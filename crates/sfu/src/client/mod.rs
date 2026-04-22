@@ -65,6 +65,13 @@ pub struct Client {
     /// Test-only: count of `ActiveSpeakerChanged` deliveries (skip-self check).
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) delivered_active_speaker: AtomicU64,
+    /// Pre-negotiated DC id:3 (`sfu-active-speaker`). Allocated at
+    /// construction via `direct_api().create_data_channel(...)` with
+    /// `negotiated: Some(3)` so the client side's
+    /// `pc.createDataChannel('sfu-active-speaker', { negotiated: true, id: 3 })`
+    /// lines up. We push `{"type":"active_speaker","peerId":<u64>}` whenever
+    /// the room-level `ActiveSpeakerChanged` fires.
+    pub(crate) active_speaker_cid: str0m::channel::ChannelId,
 }
 
 impl Client {

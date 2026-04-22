@@ -149,16 +149,25 @@ impl Client {
 
     /// Handle a dominant-speaker election change. The registry skips
     /// the speaker themselves (see [`crate::fanout::fanout`]) — this
-    /// method is only invoked on *other* clients. For M1.4 we just bump
-    /// a test-only counter; M2 will marshal it onto the signalling data
-    /// channel so the UI can update spotlight/pin state.
-    pub fn handle_active_speaker_changed(&mut self, _peer_id: u64) {
+    /// method is only invoked on *other* clients. Pushes a one-shot
+    /// `{"type":"active_speaker","peerId":<u64>}` JSON payload onto the
+    /// pre-negotiated `sfu-active-speaker` DC (id:3) so the UI can
+    /// update spotlight/pin state without polling receiver audioLevel.
+    pub fn handle_active_speaker_changed(&mut self, peer_id: u64) {
         #[cfg(any(test, feature = "test-utils"))]
         {
             self.delivered_active_speaker
                 .fetch_add(1, Ordering::Relaxed);
-            // Suppress unused-param warning in test builds.
-            let _ = _peer_id;
+        }
+        let payload = format!(r#"{{"type":"active_speaker","peerId":{peer_id}}}"#);
+        let Some(mut ch) = self.rtc.channel(self.active_speaker_cid) else {
+            // DC not yet open (DTLS still negotiating, or peer dropped).
+            // The detector will fire again within ~300 ms so we don't
+            // bother queueing — a miss at handshake is harmless.
+            return;
+        };
+        if let Err(e) = ch.write(false, payload.as_bytes()) {
+            tracing::warn!(client = *self.id, error = ?e, "active_speaker DC write failed");
         }
     }
 }

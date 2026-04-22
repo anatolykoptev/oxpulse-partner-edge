@@ -7,6 +7,7 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use str0m::channel::{ChannelConfig, Reliability};
 use str0m::Rtc;
 
 use super::{layer, Client};
@@ -20,7 +21,21 @@ fn next_client_id() -> ClientId {
 
 impl Client {
     /// Wrap a freshly-created [`Rtc`] instance.
-    pub fn new(rtc: Rtc, metrics: Arc<SfuMetrics>) -> Self {
+    ///
+    /// Opens the pre-negotiated `sfu-active-speaker` DC at SCTP stream id 3
+    /// before any SDP offer/answer, which locks in the id before the client
+    /// can race on the wire. Client side opens a symmetric DC with
+    /// `{ negotiated: true, id: 3 }`; the DC becomes usable once DTLS is up.
+    pub fn new(mut rtc: Rtc, metrics: Arc<SfuMetrics>) -> Self {
+        let active_speaker_cid = rtc
+            .direct_api()
+            .create_data_channel(ChannelConfig {
+                label: "sfu-active-speaker".to_string(),
+                ordered: true,
+                reliability: Reliability::Reliable,
+                negotiated: Some(3),
+                protocol: String::new(),
+            });
         Self {
             id: next_client_id(),
             rtc,
@@ -34,6 +49,7 @@ impl Client {
             delivered_media: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-utils"))]
             delivered_active_speaker: AtomicU64::new(0),
+            active_speaker_cid,
         }
     }
 }
