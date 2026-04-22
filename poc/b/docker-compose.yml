@@ -1,0 +1,61 @@
+name: oxpulse-partner-edge-poc-b
+services:
+  nginx-sni:
+    image: nginx:1.27-alpine
+    container_name: poc-b-nginx
+    ports:
+      - "127.0.0.1:18443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks: [poc]
+    depends_on: [caddy, coturn]
+
+  caddy:
+    image: caddy:2.10
+    container_name: poc-b-caddy
+    # Only reached via nginx-sni — no external port
+    expose: ["8443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - poc-b-caddy-data:/data
+    networks:
+      poc:
+        aliases: [caddy.internal]
+
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    container_name: poc-b-coturn
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./coturn.conf:/etc/coturn/turnserver.conf:ro
+      - poc-b-coturn-cert:/etc/coturn/cert
+    networks:
+      poc:
+        aliases: [coturn.internal]
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+
+  cert-init:
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache openssl
+        if [ ! -f /certs/cert.pem ]; then
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout /certs/key.pem -out /certs/cert.pem -days 365 \
+            -subj "/CN=turns.example.test"
+          chmod 644 /certs/cert.pem /certs/key.pem
+        fi
+    volumes:
+      - poc-b-coturn-cert:/certs
+
+volumes:
+  poc-b-caddy-data:
+  poc-b-coturn-cert:
+
+networks:
+  poc:
+    driver: bridge

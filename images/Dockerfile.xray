@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1.7
+# Partner-agnostic xray-core client image. config.json is bind-mounted.
+FROM teddysun/xray:latest
+
+ARG VERSION=dev
+LABEL org.opencontainers.image.source="https://github.com/anatolykoptev/oxpulse-partner-edge"
+LABEL org.opencontainers.image.description="OxPulse partner-edge xray-client — VLESS+Reality+XHTTP tunnel"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL oxpulse.component="partner-edge-xray"
+LABEL oxpulse.version="${VERSION}"
+
+# Upstream image lacks `ss`; add iproute2-style check tool for healthcheck.
+USER root
+RUN (apk add --no-cache iproute2 2>/dev/null \
+  || (command -v apt-get >/dev/null && apt-get update -q && apt-get install -y -q iproute2 && rm -rf /var/lib/apt/lists/*) \
+  || true)
+
+EXPOSE 3080
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD sh -c "ss -ltn 2>/dev/null | grep -q ':3080 ' || netstat -ltn 2>/dev/null | grep -q ':3080 ' || exit 1"
+
+# Upstream ENTRYPOINT launches xray with /etc/xray/config.json.

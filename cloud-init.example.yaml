@@ -1,0 +1,43 @@
+#cloud-config
+# OxPulse partner-edge — per-clone cloud-init user_data template.
+# Maintained by: OxPulse ops <https://github.com/anatolykoptev/oxpulse-partner-edge>
+# Update when: adding new hydrate.env variables or changing service names.
+# Paste this as user_data when creating a VM:
+#   Hetzner Cloud: "User data" field in server creation UI or hcloud CLI --user-data-from-file
+#   AWS EC2: --user-data flag or "Advanced details → User data" in the console
+#   DigitalOcean: "User data" section in the Droplet creation form
+
+# IMPORTANT — DNS must exist BEFORE the clone boots.
+# hydrate.sh verifies that turns-XXX.callN.YOURPARTNER.example.com
+# resolves to this VM's public IP before starting containers.
+# Caddy uses HTTP-01 ACME to obtain a TLS cert — DNS must already
+# point to this host or cert issuance fails and hydration aborts.
+# Create the A record, confirm with: dig +short turns-XXX.callN.YOURPARTNER.example.com
+# write_files runs before runcmd (cloud-init documented ordering).
+
+write_files:
+  - path: /etc/oxpulse-partner-edge/hydrate.env
+    permissions: "0600"
+    owner: root:root
+    content: |
+      # Required — change ALL three values for every clone.
+      OXPULSE_PARTNER_DOMAIN=callN.YOURPARTNER.example.com
+      OXPULSE_PARTNER_ID=YOURPARTNERID
+      OXPULSE_REGISTRATION_TOKEN=ptkn_CHANGE_ME_PER_CLONE
+
+      # Optional — override the backend URL (default: https://oxpulse.chat).
+      # Set when using a staging backend or a non-standard deployment.
+      # OXPULSE_BACKEND_URL=https://staging.oxpulse.chat
+
+      # Optional — custom CA cert for the backend TLS connection.
+      # Path must exist on the clone before hydration runs.
+      # OXPULSE_BACKEND_CA=/etc/oxpulse-partner-edge/backend-ca.pem
+
+runcmd:
+  # hydrate.service is already enabled by install.sh --bake;
+  # it fires automatically via systemd on multi-user.target.
+  # We explicitly start here to shorten first-boot latency.
+  - [ systemctl, start, oxpulse-partner-edge-hydrate.service ]
+  # Use "|| true" so cloud-init doesn't flag this step as failed
+  # if the service is still starting (status exits non-zero while activating).
+  - [ bash, -c, "systemctl status oxpulse-partner-edge.service || true" ]

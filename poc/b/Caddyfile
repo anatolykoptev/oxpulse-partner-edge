@@ -1,0 +1,24 @@
+{
+    local_certs
+    admin localhost:2019
+    servers {
+        protocols h1 h2
+    }
+}
+
+example.test:8443 {
+    tls internal
+
+    header {
+        -Via
+        -Alt-Svc
+        -Server
+    }
+
+    respond "PoC app response OK (Variant B)" 200
+}
+
+turns.example.test:8443 {
+    tls internal
+    respond "This SNI is routed by nginx to coturn — should not see this." 421
+}

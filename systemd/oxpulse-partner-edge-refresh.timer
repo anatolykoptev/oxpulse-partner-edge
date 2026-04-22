@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily check for Reality key rotation from operator backend
+After=network-online.target
+
+[Timer]
+# Once a day, with random jitter to avoid synchronizing all partner nodes
+# at the same wall-clock minute (fleet-wide DDoS on /api/partner/keys).
+OnCalendar=daily
+RandomizedDelaySec=4h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

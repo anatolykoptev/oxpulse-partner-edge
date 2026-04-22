@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1.7
+# Partner-agnostic Caddy image — baked with caddy-l4 plugin for TURNS-on-:443
+# SNI multiplex. Caddyfile is bind-mounted at runtime; nothing partner-specific
+# is baked here.
+#
+# Version pins (2026-04-18):
+#   caddy:2.11.2 — caddy-l4 v0.1.0 requires caddy/v2 >= 2.11.1 (go.mod constraint);
+#                  pinned to exact patch for reproducibility
+#   caddy-l4@v0.1.0 — only stable release (SHA 6bee9cf), marked
+#                    "breaking changes may occur" upstream — do not bump
+#                    without deliberate re-validation
+
+# ─── Stage 1: xcaddy build with caddy-l4 plugin ─────────────────────────────
+FROM caddy:2.11.2-builder AS builder
+# BuildKit cache mounts — ~60-90s savings on repeat builds (Go module + build cache).
+# Per docs/rust-build-spec.md convention in this repo, we lean on cache mounts.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    xcaddy build \
+    --with github.com/mholt/caddy-l4@v0.1.0
+
+# ─── Stage 2: runtime image ─────────────────────────────────────────────────
+FROM caddy:2.11.2-alpine
+
+ARG VERSION=dev
+LABEL org.opencontainers.image.source="https://github.com/anatolykoptev/oxpulse-partner-edge"
+LABEL org.opencontainers.image.description="OxPulse partner-edge Caddy — TLS + reverse-proxy + SPA CDN + caddy-l4 TURNS SNI mux"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL oxpulse.component="partner-edge-caddy"
+LABEL oxpulse.version="${VERSION}"
+LABEL oxpulse.plugins="caddy-l4@v0.1.0"
+
+# Swap in the xcaddy-built binary (has the caddy-l4 module linked)
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+
+# wget for compose healthcheck (the default caddy-alpine image has it, but
+# we keep this explicit in case a future caddy base drops it).
+# Upstream caddy:alpine runs as root by default — no USER directive needed here.
+RUN apk add --no-cache wget
+
+EXPOSE 80 443
+
+# Caddy's built-in entrypoint reads /etc/caddy/Caddyfile by default.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:2019/config/ >/dev/null 2>&1 || exit 1

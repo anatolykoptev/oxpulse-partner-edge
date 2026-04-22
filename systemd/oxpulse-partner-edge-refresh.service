@@ -1,0 +1,10 @@
+[Unit]
+Description=OxPulse partner-edge auto-refresh of Reality keys
+After=network-online.target oxpulse-partner-edge.service
+Requires=oxpulse-partner-edge.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/var/lib/oxpulse-partner-edge/install.env
+ExecStart=/usr/local/sbin/oxpulse-partner-edge-refresh
+TimeoutStartSec=120

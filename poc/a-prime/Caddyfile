@@ -1,0 +1,33 @@
+{
+    local_certs
+    admin localhost:2019
+    servers {
+        protocols h1 h2
+        listener_wrappers {
+            layer4 {
+                @turns tls sni turns.example.test
+                route @turns {
+                    proxy tcp/coturn.internal:5349
+                }
+            }
+            tls
+        }
+    }
+}
+
+example.test {
+    tls internal
+
+    header {
+        -Via
+        -Alt-Svc
+        -Server
+    }
+
+    respond "PoC app response OK" 200
+}
+
+turns.example.test {
+    tls internal
+    respond "This SNI is routed to coturn by caddy-l4. You should not see this." 421
+}
