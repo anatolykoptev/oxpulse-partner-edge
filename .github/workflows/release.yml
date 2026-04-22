@@ -23,7 +23,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
           shopt -s nullglob
-          for f in deploy/partner-edge/*.sh; do
+          for f in *.sh; do
             echo ">> $f"
             shellcheck -x -S warning "$f"
           done
@@ -48,7 +48,7 @@ jobs:
         env:
           EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          file_version=$(cat deploy/partner-edge/VERSION)
+          file_version=$(cat VERSION)
           if [[ "$file_version" != "$EXPECTED_VERSION" ]]; then
             echo "::error::VERSION file ($file_version) != tag version ($EXPECTED_VERSION)"
             exit 1
@@ -79,8 +79,8 @@ jobs:
       - name: Build + push ${{ matrix.component }}
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.component == 'sfu' && '.' || 'deploy/partner-edge/images' }}
-          file: deploy/partner-edge/images/Dockerfile.${{ matrix.component }}
+          context: ${{ matrix.component == 'sfu' && '.' || 'images' }}
+          file: images/Dockerfile.${{ matrix.component }}
           push: true
           build-args: |
             VERSION=${{ needs.extract-version.outputs.version }}
@@ -101,14 +101,10 @@ jobs:
         env:
           VERSION: ${{ needs.extract-version.outputs.version }}
         run: |
-          tar -czf "partner-edge-${VERSION}.tar.gz" \
-            --transform "s,^deploy/partner-edge,partner-edge-${VERSION}," \
-            deploy/partner-edge
-          cp deploy/partner-edge/bootstrap.sh   partner-edge-installer.sh
-          cp deploy/partner-edge/upgrade.sh     partner-edge-upgrade.sh
-          cp deploy/partner-edge/healthcheck.sh partner-edge-healthcheck.sh
+          cp bootstrap.sh   partner-edge-installer.sh
+          cp upgrade.sh     partner-edge-upgrade.sh
+          cp healthcheck.sh partner-edge-healthcheck.sh
           sha256sum \
-            "partner-edge-${VERSION}.tar.gz" \
             partner-edge-installer.sh \
             partner-edge-upgrade.sh \
             partner-edge-healthcheck.sh \
@@ -123,10 +119,9 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --title "partner-edge v${VERSION}" \
-              --notes "OxPulse partner-edge bundle v${VERSION}. See deploy/partner-edge/README.md."
+              --notes "OxPulse partner-edge bundle v${VERSION}. See README.md."
           fi
           gh release upload "$TAG" \
-            "partner-edge-${VERSION}.tar.gz" \
             partner-edge-installer.sh \
             partner-edge-upgrade.sh \
             partner-edge-healthcheck.sh \
