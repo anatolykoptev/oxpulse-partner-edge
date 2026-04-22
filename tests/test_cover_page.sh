@@ -20,7 +20,7 @@ grep -q './cover:/srv/cover:ro' "$CP" || { echo "FAIL: cover volume mount missin
 sed -e 's/{{PARTNER_DOMAIN}}/example.test/g' -e 's/{{TURNS_SUBDOMAIN}}/turns/g' \
     "$CF" > /tmp/Caddyfile.cover.check
 docker run --rm -v /tmp/Caddyfile.cover.check:/etc/caddy/Caddyfile:ro \
-    oxpulse-partner-edge-caddy:test caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 \
+    partner-edge-caddy:test caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 \
     | grep -q 'Valid configuration' \
     || { echo "FAIL: rendered Caddyfile doesn't validate"; exit 1; }
 

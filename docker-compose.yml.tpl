@@ -11,7 +11,7 @@ name: oxpulse-partner-edge
 
 services:
   caddy:
-    image: ghcr.io/anatolykoptev/oxpulse-partner-edge-caddy:{{IMAGE_VERSION}}
+    image: ghcr.io/anatolykoptev/partner-edge-caddy:{{IMAGE_VERSION}}
     container_name: oxpulse-partner-caddy
     restart: unless-stopped
     ports:
@@ -45,7 +45,7 @@ services:
       retries: 3
 
   xray-client:
-    image: ghcr.io/anatolykoptev/oxpulse-partner-edge-xray:{{IMAGE_VERSION}}
+    image: ghcr.io/anatolykoptev/partner-edge-xray:{{IMAGE_VERSION}}
     container_name: oxpulse-partner-xray
     restart: unless-stopped
     volumes:
@@ -62,7 +62,7 @@ services:
       retries: 3
 
   coturn:
-    image: ghcr.io/anatolykoptev/oxpulse-partner-edge-coturn:{{IMAGE_VERSION}}
+    image: ghcr.io/anatolykoptev/partner-edge-coturn:{{IMAGE_VERSION}}
     container_name: oxpulse-partner-coturn
     restart: unless-stopped
     network_mode: host        # TURN needs real public IP + UDP relay ports
@@ -93,7 +93,7 @@ services:
   # translation. Media port defaults to 7878/udp (avoids coturn's 3478); the
   # Prometheus /metrics endpoint listens on 8878/tcp (rendered via healthcheck).
   sfu:
-    image: ghcr.io/anatolykoptev/oxpulse-partner-edge-sfu:{{IMAGE_VERSION}}
+    image: ghcr.io/anatolykoptev/partner-edge-sfu:{{IMAGE_VERSION}}
     container_name: oxpulse-partner-sfu
     restart: unless-stopped
     network_mode: host

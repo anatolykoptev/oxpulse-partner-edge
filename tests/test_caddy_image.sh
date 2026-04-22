@@ -1,9 +1,9 @@
 #!/bin/bash
 # Verifies the partner-edge Caddy image has caddy-l4 plugin linked.
 # Run: bash test_caddy_image.sh [<image-tag>]
-# Default tag: oxpulse-partner-edge-caddy:test (local build)
+# Default tag: partner-edge-caddy:test (local build)
 set -euo pipefail
-IMAGE="${1:-oxpulse-partner-edge-caddy:test}"
+IMAGE="${1:-partner-edge-caddy:test}"
 
 if ! docker info >/dev/null 2>&1; then
   echo "FAIL: docker daemon unreachable" >&2

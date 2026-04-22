@@ -15,7 +15,7 @@ grep -q 'container_name: oxpulse-partner-sfu' "$TPL" \
     || { echo "FAIL: sfu container_name != oxpulse-partner-sfu"; exit 1; }
 
 # 2. sfu uses the GHCR image (matches coturn/caddy/xray convention).
-grep -qE 'image:[[:space:]]+ghcr\.io/anatolykoptev/oxpulse-partner-edge-sfu:\{\{IMAGE_VERSION\}\}' "$TPL" \
+grep -qE 'image:[[:space:]]+ghcr\.io/anatolykoptev/partner-edge-sfu:\{\{IMAGE_VERSION\}\}' "$TPL" \
     || { echo "FAIL: sfu image tag does not match GHCR pattern"; exit 1; }
 
 # 3. sfu runs in host networking (co-located media port, like coturn).

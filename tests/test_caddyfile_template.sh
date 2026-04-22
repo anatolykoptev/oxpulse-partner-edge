@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-/home/user/src/oxpulse-partner-edge}"
-IMAGE="${1:-oxpulse-partner-edge-caddy:test}"
+IMAGE="${1:-partner-edge-caddy:test}"
 TPL="$REPO_ROOT/deploy/partner-edge/Caddyfile.tpl"
 
 if ! docker info >/dev/null 2>&1; then
