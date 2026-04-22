@@ -76,11 +76,16 @@ jobs:
       # so it needs the whole repo as context. The other three images only
       # need the Dockerfile (they pull upstream binaries), so images/ is a
       # tighter context that ships fewer bytes to the builder.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Build + push ${{ matrix.component }}
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.component == 'sfu' && '.' || 'images' }}
           file: images/Dockerfile.${{ matrix.component }}
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             VERSION=${{ needs.extract-version.outputs.version }}
