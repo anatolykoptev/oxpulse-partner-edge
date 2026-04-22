@@ -29,9 +29,21 @@ impl Registry {
                         break;
                     }
                     Propagated::Noop => continue,
-                    // TODO(M2): parse RFC 6464 audio-level ext and feed
-                    // detector.record_level(...) for MediaData events.
-                    other => self.to_propagate.push_back(other),
+                    other => {
+                        // Feed RFC 6464 audio-level into the detector. str0m
+                        // stores the level as a negated i8 in [-127, 0] — 0
+                        // silent, -127 loudest. `ActiveSpeakerDetector` wants
+                        // 0..127 where 0 is loudest (mediasoup convention),
+                        // so we flip the sign. audio_level is only present on
+                        // audio packets, so we don't need a MediaKind check.
+                        if let Propagated::MediaData(origin, ref data) = other {
+                            if let Some(raw) = data.ext_vals.audio_level {
+                                let level = (-raw).clamp(0, 127) as u8;
+                                self.detector.record_level(origin.0, level, now);
+                            }
+                        }
+                        self.to_propagate.push_back(other);
+                    }
                 }
             }
         }
