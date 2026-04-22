@@ -1,0 +1,17 @@
+[Unit]
+Description=Signal coturn on TURNS cert rotation
+Documentation=https://github.com/coturn/coturn/blob/master/src/mainrelay.c
+After=oxpulse-partner-edge.service
+
+[Service]
+Type=oneshot
+# coturn is PID 1 in its container. SIGUSR2 triggers reload_ssl_certs()
+# which re-reads cert + key without dropping active sessions.
+# Verified: coturn 4.6+ source grep confirms SIGUSR2 → reload_ssl_certs
+# (older advice about SIGHUP is wrong — SIGHUP only rotates log files in coturn).
+ExecStart=/usr/bin/docker exec oxpulse-partner-coturn kill -USR2 1
+
+[Install]
+# Activation is via the .path unit above, not standalone. But if operator
+# wants to force a reload manually: `systemctl start oxpulse-partner-cert-watch`.
+WantedBy=multi-user.target

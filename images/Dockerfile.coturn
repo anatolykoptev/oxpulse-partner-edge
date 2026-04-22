@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+# Partner-agnostic coturn image. turnserver.conf is bind-mounted.
+# Runs in host network mode so it sees the real public IP and can allocate
+# relay ports in 49152-65535/udp.
+FROM coturn/coturn:4.6-alpine
+
+ARG VERSION=dev
+LABEL org.opencontainers.image.source="https://github.com/anatolykoptev/oxpulse-partner-edge"
+LABEL org.opencontainers.image.description="OxPulse partner-edge coturn — TURN/STUN relay with HMAC auth"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL oxpulse.component="partner-edge-coturn"
+LABEL oxpulse.version="${VERSION}"
+
+# Log + pid dirs owned by the coturn user baked into upstream image.
+USER root
+RUN mkdir -p /var/log/turnserver /var/run/turnserver \
+ && chown -R nobody:nogroup /var/log/turnserver /var/run/turnserver \
+ && chmod 0750 /var/log/turnserver /var/run/turnserver
+
+EXPOSE 3478/udp 3478/tcp 3479/udp 5349/tcp 5349/udp
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD sh -c "pgrep turnserver >/dev/null 2>&1 || exit 1"
+
+ENTRYPOINT ["/usr/bin/turnserver", "-c", "/etc/coturn/turnserver.conf"]

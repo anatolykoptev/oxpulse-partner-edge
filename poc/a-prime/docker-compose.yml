@@ -1,0 +1,59 @@
+name: oxpulse-partner-edge-poc-aprime
+services:
+  caddy:
+    # Use locally-built image with caddy-l4; stock caddy:2.10 does not include
+    # the layer4 plugin. Build is required before first up.
+    build:
+      context: ..
+      dockerfile_inline: |
+        FROM caddy:2.11-builder AS builder
+        RUN xcaddy build --with github.com/mholt/caddy-l4@v0.1.0
+        FROM caddy:2.11
+        COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+    container_name: poc-aprime-caddy
+    ports:
+      - "127.0.0.1:18443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - poc-aprime-caddy-data:/data
+    networks: [poc]
+    depends_on: [coturn]
+
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    container_name: poc-aprime-coturn
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./coturn.conf:/etc/coturn/turnserver.conf:ro
+      - poc-aprime-coturn-cert:/etc/coturn/cert
+    networks:
+      poc:
+        aliases: [coturn.internal]
+    depends_on:
+      cert-init:
+        condition: service_completed_successfully
+    # No public port — reached only via Caddy's l4 proxy
+
+  cert-init:
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache openssl
+        if [ ! -f /certs/cert.pem ]; then
+          openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout /certs/key.pem -out /certs/cert.pem -days 365 \
+            -subj "/CN=turns.example.test"
+          chmod 644 /certs/cert.pem /certs/key.pem
+        fi
+    volumes:
+      - poc-aprime-coturn-cert:/certs
+
+volumes:
+  poc-aprime-caddy-data:
+  poc-aprime-coturn-cert:
+
+networks:
+  poc:
+    driver: bridge

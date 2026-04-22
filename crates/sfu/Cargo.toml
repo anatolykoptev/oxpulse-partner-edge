@@ -1,0 +1,46 @@
+[package]
+name = "oxpulse-sfu"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "OxPulse SFU — str0m-based edge selective forwarding unit"
+
+[lib]
+name = "oxpulse_sfu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxpulse-sfu"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+prometheus = { version = "0.13", default-features = false }
+str0m = "0.18"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+test-utils = []
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros", "test-util"] }
+
+[[test]]
+name = "multi_client"
+required-features = ["test-utils"]
+
+[[test]]
+name = "simulcast_speaker"
+required-features = ["test-utils"]
+
+[[test]]
+name = "metrics_integration"
+required-features = ["test-utils"]
+
+[[test]]
+name = "bwe_metrics_integration"
+required-features = ["test-utils"]

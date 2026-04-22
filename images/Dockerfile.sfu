@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1.7
+# Partner-edge SFU image — crates/sfu compiled to a static Rust binary.
+# Multi-stage per docs/rust-build-spec.md: cargo-chef dep caching, BuildKit
+# cache mounts for registry + target, --locked for reproducibility.
+#
+# Expected build context: repo root (so the Cargo workspace is visible).
+#   docker build -f deploy/partner-edge/images/Dockerfile.sfu -t oxpulse-partner-edge-sfu:<tag> .
+
+# ─── Stage 1: cargo-chef planner ─────────────────────────────────────────────
+FROM rust:1-bookworm AS chef
+RUN cargo install cargo-chef --locked
+WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ─── Stage 2: builder ────────────────────────────────────────────────────────
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo chef cook --release --locked -p oxpulse-sfu --recipe-path recipe.json
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --locked -p oxpulse-sfu --bin oxpulse-sfu \
+ && cp target/release/oxpulse-sfu /binary
+
+# ─── Stage 3: runtime ────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+ARG VERSION=dev
+LABEL org.opencontainers.image.source="https://github.com/anatolykoptev/oxpulse-partner-edge"
+LABEL org.opencontainers.image.description="OxPulse partner-edge SFU — str0m-based selective forwarding unit"
+LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL oxpulse.component="partner-edge-sfu"
+LABEL oxpulse.version="${VERSION}"
+
+# ca-certificates for outbound TLS (backend liveness probes in M2.3);
+# wget for compose healthcheck against /metrics.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates wget \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /binary /usr/local/bin/oxpulse-sfu
+
+ENV RUST_LOG=info \
+    SFU_BIND_ADDRESS=0.0.0.0 \
+    SFU_UDP_PORT=7878 \
+    SFU_METRICS_PORT=8878
+
+# UDP media port + TCP metrics port (documented; actual bind happens at runtime).
+EXPOSE 7878/udp 8878/tcp
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${SFU_METRICS_PORT}/metrics" >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["/usr/local/bin/oxpulse-sfu"]

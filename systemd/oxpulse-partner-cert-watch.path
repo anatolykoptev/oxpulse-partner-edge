@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch Caddy-managed TURNS cert for renewal
+Documentation=https://github.com/anatolykoptev/oxpulse-chat/blob/main/docs/superpowers/specs/2026-04-18-turns-on-443-design.md
+
+[Path]
+# Docker named-volume path on host. The {{TURNS_SUBDOMAIN}} and {{PARTNER_DOMAIN}}
+# placeholders are substituted by install.sh/hydrate.sh before this file is
+# installed to /etc/systemd/system/.
+PathChanged=/var/lib/docker/volumes/oxpulse-partner-edge_caddy-data/_data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/{{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}}/{{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}}.crt
+Unit=oxpulse-partner-cert-watch.service
+
+[Install]
+WantedBy=multi-user.target
