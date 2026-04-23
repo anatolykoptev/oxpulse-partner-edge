@@ -52,3 +52,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "bwe_metrics_integration"
 required-features = ["test-utils"]
+
+[[test]]
+name = "hard_red_migration"
+required-features = ["test-utils"]
