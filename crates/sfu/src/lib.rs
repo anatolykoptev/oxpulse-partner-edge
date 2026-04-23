@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod pacer;
 pub mod propagate;
 pub mod registry;
+pub mod relay;
 pub mod udp_loop;
 
 pub use client::Client;
