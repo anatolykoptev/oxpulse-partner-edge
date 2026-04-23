@@ -16,6 +16,8 @@ use std::sync::{Arc, Weak};
 use str0m::media::Rid;
 use str0m::{Input, Rtc};
 
+use oxpulse_sfu_kit::ClientOrigin;
+
 use crate::metrics::SfuMetrics;
 use crate::propagate::ClientId;
 
@@ -72,12 +74,39 @@ pub struct Client {
     /// lines up. We push `{"type":"active_speaker","peerId":<u64>}` whenever
     /// the room-level `ActiveSpeakerChanged` fires.
     pub(crate) active_speaker_cid: str0m::channel::ChannelId,
+    /// Connection origin — [`oxpulse_sfu_kit::ClientOrigin::Local`] for
+    /// direct browser peers; [`oxpulse_sfu_kit::ClientOrigin::RelayFromSfu`]
+    /// for cascade relay nodes. Set via [`Client::set_origin`] after `insert()`
+    /// when the DC relay_source handshake is confirmed. Governs speaker
+    /// election exclusion and upstream keyframe routing.
+    pub(crate) origin: ClientOrigin,
+    /// RFC 9626 VFM temporal-layer cap for this subscriber.
+    /// Packets at a temporal layer higher than this are dropped before
+    /// forwarding. `u8::MAX` means "no cap" (forward all layers).
+    #[cfg(feature = "vfm")]
+    pub(crate) max_vfm_temporal_layer: u8,
 }
 
 impl Client {
     /// This subscriber's desired simulcast layer.
     pub fn desired_layer(&self) -> Rid {
         self.desired_layer
+    }
+
+    /// Whether this client is an upstream SFU relay (connected as a cascade
+    /// relay node, not a direct browser/device). Relay clients are excluded
+    /// from speaker election and keyframe requests are routed upstream rather
+    /// than back to the relay connection.
+    pub fn is_relay(&self) -> bool {
+        matches!(self.origin, ClientOrigin::RelayFromSfu(_))
+    }
+
+    /// Set the connection origin. Call immediately after `Registry::insert`
+    /// when the relay handshake is confirmed via DataChannel. Relay clients are
+    /// retroactively removed from speaker detection via
+    /// `Registry::mark_relay_source`.
+    pub fn set_origin(&mut self, origin: ClientOrigin) {
+        self.origin = origin;
     }
 
     /// Set this subscriber's desired simulcast layer. Takes effect on
@@ -87,6 +116,14 @@ impl Client {
         // Invalidate the cached layer so keyframe requests don't target
         // the old RID until we actually forward a packet in the new layer.
         self.chosen_rid = None;
+    }
+
+    /// Set the RFC 9626 VFM temporal-layer cap for this subscriber.
+    /// Packets at a temporal layer higher than `max` will be dropped by the
+    /// VFM filter before forwarding. Pass `u8::MAX` to disable the cap.
+    #[cfg(feature = "vfm")]
+    pub fn set_max_vfm_temporal_layer(&mut self, max: u8) {
+        self.max_vfm_temporal_layer = max;
     }
 
     /// Simulcast RIDs the peer has been observed publishing. Built up

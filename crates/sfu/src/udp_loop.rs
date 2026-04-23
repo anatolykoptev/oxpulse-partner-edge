@@ -18,10 +18,10 @@ use anyhow::Context;
 use tokio::net::UdpSocket;
 use tokio::time::MissedTickBehavior;
 
-use crate::active_speaker::TICK_INTERVAL;
 use crate::config::SfuConfig;
 use crate::metrics::SfuMetrics;
 use crate::registry::Registry;
+use dominant_speaker::TICK_INTERVAL;
 
 /// Maximum UDP payload we expect to receive. The str0m `chat.rs`
 /// example uses 2000 bytes which covers STUN / DTLS / SRTP with a
@@ -103,7 +103,12 @@ where
                 registry.tick(Instant::now());
             }
             _ = aso_interval.tick() => {
-                registry.tick_active_speaker(Instant::now());
+                let now = Instant::now();
+                registry.tick_active_speaker(now);
+                // M6.2: update per-peer Prometheus score gauges and queue
+                // TopSpeakers broadcast for delivery via DC id:3.
+                registry.tick_speaker_scores();
+                registry.emit_publisher_layer_hints();
             }
             recv = socket.recv_from(&mut buf) => {
                 match recv {
