@@ -14,12 +14,12 @@ use std::time::Instant;
 use str0m::net::{Protocol, Receive};
 use str0m::Input;
 
-use dominant_speaker::ActiveSpeakerDetector;
-use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
 use crate::client::{Client, Transmit};
 use crate::metrics::SfuMetrics;
 use crate::pacer::Pacer;
 use crate::propagate::Propagated;
+use dominant_speaker::ActiveSpeakerDetector;
+use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
 
 mod bwe;
 mod poll;

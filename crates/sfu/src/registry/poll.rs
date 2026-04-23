@@ -39,9 +39,9 @@ impl Registry {
                         if let Propagated::MediaData(origin, ref data) = other {
                             if let Some(raw) = data.ext_vals.audio_level {
                                 let level = (-raw).clamp(0, 127) as u8;
-                                let now_ms = now
-                                    .saturating_duration_since(self.detector_epoch)
-                                    .as_millis() as u64;
+                                let now_ms =
+                                    now.saturating_duration_since(self.detector_epoch)
+                                        .as_millis() as u64;
                                 self.detector.record_level(origin.0, level, now_ms);
                             }
                         }
@@ -95,15 +95,21 @@ impl Registry {
         while let Some(p) = self.to_propagate.pop_front() {
             match &p {
                 Propagated::BandwidthEstimate(cid, bps) => {
-                    self.bandwidth.record_native_estimate(oxpulse_sfu_kit::propagate::ClientId(**cid), *bps as f64);
+                    self.bandwidth.record_native_estimate(
+                        oxpulse_sfu_kit::propagate::ClientId(**cid),
+                        *bps as f64,
+                    );
                     continue;
                 }
                 Propagated::ClientBudgetHint(cid, bps) => {
                     // M5.4.1: client-reported budget ceiling. Record into the
                     // shared BandwidthEstimator so the pacer sees it on the
                     // next update_pacer_layers pass.
-                    self.bandwidth
-                        .record_client_hint(oxpulse_sfu_kit::propagate::ClientId(**cid), *bps, Instant::now());
+                    self.bandwidth.record_client_hint(
+                        oxpulse_sfu_kit::propagate::ClientId(**cid),
+                        *bps,
+                        Instant::now(),
+                    );
                     continue;
                 }
                 // M5.3 fix-round: the publisher's active RIDs drive the

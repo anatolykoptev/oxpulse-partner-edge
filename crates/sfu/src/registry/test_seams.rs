@@ -93,8 +93,10 @@ impl Registry {
         subscriber: crate::propagate::ClientId,
         target_bps: u64,
     ) {
-        self.bandwidth
-            .force_high_estimate_for_tests(oxpulse_sfu_kit::propagate::ClientId(*subscriber), target_bps as f64);
+        self.bandwidth.force_high_estimate_for_tests(
+            oxpulse_sfu_kit::propagate::ClientId(*subscriber),
+            target_bps as f64,
+        );
     }
 
     /// Test-only: pin a subscriber's GCC estimate ceiling so
@@ -107,7 +109,10 @@ impl Registry {
         subscriber: crate::propagate::ClientId,
         bps: u64,
     ) {
-        self.bandwidth.record_native_estimate(oxpulse_sfu_kit::propagate::ClientId(*subscriber), bps as f64);
+        self.bandwidth.record_native_estimate(
+            oxpulse_sfu_kit::propagate::ClientId(*subscriber),
+            bps as f64,
+        );
     }
 
     /// Test-only: force the pacer + metrics refresh out-of-band
