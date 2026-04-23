@@ -111,6 +111,25 @@ impl Registry {
         });
     }
 
+    /// Mark a connected client as a cascade relay from an upstream SFU.
+    ///
+    /// Call as soon as possible after `insert()` — ideally driven by the
+    /// `MarkRelaySource` DC handshake via `fanout_pending`. Relay clients are
+    /// excluded from dominant-speaker election and keyframe requests will be
+    /// routed upstream rather than back to the relay connection.
+    ///
+    /// Idempotent: calling with the same `client_id` twice is safe.
+    pub fn mark_relay_source(&mut self, client_id: crate::propagate::ClientId, upstream_url: String) {
+        if let Some(client) = self.clients.iter_mut().find(|c| c.id == client_id) {
+            client.set_origin(oxpulse_sfu_kit::ClientOrigin::RelayFromSfu(upstream_url));
+            // Remove from detector retroactively — relay clients were inserted as
+            // Local before the DC handshake completed, so they were added to the
+            // detector. Removing here corrects that without requiring a full
+            // teardown/re-insert cycle.
+            self.detector.remove_peer(&client_id.0);
+        }
+    }
+
     /// Route an incoming UDP datagram to whichever client claims it.
     /// Returns `true` if a client accepted, `false` when no client
     /// matched (common early in a connection — STUN arrives before the
