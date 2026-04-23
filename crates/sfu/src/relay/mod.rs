@@ -1,5 +1,7 @@
 //! Relay subsystem — JWT auth, HTTP handler, outbound WebRTC client.
 
+pub mod handler;
+pub mod task;
 pub mod types;
 
 use std::time::{SystemTime, UNIX_EPOCH};

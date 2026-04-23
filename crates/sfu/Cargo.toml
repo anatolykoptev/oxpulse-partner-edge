@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 dominant-speaker = { package = "rust-dominant-speaker", version = "0.3" }
 oxpulse-sfu-kit = { version = "0.6", features = [
     "active-speaker",
@@ -63,3 +63,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "hard_red_migration"
 required-features = ["test-utils"]
+
+[[test]]
+name = "relay_api"
+required-features = []
