@@ -119,7 +119,11 @@ impl Registry {
     /// routed upstream rather than back to the relay connection.
     ///
     /// Idempotent: calling with the same `client_id` twice is safe.
-    pub fn mark_relay_source(&mut self, client_id: crate::propagate::ClientId, upstream_url: String) {
+    pub fn mark_relay_source(
+        &mut self,
+        client_id: crate::propagate::ClientId,
+        upstream_url: String,
+    ) {
         if let Some(client) = self.clients.iter_mut().find(|c| c.id == client_id) {
             client.set_origin(oxpulse_sfu_kit::ClientOrigin::RelayFromSfu(upstream_url));
             // Remove from detector retroactively — relay clients were inserted as

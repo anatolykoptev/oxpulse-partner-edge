@@ -29,7 +29,7 @@ const BUDGET_CHANNEL_LABEL: &str = "sfu-budget";
 pub(super) fn handle_channel_data(client_id: ClientId, label: &str, data: &[u8]) -> Propagated {
     // relay_source can arrive on any DC channel — check before label filter.
     if let Ok(s) = std::str::from_utf8(data) {
-        if extract_str_value(s, "type").as_deref() == Some("relay_source") {
+        if extract_str_value(s, "type") == Some("relay_source") {
             if let Some(upstream_url) = extract_str_value(s, "upstreamUrl") {
                 tracing::debug!(
                     client = *client_id,
@@ -195,8 +195,8 @@ mod tests {
     }
 
     // relay_source tests use handle_channel_data directly
-    use crate::propagate::{ClientId, Propagated};
     use super::handle_channel_data;
+    use crate::propagate::{ClientId, Propagated};
 
     #[test]
     fn relay_source_returns_mark_relay_on_any_channel() {
@@ -222,7 +222,8 @@ mod tests {
     fn relay_source_on_budget_channel_wins_over_budget_parse() {
         // If somehow both type=relay_source and bps are present,
         // relay_source takes priority since it is checked first.
-        let data = br#"{"type":"relay_source","upstreamUrl":"wss://eu-1.example/sfu","bps":500000}"#;
+        let data =
+            br#"{"type":"relay_source","upstreamUrl":"wss://eu-1.example/sfu","bps":500000}"#;
         let result = handle_channel_data(ClientId(44), "sfu-budget", data);
         assert!(matches!(result, Propagated::MarkRelaySource(..)));
     }

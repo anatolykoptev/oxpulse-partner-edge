@@ -40,10 +40,7 @@ pub(crate) fn fanout(p: &Propagated, clients: &mut [Client]) {
     if let Propagated::TopSpeakers(ref speakers) = p {
         // Build a compact JSON array of u64 peer IDs without serde_json.
         let ids: Vec<String> = speakers.iter().map(|id| id.to_string()).collect();
-        let payload = format!(
-            r#"{{"type":"top_speakers","peerIds":[{}]}}"#,
-            ids.join(",")
-        );
+        let payload = format!(r#"{{"type":"top_speakers","peerIds":[{}]}}"#, ids.join(","));
         for client in clients.iter_mut() {
             let Some(mut ch) = client.rtc.channel(client.active_speaker_cid) else {
                 // DC not yet open — skip silently; next tick will retry.

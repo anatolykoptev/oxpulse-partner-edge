@@ -18,7 +18,14 @@ use prometheus::{GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, 
 /// dominant_speaker_hysteresis_ms, speaker_immediate, speaker_medium, speaker_long)`.
 pub(super) fn register(
     registry: &Registry,
-) -> anyhow::Result<(IntCounterVec, IntCounter, Histogram, GaugeVec, GaugeVec, GaugeVec)> {
+) -> anyhow::Result<(
+    IntCounterVec,
+    IntCounter,
+    Histogram,
+    GaugeVec,
+    GaugeVec,
+    GaugeVec,
+)> {
     macro_rules! reg {
         ($m:expr) => {{
             let m = $m;

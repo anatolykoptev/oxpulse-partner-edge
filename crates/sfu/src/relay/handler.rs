@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
 use tracing::instrument;
 
-use crate::relay::{RelayJwt, RelayJwtError, now_unix_secs};
 use crate::relay::task::RelayTask;
 use crate::relay::types::{RelayConnectRequest, RelayConnectResponse};
+use crate::relay::{now_unix_secs, RelayJwt, RelayJwtError};
 
 type AppState = (Arc<[u8]>, Sender<RelayTask>);
 
@@ -44,10 +44,13 @@ async fn relay_connect(
         }
         Err(RelayJwtError::InvalidSignature) => {
             tracing::warn!("relay_connect: invalid JWT signature");
-            return (StatusCode::UNAUTHORIZED, Json(RelayConnectResponse {
-                status: "error".to_string(),
-                relay_id: None,
-            }));
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(RelayConnectResponse {
+                    status: "error".to_string(),
+                    relay_id: None,
+                }),
+            );
         }
         Err(RelayJwtError::Malformed) => {
             tracing::warn!("relay_connect: malformed JWT");
@@ -68,16 +71,22 @@ async fn relay_connect(
     }
 
     tracing::info!(relay_id = %relay_id, "relay task enqueued");
-    (StatusCode::OK, Json(RelayConnectResponse {
-        status: "ok".to_string(),
-        relay_id: Some(relay_id),
-    }))
+    (
+        StatusCode::OK,
+        Json(RelayConnectResponse {
+            status: "ok".to_string(),
+            relay_id: Some(relay_id),
+        }),
+    )
 }
 
 fn error_response(msg: &str) -> (StatusCode, Json<RelayConnectResponse>) {
     let _ = msg; // msg is for the caller's logging; response omits details
-    (StatusCode::BAD_REQUEST, Json(RelayConnectResponse {
-        status: "error".to_string(),
-        relay_id: None,
-    }))
+    (
+        StatusCode::BAD_REQUEST,
+        Json(RelayConnectResponse {
+            status: "error".to_string(),
+            relay_id: None,
+        }),
+    )
 }

@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use prometheus::{
-    Encoder, GaugeVec, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
-    Registry, TextEncoder,
+    Encoder, GaugeVec, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+    TextEncoder,
 };
 
 /// All Prometheus handles for the SFU. Cheap to clone (all fields are
