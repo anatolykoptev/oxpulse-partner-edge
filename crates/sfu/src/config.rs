@@ -15,6 +15,9 @@ pub struct SfuConfig {
     /// `RUST_LOG`-style directive for `tracing_subscriber`. Falls back
     /// to the `RUST_LOG` env var when the user sets it directly.
     pub log_level: String,
+    /// HTTP port for the relay API (`POST /relay/connect`).
+    /// Env: `SFU_RELAY_API_PORT`. Default: 8912.
+    pub relay_api_port: u16,
 }
 
 impl Default for SfuConfig {
@@ -24,6 +27,7 @@ impl Default for SfuConfig {
             metrics_port: 9317,
             bind_address: "0.0.0.0".to_string(),
             log_level: "info".to_string(),
+            relay_api_port: 8912,
         }
     }
 }
@@ -40,6 +44,9 @@ impl SfuConfig {
                 .expect("SFU_METRICS_PORT must be a number"),
             bind_address: env("SFU_BIND_ADDRESS", &defaults.bind_address),
             log_level: env("RUST_LOG", &defaults.log_level),
+            relay_api_port: env("SFU_RELAY_API_PORT", &defaults.relay_api_port.to_string())
+                .parse()
+                .expect("SFU_RELAY_API_PORT must be a number"),
         }
     }
 }
@@ -58,5 +65,13 @@ mod tests {
         assert_eq!(cfg.bind_address, "0.0.0.0");
         assert_eq!(cfg.udp_port, 3478);
         assert_ne!(cfg.udp_port, cfg.metrics_port);
+        assert_ne!(cfg.metrics_port, cfg.relay_api_port);
+        assert_ne!(cfg.udp_port, cfg.relay_api_port);
+    }
+
+    #[test]
+    fn relay_api_port_default_and_env() {
+        let cfg = SfuConfig::default();
+        assert_eq!(cfg.relay_api_port, 8912);
     }
 }

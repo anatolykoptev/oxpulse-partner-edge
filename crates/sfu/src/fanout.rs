@@ -19,15 +19,48 @@ pub(crate) fn fanout(p: &Propagated, clients: &mut [Client]) {
     // `ActiveSpeakerChanged` carries a bare `peer_id: u64` (mediasoup's
     // observer shape) rather than a `ClientId` origin — handle it
     // separately so `client_id()`-based skip doesn't short-circuit.
-    if let Propagated::ActiveSpeakerChanged { peer_id } = p {
+    if let Propagated::ActiveSpeakerChanged {
+        peer_id,
+        confidence,
+    } = p
+    {
         for client in clients.iter_mut() {
             if *client.id == *peer_id {
                 // Skip-self: the speaker themselves doesn't receive
                 // their own dominance notification.
                 continue;
             }
-            client.handle_active_speaker_changed(*peer_id);
+            client.handle_active_speaker_changed(*peer_id, *confidence);
         }
+        return;
+    }
+
+    // `TopSpeakers` is a broadcast — deliver to *all* clients (no skip-self).
+    // Uses the same DC id:3 (`sfu-active-speaker`) as `ActiveSpeakerChanged`.
+    if let Propagated::TopSpeakers(ref speakers) = p {
+        // Build a compact JSON array of u64 peer IDs without serde_json.
+        let ids: Vec<String> = speakers.iter().map(|id| id.to_string()).collect();
+        let payload = format!(r#"{{"type":"top_speakers","peerIds":[{}]}}"#, ids.join(","));
+        for client in clients.iter_mut() {
+            let Some(mut ch) = client.rtc.channel(client.active_speaker_cid) else {
+                // DC not yet open — skip silently; next tick will retry.
+                continue;
+            };
+            if let Err(e) = ch.write(false, payload.as_bytes()) {
+                tracing::warn!(client = *client.id, error = ?e, "top_speakers DC write failed");
+            }
+        }
+        return;
+    }
+
+    // `AudioCodecHint` is application-level — no fanout to clients.
+    if let Propagated::AudioCodecHint {
+        peer_id,
+        opus_red,
+        opus_dred,
+    } = p
+    {
+        tracing::debug!(%peer_id, opus_red, opus_dred, "audio codec hint");
         return;
     }
 
@@ -50,10 +83,22 @@ pub(crate) fn fanout(p: &Propagated, clients: &mut [Client]) {
             | Propagated::Timeout(_)
             | Propagated::ActiveSpeakerChanged { .. }
             | Propagated::BandwidthEstimate(..)
-            | Propagated::ClientBudgetHint(..) => {
-                // BandwidthEstimate and ClientBudgetHint are consumed inside
-                // `Registry::fanout_pending` before this function is called —
-                // safe no-op if either appears here.
+            | Propagated::ClientBudgetHint(..)
+            | Propagated::PublisherLayerHint { .. }
+            | Propagated::TopSpeakers(_)
+            | Propagated::AudioCodecHint { .. }
+            | Propagated::MarkRelaySource(..)
+            | Propagated::UpstreamKeyframeRequest { .. }
+            | Propagated::PublisherLayerHintForUpstream { .. } => {
+                // BandwidthEstimate, ClientBudgetHint, PublisherLayerHint, and relay
+                // variants are consumed inside `Registry::fanout_pending` before
+                // this function is called — safe no-op if any appear here.
+                // TopSpeakers and AudioCodecHint are handled above with early
+                // returns and never reach this arm.
+            }
+            #[cfg(feature = "vfm")]
+            Propagated::VfmLayerCap(..) => {
+                // VfmLayerCap is consumed inside `Registry::fanout_pending`.
             }
         }
     }

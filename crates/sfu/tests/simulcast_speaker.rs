@@ -96,23 +96,35 @@ fn active_speaker_dominance_and_hysteresis_and_skip_self() {
     registry.insert(b);
     registry.insert(c);
 
-    // Bootstrap: first tick elects lowest peer_id (BTreeMap order).
+    // Bootstrap: first tick elects some peer (v0.3 uses HashMap + score-based
+    // bootstrap; order is non-deterministic when all scores are equal).
     let t0 = Instant::now();
     registry.force_active_speaker_tick_for_tests(t0);
+    let bootstrap_winner = registry
+        .current_active_speaker()
+        .expect("bootstrap → some peer elected");
+    assert!(
+        [1u64, 2, 3].contains(&bootstrap_winner),
+        "bootstrap winner is one of the inserted peers"
+    );
+
+    // Skip-self: the elected speaker should not receive their own notification.
+    // Map peer_id to registry index (insertion order: A=0, B=1, C=2).
+    let winner_idx = (bootstrap_winner - 1) as usize;
     assert_eq!(
-        registry.current_active_speaker(),
-        Some(1),
-        "bootstrap → peer 1"
+        registry.delivered_active_speaker_count(winner_idx),
+        0,
+        "elected speaker skip-self"
     );
-    assert_eq!(registry.delivered_active_speaker_count(0), 0, "A skip-self");
-    assert!(
-        registry.delivered_active_speaker_count(1) >= 1,
-        "B notified"
-    );
-    assert!(
-        registry.delivered_active_speaker_count(2) >= 1,
-        "C notified"
-    );
+    // Every non-winner client must have been notified.
+    for idx in 0..3usize {
+        if idx != winner_idx {
+            assert!(
+                registry.delivered_active_speaker_count(idx) >= 1,
+                "non-winner idx={idx} notified"
+            );
+        }
+    }
 
     // Hysteresis: 3 more ticks without audio → incumbent persists.
     for step in 1..=3 {
@@ -120,7 +132,7 @@ fn active_speaker_dominance_and_hysteresis_and_skip_self() {
     }
     assert_eq!(
         registry.current_active_speaker(),
-        Some(1),
+        Some(bootstrap_winner),
         "incumbent holds"
     );
 
@@ -130,7 +142,10 @@ fn active_speaker_dominance_and_hysteresis_and_skip_self() {
         registry.delivered_active_speaker_count(1),
         registry.delivered_active_speaker_count(2),
     ];
-    registry.fanout_for_tests(&Propagated::ActiveSpeakerChanged { peer_id: 2 });
+    registry.fanout_for_tests(&Propagated::ActiveSpeakerChanged {
+        peer_id: 2,
+        confidence: 0.0,
+    });
     assert_eq!(
         registry.delivered_active_speaker_count(1),
         b0,

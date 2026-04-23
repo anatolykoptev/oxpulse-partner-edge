@@ -15,18 +15,34 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+dominant-speaker = { package = "rust-dominant-speaker", version = "0.3" }
+oxpulse-sfu-kit = { version = "0.6", features = [
+    "active-speaker",
+    "metrics-prometheus",
+    "kalman-bwe",
+    "pacer",
+    "vfm",
+    "test-utils",
+] }
 prometheus = { version = "0.13", default-features = false }
 str0m = "0.18"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hmac = "0.12"
+sha2 = "0.10"
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["rustls-tls-native-roots", "connect"] }
+futures-util = { version = "0.3", features = ["sink"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [features]
 test-utils = []
+vfm = ["oxpulse-sfu-kit/vfm"]
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros", "test-util"] }
 
 [[test]]
@@ -44,3 +60,11 @@ required-features = ["test-utils"]
 [[test]]
 name = "bwe_metrics_integration"
 required-features = ["test-utils"]
+
+[[test]]
+name = "hard_red_migration"
+required-features = ["test-utils"]
+
+[[test]]
+name = "relay_api"
+required-features = []

@@ -14,12 +14,12 @@ use std::time::Instant;
 use str0m::net::{Protocol, Receive};
 use str0m::Input;
 
-use crate::active_speaker::ActiveSpeakerDetector;
-use crate::bandwidth::BandwidthEstimator;
 use crate::client::{Client, Transmit};
 use crate::metrics::SfuMetrics;
 use crate::pacer::Pacer;
 use crate::propagate::Propagated;
+use dominant_speaker::ActiveSpeakerDetector;
+use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
 
 mod bwe;
 mod poll;
@@ -38,6 +38,11 @@ pub struct Registry {
     pub(super) clients: Vec<Client>,
     pub(super) to_propagate: VecDeque<Propagated>,
     pub(super) detector: ActiveSpeakerDetector,
+    pub(super) detector_epoch: Instant,
+    /// M6.1: wall-clock time of the most recent `ActiveSpeakerChanged` emission.
+    /// Used by `tick_active_speaker` to compute inter-change intervals for the
+    /// hysteresis histogram (replacing the inlined `record_hysteresis_observation`).
+    pub(super) last_speaker_change: Option<Instant>,
     pub(super) metrics: Arc<SfuMetrics>,
     pub(super) bandwidth: BandwidthEstimator,
     pub(super) pacer: Pacer,
@@ -45,14 +50,13 @@ pub struct Registry {
 
 impl Registry {
     pub fn new(metrics: Arc<SfuMetrics>) -> Self {
-        let mut detector = ActiveSpeakerDetector::new();
-        // M6.1: wire the hysteresis histogram so tick_active_speaker can observe
-        // inter-change intervals without an extra metrics lookup in the hot path.
-        detector.set_hysteresis_histogram(metrics.dominant_speaker_hysteresis_ms.clone());
+        let detector = ActiveSpeakerDetector::new();
         Self {
             clients: Vec::new(),
             to_propagate: VecDeque::new(),
             detector,
+            detector_epoch: Instant::now(),
+            last_speaker_change: None,
             metrics,
             bandwidth: BandwidthEstimator::new(),
             pacer: Pacer::new(),
@@ -92,10 +96,42 @@ impl Registry {
         for entry in self.clients.iter().flat_map(|c| c.tracks_in.iter()) {
             client.handle_track_open(std::sync::Arc::downgrade(&entry.id));
         }
-        self.detector.add_peer(*client.id, Instant::now());
+        let peer_id = *client.id;
+        let now_ms = self.detector_epoch.elapsed().as_millis() as u64;
+        self.detector.add_peer(peer_id, now_ms);
         self.metrics.client_connect_total.inc();
         self.metrics.active_participants.inc();
         self.clients.push(client);
+        // Emit a codec-capability hint so relay layers or application code can
+        // inform the new peer that this SFU supports Opus RED / DRED.
+        self.to_propagate.push_back(Propagated::AudioCodecHint {
+            peer_id,
+            opus_red: true,
+            opus_dred: true,
+        });
+    }
+
+    /// Mark a connected client as a cascade relay from an upstream SFU.
+    ///
+    /// Call as soon as possible after `insert()` — ideally driven by the
+    /// `MarkRelaySource` DC handshake via `fanout_pending`. Relay clients are
+    /// excluded from dominant-speaker election and keyframe requests will be
+    /// routed upstream rather than back to the relay connection.
+    ///
+    /// Idempotent: calling with the same `client_id` twice is safe.
+    pub fn mark_relay_source(
+        &mut self,
+        client_id: crate::propagate::ClientId,
+        upstream_url: String,
+    ) {
+        if let Some(client) = self.clients.iter_mut().find(|c| c.id == client_id) {
+            client.set_origin(oxpulse_sfu_kit::ClientOrigin::RelayFromSfu(upstream_url));
+            // Remove from detector retroactively — relay clients were inserted as
+            // Local before the DC handshake completed, so they were added to the
+            // detector. Removing here corrects that without requiring a full
+            // teardown/re-insert cycle.
+            self.detector.remove_peer(&client_id.0);
+        }
     }
 
     /// Route an incoming UDP datagram to whichever client claims it.

@@ -60,11 +60,13 @@ pub enum Propagated {
     /// skip-self logic compares against `*client.id` inline — see
     /// [`crate::fanout::fanout`] and
     /// [`crate::client::fanout::Client::handle_active_speaker_changed`].
-    ActiveSpeakerChanged { peer_id: u64 },
+    /// `confidence` is the C2 margin from `rust-dominant-speaker` v0.3
+    /// (`SpeakerChange::c2_margin`); `0.0` for bootstrap elections.
+    ActiveSpeakerChanged { peer_id: u64, confidence: f64 },
 
     /// str0m's own GCC estimate for this subscriber's downlink, in
     /// bits per second. Sunk into
-    /// [`crate::bandwidth::BandwidthEstimator::record_native_estimate`]
+    /// [`oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator::record_native_estimate`]
     /// as a ceiling on our own estimate. Never fans out to other
     /// clients — consumed entirely inside the registry.
     BandwidthEstimate(ClientId, u64),
@@ -72,9 +74,66 @@ pub enum Propagated {
     /// Browser-reported bandwidth budget from DC id:2 (`sfu-budget`,
     /// negotiated, unordered). Payload is `{ type: "budget", bps: N }`.
     /// Sunk into
-    /// [`crate::bandwidth::BandwidthEstimator::record_client_hint`]
+    /// [`oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator::record_client_hint`]
     /// as an additional ceiling. Never fans out to other clients.
     ClientBudgetHint(ClientId, u64),
+
+    /// Top-K speakers by medium-window score, broadcast to all clients on
+    /// DC id:3 (`sfu-active-speaker`) on every 300ms ASO tick. Payload:
+    /// `{"type":"top_speakers","peerIds":[<u64>, ...]}`.
+    TopSpeakers(Vec<u64>),
+
+    /// Codec capability hint emitted when a peer joins. Signals that this
+    /// SFU supports Opus RED and DRED. Application-level — the SFU fanout
+    /// logs it and does nothing else.
+    AudioCodecHint {
+        peer_id: u64,
+        opus_red: bool,
+        opus_dred: bool,
+    },
+
+    /// Subscriber requested a maximum RFC 9626 VFM temporal layer.
+    /// Payload: `{ "type": "max_temporal_layer", "vfm": N }`.
+    /// Consumed in the registry; calls `Client::set_max_vfm_temporal_layer`
+    /// on the subscriber. Never fans out to other clients.
+    #[cfg(feature = "vfm")]
+    VfmLayerCap(ClientId, u8),
+
+    /// Dynacast hint: the maximum simulcast layer any subscriber of this
+    /// publisher currently wants. Emitted by
+    /// `Registry::emit_publisher_layer_hints` on the 300 ms speaker tick.
+    /// Applications may forward this to the publisher via signalling to let
+    /// it stop encoding unneeded layers.
+    PublisherLayerHint {
+        /// The publisher whose encoding may be reduced.
+        publisher_id: ClientId,
+        /// Highest simulcast layer any subscriber currently wants.
+        max_rid: str0m::media::Rid,
+    },
+
+    /// Mark this client as a relay connection from an upstream SFU edge.
+    /// Received via DataChannel (`relay_source` message type) from the relay
+    /// client itself. `upstream_url` identifies the upstream SFU for logging
+    /// and routing. Consumed inside `Registry::fanout_pending`; never fans out.
+    MarkRelaySource(ClientId, String),
+
+    /// A keyframe request that originated on a relay-connected track and must
+    /// be forwarded upstream to the source SFU rather than sent back to the
+    /// relay connection. Consumed by the signalling layer; never fans out
+    /// peer-to-peer inside this SFU instance.
+    UpstreamKeyframeRequest {
+        source_relay_id: ClientId,
+        req: str0m::media::KeyframeRequest,
+        source_mid: str0m::media::Mid,
+    },
+
+    /// A Dynacast (simulcast layer) hint that must be forwarded upstream to
+    /// the source SFU so it can adjust the relay's send layer. Consumed by
+    /// the signalling layer; never fans out peer-to-peer.
+    PublisherLayerHintForUpstream {
+        publisher_relay_id: ClientId,
+        max_rid: str0m::media::Rid,
+    },
 }
 
 impl Propagated {
@@ -87,11 +146,23 @@ impl Propagated {
             | Propagated::KeyframeRequest(c, _, _, _)
             | Propagated::BandwidthEstimate(c, _)
             | Propagated::ClientBudgetHint(c, _) => Some(*c),
+            #[cfg(feature = "vfm")]
+            Propagated::VfmLayerCap(c, _) => Some(*c),
+            Propagated::PublisherLayerHint { publisher_id, .. } => Some(*publisher_id),
             // ActiveSpeakerChanged has no originating ClientId — the
             // fanout skip rule uses `peer_id == *client.id` directly.
-            Propagated::Noop | Propagated::Timeout(_) | Propagated::ActiveSpeakerChanged { .. } => {
-                None
-            }
+            // TopSpeakers and AudioCodecHint are broadcast / application-level —
+            // they have no skip-origin semantics.
+            Propagated::Noop
+            | Propagated::Timeout(_)
+            | Propagated::ActiveSpeakerChanged { .. }
+            | Propagated::TopSpeakers(_)
+            | Propagated::AudioCodecHint { .. }
+            // Relay-source events are consumed inside the registry/signalling
+            // layer, never fanned out peer-to-peer.
+            | Propagated::MarkRelaySource(..)
+            | Propagated::UpstreamKeyframeRequest { .. }
+            | Propagated::PublisherLayerHintForUpstream { .. } => None,
         }
     }
 }
