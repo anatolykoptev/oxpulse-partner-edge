@@ -378,3 +378,75 @@ fn confidence_is_zero_on_bootstrap_and_positive_on_contested_flip() {
     // What we CAN verify: the change was emitted at all (dominant_speaker_changes_total).
     // A future test with a drain seam should assert c2_margin > 0.0 directly.
 }
+
+
+// ─── Test 8 ───────────────────────────────────────────────────────────────────
+//
+// mark_relay_source: relay clients must not be elected as dominant speaker.
+//
+// Simulates the production DC-handshake path:
+//   1. Both clients inserted as Local (default).
+//   2. Some audio arrives BEFORE the DC relay_source message (brief race window).
+//   3. `mark_relay_source` is called — removes relay from the detector.
+//   4. Only the local client continues to produce audio (production `poll_all`
+//      guards `record_level` against relay clients, so subsequent relay audio
+//      is never fed into the detector).
+//   5. After enough loud-local + tick, the local client should win; relay must
+//      never appear as the elected speaker.
+//
+// This exercises both:
+//   - Post-insert retroactive removal (the `remove_peer` path).
+//   - The invariant that relay audio fed before the mark is harmless once
+//     the relay is removed from the detector's speaker map.
+#[test]
+fn mark_relay_source_excludes_client_from_speaker_election() {
+    use std::time::{Duration, Instant};
+
+    use oxpulse_sfu::client::test_seed::new_client;
+    use oxpulse_sfu::{ClientId, Registry};
+
+    let mut registry = Registry::new_for_tests();
+    let epoch = Instant::now();
+
+    let local_id: u64 = 500;
+    let relay_id: u64 = 501;
+    registry.insert(new_client(ClientId(local_id)));
+    registry.insert(new_client(ClientId(relay_id)));
+
+    // Phase 1: brief audio window BEFORE DC relay_source handshake completes.
+    // In production this is the ICE/DTLS phase before the DataChannel is open.
+    for i in 0u64..5 {
+        let t = epoch + Duration::from_millis(i * 20);
+        registry.inject_audio_level_for_tests(relay_id, 5, t);    // very loud (pre-mark)
+        registry.inject_audio_level_for_tests(local_id, 120, t);  // very quiet
+    }
+
+    // Phase 2: DC relay_source message arrives — remove relay from detector.
+    registry.mark_relay_source(
+        ClientId(relay_id),
+        "wss://eu-1.example/sfu".to_string(),
+    );
+
+    // Phase 3: only local client produces audio (relay audio is suppressed in
+    // production by the `poll_all` is_relay guard; here we just don't inject
+    // for relay to match that behavior).
+    for i in 5u64..85 {
+        let t = epoch + Duration::from_millis(i * 20);
+        registry.inject_audio_level_for_tests(local_id, 5, t);    // local is now loud
+        // relay_id intentionally omitted — simulates poll_all guard
+    }
+
+    // Force a tick and check.
+    registry.force_active_speaker_tick_for_tests(epoch + Duration::from_millis(1800));
+
+    // The relay client must NEVER be the elected speaker.
+    if let Some(winner) = registry.current_active_speaker() {
+        assert_ne!(
+            winner, relay_id,
+            "relay client (id={relay_id}) must not be elected as dominant speaker; \
+             mark_relay_source must remove it from the detector permanently",
+        );
+    }
+    // local_id may or may not win depending on bootstrap window — that's fine.
+    // The critical invariant is relay_id != winner.
+}

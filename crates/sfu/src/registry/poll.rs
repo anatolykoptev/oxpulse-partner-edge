@@ -40,11 +40,20 @@ impl Registry {
                         // audio packets, so we don't need a MediaKind check.
                         if let Propagated::MediaData(origin, ref data) = other {
                             if let Some(raw) = data.ext_vals.audio_level {
-                                let level = (-raw).clamp(0, 127) as u8;
-                                let now_ms =
-                                    now.saturating_duration_since(self.detector_epoch)
-                                        .as_millis() as u64;
-                                self.detector.record_level(origin.0, level, now_ms);
+                                // Skip speaker detection for relay clients — they
+                                // re-stream audio from another SFU and must not
+                                // participate in this instance's speaker election.
+                                // The emitting client is always `client` (poll_output
+                                // emits from self), so checking `client.is_relay()` is
+                                // equivalent to checking if origin is a relay — and
+                                // avoids a second borrow of `self.clients`.
+                                if !client.is_relay() {
+                                    let level = (-raw).clamp(0, 127) as u8;
+                                    let now_ms =
+                                        now.saturating_duration_since(self.detector_epoch)
+                                            .as_millis() as u64;
+                                    self.detector.record_level(origin.0, level, now_ms);
+                                }
                             }
                         }
                         self.to_propagate.push_back(other);
