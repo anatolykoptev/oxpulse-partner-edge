@@ -53,6 +53,8 @@ Ctrl-C / SIGTERM shuts the loop down cleanly.
 | `SFU_METRICS_PORT` | `9317` | HTTP `/metrics` Prometheus endpoint |
 | `SFU_BIND_ADDRESS` | `0.0.0.0` | Bind interface for both sockets |
 | `RUST_LOG` | `info` | `tracing_subscriber` directive |
+| `SFU_RELAY_API_PORT` | `8912` | HTTP port for the relay API (`POST /relay/connect`). Expose in firewall for oxpulse-chat to reach. |
+| `RELAY_JWT_SECRET` | `change-me-in-production` | HMAC-SHA256 secret for relay JWT validation. Must match `RELAY_JWT_SECRET` in oxpulse-chat. **Change before deployment.** |
 
 ## References
 

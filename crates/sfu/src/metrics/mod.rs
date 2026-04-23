@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use prometheus::{
-    Encoder, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
+    Encoder, GaugeVec, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
     TextEncoder,
 };
 
@@ -58,6 +58,12 @@ pub struct SfuMetrics {
     pub e2e_handshake_failures_total: IntCounter,
     /// M6.1: histogram of inter-change intervals as dominant-speaker hysteresis proxy.
     pub dominant_speaker_hysteresis_ms: Histogram,
+    /// M6.2: immediate-window audio activity score per peer (0.0 silent → 1.0 loudest).
+    pub speaker_immediate: GaugeVec,
+    /// M6.2: medium-window audio activity score per peer.
+    pub speaker_medium: GaugeVec,
+    /// M6.2: long-window audio activity score per peer.
+    pub speaker_long: GaugeVec,
 }
 
 impl SfuMetrics {
@@ -145,8 +151,14 @@ impl SfuMetrics {
         )
         .context("pacer_layer_total")?);
 
-        let (layer_transitions_total, e2e_handshake_failures_total, dominant_speaker_hysteresis_ms) =
-            m6::register(&registry)?;
+        let (
+            layer_transitions_total,
+            e2e_handshake_failures_total,
+            dominant_speaker_hysteresis_ms,
+            speaker_immediate,
+            speaker_medium,
+            speaker_long,
+        ) = m6::register(&registry)?;
 
         Ok(Self {
             registry: Arc::new(registry),
@@ -162,6 +174,9 @@ impl SfuMetrics {
             layer_transitions_total,
             e2e_handshake_failures_total,
             dominant_speaker_hysteresis_ms,
+            speaker_immediate,
+            speaker_medium,
+            speaker_long,
         })
     }
 

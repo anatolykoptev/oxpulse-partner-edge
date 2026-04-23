@@ -9,16 +9,23 @@
 //! import from this module directly.
 
 use anyhow::Context;
-use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, Opts, Registry};
+use prometheus::{GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, Opts, Registry};
 
-/// Construct and register the three M6.1 metrics onto `registry`.
+/// Construct and register M6.1 metrics onto `registry`.
 ///
 /// Called once from [`super::SfuMetrics::new`] after the core metrics are
 /// registered. Returns `(layer_transitions_total, e2e_handshake_failures_total,
-/// dominant_speaker_hysteresis_ms)`.
+/// dominant_speaker_hysteresis_ms, speaker_immediate, speaker_medium, speaker_long)`.
 pub(super) fn register(
     registry: &Registry,
-) -> anyhow::Result<(IntCounterVec, IntCounter, Histogram)> {
+) -> anyhow::Result<(
+    IntCounterVec,
+    IntCounter,
+    Histogram,
+    GaugeVec,
+    GaugeVec,
+    GaugeVec,
+)> {
     macro_rules! reg {
         ($m:expr) => {{
             let m = $m;
@@ -67,9 +74,43 @@ pub(super) fn register(
     )
     .context("dominant_speaker_hysteresis_ms")?);
 
+    // Per-peer audio score gauges (M6.2). Updated on every 300ms ASO tick.
+    // Label: peer (ClientId u64 as string). Series are ephemeral — they are
+    // not explicitly removed on disconnect, but Prometheus staleness handling
+    // will age them out. Cardinality is bounded by connected peers.
+    let speaker_immediate = reg!(GaugeVec::new(
+        Opts::new(
+            "sfu_speaker_immediate_score",
+            "Immediate-window audio activity score per peer (0.0 silent → 1.0 loudest)",
+        ),
+        &["peer"],
+    )
+    .context("sfu_speaker_immediate_score")?);
+
+    let speaker_medium = reg!(GaugeVec::new(
+        Opts::new(
+            "sfu_speaker_medium_score",
+            "Medium-window audio activity score per peer (0.0 silent → 1.0 loudest)",
+        ),
+        &["peer"],
+    )
+    .context("sfu_speaker_medium_score")?);
+
+    let speaker_long = reg!(GaugeVec::new(
+        Opts::new(
+            "sfu_speaker_long_score",
+            "Long-window audio activity score per peer (0.0 silent → 1.0 loudest)",
+        ),
+        &["peer"],
+    )
+    .context("sfu_speaker_long_score")?);
+
     Ok((
         layer_transitions_total,
         e2e_handshake_failures_total,
         dominant_speaker_hysteresis_ms,
+        speaker_immediate,
+        speaker_medium,
+        speaker_long,
     ))
 }
