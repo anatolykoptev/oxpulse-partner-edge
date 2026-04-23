@@ -150,16 +150,16 @@ impl Client {
     /// Handle a dominant-speaker election change. The registry skips
     /// the speaker themselves (see [`crate::fanout::fanout`]) — this
     /// method is only invoked on *other* clients. Pushes a one-shot
-    /// `{"type":"active_speaker","peerId":<u64>}` JSON payload onto the
+    /// `{"type":"active_speaker","peerId":<u64>,"confidence":<f64>}` JSON payload onto the
     /// pre-negotiated `sfu-active-speaker` DC (id:3) so the UI can
     /// update spotlight/pin state without polling receiver audioLevel.
-    pub fn handle_active_speaker_changed(&mut self, peer_id: u64) {
+    pub fn handle_active_speaker_changed(&mut self, peer_id: u64, confidence: f64) {
         #[cfg(any(test, feature = "test-utils"))]
         {
             self.delivered_active_speaker
                 .fetch_add(1, Ordering::Relaxed);
         }
-        let payload = format!(r#"{{"type":"active_speaker","peerId":{peer_id}}}"#);
+        let payload = format!(r#"{{"type":"active_speaker","peerId":{peer_id},"confidence":{confidence:.3}}}"#);
         let Some(mut ch) = self.rtc.channel(self.active_speaker_cid) else {
             // DC not yet open (DTLS still negotiating, or peer dropped).
             // The detector will fire again within ~300 ms so we don't

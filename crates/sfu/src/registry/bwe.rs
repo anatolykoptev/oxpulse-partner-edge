@@ -64,7 +64,7 @@ impl Registry {
         self.clients.retain(|c| {
             let alive = c.is_alive();
             if !alive {
-                detector.remove_peer(*c.id);
+                detector.remove_peer(&c.id.0);
                 bandwidth.remove(&c.id);
                 pacer.remove(&c.id);
                 metrics.client_disconnect_total.inc();

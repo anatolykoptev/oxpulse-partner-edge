@@ -18,7 +18,7 @@ use anyhow::Context;
 use tokio::net::UdpSocket;
 use tokio::time::MissedTickBehavior;
 
-use crate::active_speaker::TICK_INTERVAL;
+use dominant_speaker::TICK_INTERVAL;
 use crate::config::SfuConfig;
 use crate::metrics::SfuMetrics;
 use crate::registry::Registry;

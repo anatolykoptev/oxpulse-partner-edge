@@ -60,7 +60,9 @@ pub enum Propagated {
     /// skip-self logic compares against `*client.id` inline — see
     /// [`crate::fanout::fanout`] and
     /// [`crate::client::fanout::Client::handle_active_speaker_changed`].
-    ActiveSpeakerChanged { peer_id: u64 },
+    /// `confidence` is the C2 margin from `rust-dominant-speaker` v0.3
+    /// (`SpeakerChange::c2_margin`); `0.0` for bootstrap elections.
+    ActiveSpeakerChanged { peer_id: u64, confidence: f64 },
 
     /// str0m's own GCC estimate for this subscriber's downlink, in
     /// bits per second. Sunk into
