@@ -95,7 +95,7 @@ impl Registry {
         while let Some(p) = self.to_propagate.pop_front() {
             match &p {
                 Propagated::BandwidthEstimate(cid, bps) => {
-                    self.bandwidth.record_native_estimate(*cid, *bps);
+                    self.bandwidth.record_native_estimate(oxpulse_sfu_kit::propagate::ClientId(**cid), *bps as f64);
                     continue;
                 }
                 Propagated::ClientBudgetHint(cid, bps) => {
@@ -103,7 +103,7 @@ impl Registry {
                     // shared BandwidthEstimator so the pacer sees it on the
                     // next update_pacer_layers pass.
                     self.bandwidth
-                        .record_client_hint(*cid, *bps, Instant::now());
+                        .record_client_hint(oxpulse_sfu_kit::propagate::ClientId(**cid), *bps, Instant::now());
                     continue;
                 }
                 // M5.3 fix-round: the publisher's active RIDs drive the
