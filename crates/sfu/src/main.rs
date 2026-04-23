@@ -4,7 +4,7 @@ use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
 use anyhow::Context;
-use oxpulse_sfu::{metrics::spawn_metrics_server, relay::{handler::spawn_relay_api, task::RelayTask}, udp_loop, SfuConfig, SfuMetrics};
+use oxpulse_sfu::{metrics::spawn_metrics_server, relay::{client::connect_relay, handler::spawn_relay_api, task::RelayTask}, udp_loop, SfuConfig, SfuMetrics};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,10 +41,21 @@ async fn main() -> anyhow::Result<()> {
     let relay_handle = spawn_relay_api(relay_listener, relay_secret, relay_tx)?;
     tracing::info!(addr = %relay_addr, "relay API listening");
 
-    // Drain the relay task channel (Tasks 3->4: actual relay client starts in Task 4).
+    // Drain relay task channel — spawn a WebRTC relay client for each task.
     tokio::spawn(async move {
         while let Some(task) = relay_rx.recv().await {
-            tracing::info!(room_id = %task.room_id, upstream_url = %task.upstream_url, "relay task received (stub)");
+            let url = task.upstream_url.clone();
+            let token = task.upstream_room_token.clone();
+            let room_id = task.room_id.clone();
+            tokio::spawn(async move {
+                // local_udp_addr will come from SfuConfig in a follow-up task.
+                // 0.0.0.0:0 is a placeholder; ICE will not complete until this
+                // is wired to the actual public UDP port.
+                let local_addr: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+                if let Err(e) = connect_relay(&url, &token, local_addr).await {
+                    tracing::warn!(error = %e, %room_id, "relay connection failed");
+                }
+            });
         }
     });
 
