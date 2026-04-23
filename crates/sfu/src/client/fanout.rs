@@ -9,7 +9,7 @@
 //! M5.3: the per-subscriber simulcast layer is no longer static —
 //! [`Client::pacer_select_layer`] runs before the filter and updates
 //! `desired_layer` from the GCC bandwidth estimate produced by the
-//! registry-owned [`crate::bandwidth::BandwidthEstimator`] paired
+//! registry-owned [`oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator`] paired
 //! with the [`crate::pacer::Pacer`]. See those modules for the
 //! algorithm + hysteresis.
 
@@ -24,7 +24,7 @@ use crate::propagate::ClientId;
 impl Client {
     /// Consult the [`Pacer`] for the simulcast tier this subscriber
     /// should currently receive, given the latest GCC estimate from
-    /// [`crate::bandwidth::BandwidthEstimator::estimate_bps`]. Updates
+    /// [`oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator::estimate_bps`]. Updates
     /// `self.desired_layer` in place (cheap — no SDP renegotiation).
     /// Returns the chosen layer so the caller can record a metric.
     ///

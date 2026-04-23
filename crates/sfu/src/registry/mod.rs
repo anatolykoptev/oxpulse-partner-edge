@@ -15,7 +15,7 @@ use str0m::net::{Protocol, Receive};
 use str0m::Input;
 
 use dominant_speaker::ActiveSpeakerDetector;
-use crate::bandwidth::BandwidthEstimator;
+use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
 use crate::client::{Client, Transmit};
 use crate::metrics::SfuMetrics;
 use crate::pacer::Pacer;

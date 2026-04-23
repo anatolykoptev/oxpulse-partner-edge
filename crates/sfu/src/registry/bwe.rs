@@ -8,7 +8,7 @@
 
 use str0m::media::Rid;
 
-use crate::bandwidth::BandwidthEstimator;
+use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
 use crate::client::layer;
 use crate::pacer::Pacer;
 use crate::propagate::ClientId;
@@ -18,7 +18,7 @@ use super::Registry;
 /// Fallback simulcast ladder used when a publisher hasn't been observed
 /// emitting any RID yet (bootstrap window before the first MediaData
 /// arrives, or re-init after a track reset). Keeps the existing
-/// "full ladder available" pacer contract until per-publisher
+/// full ladder available pacer contract until per-publisher
 /// `active_rids` has real data.
 const DEFAULT_SIMULCAST_LADDER: [Rid; 3] = [layer::LOW, layer::MEDIUM, layer::HIGH];
 
@@ -65,7 +65,7 @@ impl Registry {
             let alive = c.is_alive();
             if !alive {
                 detector.remove_peer(&c.id.0);
-                bandwidth.remove(&c.id);
+                bandwidth.reap_dead(oxpulse_sfu_kit::propagate::ClientId(*c.id));
                 pacer.remove(&c.id);
                 metrics.client_disconnect_total.inc();
                 metrics.active_participants.dec();
@@ -129,7 +129,7 @@ impl Registry {
         for client in self.clients.iter_mut() {
             let budget = self
                 .bandwidth
-                .estimate_bps(&client.id, std::time::Instant::now());
+                .estimate_bps(oxpulse_sfu_kit::propagate::ClientId(*client.id), std::time::Instant::now());
             let prev_layer = client.desired_layer;
             let chosen = client.pacer_select_layer(&mut self.pacer, budget, available);
             let peer_label = (*client.id).to_string();

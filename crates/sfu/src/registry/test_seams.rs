@@ -1,5 +1,5 @@
 //! Test-only affordances for `Registry`. Gated with
-//! `cfg(any(test, feature = "test-utils"))` so the release binary is
+//! `cfg(any(test, feature = test-utils))` so the release binary is
 //! lean and the observer APIs can't be abused in production code.
 //!
 //! Split from `registry.rs` per CLAUDE.md — test seams are a distinct
@@ -81,53 +81,33 @@ impl Registry {
         self.detector.current_dominant().copied()
     }
 
-    /// Test-only: drive the internal delay + loss estimators high
-    /// enough that the combined estimate reaches approximately
-    /// `target_bps`. Done by feeding zero-gradient + zero-loss samples
-    /// through `on_arrival` until the multiplicative-increase track
-    /// climbs to target. `native_estimate_bps` is left alone so the
-    /// ceiling semantics still apply. Separately,
-    /// [`Self::cap_subscriber_bandwidth_for_tests`] can pin a ceiling.
+    /// Test-only: force both the Kalman delay and loss estimators for
+    /// `subscriber` to report `target_bps`, bypassing TWCC simulation.
+    /// Uses the kit's `force_high_estimate_for_tests` seam which zeroes
+    /// both estimators to a fixed value without needing real network samples.
+    /// `native_estimate_bps` is left untouched so ceiling semantics apply.
+    /// Use [`Self::cap_subscriber_bandwidth_for_tests`] to apply a ceiling.
     #[doc(hidden)]
     pub fn drive_subscriber_bandwidth_for_tests(
         &mut self,
         subscriber: crate::propagate::ClientId,
         target_bps: u64,
     ) {
-        use std::time::{Duration, Instant};
-        let start = Instant::now();
-        // 400 samples × rate-limit triggers every 200ms gives ~4
-        // rate-control fires per second; 1.05^N climb covers up to
-        // ~10 Mbps from the 300 kbps bootstrap in < 100 samples.
-        let mut now = start;
-        for i in 0..400u64 {
-            let send = now;
-            let arr = send + Duration::from_millis(5);
-            self.bandwidth.record_sent(subscriber, i, send);
-            self.bandwidth
-                .on_arrival(subscriber, i, Some(arr), true, arr);
-            if self
-                .bandwidth
-                .estimate_bps(&subscriber, now)
-                .is_some_and(|b| b >= target_bps)
-            {
-                break;
-            }
-            now += Duration::from_millis(300);
-        }
+        self.bandwidth
+            .force_high_estimate_for_tests(oxpulse_sfu_kit::propagate::ClientId(*subscriber), target_bps as f64);
     }
 
     /// Test-only: pin a subscriber's GCC estimate ceiling so
-    /// integration tests can simulate a capped downlink. Mirrors
-    /// [`crate::bandwidth::BandwidthEstimator::record_native_estimate`]
-    /// (which clamps our combined output to this ceiling via `min`).
+    /// integration tests can simulate a capped downlink. Uses
+    /// `record_native_estimate` which clamps our combined output to
+    /// this ceiling via `min`.
     #[doc(hidden)]
     pub fn cap_subscriber_bandwidth_for_tests(
         &mut self,
         subscriber: crate::propagate::ClientId,
         bps: u64,
     ) {
-        self.bandwidth.record_native_estimate(subscriber, bps);
+        self.bandwidth.record_native_estimate(oxpulse_sfu_kit::propagate::ClientId(*subscriber), bps as f64);
     }
 
     /// Test-only: force the pacer + metrics refresh out-of-band

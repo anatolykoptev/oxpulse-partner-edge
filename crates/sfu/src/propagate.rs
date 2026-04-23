@@ -66,7 +66,7 @@ pub enum Propagated {
 
     /// str0m's own GCC estimate for this subscriber's downlink, in
     /// bits per second. Sunk into
-    /// [`crate::bandwidth::BandwidthEstimator::record_native_estimate`]
+    /// [`oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator::record_native_estimate`]
     /// as a ceiling on our own estimate. Never fans out to other
     /// clients — consumed entirely inside the registry.
     BandwidthEstimate(ClientId, u64),
@@ -74,7 +74,7 @@ pub enum Propagated {
     /// Browser-reported bandwidth budget from DC id:2 (`sfu-budget`,
     /// negotiated, unordered). Payload is `{ type: "budget", bps: N }`.
     /// Sunk into
-    /// [`crate::bandwidth::BandwidthEstimator::record_client_hint`]
+    /// [`oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator::record_client_hint`]
     /// as an additional ceiling. Never fans out to other clients.
     ClientBudgetHint(ClientId, u64),
 }
