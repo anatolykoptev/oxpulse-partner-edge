@@ -96,11 +96,19 @@ impl Registry {
         for entry in self.clients.iter().flat_map(|c| c.tracks_in.iter()) {
             client.handle_track_open(std::sync::Arc::downgrade(&entry.id));
         }
+        let peer_id = *client.id;
         let now_ms = self.detector_epoch.elapsed().as_millis() as u64;
-        self.detector.add_peer(*client.id, now_ms);
+        self.detector.add_peer(peer_id, now_ms);
         self.metrics.client_connect_total.inc();
         self.metrics.active_participants.inc();
         self.clients.push(client);
+        // Emit a codec-capability hint so relay layers or application code can
+        // inform the new peer that this SFU supports Opus RED / DRED.
+        self.to_propagate.push_back(Propagated::AudioCodecHint {
+            peer_id,
+            opus_red: true,
+            opus_dred: true,
+        });
     }
 
     /// Route an incoming UDP datagram to whichever client claims it.
