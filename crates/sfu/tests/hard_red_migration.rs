@@ -384,20 +384,17 @@ fn confidence_is_zero_on_bootstrap_and_positive_on_contested_flip() {
 //
 // mark_relay_source: relay clients must not be elected as dominant speaker.
 //
-// Simulates the production DC-handshake path:
-//   1. Both clients inserted as Local (default).
-//   2. Some audio arrives BEFORE the DC relay_source message (brief race window).
-//   3. `mark_relay_source` is called — removes relay from the detector.
-//   4. Only the local client continues to produce audio (production `poll_all`
-//      guards `record_level` against relay clients, so subsequent relay audio
-//      is never fed into the detector).
-//   5. After enough loud-local + tick, the local client should win; relay must
-//      never appear as the elected speaker.
+// Simulates the production DC-handshake path and verifies two invariants:
 //
-// This exercises both:
-//   - Post-insert retroactive removal (the `remove_peer` path).
-//   - The invariant that relay audio fed before the mark is harmless once
-//     the relay is removed from the detector's speaker map.
+// Invariant A (detector-state, strong): after `mark_relay_source`, the relay
+//   client must be absent from `top_speakers_for_tests` even with heavy loud
+//   audio injected pre-mark. The relay is genuinely removed from the detector's
+//   speaker map — not merely losing on score.
+//
+// Invariant B (election result, weak): the relay must not be elected as
+//   dominant speaker after the mark.
+//
+// Invariant A is the primary guard; it fails if mark_relay_source is a no-op.
 #[test]
 fn mark_relay_source_excludes_client_from_speaker_election() {
     use std::time::{Duration, Instant};
@@ -413,33 +410,39 @@ fn mark_relay_source_excludes_client_from_speaker_election() {
     registry.insert(new_client(ClientId(local_id)));
     registry.insert(new_client(ClientId(relay_id)));
 
-    // Phase 1: brief audio window BEFORE DC relay_source handshake completes.
-    // In production this is the ICE/DTLS phase before the DataChannel is open.
-    for i in 0u64..5 {
+    // Feed HEAVY loud audio to relay BEFORE marking — ensure it's well established
+    // in the detector with a high score. Without the mark, relay would be top-1.
+    for i in 0u64..80 {
         let t = epoch + Duration::from_millis(i * 20);
         registry.inject_audio_level_for_tests(relay_id, 5, t);    // very loud (pre-mark)
         registry.inject_audio_level_for_tests(local_id, 120, t);  // very quiet
     }
 
-    // Phase 2: DC relay_source message arrives — remove relay from detector.
+    // Verify relay IS in top speakers before marking (so the removal is meaningful).
+    let top_before = registry.top_speakers_for_tests(5);
+    assert!(
+        top_before.contains(&relay_id),
+        "relay (id={relay_id}) must be in top speakers before mark_relay_source; \
+         got: {top_before:?}",
+    );
+
+    // DC relay_source message arrives — mark and remove from detector.
     registry.mark_relay_source(
         ClientId(relay_id),
         "wss://eu-1.example/sfu".to_string(),
     );
 
-    // Phase 3: only local client produces audio (relay audio is suppressed in
-    // production by the `poll_all` is_relay guard; here we just don't inject
-    // for relay to match that behavior).
-    for i in 5u64..85 {
-        let t = epoch + Duration::from_millis(i * 20);
-        registry.inject_audio_level_for_tests(local_id, 5, t);    // local is now loud
-        // relay_id intentionally omitted — simulates poll_all guard
-    }
+    // Invariant A: relay must be gone from the detector's speaker map immediately
+    // after mark_relay_source — no audio injection or tick needed.
+    let top_after = registry.top_speakers_for_tests(5);
+    assert!(
+        !top_after.contains(&relay_id),
+        "relay (id={relay_id}) must NOT be in top speakers after mark_relay_source; \
+         mark_relay_source must call remove_peer on the detector. got: {top_after:?}",
+    );
 
-    // Force a tick and check.
+    // Invariant B: even after a tick, relay must not be elected.
     registry.force_active_speaker_tick_for_tests(epoch + Duration::from_millis(1800));
-
-    // The relay client must NEVER be the elected speaker.
     if let Some(winner) = registry.current_active_speaker() {
         assert_ne!(
             winner, relay_id,
@@ -447,6 +450,4 @@ fn mark_relay_source_excludes_client_from_speaker_election() {
              mark_relay_source must remove it from the detector permanently",
         );
     }
-    // local_id may or may not win depending on bootstrap window — that's fine.
-    // The critical invariant is relay_id != winner.
 }
