@@ -190,6 +190,41 @@ impl Registry {
                     }
                     continue;
                 }
+                Propagated::MarkRelaySource(client_id, upstream_url) => {
+                    if let Some(client) = self.clients.iter_mut().find(|c| c.id == *client_id) {
+                        client.set_origin(oxpulse_sfu_kit::ClientOrigin::RelayFromSfu(
+                            upstream_url.clone(),
+                        ));
+                        // Remove from detector retroactively — relay clients must not
+                        // participate in speaker election. Normally insert() guards against
+                        // this, but this client was inserted as Local before the DC
+                        // relay_source handshake completed.
+                        self.detector.remove_peer(&client_id.0);
+                        tracing::info!(
+                            client = **client_id,
+                            upstream_url = %upstream_url,
+                            "marked client as cascade relay source"
+                        );
+                    }
+                    continue;
+                }
+                Propagated::UpstreamKeyframeRequest { source_relay_id, .. } => {
+                    // TODO: forward to upstream SFU via signalling WebSocket.
+                    tracing::debug!(
+                        relay = **source_relay_id,
+                        "upstream keyframe request — relay to signalling (not yet wired)"
+                    );
+                    continue;
+                }
+                Propagated::PublisherLayerHintForUpstream { publisher_relay_id, max_rid } => {
+                    // TODO: forward to upstream SFU via signalling WebSocket.
+                    tracing::debug!(
+                        relay = **publisher_relay_id,
+                        ?max_rid,
+                        "upstream dynacast hint — relay to signalling (not yet wired)"
+                    );
+                    continue;
+                }
                 Propagated::PublisherLayerHint { publisher_id, max_rid } => {
                     tracing::debug!(
                         publisher = **publisher_id,

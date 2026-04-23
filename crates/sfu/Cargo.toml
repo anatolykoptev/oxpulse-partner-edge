@@ -22,6 +22,7 @@ oxpulse-sfu-kit = { version = "0.6", features = [
     "metrics-prometheus",
     "kalman-bwe",
     "pacer",
+    "vfm",
     "test-utils",
 ] }
 prometheus = { version = "0.13", default-features = false }
@@ -32,6 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 test-utils = []
+vfm = ["oxpulse-sfu-kit/vfm"]
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

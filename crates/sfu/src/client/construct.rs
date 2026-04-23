@@ -48,6 +48,9 @@ impl Client {
             #[cfg(any(test, feature = "test-utils"))]
             delivered_active_speaker: AtomicU64::new(0),
             active_speaker_cid,
+            origin: oxpulse_sfu_kit::ClientOrigin::Local,
+            #[cfg(feature = "vfm")]
+            max_vfm_temporal_layer: u8::MAX,
         }
     }
 }
