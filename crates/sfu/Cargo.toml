@@ -16,6 +16,13 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+oxpulse-sfu-kit = { path = "/home/user/src/oxpulse-sfu-kit", features = [
+    "active-speaker",
+    "metrics-prometheus",
+    "kalman-bwe",
+    "pacer",
+    "test-utils",
+] }
 prometheus = { version = "0.13", default-features = false }
 str0m = "0.18"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros"] }

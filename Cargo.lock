@@ -371,6 +371,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -453,6 +459,15 @@ dependencies = [
  "r-efi",
  "wasip2",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+dependencies = [
+ "foldhash",
 ]
 
 [[package]]
@@ -733,6 +748,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
 
 [[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
 name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -886,12 +907,25 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "oxpulse-sfu-kit",
  "prometheus",
  "reqwest",
  "str0m",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "oxpulse-sfu-kit"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "prometheus",
+ "rust-dominant-speaker",
+ "str0m",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1183,6 +1217,16 @@ dependencies = [
  "libc",
  "untrusted 0.9.0",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rust-dominant-speaker"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aed8a2f304fcc62adc78633974e4d12cc9b29d6a9df8ffd2723ef92aa1a73f8d"
+dependencies = [
+ "hashbrown",
+ "libm",
 ]
 
 [[package]]
