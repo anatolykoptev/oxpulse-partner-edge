@@ -6,8 +6,10 @@
 
 use std::time::Instant;
 
+use str0m::media::Rid;
 use str0m::Input;
 
+use crate::client::layer;
 use crate::fanout::fanout;
 use crate::propagate::Propagated;
 
@@ -78,10 +80,79 @@ impl Registry {
         }
     }
 
+    /// Update Prometheus gauges with current per-peer audio activity scores.
+    ///
+    /// Also queues a `TopSpeakers` event with the top-3 speakers by
+    /// medium-window score for broadcast via DC id:3. Called from
+    /// `udp_loop::serve` on the same 300ms ASO tick branch as
+    /// `tick_active_speaker`.
+    pub fn tick_speaker_scores(&mut self) {
+        for (peer_id, imm, med, lng) in self.detector.peer_scores() {
+            let label = peer_id.to_string();
+            self.metrics
+                .speaker_immediate
+                .with_label_values(&[&label])
+                .set(imm);
+            self.metrics
+                .speaker_medium
+                .with_label_values(&[&label])
+                .set(med);
+            self.metrics
+                .speaker_long
+                .with_label_values(&[&label])
+                .set(lng);
+        }
+
+        let top3: Vec<u64> = self.detector.current_top_k(3);
+        if !top3.is_empty() {
+            self.to_propagate.push_back(Propagated::TopSpeakers(top3));
+        }
+    }
+
     /// Drive the session clock forward on every client.
     pub fn tick(&mut self, now: Instant) {
         for client in self.clients.iter_mut() {
             client.handle_input(Input::Timeout(now));
+        }
+    }
+
+    /// Dynacast: scan subscriber desired layers per publisher and enqueue
+    /// `Propagated::PublisherLayerHint` for each publisher whose maximum
+    /// desired layer changed. Called once per 300 ms speaker tick.
+    ///
+    /// Applications may act on these hints to signal publishers to stop
+    /// encoding simulcast layers that no subscriber is currently requesting.
+    pub fn emit_publisher_layer_hints(&mut self) {
+        use std::collections::HashMap;
+
+        let rank = |r: Rid| -> u8 {
+            if r == layer::LOW {
+                0
+            } else if r == layer::MEDIUM {
+                1
+            } else {
+                2
+            }
+        };
+
+        let mut max_per_publisher: HashMap<crate::propagate::ClientId, Rid> = HashMap::new();
+        for subscriber in &self.clients {
+            let sub_desired = subscriber.desired_layer();
+            for track_out in &subscriber.tracks_out {
+                if let Some(track_in) = track_out.track_in.upgrade() {
+                    let publisher_id = track_in.origin;
+                    let entry = max_per_publisher.entry(publisher_id).or_insert(layer::LOW);
+                    if rank(sub_desired) > rank(*entry) {
+                        *entry = sub_desired;
+                    }
+                }
+            }
+        }
+        for (publisher_id, max_rid) in max_per_publisher {
+            self.to_propagate.push_back(Propagated::PublisherLayerHint {
+                publisher_id,
+                max_rid,
+            });
         }
     }
 
@@ -110,6 +181,23 @@ impl Registry {
                         *bps,
                         Instant::now(),
                     );
+                    continue;
+                }
+                #[cfg(feature = "vfm")]
+                Propagated::VfmLayerCap(sub_id, max_tid) => {
+                    if let Some(client) = self.clients.iter_mut().find(|c| c.id == *sub_id) {
+                        client.set_max_vfm_temporal_layer(*max_tid);
+                    }
+                    continue;
+                }
+                Propagated::PublisherLayerHint { publisher_id, max_rid } => {
+                    tracing::debug!(
+                        publisher = **publisher_id,
+                        max_rid = ?max_rid,
+                        "dynacast: publisher layer hint"
+                    );
+                    // TODO: relay to publisher via signalling channel (future work).
+                    // For now, log it so operators can see it in traces.
                     continue;
                 }
                 // M5.3 fix-round: the publisher's active RIDs drive the
