@@ -1,151 +1,88 @@
-# OxPulse Partner Edge Bundle
+# oxpulse-partner-edge
 
-One-command installer for a production-grade **co-brand mirror node** that
-participates in the OxPulse network. Tested on Debian 12, Ubuntu
-22.04 / 24.04, AlmaLinux 9, Rocky Linux 9.
+[![CI](https://github.com/anatolykoptev/oxpulse-partner-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/anatolykoptev/oxpulse-partner-edge/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/anatolykoptev/oxpulse-partner-edge?label=release)](https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
-The bundle runs four containers on the partner's VPS:
+Production-ready co-brand mirror node for the OxPulse network. One command installs TLS termination, a VLESS+Reality bypass tunnel, TURN/STUN relay, and an encrypted-group-call SFU on any VPS.
 
-- **Caddy** — TLS termination (ACME via Let's Encrypt), SPA CDN, reverse
-  proxy of `/api/*` + `/ws/*` through the tunnel.
-- **xray-client** — VLESS + Reality + XHTTP tunnel to the main backend.
-  Exposes only `:3080` inside the docker network.
-- **coturn** — TURN/STUN relay with HMAC auth (`:3478/udp+tcp`,
-  `:5349/tcp` for TURNS). Runs in host network mode.
-- **sfu** — str0m-based Selective Forwarding Unit for encrypted group calls.
-  Terminates WebRTC on `:3478/udp` and exposes Prometheus metrics on
-  `:9317/tcp`.
+## What's inside
 
-## Prerequisites
+| Container | Purpose |
+|-----------|---------|
+| **caddy** | TLS (ACME/Let's Encrypt), SNI mux, reverse proxy for `/api/*` + `/ws/*` |
+| **xray-client** | VLESS + Reality + XHTTP outbound tunnel (bypasses DPI/censorship) |
+| **coturn** | TURN/STUN relay — UDP 3478, TURNS on 443 via Caddy SNI mux |
+| **sfu** | WebRTC Selective Forwarding Unit for encrypted group calls |
 
-- Debian 12+, Ubuntu 22.04+, AlmaLinux 9+, or Rocky 9+ (`systemd` + `bash`)
-- 1 vCPU, 1 GB RAM, 20 GB disk minimum
-- Public IPv4 reachable from the internet
-- A DNS A record for your partner domain pointing at the VPS's public IP
-- Ports open: **80, 443/tcp+udp, 3478/tcp+udp, 3479/udp, 5349/tcp,
-  8912/tcp (relay API), 9317/tcp (SFU metrics), 49152–65535/udp**
+## Requirements
 
-## Firewall
+- Debian 12 / Ubuntu 22.04+ / AlmaLinux 9 / Rocky 9 with `systemd`
+- 1 vCPU, 1 GB RAM, 20 GB disk
+- Public IPv4; DNS A record for your domain
+- Open ports: `80, 443, 3478/tcp+udp, 5349/tcp, 8912/tcp, 9317/tcp, 49152–65535/udp`
 
-`install.sh` does **not** manage your host firewall.
+## Install
 
 ```bash
-# ufw example
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw allow 3478/tcp
-ufw allow 3478/udp       # TURN/STUN + WebRTC media
-ufw allow 5349/tcp       # TURNS
-ufw allow 8912/tcp       # Relay API
-ufw allow 9317/tcp       # SFU Prometheus metrics
-ufw allow 49152:65535/udp  # TURN relay ports
+curl -fsSL \
+  https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/partner-edge-installer.sh \
+  | sudo bash -s -- \
+      --domain=call.your-domain.example \
+      --partner-id=your-partner-id \
+      --token=ptkn_<registration-token>
 ```
 
-## Quickstart
+<details>
+<summary>All installer flags</summary>
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--domain=<fqdn>` | ✓ | Partner edge domain (must already resolve) |
+| `--partner-id=<id>` | ✓ | Short identifier matching backend config |
+| `--token=<ptkn_...>` | ✓* | Single-use registration token |
+| `--manual-config=<path>` | ✓* | Local JSON config (alternative to `--token`) |
+| `--image-version=<tag>` | | Pin to a specific image tag |
+| `--dry-run` | | Preview only — no docker/systemd changes |
+
+\* Either `--token` or `--manual-config` is required.
+</details>
+
+## SFU configuration
+
+The `sfu` container is configured via environment variables in
+`/etc/oxpulse-partner-edge/docker-compose.yml`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SFU_UDP_PORT` | `3478` | WebRTC media port (DTLS/SRTP/STUN) |
+| `SFU_METRICS_PORT` | `9317` | Prometheus `/metrics` endpoint |
+| `SFU_RELAY_API_PORT` | `8912` | Cascade relay API (`POST /relay/connect`) |
+| `SFU_BIND_ADDRESS` | `0.0.0.0` | Bind interface |
+| `RELAY_JWT_SECRET` | — | HMAC-SHA256 secret shared with oxpulse-chat. **Required for cascade relay.** |
+| `RUST_LOG` | `info` | Log filter |
+
+## Verify
 
 ```bash
-curl -fsSL https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/partner-edge-installer.sh \
-  -o install.sh
-sudo bash install.sh \
-  --domain=call.your-domain.example \
-  --partner-id=your-partner-id \
-  --token=ptkn_<registration-token>
-```
-
-### CLI flags
-
-| Flag | Default | Notes |
-|------|---------|-------|
-| `--domain=<fqdn>` | required | Partner edge domain. Must resolve to this host. |
-| `--partner-id=<id>` | required | Short identifier; must match backend config. |
-| `--token=<ptkn_...>` | — | Registration token (calls `/api/partner/register`). |
-| `--manual-config=<path>` | — | Alternative: read node config from a local JSON file. |
-| `--image-version=<tag>` | `latest` | Pin images to a specific published tag. |
-| `--dry-run` | off | Render templates + print plan, skip docker/systemd. |
-
-## What the installer creates
-
-| Path | Purpose |
-|------|---------|
-| `/etc/oxpulse-partner-edge/docker-compose.yml` | Rendered compose file |
-| `/etc/oxpulse-partner-edge/Caddyfile` | Rendered Caddy config |
-| `/etc/oxpulse-partner-edge/xray-client.json` | Rendered tunnel config |
-| `/etc/oxpulse-partner-edge/coturn.conf` | TURN server config |
-| `/var/lib/oxpulse-partner-edge/install.env` | Partner/version state |
-| `/usr/local/sbin/oxpulse-partner-edge-healthcheck` | Verification tool |
-| `/usr/local/sbin/oxpulse-partner-edge-upgrade` | Upgrade / rollback tool |
-| `/etc/systemd/system/oxpulse-partner-edge.service` | Systemd unit |
-
-## Verification
-
-```bash
-sudo oxpulse-partner-edge-healthcheck          # full external check
-sudo oxpulse-partner-edge-healthcheck --local  # docker-network only (pre-DNS)
-```
-
-## SFU environment variables
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `SFU_UDP_PORT` | `3478` | WebRTC media multiplexed UDP port |
-| `SFU_METRICS_PORT` | `9317` | HTTP `/metrics` Prometheus endpoint |
-| `SFU_BIND_ADDRESS` | `0.0.0.0` | Bind interface for all sockets |
-| `SFU_RELAY_API_PORT` | `8912` | HTTP relay API for cascade SFU connections |
-| `RELAY_JWT_SECRET` | change-me | HMAC-SHA256 secret; must match `RELAY_JWT_SECRET` in oxpulse-chat. **Change before deployment.** |
-| `RUST_LOG` | `info` | `tracing_subscriber` directive |
-
-## Prometheus scrape config
-
-```yaml
-scrape_configs:
-  - job_name: oxpulse-sfu
-    scrape_interval: 30s
-    static_configs:
-      - targets: ['<edge-public-ip>:9317']
-        labels:
-          partner: 'your-partner-id'
+sudo oxpulse-partner-edge-healthcheck         # full 12-point check
+sudo oxpulse-partner-edge-healthcheck --local # pre-DNS (docker-network only)
 ```
 
 ## Upgrade / rollback
 
 ```bash
-# Pull :latest and recreate:
-sudo oxpulse-partner-edge-upgrade
-
-# Pin to a specific tag:
-sudo oxpulse-partner-edge-upgrade v0.8.0
-
-# Explicit rollback:
-sudo oxpulse-partner-edge-upgrade --rollback
+sudo oxpulse-partner-edge-upgrade             # pull :latest
+sudo oxpulse-partner-edge-upgrade v0.8.0      # pin to version
+sudo oxpulse-partner-edge-upgrade --rollback  # revert to previous
 ```
 
-## Snapshot-based scaling
+## Snapshot scaling (multiple nodes)
 
-For scaling to multiple edge nodes via VM snapshots:
-
-1. **Bake** the master VM: `sudo bash install.sh --bake`
-2. Take a snapshot of the powered-off VM.
-3. Launch clones with `user_data` cloud-init providing per-clone `OXPULSE_PARTNER_DOMAIN` and `OXPULSE_REGISTRATION_TOKEN`.
-4. On first boot, `oxpulse-partner-edge-hydrate.service` calls `/api/partner/register` and renders config automatically.
-
-Each clone requires a unique single-use registration token. Request tokens from OxPulse ops.
-
-## Troubleshooting
-
-**Port already in use** — Stop nginx/apache before `install.sh`.
-
-**Caddy can't get a TLS cert** — Verify DNS A record resolves to this host's public IP. Do not proxy through Cloudflare (use DNS-only mode).
-
-**TURN doesn't work** — UDP 3478 + 49152-65535 are filtered by your cloud firewall.
-
-**xray-client reconnects** — Reality credentials don't match the backend. Re-register.
-
-## Security
-
-- TURN shared secret is per-partner. Rotating it requires node redeployment.
-- Coturn runs in host-network mode to advertise real public relay candidates. The `denied-peer-ip` list in `coturn.conf` blocks SSRF into RFC1918 ranges.
-- The Caddy container mounts the Caddyfile read-only.
-- Relay API (`SFU_RELAY_API_PORT`) should be accessible only from the OxPulse backend — restrict in your cloud security group.
+1. Provision a master VM and run `sudo bash install.sh --bake`
+2. Snapshot the VM (before first boot hydration)
+3. Launch clones with `user_data` providing `OXPULSE_PARTNER_DOMAIN` and `OXPULSE_REGISTRATION_TOKEN`
+4. On first boot, `oxpulse-partner-edge-hydrate.service` registers the node and starts all services automatically
 
 ## Uninstall
 
@@ -158,7 +95,16 @@ sudo rm -rf /etc/oxpulse-partner-edge /var/lib/oxpulse-partner-edge \
 sudo systemctl daemon-reload
 ```
 
-## Support
+## Security
 
-- GitHub issues: https://github.com/anatolykoptev/oxpulse-partner-edge/issues
-- CHANGELOG: [CHANGELOG.md](CHANGELOG.md)
+- Coturn runs in host-network mode and blocks SSRF into RFC1918/CGNAT/link-local ranges via `denied-peer-ip`.
+- Restrict `SFU_RELAY_API_PORT` (8912) to the OxPulse backend IP in your cloud firewall.
+- Each partner node has independent TURN credentials — one node compromise does not affect others.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+MIT OR Apache-2.0
