@@ -45,11 +45,13 @@ impl Registry {
 
     /// Test-only: inject an audio level into the dominant-speaker
     /// detector bypassing the (M2-deferred) wire-level RFC 6464
-    /// parser. Delegates to
-    /// [`ActiveSpeakerDetector::inject_level_for_tests`].
+    /// parser. Uses `record_level` directly with ms conversion.
     #[doc(hidden)]
     pub fn inject_audio_level_for_tests(&mut self, peer_id: u64, level: u8, now: Instant) {
-        self.detector.inject_level_for_tests(peer_id, level, now);
+        let now_ms = now
+            .saturating_duration_since(self.detector_epoch)
+            .as_millis() as u64;
+        self.detector.record_level(peer_id, level, now_ms);
     }
 
     /// Test-only: force an ASO tick and drain any fanout the detector
@@ -57,20 +59,26 @@ impl Registry {
     /// this tick, mirroring the detector's own return.
     #[doc(hidden)]
     pub fn force_active_speaker_tick_for_tests(&mut self, now: Instant) -> Option<u64> {
-        let changed = self.detector.force_tick_for_tests(now);
-        if let Some(peer_id) = changed {
+        let now_ms = now
+            .saturating_duration_since(self.detector_epoch)
+            .as_millis() as u64;
+        let changed = self.detector.tick(now_ms);
+        if let Some(ref change) = changed {
             self.metrics.dominant_speaker_changes_total.inc();
             self.to_propagate
-                .push_back(Propagated::ActiveSpeakerChanged { peer_id });
+                .push_back(Propagated::ActiveSpeakerChanged {
+                    peer_id: change.peer_id,
+                    confidence: change.c2_margin,
+                });
         }
         self.fanout_pending();
-        changed
+        changed.map(|c| c.peer_id)
     }
 
     /// Test-only: read the detector's current dominant peer, if any.
     #[doc(hidden)]
     pub fn current_active_speaker(&self) -> Option<u64> {
-        self.detector.current_dominant()
+        self.detector.current_dominant().copied()
     }
 
     /// Test-only: drive the internal delay + loss estimators high

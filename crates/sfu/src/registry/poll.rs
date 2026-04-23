@@ -39,7 +39,10 @@ impl Registry {
                         if let Propagated::MediaData(origin, ref data) = other {
                             if let Some(raw) = data.ext_vals.audio_level {
                                 let level = (-raw).clamp(0, 127) as u8;
-                                self.detector.record_level(origin.0, level, now);
+                                let now_ms = now
+                                    .saturating_duration_since(self.detector_epoch)
+                                    .as_millis() as u64;
+                                self.detector.record_level(origin.0, level, now_ms);
                             }
                         }
                         self.to_propagate.push_back(other);
@@ -54,12 +57,24 @@ impl Registry {
     /// `Propagated::ActiveSpeakerChanged` when dominance changes.
     /// Called from `udp_loop::serve`'s 300ms interval branch.
     pub fn tick_active_speaker(&mut self, now: Instant) {
-        if let Some(peer_id) = self.detector.tick(now) {
+        let now_ms = now
+            .saturating_duration_since(self.detector_epoch)
+            .as_millis() as u64;
+        if let Some(change) = self.detector.tick(now_ms) {
             self.metrics.dominant_speaker_changes_total.inc();
             // M6.1: record inter-change interval into the hysteresis histogram.
-            self.detector.record_hysteresis_observation(now);
+            // Replaces the inlined `record_hysteresis_observation` method that
+            // lived on the old monomorphic detector — v0.3 has no such method.
+            if let Some(prev) = self.last_speaker_change {
+                let ms = now.duration_since(prev).as_secs_f64() * 1_000.0;
+                self.metrics.dominant_speaker_hysteresis_ms.observe(ms);
+            }
+            self.last_speaker_change = Some(now);
             self.to_propagate
-                .push_back(Propagated::ActiveSpeakerChanged { peer_id });
+                .push_back(Propagated::ActiveSpeakerChanged {
+                    peer_id: change.peer_id,
+                    confidence: change.c2_margin,
+                });
         }
     }
 

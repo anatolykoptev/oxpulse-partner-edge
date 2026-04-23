@@ -14,7 +14,7 @@ use std::time::Instant;
 use str0m::net::{Protocol, Receive};
 use str0m::Input;
 
-use crate::active_speaker::ActiveSpeakerDetector;
+use dominant_speaker::ActiveSpeakerDetector;
 use crate::bandwidth::BandwidthEstimator;
 use crate::client::{Client, Transmit};
 use crate::metrics::SfuMetrics;
@@ -38,6 +38,11 @@ pub struct Registry {
     pub(super) clients: Vec<Client>,
     pub(super) to_propagate: VecDeque<Propagated>,
     pub(super) detector: ActiveSpeakerDetector,
+    pub(super) detector_epoch: Instant,
+    /// M6.1: wall-clock time of the most recent `ActiveSpeakerChanged` emission.
+    /// Used by `tick_active_speaker` to compute inter-change intervals for the
+    /// hysteresis histogram (replacing the inlined `record_hysteresis_observation`).
+    pub(super) last_speaker_change: Option<Instant>,
     pub(super) metrics: Arc<SfuMetrics>,
     pub(super) bandwidth: BandwidthEstimator,
     pub(super) pacer: Pacer,
@@ -45,14 +50,13 @@ pub struct Registry {
 
 impl Registry {
     pub fn new(metrics: Arc<SfuMetrics>) -> Self {
-        let mut detector = ActiveSpeakerDetector::new();
-        // M6.1: wire the hysteresis histogram so tick_active_speaker can observe
-        // inter-change intervals without an extra metrics lookup in the hot path.
-        detector.set_hysteresis_histogram(metrics.dominant_speaker_hysteresis_ms.clone());
+        let detector = ActiveSpeakerDetector::new();
         Self {
             clients: Vec::new(),
             to_propagate: VecDeque::new(),
             detector,
+            detector_epoch: Instant::now(),
+            last_speaker_change: None,
             metrics,
             bandwidth: BandwidthEstimator::new(),
             pacer: Pacer::new(),
@@ -92,7 +96,8 @@ impl Registry {
         for entry in self.clients.iter().flat_map(|c| c.tracks_in.iter()) {
             client.handle_track_open(std::sync::Arc::downgrade(&entry.id));
         }
-        self.detector.add_peer(*client.id, Instant::now());
+        let now_ms = self.detector_epoch.elapsed().as_millis() as u64;
+        self.detector.add_peer(*client.id, now_ms);
         self.metrics.client_connect_total.inc();
         self.metrics.active_participants.inc();
         self.clients.push(client);
