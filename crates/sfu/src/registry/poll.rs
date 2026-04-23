@@ -49,9 +49,10 @@ impl Registry {
                                 // avoids a second borrow of `self.clients`.
                                 if !client.is_relay() {
                                     let level = (-raw).clamp(0, 127) as u8;
-                                    let now_ms =
-                                        now.saturating_duration_since(self.detector_epoch)
-                                            .as_millis() as u64;
+                                    let now_ms = now
+                                        .saturating_duration_since(self.detector_epoch)
+                                        .as_millis()
+                                        as u64;
                                     self.detector.record_level(origin.0, level, now_ms);
                                 }
                             }
@@ -217,7 +218,9 @@ impl Registry {
                     }
                     continue;
                 }
-                Propagated::UpstreamKeyframeRequest { source_relay_id, .. } => {
+                Propagated::UpstreamKeyframeRequest {
+                    source_relay_id, ..
+                } => {
                     // TODO: forward to upstream SFU via signalling WebSocket.
                     tracing::debug!(
                         relay = **source_relay_id,
@@ -225,7 +228,10 @@ impl Registry {
                     );
                     continue;
                 }
-                Propagated::PublisherLayerHintForUpstream { publisher_relay_id, max_rid } => {
+                Propagated::PublisherLayerHintForUpstream {
+                    publisher_relay_id,
+                    max_rid,
+                } => {
                     // TODO: forward to upstream SFU via signalling WebSocket.
                     tracing::debug!(
                         relay = **publisher_relay_id,
@@ -234,7 +240,10 @@ impl Registry {
                     );
                     continue;
                 }
-                Propagated::PublisherLayerHint { publisher_id, max_rid } => {
+                Propagated::PublisherLayerHint {
+                    publisher_id,
+                    max_rid,
+                } => {
                     tracing::debug!(
                         publisher = **publisher_id,
                         max_rid = ?max_rid,

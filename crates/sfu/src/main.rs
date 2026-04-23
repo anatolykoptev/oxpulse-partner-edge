@@ -4,7 +4,11 @@ use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
 use anyhow::Context;
-use oxpulse_sfu::{metrics::spawn_metrics_server, relay::{client::connect_relay, handler::spawn_relay_api, task::RelayTask}, udp_loop, SfuConfig, SfuMetrics};
+use oxpulse_sfu::{
+    metrics::spawn_metrics_server,
+    relay::{client::connect_relay, handler::spawn_relay_api, task::RelayTask},
+    udp_loop, SfuConfig, SfuMetrics,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

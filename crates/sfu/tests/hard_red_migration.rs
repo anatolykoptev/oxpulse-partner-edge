@@ -265,8 +265,8 @@ fn audio_level_loud_peer_wins_election_over_quiet_peer() {
     // Detector convention: 0 = loudest, 127 = silent.
     for i in 0u64..80 {
         let t = epoch + Duration::from_millis(i * 20);
-        registry.inject_audio_level_for_tests(20, 5, t);    // loud
-        registry.inject_audio_level_for_tests(21, 120, t);  // quiet
+        registry.inject_audio_level_for_tests(20, 5, t); // loud
+        registry.inject_audio_level_for_tests(21, 120, t); // quiet
     }
 
     registry.force_active_speaker_tick_for_tests(epoch + Duration::from_millis(1700));
@@ -316,8 +316,8 @@ fn confidence_is_zero_on_bootstrap_and_positive_on_contested_flip() {
     // Bootstrap c2_margin will be 0.0 (see rust-dominant-speaker source).
     for i in 0u64..100 {
         let t = epoch + Duration::from_millis(i * 20);
-        registry.inject_audio_level_for_tests(40, 5, t);    // loud
-        registry.inject_audio_level_for_tests(41, 120, t);  // quiet
+        registry.inject_audio_level_for_tests(40, 5, t); // loud
+        registry.inject_audio_level_for_tests(41, 120, t); // quiet
     }
     registry.force_active_speaker_tick_for_tests(epoch + Duration::from_millis(2100));
 
@@ -339,8 +339,8 @@ fn confidence_is_zero_on_bootstrap_and_positive_on_contested_flip() {
     let flip_epoch = epoch + Duration::from_millis(2200);
     for i in 0u64..150 {
         let t = flip_epoch + Duration::from_millis(i * 20);
-        registry.inject_audio_level_for_tests(40, 120, t);  // now quiet
-        registry.inject_audio_level_for_tests(41, 5, t);    // now loud
+        registry.inject_audio_level_for_tests(40, 120, t); // now quiet
+        registry.inject_audio_level_for_tests(41, 5, t); // now loud
     }
 
     // Tick repeatedly until peer 41 displaces peer 40.
@@ -379,7 +379,6 @@ fn confidence_is_zero_on_bootstrap_and_positive_on_contested_flip() {
     // A future test with a drain seam should assert c2_margin > 0.0 directly.
 }
 
-
 // ─── Test 8 ───────────────────────────────────────────────────────────────────
 //
 // mark_relay_source: relay clients must not be elected as dominant speaker.
@@ -414,8 +413,8 @@ fn mark_relay_source_excludes_client_from_speaker_election() {
     // in the detector with a high score. Without the mark, relay would be top-1.
     for i in 0u64..80 {
         let t = epoch + Duration::from_millis(i * 20);
-        registry.inject_audio_level_for_tests(relay_id, 5, t);    // very loud (pre-mark)
-        registry.inject_audio_level_for_tests(local_id, 120, t);  // very quiet
+        registry.inject_audio_level_for_tests(relay_id, 5, t); // very loud (pre-mark)
+        registry.inject_audio_level_for_tests(local_id, 120, t); // very quiet
     }
 
     // Verify relay IS in top speakers before marking (so the removal is meaningful).
@@ -427,10 +426,7 @@ fn mark_relay_source_excludes_client_from_speaker_election() {
     );
 
     // DC relay_source message arrives — mark and remove from detector.
-    registry.mark_relay_source(
-        ClientId(relay_id),
-        "wss://eu-1.example/sfu".to_string(),
-    );
+    registry.mark_relay_source(ClientId(relay_id), "wss://eu-1.example/sfu".to_string());
 
     // Invariant A: relay must be gone from the detector's speaker map immediately
     // after mark_relay_source — no audio injection or tick needed.

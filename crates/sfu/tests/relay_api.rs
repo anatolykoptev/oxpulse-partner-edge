@@ -1,14 +1,14 @@
 //! Integration tests for the relay HTTP API.
 
-use std::sync::Arc;
-use std::time::Duration;
-use reqwest::Client;
-use tokio::net::TcpListener;
-use tokio::sync::mpsc;
-use oxpulse_sfu::relay::{RelayJwt, now_unix_secs};
-use oxpulse_sfu::relay::types::{RelayConnectRequest, RelayConnectResponse};
 use oxpulse_sfu::relay::handler::spawn_relay_api;
 use oxpulse_sfu::relay::task::RelayTask;
+use oxpulse_sfu::relay::types::{RelayConnectRequest, RelayConnectResponse};
+use oxpulse_sfu::relay::{now_unix_secs, RelayJwt};
+use reqwest::Client;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 async fn start_test_api(secret: Arc<[u8]>) -> (String, mpsc::Receiver<RelayTask>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -26,7 +26,8 @@ fn make_token(secret: &[u8], room_id: &str) -> String {
         upstream_room_token: "tok".to_string(),
         issued_at: now,
         expires_at: now + 60,
-    }.sign(secret)
+    }
+    .sign(secret)
 }
 
 #[tokio::test]
@@ -41,11 +42,18 @@ async fn relay_connect_accepts_valid_jwt() {
             upstream_url: "wss://us.example/ws/sfu/room-abc".to_string(),
             upstream_room_token: "tok".to_string(),
         })
-        .send().await.unwrap().json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(resp.status, "ok");
     assert!(resp.relay_id.is_some());
-    let task = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await
-        .expect("task within 1s").expect("channel open");
+    let task = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("task within 1s")
+        .expect("channel open");
     assert_eq!(task.room_id, "room-abc");
 }
 
@@ -60,6 +68,9 @@ async fn relay_connect_rejects_invalid_jwt() {
             upstream_url: "wss://x.example/ws/sfu/x".to_string(),
             upstream_room_token: "tok".to_string(),
         })
-        .send().await.unwrap().status();
+        .send()
+        .await
+        .unwrap()
+        .status();
     assert!(status.is_client_error(), "expected 4xx, got {status}");
 }
