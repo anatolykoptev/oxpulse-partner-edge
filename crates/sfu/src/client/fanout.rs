@@ -159,7 +159,9 @@ impl Client {
             self.delivered_active_speaker
                 .fetch_add(1, Ordering::Relaxed);
         }
-        let payload = format!(r#"{{"type":"active_speaker","peerId":{peer_id},"confidence":{confidence:.3}}}"#);
+        let payload = format!(
+            r#"{{"type":"active_speaker","peerId":{peer_id},"confidence":{confidence:.3}}}"#
+        );
         let Some(mut ch) = self.rtc.channel(self.active_speaker_cid) else {
             // DC not yet open (DTLS still negotiating, or peer dropped).
             // The detector will fire again within ~300 ms so we don't

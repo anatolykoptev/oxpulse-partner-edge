@@ -8,10 +8,10 @@
 
 use str0m::media::Rid;
 
-use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
 use crate::client::layer;
 use crate::pacer::Pacer;
 use crate::propagate::ClientId;
+use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
 
 use super::Registry;
 
@@ -127,9 +127,10 @@ impl Registry {
         };
 
         for client in self.clients.iter_mut() {
-            let budget = self
-                .bandwidth
-                .estimate_bps(oxpulse_sfu_kit::propagate::ClientId(*client.id), std::time::Instant::now());
+            let budget = self.bandwidth.estimate_bps(
+                oxpulse_sfu_kit::propagate::ClientId(*client.id),
+                std::time::Instant::now(),
+            );
             let prev_layer = client.desired_layer;
             let chosen = client.pacer_select_layer(&mut self.pacer, budget, available);
             let peer_label = (*client.id).to_string();

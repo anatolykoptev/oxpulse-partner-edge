@@ -910,6 +910,7 @@ dependencies = [
  "oxpulse-sfu-kit",
  "prometheus",
  "reqwest",
+ "rust-dominant-speaker",
  "str0m",
  "tokio",
  "tracing",
@@ -919,6 +920,8 @@ dependencies = [
 [[package]]
 name = "oxpulse-sfu-kit"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe1e5724275618472f3855964762b8f894fb295b4ce0438f68a7fc9d34ad4ff4"
 dependencies = [
  "anyhow",
  "prometheus",

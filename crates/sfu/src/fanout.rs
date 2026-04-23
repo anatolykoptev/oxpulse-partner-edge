@@ -19,7 +19,11 @@ pub(crate) fn fanout(p: &Propagated, clients: &mut [Client]) {
     // `ActiveSpeakerChanged` carries a bare `peer_id: u64` (mediasoup's
     // observer shape) rather than a `ClientId` origin — handle it
     // separately so `client_id()`-based skip doesn't short-circuit.
-    if let Propagated::ActiveSpeakerChanged { peer_id, confidence } = p {
+    if let Propagated::ActiveSpeakerChanged {
+        peer_id,
+        confidence,
+    } = p
+    {
         for client in clients.iter_mut() {
             if *client.id == *peer_id {
                 // Skip-self: the speaker themselves doesn't receive
