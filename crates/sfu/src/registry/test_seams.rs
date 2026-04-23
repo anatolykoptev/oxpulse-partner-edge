@@ -157,4 +157,12 @@ impl Registry {
     pub fn reap_dead_for_tests(&mut self) {
         self.reap_dead();
     }
+
+    /// Test-only: return the top-k peer IDs by medium-window activity score.
+    /// Useful for asserting that a relay peer is absent from the ranking
+    /// after `mark_relay_source` removes it from the detector.
+    #[doc(hidden)]
+    pub fn top_speakers_for_tests(&self, k: usize) -> Vec<u64> {
+        self.detector.current_top_k(k)
+    }
 }
