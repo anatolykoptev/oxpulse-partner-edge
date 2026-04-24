@@ -102,8 +102,10 @@ mod tests {
     #[test]
     fn relay_auth_secret_default_is_none() {
         let cfg = SfuConfig::default();
-        assert!(cfg.relay_auth_secret.is_none(),
-            "relay_auth_secret should default to None (unauthenticated dev mode)");
+        assert!(
+            cfg.relay_auth_secret.is_none(),
+            "relay_auth_secret should default to None (unauthenticated dev mode)"
+        );
     }
 
     #[test]

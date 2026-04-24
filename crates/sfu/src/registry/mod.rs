@@ -62,7 +62,10 @@ impl Registry {
     /// Construct a registry with a relay authentication secret.
     /// Pass `Some(secret)` to enforce roomToken verification on relay_source DC messages.
     /// Pass `None` for dev/test mode (unauthenticated relay).
-    pub fn with_relay_secret(metrics: Arc<SfuMetrics>, relay_auth_secret: Option<Arc<[u8]>>) -> Self {
+    pub fn with_relay_secret(
+        metrics: Arc<SfuMetrics>,
+        relay_auth_secret: Option<Arc<[u8]>>,
+    ) -> Self {
         Self::with_relay_auth(metrics, relay_auth_secret, None)
     }
 

@@ -29,15 +29,19 @@ fn make_token(secret: &[u8], room_id: &str) -> String {
         exp: now + 60,
         jti: uuid_v4_simple(),
     }
-    .sign(secret).unwrap()
+    .sign(secret)
+    .unwrap()
 }
 
 fn uuid_v4_simple() -> String {
     // Minimal deterministic unique ID for tests — not a real UUID.
-    format!("test-jti-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos())
+    format!(
+        "test-jti-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+    )
 }
 
 #[tokio::test]
@@ -47,9 +51,7 @@ async fn relay_connect_accepts_valid_jwt() {
     let token = make_token(&secret, "room-abc");
     let resp: RelayConnectResponse = Client::new()
         .post(format!("{base}/relay/connect"))
-        .json(&RelayConnectRequest {
-            relay_token: token,
-        })
+        .json(&RelayConnectRequest { relay_token: token })
         .send()
         .await
         .unwrap()

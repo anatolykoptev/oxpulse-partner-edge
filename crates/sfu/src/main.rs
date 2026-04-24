@@ -6,7 +6,11 @@ use tracing_subscriber::EnvFilter;
 use anyhow::Context;
 use oxpulse_sfu::{
     metrics::spawn_metrics_server,
-    relay::{client::connect_relay, handler::{spawn_relay_api, SeenJtis}, task::RelayTask},
+    relay::{
+        client::connect_relay,
+        handler::{spawn_relay_api, SeenJtis},
+        task::RelayTask,
+    },
     udp_loop, SfuConfig, SfuMetrics,
 };
 
@@ -69,13 +73,21 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("bind relay API on {relay_addr}"))?;
     let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<RelayTask>(16);
-    let seen_jtis: SeenJtis = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let seen_jtis: SeenJtis =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     // Ed25519 public key for verifying relay JWTs (preferred over HS256).
-    let relay_signing_pubkey = config.sfu_signing_public_key
+    let relay_signing_pubkey = config
+        .sfu_signing_public_key
         .as_ref()
         .map(|s| Arc::new(s.clone()));
 
-    let relay_handle = spawn_relay_api(relay_listener, relay_secret, relay_signing_pubkey, relay_tx, seen_jtis)?;
+    let relay_handle = spawn_relay_api(
+        relay_listener,
+        relay_secret,
+        relay_signing_pubkey,
+        relay_tx,
+        seen_jtis,
+    )?;
     tracing::info!(addr = %relay_addr, "relay API listening");
 
     // Drain relay task channel — spawn a WebRTC relay client for each task.

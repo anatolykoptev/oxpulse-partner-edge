@@ -72,7 +72,7 @@ impl RelayJwt {
     /// The public key is fetched from oxpulse-chat's /api/partner/keys endpoint.
     /// This method replaces the shared-secret `verify()` and cannot be used to mint tokens.
     pub fn verify_ed25519(token: &str, public_key_pem: &str) -> Result<Self, RelayJwtError> {
-        use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+        use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
         let key = DecodingKey::from_ed_pem(public_key_pem.as_bytes())
             .map_err(|_| RelayJwtError::Malformed)?;
         let mut validation = Validation::new(Algorithm::EdDSA);
@@ -84,7 +84,9 @@ impl RelayJwt {
             .map(|d| d.claims)
             .map_err(|e| match e.kind() {
                 jsonwebtoken::errors::ErrorKind::ExpiredSignature => RelayJwtError::Expired,
-                jsonwebtoken::errors::ErrorKind::InvalidSignature => RelayJwtError::InvalidSignature,
+                jsonwebtoken::errors::ErrorKind::InvalidSignature => {
+                    RelayJwtError::InvalidSignature
+                }
                 _ => RelayJwtError::Malformed,
             })?;
 
@@ -178,7 +180,10 @@ mod tests {
             exp: now_unix_secs() + 660,
         };
         let token = jwt.sign(b"s").unwrap();
-        assert!(matches!(RelayJwt::verify(&token, b"s"), Err(RelayJwtError::Malformed)));
+        assert!(matches!(
+            RelayJwt::verify(&token, b"s"),
+            Err(RelayJwtError::Malformed)
+        ));
     }
 
     #[test]
@@ -201,14 +206,11 @@ mod tests {
 
     #[cfg(test)]
     fn generate_test_keypair_relay() -> (String, String) {
-        use ed25519_dalek::SigningKey as DalekKey;
         use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use ed25519_dalek::SigningKey as DalekKey;
         use pkcs8::LineEnding;
         let key = DalekKey::generate(&mut rand::rngs::OsRng);
-        let priv_pem = key
-            .to_pkcs8_pem(LineEnding::LF)
-            .unwrap()
-            .to_string();
+        let priv_pem = key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
         let pub_pem = key
             .verifying_key()
             .to_public_key_pem(LineEnding::LF)
@@ -218,7 +220,7 @@ mod tests {
 
     #[cfg(test)]
     fn sign_ed25519_for_test(jwt: &RelayJwt, priv_pem: &str) -> String {
-        use jsonwebtoken::{encode, EncodingKey, Header, Algorithm};
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
         let key = EncodingKey::from_ed_pem(priv_pem.as_bytes()).unwrap();
         encode(&Header::new(Algorithm::EdDSA), jwt, &key).unwrap()
     }
@@ -283,5 +285,4 @@ mod tests {
             Err(RelayJwtError::Malformed)
         ));
     }
-
 }

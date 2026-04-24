@@ -48,12 +48,16 @@ where
         .relay_auth_secret
         .clone()
         .map(|v| Arc::from(v.as_slice()));
-    let relay_signing_pubkey = config
-        .sfu_signing_public_key
-        .clone()
-        .map(Arc::new);
+    let relay_signing_pubkey = config.sfu_signing_public_key.clone().map(Arc::new);
     let socket = bind(&config).await?;
-    serve(socket, metrics, relay_auth_secret, relay_signing_pubkey, shutdown).await
+    serve(
+        socket,
+        metrics,
+        relay_auth_secret,
+        relay_signing_pubkey,
+        shutdown,
+    )
+    .await
 }
 
 /// Bind the UDP socket per `config`. Exposed so tests can observe the

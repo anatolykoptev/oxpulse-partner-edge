@@ -303,8 +303,8 @@ mod tests {
 
     // ── relay_source token-gating tests ─────────────────────────────────────
 
-    use jsonwebtoken::{encode, EncodingKey, Header};
     use crate::room_auth::RoomClaims;
+    use jsonwebtoken::{encode, EncodingKey, Header};
 
     fn make_room_token(room: &str, sub: u64, secret: &[u8], exp_delta_secs: i64) -> String {
         let now = std::time::SystemTime::now()
@@ -312,8 +312,18 @@ mod tests {
             .unwrap()
             .as_secs();
         let exp = (now as i64 + exp_delta_secs).max(0) as u64;
-        let claims = RoomClaims { sub, room: room.to_string(), iat: now, exp };
-        encode(&Header::default(), &claims, &EncodingKey::from_secret(secret)).unwrap()
+        let claims = RoomClaims {
+            sub,
+            room: room.to_string(),
+            iat: now,
+            exp,
+        };
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -325,14 +335,16 @@ mod tests {
             r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
             token
         );
-        let result = handle_channel_data(ClientId(50), "any", payload.as_bytes(), Some(secret), None);
+        let result =
+            handle_channel_data(ClientId(50), "any", payload.as_bytes(), Some(secret), None);
         assert!(matches!(result, Propagated::MarkRelaySource(..)));
     }
 
     #[test]
     fn relay_source_missing_token_when_secret_set_rejected() {
         let secret = b"test-secret-32-bytes-long-enough!";
-        let data = br#"{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc"}"#;
+        let data =
+            br#"{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc"}"#;
         let result = handle_channel_data(ClientId(51), "any", data, Some(secret), None);
         assert!(matches!(result, Propagated::Noop));
     }
@@ -345,7 +357,8 @@ mod tests {
             r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
             token
         );
-        let result = handle_channel_data(ClientId(52), "any", payload.as_bytes(), Some(secret), None);
+        let result =
+            handle_channel_data(ClientId(52), "any", payload.as_bytes(), Some(secret), None);
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -357,7 +370,8 @@ mod tests {
             r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
             token
         );
-        let result = handle_channel_data(ClientId(53), "any", payload.as_bytes(), Some(secret), None);
+        let result =
+            handle_channel_data(ClientId(53), "any", payload.as_bytes(), Some(secret), None);
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -370,30 +384,39 @@ mod tests {
             r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
             token
         );
-        let result = handle_channel_data(ClientId(54), "any", payload.as_bytes(), Some(secret), None);
+        let result =
+            handle_channel_data(ClientId(54), "any", payload.as_bytes(), Some(secret), None);
         assert!(matches!(result, Propagated::Noop));
     }
 
     // --- EdDSA relay_source tests ---
 
     fn generate_test_keypair_dc() -> (String, String) {
-        use ed25519_dalek::SigningKey as DalekKey;
         use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use ed25519_dalek::SigningKey as DalekKey;
         use pkcs8::LineEnding;
         let key = DalekKey::generate(&mut rand::rngs::OsRng);
         let priv_pem = key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
-        let pub_pem = key.verifying_key().to_public_key_pem(LineEnding::LF).unwrap();
+        let pub_pem = key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
         (priv_pem, pub_pem)
     }
 
     fn make_ed25519_room_token_dc(room: &str, sub: u64, priv_pem: &str, exp_delta: i64) -> String {
-        use jsonwebtoken::{encode, EncodingKey, Header, Algorithm};
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
         let exp = (now as i64 + exp_delta).max(0) as u64;
-        let claims = RoomClaims { sub, room: room.to_string(), iat: now, exp };
+        let claims = RoomClaims {
+            sub,
+            room: room.to_string(),
+            iat: now,
+            exp,
+        };
         let key = EncodingKey::from_ed_pem(priv_pem.as_bytes()).unwrap();
         encode(&Header::new(Algorithm::EdDSA), &claims, &key).unwrap()
     }
@@ -419,14 +442,9 @@ mod tests {
     #[test]
     fn relay_source_eddsa_missing_token_when_pubkey_set_rejected() {
         let (_priv, pub_pem) = generate_test_keypair_dc();
-        let data = br#"{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc"}"#;
-        let result = handle_channel_data(
-            ClientId(61),
-            "any",
-            data,
-            None,
-            Some(pub_pem.as_str()),
-        );
+        let data =
+            br#"{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc"}"#;
+        let result = handle_channel_data(ClientId(61), "any", data, None, Some(pub_pem.as_str()));
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -463,10 +481,9 @@ mod tests {
             ClientId(63),
             "any",
             payload.as_bytes(),
-            Some(b"some-hs256-secret"),   // present but irrelevant — EdDSA wins
+            Some(b"some-hs256-secret"), // present but irrelevant — EdDSA wins
             Some(pub_pem.as_str()),
         );
         assert!(matches!(result, Propagated::MarkRelaySource(..)));
     }
-
 }

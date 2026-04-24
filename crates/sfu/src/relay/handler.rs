@@ -112,7 +112,7 @@ async fn relay_connect(
     let relay_id = format!("relay-{}", jwt.room_id.chars().take(8).collect::<String>());
     let task = RelayTask {
         room_id: jwt.room_id.clone(),
-        upstream_url: jwt.upstream_url.clone(),           // from JWT (signed), not body
+        upstream_url: jwt.upstream_url.clone(), // from JWT (signed), not body
         upstream_room_token: jwt.upstream_room_token.clone(), // from JWT (signed), not body
     };
 
