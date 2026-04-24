@@ -1,6 +1,7 @@
 //! Axum HTTP handler for the relay API.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use tokio::net::TcpListener;
@@ -11,17 +12,31 @@ use crate::relay::task::RelayTask;
 use crate::relay::types::{RelayConnectRequest, RelayConnectResponse};
 use crate::relay::{now_unix_secs, RelayJwt, RelayJwtError};
 
-type AppState = (Arc<[u8]>, Sender<RelayTask>);
+pub type SeenJtis = Arc<Mutex<HashSet<String>>>;
+
+type AppState = (Arc<[u8]>, Sender<RelayTask>, SeenJtis);
+
+/// Allow-list: upstream must be a wss:// URL on a trusted domain.
+/// Prevents SSRF even if JWT is somehow forged.
+fn is_allowed_upstream(url: &str) -> bool {
+    url.starts_with("wss://")
+        && (url.contains(".oxpulse.chat/")
+            || url.contains(".oxpulse.chat:")
+            // Allow local/dev for testing — remove in production hardening
+            || url.starts_with("wss://localhost")
+            || url.starts_with("wss://127."))
+}
 
 /// Spawn the relay API HTTP server on the given `listener`.
 pub fn spawn_relay_api(
     listener: TcpListener,
     secret: Arc<[u8]>,
     task_tx: Sender<RelayTask>,
+    seen_jtis: SeenJtis,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let app = Router::new()
         .route("/relay/connect", post(relay_connect))
-        .with_state((secret, task_tx));
+        .with_state((secret, task_tx, seen_jtis));
     let handle = tokio::spawn(async move {
         axum::serve(listener, app)
             .await
@@ -32,7 +47,7 @@ pub fn spawn_relay_api(
 
 #[instrument(skip_all)]
 async fn relay_connect(
-    State((secret, task_tx)): State<AppState>,
+    State((secret, task_tx, seen_jtis)): State<AppState>,
     Json(body): Json<RelayConnectRequest>,
 ) -> (StatusCode, Json<RelayConnectResponse>) {
     let now = now_unix_secs();
@@ -58,11 +73,38 @@ async fn relay_connect(
         }
     };
 
-    let relay_id = format!("relay-{}", &jwt.room_id[..8.min(jwt.room_id.len())]);
+    // Defense-in-depth: validate upstream URL against allow-list even though
+    // it comes from a signed JWT.
+    if !is_allowed_upstream(&jwt.upstream_url) {
+        tracing::warn!(upstream_url = %jwt.upstream_url, "relay_connect: upstream URL not in allow-list");
+        return error_response("upstream URL not allowed");
+    }
+
+    // Replay prevention: reject if this JTI has already been seen.
+    {
+        let mut seen = seen_jtis.lock().unwrap_or_else(|p| p.into_inner());
+        if seen.contains(&jwt.jti) {
+            tracing::warn!(jti = %jwt.jti, "relay_connect: replayed JWT rejected");
+            return (
+                StatusCode::CONFLICT,
+                Json(RelayConnectResponse {
+                    status: "error".to_string(),
+                    relay_id: None,
+                }),
+            );
+        }
+        seen.insert(jwt.jti.clone());
+        // Simple bounded eviction: TTL is 60s, set won't grow unbounded in practice.
+        if seen.len() > 1000 {
+            seen.clear();
+        }
+    }
+
+    let relay_id = format!("relay-{}", jwt.room_id.chars().take(8).collect::<String>());
     let task = RelayTask {
-        room_id: jwt.room_id,
-        upstream_url: body.upstream_url,
-        upstream_room_token: body.upstream_room_token,
+        room_id: jwt.room_id.clone(),
+        upstream_url: jwt.upstream_url.clone(),           // from JWT (signed), not body
+        upstream_room_token: jwt.upstream_room_token.clone(), // from JWT (signed), not body
     };
 
     if task_tx.send(task).await.is_err() {
