@@ -91,7 +91,12 @@ async fn relay_connect(
 
     // Replay prevention: reject if this JTI has already been seen.
     {
-        let mut seen = seen_jtis.lock().unwrap_or_else(|p| p.into_inner());
+        let mut seen = seen_jtis.lock().unwrap_or_else(|p| {
+            tracing::error!(
+                "SeenJtis mutex poisoned — recovering (replay cache state may be inconsistent)"
+            );
+            p.into_inner()
+        });
         if seen.contains(&jwt.jti) {
             tracing::warn!(jti = %jwt.jti, "relay_connect: replayed JWT rejected");
             return (
