@@ -6,7 +6,7 @@ use tracing_subscriber::EnvFilter;
 use anyhow::Context;
 use oxpulse_sfu::{
     metrics::spawn_metrics_server,
-    relay::{client::connect_relay, handler::spawn_relay_api, task::RelayTask},
+    relay::{client::connect_relay, handler::{spawn_relay_api, SeenJtis}, task::RelayTask},
     udp_loop, SfuConfig, SfuMetrics,
 };
 
@@ -32,17 +32,32 @@ async fn main() -> anyhow::Result<()> {
     let metrics_handle = spawn_metrics_server(metrics_addr, metrics.clone())?;
 
     // Relay API -- JWT-authenticated POST /relay/connect for cascade relay setup.
-    let relay_secret = Arc::<[u8]>::from(
-        std::env::var("RELAY_JWT_SECRET")
-            .unwrap_or_else(|_| "change-me-in-production".to_string())
-            .into_bytes(),
-    );
+    let relay_secret_str = std::env::var("RELAY_JWT_SECRET").map_err(|_| {
+        anyhow::anyhow!(
+            "RELAY_JWT_SECRET environment variable is required — see README.md for setup instructions"
+        )
+    })?;
+    if relay_secret_str == "change-me-in-production" {
+        anyhow::bail!(
+            "RELAY_JWT_SECRET is the documented placeholder value — set a random secret of at least 32 bytes. \
+             Generate one with: openssl rand -hex 32"
+        );
+    }
+    if relay_secret_str.len() < 32 {
+        anyhow::bail!(
+            "RELAY_JWT_SECRET is too short ({} bytes) — minimum 32 bytes required",
+            relay_secret_str.len()
+        );
+    }
+    let relay_secret = Arc::<[u8]>::from(relay_secret_str.into_bytes());
+
     let relay_addr = format!("{}:{}", config.bind_address, config.relay_api_port);
     let relay_listener = tokio::net::TcpListener::bind(&relay_addr)
         .await
         .with_context(|| format!("bind relay API on {relay_addr}"))?;
     let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<RelayTask>(16);
-    let relay_handle = spawn_relay_api(relay_listener, relay_secret, relay_tx)?;
+    let seen_jtis: SeenJtis = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let relay_handle = spawn_relay_api(relay_listener, relay_secret, relay_tx, seen_jtis)?;
     tracing::info!(addr = %relay_addr, "relay API listening");
 
     // Drain relay task channel — spawn a WebRTC relay client for each task.
