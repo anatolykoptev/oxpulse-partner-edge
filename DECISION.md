@@ -74,3 +74,9 @@ cost is ~1 dev-day, not a full redesign.
 
 Anatoly Koptev, via senior-subagent-driven PoC. Advisor review pre-committed
 to design doc.
+
+## Update — v0.8.0 (2026-04-23)
+
+oxpulse-sfu-kit v0.6 replaced the inlined bandwidth/pacer/active_speaker modules.
+Architectural decisions remain valid; the implementation now delegates to the published library.
+Cascade relay client added (`POST /relay/connect`, str0m offerer, `relay_source` DC).
