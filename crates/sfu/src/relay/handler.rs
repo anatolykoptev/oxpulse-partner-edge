@@ -14,7 +14,10 @@ use crate::relay::{RelayJwt, RelayJwtError};
 
 pub type SeenJtis = Arc<Mutex<HashSet<String>>>;
 
-type AppState = (Arc<[u8]>, Sender<RelayTask>, SeenJtis);
+/// `(hs256_secret, signing_public_key, task_tx, seen_jtis)`
+/// `signing_public_key` is `Some` when SFU_SIGNING_PUBLIC_KEY is configured (Ed25519 preferred).
+/// When `None`, falls back to HS256 via `hs256_secret` (deprecated path).
+type AppState = (Arc<[u8]>, Option<Arc<String>>, Sender<RelayTask>, SeenJtis);
 
 /// Allow-list: upstream must be a wss:// URL on a trusted domain.
 /// Prevents SSRF even if JWT is somehow forged.
@@ -31,12 +34,13 @@ fn is_allowed_upstream(url: &str) -> bool {
 pub fn spawn_relay_api(
     listener: TcpListener,
     secret: Arc<[u8]>,
+    signing_public_key: Option<Arc<String>>,
     task_tx: Sender<RelayTask>,
     seen_jtis: SeenJtis,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let app = Router::new()
         .route("/relay/connect", post(relay_connect))
-        .with_state((secret, task_tx, seen_jtis));
+        .with_state((secret, signing_public_key, task_tx, seen_jtis));
     let handle = tokio::spawn(async move {
         axum::serve(listener, app)
             .await
@@ -47,10 +51,16 @@ pub fn spawn_relay_api(
 
 #[instrument(skip_all)]
 async fn relay_connect(
-    State((secret, task_tx, seen_jtis)): State<AppState>,
+    State((secret, signing_public_key, task_tx, seen_jtis)): State<AppState>,
     Json(body): Json<RelayConnectRequest>,
 ) -> (StatusCode, Json<RelayConnectResponse>) {
-    let jwt = match RelayJwt::verify(&body.relay_token, &secret) {
+    // Prefer Ed25519 if public key is configured; fall back to HS256 shared secret.
+    let verify_result = if let Some(pubkey) = &signing_public_key {
+        RelayJwt::verify_ed25519(&body.relay_token, pubkey)
+    } else {
+        RelayJwt::verify(&body.relay_token, &secret)
+    };
+    let jwt = match verify_result {
         Ok(j) => j,
         Err(RelayJwtError::Expired) => {
             tracing::warn!("relay_connect: expired JWT");
@@ -102,7 +112,7 @@ async fn relay_connect(
     let relay_id = format!("relay-{}", jwt.room_id.chars().take(8).collect::<String>());
     let task = RelayTask {
         room_id: jwt.room_id.clone(),
-        upstream_url: jwt.upstream_url.clone(),           // from JWT (signed), not body
+        upstream_url: jwt.upstream_url.clone(), // from JWT (signed), not body
         upstream_room_token: jwt.upstream_room_token.clone(), // from JWT (signed), not body
     };
 

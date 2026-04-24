@@ -16,7 +16,7 @@
 //! in this crate is gating the DataChannel relay_source privilege escalation
 //! behind a verified token.
 
-use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
 /// Claims contained in a room token issued by oxpulse-chat.
@@ -63,7 +63,7 @@ pub fn verify_room_token(
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     validation.leeway = 0; // reject expired tokens without any clock-skew grace period
-    // signaling does not set all standard claims -- only validate exp
+                           // signaling does not set all standard claims -- only validate exp
     validation.required_spec_claims = std::collections::HashSet::new();
 
     let claims = decode::<RoomClaims>(token, &key, &validation)
@@ -80,6 +80,36 @@ pub fn verify_room_token(
     Ok(claims)
 }
 
+/// Verify a room token signed with Ed25519 (Phase 2 replacement for HS256).
+///
+/// `public_key_pem` is the Ed25519 public key obtained from `/api/partner/keys`.
+/// Partner-edge nodes fetch this key on startup and cache it.
+pub fn verify_room_token_ed25519(
+    token: &str,
+    room_id: &str,
+    public_key_pem: &str,
+) -> Result<RoomClaims, RoomAuthError> {
+    let key =
+        DecodingKey::from_ed_pem(public_key_pem.as_bytes()).map_err(|_| RoomAuthError::Invalid)?;
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = true;
+    validation.leeway = 0;
+    // signaling does not set all standard claims — only validate exp
+    validation.required_spec_claims = std::collections::HashSet::new();
+
+    let claims = decode::<RoomClaims>(token, &key, &validation)
+        .map(|t| t.claims)
+        .map_err(|_| RoomAuthError::Invalid)?;
+
+    if claims.room != room_id {
+        return Err(RoomAuthError::RoomMismatch {
+            token_room: claims.room,
+            request_room: room_id.to_string(),
+        });
+    }
+    Ok(claims)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,8 +121,18 @@ mod tests {
             .unwrap()
             .as_secs();
         let exp = (now as i64 + exp_delta_secs).max(0) as u64;
-        let claims = RoomClaims { sub, room: room.to_string(), iat: now, exp };
-        encode(&Header::default(), &claims, &EncodingKey::from_secret(secret)).unwrap()
+        let claims = RoomClaims {
+            sub,
+            room: room.to_string(),
+            iat: now,
+            exp,
+        };
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -143,6 +183,90 @@ mod tests {
     fn empty_token_rejected() {
         assert!(matches!(
             verify_room_token("", "room-abc", b"secret"),
+            Err(RoomAuthError::Invalid)
+        ));
+    }
+
+    // --- Ed25519 room token tests ---
+
+    /// Generate a fresh Ed25519 keypair for tests.
+    /// Returns `(private_key_pem, public_key_pem)`.
+    fn generate_test_keypair_room() -> (String, String) {
+        use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use ed25519_dalek::SigningKey as DalekKey;
+        use pkcs8::LineEnding;
+        let key = DalekKey::generate(&mut rand::rngs::OsRng);
+        let priv_pem = key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
+        let pub_pem = key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        (priv_pem, pub_pem)
+    }
+
+    fn make_ed25519_room_token(room: &str, sub: u64, priv_pem: &str, exp_delta: i64) -> String {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let exp = (now as i64 + exp_delta).max(0) as u64;
+        let claims = RoomClaims {
+            sub,
+            room: room.to_string(),
+            iat: now,
+            exp,
+        };
+        let key = EncodingKey::from_ed_pem(priv_pem.as_bytes()).unwrap();
+        encode(&Header::new(Algorithm::EdDSA), &claims, &key).unwrap()
+    }
+
+    #[test]
+    fn verify_room_token_ed25519_accepts_valid() {
+        let (priv_pem, pub_pem) = generate_test_keypair_room();
+        let token = make_ed25519_room_token("room-abc", 42, &priv_pem, 3600);
+        let claims = verify_room_token_ed25519(&token, "room-abc", &pub_pem).unwrap();
+        assert_eq!(claims.sub, 42);
+        assert_eq!(claims.room, "room-abc");
+    }
+
+    #[test]
+    fn verify_room_token_ed25519_wrong_room_rejected() {
+        let (priv_pem, pub_pem) = generate_test_keypair_room();
+        let token = make_ed25519_room_token("room-abc", 1, &priv_pem, 3600);
+        let err = verify_room_token_ed25519(&token, "room-xyz", &pub_pem).unwrap_err();
+        assert!(matches!(err, RoomAuthError::RoomMismatch { .. }));
+    }
+
+    #[test]
+    fn verify_room_token_ed25519_expired_rejected() {
+        let (priv_pem, pub_pem) = generate_test_keypair_room();
+        let token = make_ed25519_room_token("room-abc", 1, &priv_pem, -10);
+        assert!(matches!(
+            verify_room_token_ed25519(&token, "room-abc", &pub_pem),
+            Err(RoomAuthError::Invalid)
+        ));
+    }
+
+    #[test]
+    fn verify_room_token_ed25519_wrong_pubkey_rejected() {
+        let (priv_pem, _pub1) = generate_test_keypair_room();
+        let (_priv2, pub_pem2) = generate_test_keypair_room();
+        let token = make_ed25519_room_token("room-abc", 1, &priv_pem, 3600);
+        assert!(matches!(
+            verify_room_token_ed25519(&token, "room-abc", &pub_pem2),
+            Err(RoomAuthError::Invalid)
+        ));
+    }
+
+    #[test]
+    fn verify_room_token_ed25519_hs256_token_rejected() {
+        // An HS256-signed token must not be accepted by the EdDSA verifier.
+        let secret = b"test-secret-32-bytes-long-enough!";
+        let hs256_token = make_token("room-abc", 1, secret, 3600);
+        let (_priv, pub_pem) = generate_test_keypair_room();
+        assert!(matches!(
+            verify_room_token_ed25519(&hs256_token, "room-abc", &pub_pem),
             Err(RoomAuthError::Invalid)
         ));
     }

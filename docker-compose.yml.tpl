@@ -5,7 +5,7 @@
 #   {{PARTNER_ID}} {{PARTNER_DOMAIN}} {{BACKEND_ENDPOINT}}
 #   {{TURN_SECRET}} {{REALITY_UUID}} {{REALITY_PUBLIC_KEY}} {{REALITY_SHORT_ID}}
 #   {{REALITY_SERVER_NAME}} {{PUBLIC_IP}} {{PRIVATE_IP}} {{IMAGE_VERSION}}
-#   {{SFU_UDP_PORT}} {{SFU_METRICS_PORT}}
+#   {{SFU_UDP_PORT}} {{SFU_METRICS_PORT}} {{SFU_SIGNING_PUBLIC_KEY}}
 
 name: oxpulse-partner-edge
 
@@ -105,6 +105,10 @@ services:
       SFU_METRICS_PORT: "{{SFU_METRICS_PORT}}"
       RUST_LOG: "info"
       PARTNER_ID: "{{PARTNER_ID}}"
+      # Phase 2: Ed25519 public key for asymmetric relay JWT verification.
+      # Fetched from /api/partner/keys at install time; refreshed daily by
+      # oxpulse-partner-edge-refresh.sh (written to sfu-keys.env).
+      SFU_SIGNING_PUBLIC_KEY: "{{SFU_SIGNING_PUBLIC_KEY}}"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:{{SFU_METRICS_PORT}}/metrics >/dev/null 2>&1 || exit 1"]
       interval: 30s
