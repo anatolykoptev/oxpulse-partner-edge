@@ -35,6 +35,9 @@ die()  { log "ERR $*"; exit 1; }
 
 [[ -f "$NODE_CFG" ]] || die "node-config.json not found at $NODE_CFG"
 
+NODE_ID=$(jq -r '.node_id // .partner_id // empty' "$NODE_CFG")
+[[ -n "$NODE_ID" ]] || die "node_id not found in $NODE_CFG"
+
 # Fetch fresh keys
 RESP=$(curl -sS --max-time 10 -fL "$BACKEND_URL/api/partner/keys" 2>&1) \
     || die "fetch keys failed: $RESP"
@@ -58,6 +61,27 @@ if [[ -n "$SFU_SIGNING_PUBKEY" ]]; then
     log "sfu_signing_public_key extracted and saved to $SFU_KEYS_ENV"
 else
     log "WARNING: sfu_signing_public_key not in /api/partner/keys response (signaling may need updating)"
+fi
+
+# Heartbeat — обновляет partner_nodes.last_seen_at. Без этого вызова
+# piter-server видит нас "мёртвыми" и staleness canary срабатывает
+# ложно (инцидент 2026-04-23, root cause: last_seen_at был только
+# registration timestamp, не liveness). Endpoint публичный без auth,
+# единственная запись — last_seen_at = NOW(). Идемпотентный.
+HB_RESP=$(curl -sS -X POST \
+  -H 'Content-Type: application/json' \
+  -d "{\"node_id\":\"${NODE_ID}\"}" \
+  --max-time 10 \
+  "${BACKEND_URL}/api/partner/heartbeat" \
+  -w '\n%{http_code}' 2>/dev/null || printf '\n000')
+HB_CODE=$(printf '%s' "$HB_RESP" | tail -n1)
+HB_BODY=$(printf '%s' "$HB_RESP" | sed '$d')
+if [[ "$HB_CODE" != "200" ]]; then
+    log "heartbeat failed: http=$HB_CODE body=$HB_BODY"
+    # Non-fatal: heartbeat помогает observability, но не критичен
+    # для функциональности ноды. Продолжаем refresh.
+else
+    log "heartbeat ok: $HB_BODY"
 fi
 
 if [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
