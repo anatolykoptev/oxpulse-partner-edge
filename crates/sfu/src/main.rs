@@ -24,6 +24,19 @@ async fn main() -> anyhow::Result<()> {
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
         .expect("failed to install SIGTERM handler at startup");
 
+    // FIPS 140-3 compile-time check.
+    // aws-lc-rs with `features = ["fips"]` uses aws-lc-fips-sys (NIST validated).
+    // No runtime enable() call needed — FIPS mode is fully compile-time.
+    if config.fips_mode {
+        #[cfg(feature = "fips")]
+        tracing::info!("FIPS 140-3 mode ACTIVE — binary compiled with aws-lc-fips-sys");
+        #[cfg(not(feature = "fips"))]
+        anyhow::bail!(
+            "SFU_FIPS=1 requires binary compiled with --features fips. \
+             Rebuild: CARGO_BUILD_JOBS=2 cargo build --release --features fips"
+        );
+    }
+
     // Shared metrics instance — registry and UDP loop both hold a clone.
     let metrics = Arc::new(SfuMetrics::new()?);
 

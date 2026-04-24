@@ -1,5 +1,5 @@
 //! SFU runtime configuration. Env-driven to match the conventions in
-//! `crates/server/src/config.rs` — `from_env()` with sensible defaults
+//! `crates/server/src/config.rs` -- `from_env()` with sensible defaults
 //! and panics only on obviously malformed numeric input at startup.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,6 +24,9 @@ pub struct SfuConfig {
     /// When `None`, relay promotion is unauthenticated (dev/test only).
     /// Env: `SIGNALING_SFU_SECRET`.
     pub relay_auth_secret: Option<Vec<u8>>,
+    /// Whether FIPS 140-3 mode is required. Binary must be compiled with
+    /// `--features fips` (aws-lc-rs). Env: `SFU_FIPS=1`. Default: false.
+    pub fips_mode: bool,
 }
 
 impl Default for SfuConfig {
@@ -35,6 +38,7 @@ impl Default for SfuConfig {
             log_level: "info".to_string(),
             relay_api_port: 8912,
             relay_auth_secret: None,
+            fips_mode: false,
         }
     }
 }
@@ -58,6 +62,7 @@ impl SfuConfig {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.into_bytes()),
+            fips_mode: std::env::var("SFU_FIPS").as_deref() == Ok("1"),
         }
     }
 }
@@ -78,6 +83,7 @@ mod tests {
         assert_ne!(cfg.udp_port, cfg.metrics_port);
         assert_ne!(cfg.metrics_port, cfg.relay_api_port);
         assert_ne!(cfg.udp_port, cfg.relay_api_port);
+        assert!(!cfg.fips_mode);
     }
 
     #[test]
@@ -91,5 +97,28 @@ mod tests {
         let cfg = SfuConfig::default();
         assert!(cfg.relay_auth_secret.is_none(),
             "relay_auth_secret should default to None (unauthenticated dev mode)");
+    }
+
+    #[test]
+    fn fips_mode_defaults_false() {
+        std::env::remove_var("SFU_FIPS");
+        let cfg = SfuConfig::default();
+        assert!(!cfg.fips_mode, "fips_mode must default to false");
+    }
+
+    #[test]
+    fn fips_mode_env_one_enables() {
+        std::env::set_var("SFU_FIPS", "1");
+        let cfg = SfuConfig::from_env();
+        assert!(cfg.fips_mode);
+        std::env::remove_var("SFU_FIPS");
+    }
+
+    #[test]
+    fn fips_mode_env_empty_is_false() {
+        std::env::set_var("SFU_FIPS", "");
+        let cfg = SfuConfig::from_env();
+        assert!(!cfg.fips_mode);
+        std::env::remove_var("SFU_FIPS");
     }
 }
