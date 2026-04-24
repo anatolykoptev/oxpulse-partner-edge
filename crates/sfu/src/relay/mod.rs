@@ -47,7 +47,7 @@ impl RelayJwt {
         // We validate jti ourselves in the handler; don't require it as a spec claim.
         validation.required_spec_claims = std::collections::HashSet::new();
 
-        decode::<RelayJwt>(token, &key, &validation)
+        let claims = decode::<RelayJwt>(token, &key, &validation)
             .map(|data| data.claims)
             .map_err(|e| match e.kind() {
                 jsonwebtoken::errors::ErrorKind::ExpiredSignature => RelayJwtError::Expired,
@@ -57,7 +57,14 @@ impl RelayJwt {
                     RelayJwtError::InvalidSignature
                 }
                 _ => RelayJwtError::Malformed,
-            })
+            })?;
+        // Reject forward-dated tokens: iat must not be more than 30s in the future.
+        // Prevents a forged token with iat=u64::MAX / exp=u64::MAX from being accepted.
+        let now = now_unix_secs();
+        if claims.iat > now + 30 {
+            return Err(RelayJwtError::Malformed);
+        }
+        Ok(claims)
     }
 }
 
@@ -129,6 +136,21 @@ mod tests {
             RelayJwt::verify("not-a-jwt", b"s"),
             Err(RelayJwtError::Malformed)
         ));
+    }
+
+    #[test]
+    fn verify_rejects_forward_dated_iat() {
+        // iat = now + 600s is a forgery attempt; must be rejected
+        let jwt = RelayJwt {
+            room_id: "r".to_string(),
+            upstream_url: "wss://x".to_string(),
+            upstream_room_token: "t".to_string(),
+            jti: "j".to_string(),
+            iat: now_unix_secs() + 600, // 10 minutes in the future
+            exp: now_unix_secs() + 660,
+        };
+        let token = jwt.sign(b"s").unwrap();
+        assert!(matches!(RelayJwt::verify(&token, b"s"), Err(RelayJwtError::Malformed)));
     }
 
     #[test]
