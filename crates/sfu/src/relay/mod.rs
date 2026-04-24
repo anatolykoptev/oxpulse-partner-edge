@@ -20,6 +20,8 @@ pub struct RelayJwt {
     pub upstream_room_token: String,
     pub issued_at: u64,
     pub expires_at: u64,
+    /// Unique token ID for replay prevention.
+    pub jti: String,
 }
 
 #[derive(Debug)]
@@ -50,6 +52,10 @@ impl RelayJwt {
         let jwt: RelayJwt =
             serde_json::from_slice(&payload).map_err(|_| RelayJwtError::Malformed)?;
         if now_secs >= jwt.expires_at {
+            return Err(RelayJwtError::Expired);
+        }
+        // Reject tokens issued improbably far in the future (clock skew > 30s).
+        if jwt.issued_at > now_secs + 30 {
             return Err(RelayJwtError::Expired);
         }
         Ok(jwt)
@@ -177,6 +183,7 @@ mod tests {
             upstream_room_token: "tok".to_string(),
             issued_at: issued,
             expires_at: expires,
+            jti: "test-jti".to_string(),
         }
     }
 
