@@ -84,6 +84,10 @@ pub struct Client {
     /// When set, relay_source DataChannel messages MUST include a verified roomToken.
     /// Loaded from SIGNALING_SFU_SECRET at startup.
     pub(crate) relay_auth_secret: Option<Arc<[u8]>>,
+    /// Ed25519 public key (PEM) for verifying EdDSA-signed room tokens (Phase 2).
+    /// When set, EdDSA verification is preferred over HS256.
+    /// Loaded from SFU_SIGNING_PUBLIC_KEY at startup.
+    pub(crate) relay_signing_pubkey: Option<Arc<String>>,
     /// RFC 9626 VFM temporal-layer cap for this subscriber.
     /// Packets at a temporal layer higher than this are dropped before
     /// forwarding. `u8::MAX` means "no cap" (forward all layers).

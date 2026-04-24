@@ -51,17 +51,14 @@ pub fn join_message() -> String {
 /// Defense-in-depth against SSRF even if a signed JWT somehow contains a bad URL.
 fn is_allowed_upstream_host(url: &str) -> bool {
     // Must be wss://
-    let Some(rest) = url.strip_prefix("wss://") else { return false; };
+    let Some(rest) = url.strip_prefix("wss://") else {
+        return false;
+    };
     // Extract hostname (before first / or :)
     let host = rest.split(['/', ':']).next().unwrap_or("");
 
     // Allow-list: our own infrastructure + localhost for dev/test
-    let allowed = [
-        ".oxpulse.chat",
-        "localhost",
-        "127.0.0.1",
-        "::1",
-    ];
+    let allowed = [".oxpulse.chat", "localhost", "127.0.0.1", "::1"];
     allowed.iter().any(|&pattern| {
         if pattern.starts_with('.') {
             host.ends_with(pattern) || host == &pattern[1..]
@@ -259,10 +256,16 @@ mod tests {
 
     #[test]
     fn upstream_allow_list_accepts_valid_hosts() {
-        assert!(is_allowed_upstream_host("wss://edge.oxpulse.chat/ws/sfu/room1"));
-        assert!(is_allowed_upstream_host("wss://us-1.oxpulse.chat/ws/sfu/room1"));
+        assert!(is_allowed_upstream_host(
+            "wss://edge.oxpulse.chat/ws/sfu/room1"
+        ));
+        assert!(is_allowed_upstream_host(
+            "wss://us-1.oxpulse.chat/ws/sfu/room1"
+        ));
         assert!(is_allowed_upstream_host("wss://localhost/ws/sfu/room1"));
-        assert!(is_allowed_upstream_host("wss://127.0.0.1:8911/ws/sfu/room1"));
+        assert!(is_allowed_upstream_host(
+            "wss://127.0.0.1:8911/ws/sfu/room1"
+        ));
         assert!(is_allowed_upstream_host("wss://oxpulse.chat/ws/sfu/room1"));
     }
 
