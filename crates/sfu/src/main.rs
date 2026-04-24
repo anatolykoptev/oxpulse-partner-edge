@@ -6,7 +6,11 @@ use tracing_subscriber::EnvFilter;
 use anyhow::Context;
 use oxpulse_sfu::{
     metrics::spawn_metrics_server,
-    relay::{client::connect_relay, handler::{spawn_relay_api, SeenJtis}, task::RelayTask},
+    relay::{
+        client::connect_relay,
+        handler::{spawn_relay_api, SeenJtis},
+        task::RelayTask,
+    },
     udp_loop, SfuConfig, SfuMetrics,
 };
 
@@ -23,6 +27,19 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
         .expect("failed to install SIGTERM handler at startup");
+
+    // FIPS 140-3 compile-time check.
+    // aws-lc-rs with `features = ["fips"]` uses aws-lc-fips-sys (NIST validated).
+    // No runtime enable() call needed — FIPS mode is fully compile-time.
+    if config.fips_mode {
+        #[cfg(feature = "fips")]
+        tracing::info!("FIPS 140-3 mode ACTIVE — binary compiled with aws-lc-fips-sys");
+        #[cfg(not(feature = "fips"))]
+        anyhow::bail!(
+            "SFU_FIPS=1 requires binary compiled with --features fips. \
+             Rebuild: CARGO_BUILD_JOBS=2 cargo build --release --features fips"
+        );
+    }
 
     // Shared metrics instance — registry and UDP loop both hold a clone.
     let metrics = Arc::new(SfuMetrics::new()?);
@@ -56,8 +73,21 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("bind relay API on {relay_addr}"))?;
     let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<RelayTask>(16);
-    let seen_jtis: SeenJtis = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-    let relay_handle = spawn_relay_api(relay_listener, relay_secret, relay_tx, seen_jtis)?;
+    let seen_jtis: SeenJtis =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    // Ed25519 public key for verifying relay JWTs (preferred over HS256).
+    let relay_signing_pubkey = config
+        .sfu_signing_public_key
+        .as_ref()
+        .map(|s| Arc::new(s.clone()));
+
+    let relay_handle = spawn_relay_api(
+        relay_listener,
+        relay_secret,
+        relay_signing_pubkey,
+        relay_tx,
+        seen_jtis,
+    )?;
     tracing::info!(addr = %relay_addr, "relay API listening");
 
     // Drain relay task channel — spawn a WebRTC relay client for each task.

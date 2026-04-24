@@ -280,6 +280,27 @@ fi
 [[ -z "$REALITY_ENCRYPTION" ]] && REALITY_ENCRYPTION="none"
 [[ -n "$REGISTER_TURNS_SUBDOMAIN" ]] && TURNS_SUBDOMAIN="$REGISTER_TURNS_SUBDOMAIN"
 
+# Phase 2: Fetch Ed25519 SFU signing public key from /api/partner/keys at
+# install time so the SFU container starts with the correct key on day 1
+# (the daily refresh timer fires later; install must not leave it empty).
+log "  fetching sfu_signing_public_key from $BACKEND_API/api/partner/keys"
+SFU_SIGNING_PUBLIC_KEY=""
+_keys_resp=$(curl -sS --max-time 10 -fL "$BACKEND_API/api/partner/keys" 2>/dev/null || true)
+if [[ -n "$_keys_resp" ]]; then
+	SFU_SIGNING_PUBLIC_KEY=$(printf '%s' "$_keys_resp" | jq -r '.sfu_signing_public_key // empty' 2>/dev/null || true)
+fi
+if [[ -n "$SFU_SIGNING_PUBLIC_KEY" ]]; then
+	log "  sfu_signing_public_key obtained"
+	if [[ $DRY_RUN -eq 0 ]]; then
+		install -d -m 0700 "$PREFIX_LIB"
+		printf 'SFU_SIGNING_PUBLIC_KEY=%s\n' "$SFU_SIGNING_PUBLIC_KEY" > "$PREFIX_LIB/sfu-keys.env"
+		chmod 0600 "$PREFIX_LIB/sfu-keys.env"
+	fi
+else
+	warn "  sfu_signing_public_key not available from /api/partner/keys (signaling may need updating; SFU relay JWT auth will fall back to RELAY_JWT_SECRET)"
+fi
+unset _keys_resp
+
 # Split backend_endpoint "host:port" into host + port for xray config.
 BACKEND_HOST="${BACKEND_ENDPOINT%:*}"
 BACKEND_PORT="${BACKEND_ENDPOINT##*:}"
@@ -350,6 +371,7 @@ render() {
 		-e "s|{{IMAGE_VERSION}}|${IMAGE_VERSION}|g" \
 		-e "s|{{SFU_UDP_PORT}}|${SFU_UDP_PORT}|g" \
 		-e "s|{{SFU_METRICS_PORT}}|${SFU_METRICS_PORT}|g" \
+		-e "s|{{SFU_SIGNING_PUBLIC_KEY}}|${SFU_SIGNING_PUBLIC_KEY:-}|g" \
 		"$src" > "$dst"
 }
 

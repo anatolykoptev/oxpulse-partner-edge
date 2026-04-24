@@ -8,19 +8,23 @@
 #
 # This script:
 #   1. GET ${BACKEND_URL}/api/partner/keys (no auth, returns version hash)
-#   2. Compare returned `version` with stored value
-#   3. If different:
+#   2. Extract sfu_signing_public_key (Phase 2: Ed25519 asymmetric JWT verification)
+#      and persist it to sfu-keys.env on EVERY run (so the SFU container always
+#      has the current key, not just on rotation days).
+#   3. Compare returned `version` with stored value
+#   4. If different:
 #      a. Patch /etc/oxpulse-partner-edge/node-config.json with new
 #         reality_public_key + reality_encryption + reality_server_names
 #      b. systemctl reload oxpulse-partner-edge.service (compose recreate)
 #      c. Persist new version hash
-#   4. Else: no-op (cheap — daily run with constant headers, ~200B response)
+#   5. Else: no-op for Reality rotation (cheap — daily run, ~200B response)
 set -euo pipefail
 
 PREFIX_ETC=/etc/oxpulse-partner-edge
 PREFIX_LIB=/var/lib/oxpulse-partner-edge
 NODE_CFG="$PREFIX_ETC/node-config.json"
 VERSION_FILE="$PREFIX_LIB/keys-version"
+SFU_KEYS_ENV="$PREFIX_LIB/sfu-keys.env"
 LOG_FILE=/var/log/oxpulse-partner-edge-refresh.log
 BACKEND_URL="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
 BACKEND_URL="${BACKEND_URL%/}"
@@ -41,6 +45,20 @@ NEW_VERSION=$(printf '%s' "$RESP" | jq -r '.version' 2>/dev/null) \
     || die "empty version in response: $RESP"
 
 CURRENT_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "none")
+
+# Phase 2: Extract Ed25519 SFU signing public key on EVERY run.
+# Written before the early-exit so the SFU container always has the current
+# key even when Reality hasn't rotated. Ed25519 pubkeys are single-line
+# base64 (~44 chars) — no heredoc needed.
+SFU_SIGNING_PUBKEY=$(printf '%s' "$RESP" | jq -r '.sfu_signing_public_key // empty')
+if [[ -n "$SFU_SIGNING_PUBKEY" ]]; then
+    install -d -m 0700 "$PREFIX_LIB"
+    printf 'SFU_SIGNING_PUBLIC_KEY=%s\n' "$SFU_SIGNING_PUBKEY" > "$SFU_KEYS_ENV"
+    chmod 0600 "$SFU_KEYS_ENV"
+    log "sfu_signing_public_key extracted and saved to $SFU_KEYS_ENV"
+else
+    log "WARNING: sfu_signing_public_key not in /api/partner/keys response (signaling may need updating)"
+fi
 
 if [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
     log "no rotation: version=$NEW_VERSION"
