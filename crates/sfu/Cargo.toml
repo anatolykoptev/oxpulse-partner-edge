@@ -33,7 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-jsonwebtoken = "9"
+jsonwebtoken = { version = "9", features = ["use_pem"] }
 hmac = "0.12"
 sha2 = "0.10"
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["rustls-tls-native-roots", "connect"] }
@@ -48,6 +48,9 @@ fips = ["dep:aws-lc-rs"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros", "test-util"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
+rand = "0.8"
 
 [[test]]
 name = "multi_client"

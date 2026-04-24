@@ -70,7 +70,12 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("bind relay API on {relay_addr}"))?;
     let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<RelayTask>(16);
     let seen_jtis: SeenJtis = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-    let relay_handle = spawn_relay_api(relay_listener, relay_secret, relay_tx, seen_jtis)?;
+    // Ed25519 public key for verifying relay JWTs (preferred over HS256).
+    let relay_signing_pubkey = config.sfu_signing_public_key
+        .as_ref()
+        .map(|s| Arc::new(s.clone()));
+
+    let relay_handle = spawn_relay_api(relay_listener, relay_secret, relay_signing_pubkey, relay_tx, seen_jtis)?;
     tracing::info!(addr = %relay_addr, "relay API listening");
 
     // Drain relay task channel — spawn a WebRTC relay client for each task.

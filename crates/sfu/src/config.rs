@@ -27,6 +27,11 @@ pub struct SfuConfig {
     /// Whether FIPS 140-3 mode is required. Binary must be compiled with
     /// `--features fips` (aws-lc-rs). Env: `SFU_FIPS=1`. Default: false.
     pub fips_mode: bool,
+    /// Ed25519 public key PEM for verifying relay JWT tokens issued by oxpulse-chat.
+    /// Fetched from /api/partner/keys and stored in node-config.
+    /// Env: SFU_SIGNING_PUBLIC_KEY.
+    /// If None, falls back to HS256 RELAY_JWT_SECRET (deprecated -- use Ed25519).
+    pub sfu_signing_public_key: Option<String>,
 }
 
 impl Default for SfuConfig {
@@ -39,6 +44,7 @@ impl Default for SfuConfig {
             relay_api_port: 8912,
             relay_auth_secret: None,
             fips_mode: false,
+            sfu_signing_public_key: None,
         }
     }
 }
@@ -63,6 +69,7 @@ impl SfuConfig {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.into_bytes()),
             fips_mode: std::env::var("SFU_FIPS").as_deref() == Ok("1"),
+            sfu_signing_public_key: std::env::var("SFU_SIGNING_PUBLIC_KEY").ok(),
         }
     }
 }

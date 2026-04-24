@@ -15,7 +15,7 @@ async fn start_test_api(secret: Arc<[u8]>) -> (String, mpsc::Receiver<RelayTask>
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<RelayTask>(8);
     let seen_jtis: SeenJtis = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-    spawn_relay_api(listener, secret, tx, seen_jtis).unwrap();
+    spawn_relay_api(listener, secret, None, tx, seen_jtis).unwrap();
     (format!("http://{addr}"), rx)
 }
 

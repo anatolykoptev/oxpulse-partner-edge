@@ -66,6 +66,34 @@ impl RelayJwt {
         }
         Ok(claims)
     }
+
+    /// Verify with Ed25519 public key PEM -- the asymmetric replacement for HS256.
+    ///
+    /// The public key is fetched from oxpulse-chat's /api/partner/keys endpoint.
+    /// This method replaces the shared-secret `verify()` and cannot be used to mint tokens.
+    pub fn verify_ed25519(token: &str, public_key_pem: &str) -> Result<Self, RelayJwtError> {
+        use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+        let key = DecodingKey::from_ed_pem(public_key_pem.as_bytes())
+            .map_err(|_| RelayJwtError::Malformed)?;
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.validate_exp = true;
+        validation.leeway = 0;
+        validation.required_spec_claims = std::collections::HashSet::new();
+
+        let claims = decode::<RelayJwt>(token, &key, &validation)
+            .map(|d| d.claims)
+            .map_err(|e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => RelayJwtError::Expired,
+                jsonwebtoken::errors::ErrorKind::InvalidSignature => RelayJwtError::InvalidSignature,
+                _ => RelayJwtError::Malformed,
+            })?;
+
+        let now = now_unix_secs();
+        if claims.iat > now + 30 {
+            return Err(RelayJwtError::Malformed);
+        }
+        Ok(claims)
+    }
 }
 
 pub fn now_unix_secs() -> u64 {
@@ -169,4 +197,91 @@ mod tests {
             Err(RelayJwtError::InvalidSignature | RelayJwtError::Malformed)
         ));
     }
+    // --- Ed25519 (EdDSA) test helpers ---
+
+    #[cfg(test)]
+    fn generate_test_keypair_relay() -> (String, String) {
+        use ed25519_dalek::SigningKey as DalekKey;
+        use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use pkcs8::LineEnding;
+        let key = DalekKey::generate(&mut rand::rngs::OsRng);
+        let priv_pem = key
+            .to_pkcs8_pem(LineEnding::LF)
+            .unwrap()
+            .to_string();
+        let pub_pem = key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        (priv_pem, pub_pem)
+    }
+
+    #[cfg(test)]
+    fn sign_ed25519_for_test(jwt: &RelayJwt, priv_pem: &str) -> String {
+        use jsonwebtoken::{encode, EncodingKey, Header, Algorithm};
+        let key = EncodingKey::from_ed_pem(priv_pem.as_bytes()).unwrap();
+        encode(&Header::new(Algorithm::EdDSA), jwt, &key).unwrap()
+    }
+
+    fn sample(iat: u64, exp: u64) -> RelayJwt {
+        RelayJwt {
+            room_id: "room-ed25519".to_string(),
+            upstream_url: "wss://eu.example/ws/sfu/ed".to_string(),
+            upstream_room_token: "tok-ed".to_string(),
+            iat,
+            exp,
+            jti: "ed-test-jti".to_string(),
+        }
+    }
+
+    #[test]
+    fn verify_ed25519_accepts_valid_token() {
+        let (priv_pem, pub_pem) = generate_test_keypair_relay();
+        let jwt = sample(now_unix_secs(), now_unix_secs() + 300);
+        let token = sign_ed25519_for_test(&jwt, &priv_pem);
+        let verified = RelayJwt::verify_ed25519(&token, &pub_pem).unwrap();
+        assert_eq!(verified.room_id, jwt.room_id);
+    }
+
+    #[test]
+    fn verify_ed25519_rejects_wrong_public_key() {
+        let (priv_pem1, _pub1) = generate_test_keypair_relay();
+        let (_priv2, pub_pem2) = generate_test_keypair_relay();
+        let jwt = sample(now_unix_secs(), now_unix_secs() + 300);
+        let token = sign_ed25519_for_test(&jwt, &priv_pem1);
+        assert!(matches!(
+            RelayJwt::verify_ed25519(&token, &pub_pem2),
+            Err(RelayJwtError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn verify_ed25519_rejects_expired() {
+        let (priv_pem, pub_pem) = generate_test_keypair_relay();
+        let jwt = sample(now_unix_secs() - 600, now_unix_secs() - 10);
+        let token = sign_ed25519_for_test(&jwt, &priv_pem);
+        assert!(matches!(
+            RelayJwt::verify_ed25519(&token, &pub_pem),
+            Err(RelayJwtError::Expired)
+        ));
+    }
+
+    #[test]
+    fn verify_ed25519_rejects_forward_dated_iat() {
+        let (priv_pem, pub_pem) = generate_test_keypair_relay();
+        let jwt = RelayJwt {
+            room_id: "r".to_string(),
+            upstream_url: "wss://x".to_string(),
+            upstream_room_token: "t".to_string(),
+            jti: "j".to_string(),
+            iat: now_unix_secs() + 600,
+            exp: now_unix_secs() + 660,
+        };
+        let token = sign_ed25519_for_test(&jwt, &priv_pem);
+        assert!(matches!(
+            RelayJwt::verify_ed25519(&token, &pub_pem),
+            Err(RelayJwtError::Malformed)
+        ));
+    }
+
 }
