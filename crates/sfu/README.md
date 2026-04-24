@@ -38,7 +38,7 @@ cargo build --release -p oxpulse-sfu
 | `SFU_METRICS_PORT` | `9317` | Prometheus `/metrics` |
 | `SFU_RELAY_API_PORT` | `8912` | Cascade relay HTTP API |
 | `SFU_BIND_ADDRESS` | `0.0.0.0` | Bind interface |
-| `RELAY_JWT_SECRET` | `change-me-in-production` | HMAC-SHA256 secret shared with oxpulse-chat |
+| `RELAY_JWT_SECRET` | *(required, no default)* | HMAC-SHA256 secret shared with oxpulse-chat. Generate: `openssl rand -hex 32`. Minimum 32 bytes. |
 | `RUST_LOG` | `info` | Log filter |
 
 ## Metrics
@@ -67,13 +67,11 @@ POST http://<host>:8912/relay/connect
 Content-Type: application/json
 
 {
-  "relay_token": "<HMAC-SHA256 signed JWT from oxpulse-chat>",
-  "upstream_url": "wss://eu-edge.example/ws/sfu/ROOM-ID",
-  "upstream_room_token": "<room JWT>"
+  "relay_token": "<HMAC-SHA256 signed JWT from oxpulse-chat>"
 }
 ```
 
-On success, the SFU opens an outbound WebRTC connection to `upstream_url`, marks the client as `RelayFromSfu`, and routes keyframe requests upstream instead of back to the relay peer.
+The JWT carries all relay parameters (`upstream_url`, `upstream_room_token`, `room_id`). On success, the SFU opens an outbound WebRTC connection to the upstream URL embedded in the JWT, marks the client as `RelayFromSfu`, and routes keyframe requests upstream instead of back to the relay peer.
 
 ## DataChannel protocol
 
