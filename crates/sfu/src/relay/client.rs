@@ -16,12 +16,14 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 /// Serialise the relay-source DataChannel announcement message.
 ///
-/// Sent on the pre-negotiated data channel once DTLS is up.
-/// The upstream edge parses this and calls `client.set_origin(RelayFromSfu(...))`.
-pub fn relay_source_message(upstream_url: &str) -> String {
+/// `room_token` is the room JWT issued by oxpulse-chat signaling for this room.
+/// The upstream SFU verifies this token to prevent unauthenticated relay promotion.
+/// Pass an empty string only for dev/test when SIGNALING_SFU_SECRET is unset.
+pub fn relay_source_message(upstream_url: &str, room_token: &str) -> String {
     serde_json::json!({
         "type": "relay_source",
-        "upstreamUrl": upstream_url
+        "upstreamUrl": upstream_url,
+        "roomToken": room_token,
     })
     .to_string()
 }
@@ -45,11 +47,43 @@ pub fn join_message() -> String {
 /// Returns when the relay connection is established (or errors out).
 /// Media forwarding (step 7 on-wire) is a follow-up task — the DC send here
 /// may not reach the upstream until the relay UDP path is integrated.
+/// Returns true if the upstream URL is from an allowed host.
+/// Defense-in-depth against SSRF even if a signed JWT somehow contains a bad URL.
+fn is_allowed_upstream_host(url: &str) -> bool {
+    // Must be wss://
+    let Some(rest) = url.strip_prefix("wss://") else { return false; };
+    // Extract hostname (before first / or :)
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+
+    // Allow-list: our own infrastructure + localhost for dev/test
+    let allowed = [
+        ".oxpulse.chat",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ];
+    allowed.iter().any(|&pattern| {
+        if pattern.starts_with('.') {
+            host.ends_with(pattern) || host == &pattern[1..]
+        } else {
+            host == pattern
+        }
+    })
+}
+
 pub async fn connect_relay(
     upstream_ws_url: &str,
-    _upstream_room_token: &str,
+    upstream_room_token: &str,
     local_udp_addr: SocketAddr,
 ) -> anyhow::Result<()> {
+    // Defense-in-depth: validate upstream host even though JWT is signed.
+    if !is_allowed_upstream_host(upstream_ws_url) {
+        anyhow::bail!(
+            "upstream URL host is not in the allow-list: {}",
+            upstream_ws_url
+        );
+    }
+
     // 1. Open WebSocket.
     let (mut ws, _) = connect_async(upstream_ws_url)
         .await
@@ -192,7 +226,7 @@ pub async fn connect_relay(
     // 7. Send relay_source message on the pre-negotiated DC (id 5).
     //    Channel becomes available after DTLS + SCTP handshake completes.
     if let Some(mut ch) = rtc.channel(dc_id) {
-        let msg = relay_source_message(upstream_ws_url);
+        let msg = relay_source_message(upstream_ws_url, upstream_room_token);
         ch.write(false, msg.as_bytes())
             .context("write relay_source DC message")?;
         tracing::info!("relay: sent relay_source DC message");
@@ -208,11 +242,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn relay_source_message_contains_type_and_url() {
-        let msg = relay_source_message("wss://eu.example/ws/sfu/room1");
+    fn relay_source_message_contains_type_url_and_token() {
+        let msg = relay_source_message("wss://eu.example/ws/sfu/room1", "test-room-token");
         let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
         assert_eq!(v["type"], "relay_source");
         assert_eq!(v["upstreamUrl"], "wss://eu.example/ws/sfu/room1");
+        assert_eq!(v["roomToken"], "test-room-token");
     }
 
     #[test]
@@ -220,5 +255,23 @@ mod tests {
         let msg = join_message();
         let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
         assert_eq!(v["type"], "join");
+    }
+
+    #[test]
+    fn upstream_allow_list_accepts_valid_hosts() {
+        assert!(is_allowed_upstream_host("wss://edge.oxpulse.chat/ws/sfu/room1"));
+        assert!(is_allowed_upstream_host("wss://us-1.oxpulse.chat/ws/sfu/room1"));
+        assert!(is_allowed_upstream_host("wss://localhost/ws/sfu/room1"));
+        assert!(is_allowed_upstream_host("wss://127.0.0.1:8911/ws/sfu/room1"));
+        assert!(is_allowed_upstream_host("wss://oxpulse.chat/ws/sfu/room1"));
+    }
+
+    #[test]
+    fn upstream_allow_list_rejects_external_hosts() {
+        assert!(!is_allowed_upstream_host("wss://attacker.example.com/ssrf"));
+        assert!(!is_allowed_upstream_host("wss://10.0.0.1/internal"));
+        assert!(!is_allowed_upstream_host("http://localhost/not-wss"));
+        assert!(!is_allowed_upstream_host("wss://evil-oxpulse.chat/bypass"));
+        assert!(!is_allowed_upstream_host("wss://notoxpulse.chat/bypass"));
     }
 }

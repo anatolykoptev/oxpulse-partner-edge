@@ -11,6 +11,7 @@ pub mod pacer;
 pub mod propagate;
 pub mod registry;
 pub mod relay;
+pub mod room_auth;
 pub mod udp_loop;
 
 pub use client::Client;
