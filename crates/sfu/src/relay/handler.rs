@@ -10,7 +10,7 @@ use tracing::instrument;
 
 use crate::relay::task::RelayTask;
 use crate::relay::types::{RelayConnectRequest, RelayConnectResponse};
-use crate::relay::{now_unix_secs, RelayJwt, RelayJwtError};
+use crate::relay::{RelayJwt, RelayJwtError};
 
 pub type SeenJtis = Arc<Mutex<HashSet<String>>>;
 
@@ -50,8 +50,7 @@ async fn relay_connect(
     State((secret, task_tx, seen_jtis)): State<AppState>,
     Json(body): Json<RelayConnectRequest>,
 ) -> (StatusCode, Json<RelayConnectResponse>) {
-    let now = now_unix_secs();
-    let jwt = match RelayJwt::verify(&body.relay_token, &secret, now) {
+    let jwt = match RelayJwt::verify(&body.relay_token, &secret) {
         Ok(j) => j,
         Err(RelayJwtError::Expired) => {
             tracing::warn!("relay_connect: expired JWT");

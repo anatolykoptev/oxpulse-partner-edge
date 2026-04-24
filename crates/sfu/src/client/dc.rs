@@ -10,13 +10,16 @@
 //!     `Propagated::ClientBudgetHint(client_id, bps)`
 //!   * `{ "type": "max_temporal_layer", "vfm": <u8> }` (feature `vfm`) →
 //!     `Propagated::VfmLayerCap(client_id, layer)`
-//!   * `{ "type": "relay_source", "upstreamUrl": "<url>" }` (any channel) →
+//!   * `{ "type": "relay_source", "upstreamUrl": "<url>", "roomToken": "<jwt>" }` (any channel) →
 //!     `Propagated::MarkRelaySource(client_id, upstream_url)` — marks this
-//!     connection as a cascade SFU relay node.
+//!     connection as a cascade SFU relay node. When SIGNALING_SFU_SECRET is
+//!     configured, roomToken MUST be a valid room JWT signed by signaling;
+//!     unauthenticated relay promotions are rejected.
 //!
 //! Returns `Propagated::Noop` for any unrecognised payload.
 
 use crate::propagate::{ClientId, Propagated};
+use crate::room_auth;
 
 /// Label of the pre-negotiated budget data channel.
 const BUDGET_CHANNEL_LABEL: &str = "sfu-budget";
@@ -26,23 +29,76 @@ const BUDGET_CHANNEL_LABEL: &str = "sfu-budget";
 /// `label` is pre-resolved by the caller (via `rtc.channel(id)`) because
 /// `Rtc::channel` requires `&mut self`, which can't be borrowed alongside
 /// the event data in a match arm. Label mismatch → `Noop`.
-pub(super) fn handle_channel_data(client_id: ClientId, label: &str, data: &[u8]) -> Propagated {
+/// `relay_auth_secret`: when `Some`, relay_source messages MUST carry a valid `roomToken`
+/// JWT signed with this secret. Pass `None` to allow unauthenticated relay (dev/test only).
+pub(super) fn handle_channel_data(
+    client_id: ClientId,
+    label: &str,
+    data: &[u8],
+    relay_auth_secret: Option<&[u8]>,
+) -> Propagated {
     // relay_source can arrive on any DC channel — check before label filter.
+    // When relay_auth_secret is Some, the message MUST contain a valid roomToken JWT
+    // issued by oxpulse-chat signaling. This closes the privilege-escalation path where
+    // any connected peer could self-promote to relay status by sending
+    // {"type":"relay_source","upstreamUrl":"..."} over DataChannel.
     if let Ok(s) = std::str::from_utf8(data) {
         if extract_str_value(s, "type") == Some("relay_source") {
-            if let Some(upstream_url) = extract_str_value(s, "upstreamUrl") {
+            let Some(upstream_url) = extract_str_value(s, "upstreamUrl") else {
+                tracing::warn!(
+                    client = *client_id,
+                    "relay_source DC: missing upstreamUrl, rejecting"
+                );
+                return Propagated::Noop;
+            };
+
+            // Token gating: require a valid roomToken when SIGNALING_SFU_SECRET is set.
+            if let Some(secret) = relay_auth_secret {
+                let Some(token) = extract_str_value(s, "roomToken") else {
+                    tracing::warn!(
+                        client = *client_id,
+                        upstream_url = upstream_url,
+                        "relay_source DC: missing roomToken (SIGNALING_SFU_SECRET is set) — rejecting"
+                    );
+                    return Propagated::Noop;
+                };
+                // Extract room ID from the upstream URL (last path segment).
+                // URL format: wss://host/.../ROOM_ID
+                let room_id = upstream_url.rsplit('/').next().unwrap_or("");
+                if room_id.is_empty() {
+                    tracing::warn!(
+                        client = *client_id,
+                        upstream_url = upstream_url,
+                        "relay_source DC: cannot extract room_id from upstreamUrl — rejecting"
+                    );
+                    return Propagated::Noop;
+                }
+                if let Err(e) = room_auth::verify_room_token(token, room_id, secret) {
+                    tracing::warn!(
+                        client = *client_id,
+                        upstream_url = upstream_url,
+                        error = %e,
+                        "relay_source DC: roomToken verification failed — rejecting"
+                    );
+                    return Propagated::Noop;
+                }
                 tracing::debug!(
                     client = *client_id,
                     upstream_url = upstream_url,
-                    "relay_source DC: marking as cascade relay"
+                    room_id = room_id,
+                    "relay_source DC: roomToken verified — marking as cascade relay"
                 );
-                return Propagated::MarkRelaySource(client_id, upstream_url.to_string());
+            } else {
+                // No secret configured — allow unauthenticated relay (dev/test only).
+                // Production deployments MUST set SIGNALING_SFU_SECRET.
+                tracing::debug!(
+                    client = *client_id,
+                    upstream_url = upstream_url,
+                    "relay_source DC: no SIGNALING_SFU_SECRET — allowing unauthenticated (dev mode)"
+                );
             }
-            tracing::warn!(
-                client = *client_id,
-                "relay_source DC: missing upstreamUrl, dropping"
-            );
-            return Propagated::Noop;
+
+            return Propagated::MarkRelaySource(client_id, upstream_url.to_string());
         }
     }
 
@@ -201,7 +257,7 @@ mod tests {
     #[test]
     fn relay_source_returns_mark_relay_on_any_channel() {
         let data = br#"{"type":"relay_source","upstreamUrl":"wss://eu-1.example/sfu"}"#;
-        let result = handle_channel_data(ClientId(42), "some-other-channel", data);
+        let result = handle_channel_data(ClientId(42), "some-other-channel", data, None);
         match result {
             Propagated::MarkRelaySource(id, url) => {
                 assert_eq!(*id, 42);
@@ -214,7 +270,7 @@ mod tests {
     #[test]
     fn relay_source_missing_url_returns_noop() {
         let data = br#"{"type":"relay_source"}"#;
-        let result = handle_channel_data(ClientId(43), "sfu-budget", data);
+        let result = handle_channel_data(ClientId(43), "sfu-budget", data, None);
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -224,7 +280,80 @@ mod tests {
         // relay_source takes priority since it is checked first.
         let data =
             br#"{"type":"relay_source","upstreamUrl":"wss://eu-1.example/sfu","bps":500000}"#;
-        let result = handle_channel_data(ClientId(44), "sfu-budget", data);
+        let result = handle_channel_data(ClientId(44), "sfu-budget", data, None);
         assert!(matches!(result, Propagated::MarkRelaySource(..)));
+    }
+
+    // ── relay_source token-gating tests ─────────────────────────────────────
+
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use crate::room_auth::RoomClaims;
+
+    fn make_room_token(room: &str, sub: u64, secret: &[u8], exp_delta_secs: i64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let exp = (now as i64 + exp_delta_secs).max(0) as u64;
+        let claims = RoomClaims { sub, room: room.to_string(), iat: now, exp };
+        encode(&Header::default(), &claims, &EncodingKey::from_secret(secret)).unwrap()
+    }
+
+    #[test]
+    fn relay_source_with_valid_token_accepted() {
+        let secret = b"test-secret-32-bytes-long-enough!";
+        // URL ending with /room-abc — room_id extracted as "room-abc"
+        let token = make_room_token("room-abc", 99, secret, 3600);
+        let payload = format!(
+            r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
+            token
+        );
+        let result = handle_channel_data(ClientId(50), "any", payload.as_bytes(), Some(secret));
+        assert!(matches!(result, Propagated::MarkRelaySource(..)));
+    }
+
+    #[test]
+    fn relay_source_missing_token_when_secret_set_rejected() {
+        let secret = b"test-secret-32-bytes-long-enough!";
+        let data = br#"{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc"}"#;
+        let result = handle_channel_data(ClientId(51), "any", data, Some(secret));
+        assert!(matches!(result, Propagated::Noop));
+    }
+
+    #[test]
+    fn relay_source_wrong_secret_rejected() {
+        let secret = b"correct-secret-32-bytes-long!!!!";
+        let token = make_room_token("room-abc", 1, b"other-secret-32-bytes-long!!!!!!!", 3600);
+        let payload = format!(
+            r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
+            token
+        );
+        let result = handle_channel_data(ClientId(52), "any", payload.as_bytes(), Some(secret));
+        assert!(matches!(result, Propagated::Noop));
+    }
+
+    #[test]
+    fn relay_source_expired_token_rejected() {
+        let secret = b"test-secret-32-bytes-long-enough!";
+        let token = make_room_token("room-abc", 1, secret, -60); // expired 60s ago
+        let payload = format!(
+            r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
+            token
+        );
+        let result = handle_channel_data(ClientId(53), "any", payload.as_bytes(), Some(secret));
+        assert!(matches!(result, Propagated::Noop));
+    }
+
+    #[test]
+    fn relay_source_wrong_room_rejected() {
+        let secret = b"test-secret-32-bytes-long-enough!";
+        // Token is for room-xyz but URL ends with room-abc
+        let token = make_room_token("room-xyz", 1, secret, 3600);
+        let payload = format!(
+            r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
+            token
+        );
+        let result = handle_channel_data(ClientId(54), "any", payload.as_bytes(), Some(secret));
+        assert!(matches!(result, Propagated::Noop));
     }
 }

@@ -80,6 +80,10 @@ pub struct Client {
     /// when the DC relay_source handshake is confirmed. Governs speaker
     /// election exclusion and upstream keyframe routing.
     pub(crate) origin: ClientOrigin,
+    /// Shared secret for verifying relay_source room tokens issued by oxpulse-chat.
+    /// When set, relay_source DataChannel messages MUST include a verified roomToken.
+    /// Loaded from SIGNALING_SFU_SECRET at startup.
+    pub(crate) relay_auth_secret: Option<Arc<[u8]>>,
     /// RFC 9626 VFM temporal-layer cap for this subscriber.
     /// Packets at a temporal layer higher than this are dropped before
     /// forwarding. `u8::MAX` means "no cap" (forward all layers).

@@ -18,6 +18,12 @@ pub struct SfuConfig {
     /// HTTP port for the relay API (`POST /relay/connect`).
     /// Env: `SFU_RELAY_API_PORT`. Default: 8912.
     pub relay_api_port: u16,
+    /// Shared secret for verifying room JWTs issued by oxpulse-chat signaling.
+    /// Must match `SIGNALING_SFU_SECRET` on the signaling server.
+    /// When `Some`, relay_source DataChannel messages MUST include a valid roomToken.
+    /// When `None`, relay promotion is unauthenticated (dev/test only).
+    /// Env: `SIGNALING_SFU_SECRET`.
+    pub relay_auth_secret: Option<Vec<u8>>,
 }
 
 impl Default for SfuConfig {
@@ -28,6 +34,7 @@ impl Default for SfuConfig {
             bind_address: "0.0.0.0".to_string(),
             log_level: "info".to_string(),
             relay_api_port: 8912,
+            relay_auth_secret: None,
         }
     }
 }
@@ -47,6 +54,10 @@ impl SfuConfig {
             relay_api_port: env("SFU_RELAY_API_PORT", &defaults.relay_api_port.to_string())
                 .parse()
                 .expect("SFU_RELAY_API_PORT must be a number"),
+            relay_auth_secret: std::env::var("SIGNALING_SFU_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.into_bytes()),
         }
     }
 }
@@ -73,5 +84,12 @@ mod tests {
     fn relay_api_port_default_and_env() {
         let cfg = SfuConfig::default();
         assert_eq!(cfg.relay_api_port, 8912);
+    }
+
+    #[test]
+    fn relay_auth_secret_default_is_none() {
+        let cfg = SfuConfig::default();
+        assert!(cfg.relay_auth_secret.is_none(),
+            "relay_auth_secret should default to None (unauthenticated dev mode)");
     }
 }

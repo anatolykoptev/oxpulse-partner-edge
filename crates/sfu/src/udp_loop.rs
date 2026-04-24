@@ -44,8 +44,12 @@ pub async fn run_udp_loop<F>(
 where
     F: Future<Output = ()>,
 {
+    let relay_auth_secret = config
+        .relay_auth_secret
+        .clone()
+        .map(|v| Arc::from(v.as_slice()));
     let socket = bind(&config).await?;
-    serve(socket, metrics, shutdown).await
+    serve(socket, metrics, relay_auth_secret, shutdown).await
 }
 
 /// Bind the UDP socket per `config`. Exposed so tests can observe the
@@ -65,13 +69,14 @@ pub async fn bind(config: &SfuConfig) -> anyhow::Result<UdpSocket> {
 pub async fn serve<F>(
     socket: UdpSocket,
     metrics: Arc<SfuMetrics>,
+    relay_auth_secret: Option<Arc<[u8]>>,
     shutdown: F,
 ) -> anyhow::Result<()>
 where
     F: Future<Output = ()>,
 {
     let local = socket.local_addr().context("failed to read local_addr")?;
-    let mut registry = Registry::new(metrics);
+    let mut registry = Registry::with_relay_secret(metrics, relay_auth_secret);
     let mut buf = vec![0u8; RECV_BUFFER_BYTES];
     // M1.4: ASO tick drives dominant-speaker election. Delay-on-miss so
     // a slow tick doesn't cause a burst of tick() calls.
@@ -167,7 +172,7 @@ mod tests {
         let socket = bind(&cfg).await.expect("bind");
         let metrics = Arc::new(SfuMetrics::default());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let handle = tokio::spawn(serve(socket, metrics, async {
+        let handle = tokio::spawn(serve(socket, metrics, None, async {
             let _ = rx.await;
         }));
         tx.send(()).unwrap();
