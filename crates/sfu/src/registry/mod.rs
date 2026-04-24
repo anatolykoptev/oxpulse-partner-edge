@@ -46,10 +46,20 @@ pub struct Registry {
     pub(super) metrics: Arc<SfuMetrics>,
     pub(super) bandwidth: BandwidthEstimator,
     pub(super) pacer: Pacer,
+    /// Shared secret for relay_source roomToken verification. Copied into each
+    /// client at insert() time so DC messages can be verified in-place.
+    pub(super) relay_auth_secret: Option<Arc<[u8]>>,
 }
 
 impl Registry {
     pub fn new(metrics: Arc<SfuMetrics>) -> Self {
+        Self::with_relay_secret(metrics, None)
+    }
+
+    /// Construct a registry with a relay authentication secret.
+    /// Pass `Some(secret)` to enforce roomToken verification on relay_source DC messages.
+    /// Pass `None` for dev/test mode (unauthenticated relay).
+    pub fn with_relay_secret(metrics: Arc<SfuMetrics>, relay_auth_secret: Option<Arc<[u8]>>) -> Self {
         let detector = ActiveSpeakerDetector::new();
         Self {
             clients: Vec::new(),
@@ -60,6 +70,7 @@ impl Registry {
             metrics,
             bandwidth: BandwidthEstimator::new(),
             pacer: Pacer::new(),
+            relay_auth_secret,
         }
     }
 
@@ -93,6 +104,9 @@ impl Registry {
         // Adopt the registry's metrics so forwarded_packets / layer_selection
         // increments land on the same Prometheus registry as connect / disconnect.
         client.metrics = self.metrics.clone();
+        // Copy the relay authentication secret so this client can verify
+        // relay_source DataChannel messages in-place without touching the registry.
+        client.relay_auth_secret = self.relay_auth_secret.clone();
         for entry in self.clients.iter().flat_map(|c| c.tracks_in.iter()) {
             client.handle_track_open(std::sync::Arc::downgrade(&entry.id));
         }

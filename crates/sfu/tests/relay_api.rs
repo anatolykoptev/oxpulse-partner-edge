@@ -25,11 +25,11 @@ fn make_token(secret: &[u8], room_id: &str) -> String {
         room_id: room_id.to_string(),
         upstream_url: "wss://localhost/ws/sfu/test".to_string(),
         upstream_room_token: "tok".to_string(),
-        issued_at: now,
-        expires_at: now + 60,
+        iat: now,
+        exp: now + 60,
         jti: uuid_v4_simple(),
     }
-    .sign(secret)
+    .sign(secret).unwrap()
 }
 
 fn uuid_v4_simple() -> String {

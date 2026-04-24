@@ -5,22 +5,22 @@ pub mod handler;
 pub mod task;
 pub mod types;
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use std::time::{SystemTime, UNIX_EPOCH};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 
-type HmacSha256 = Hmac<Sha256>;
-
-/// Short-lived relay grant token. Signed with HMAC-SHA256.
-/// Wire format: `<base64url(json_payload)>.<base64url(hmac_tag)>`.
+/// Short-lived relay grant token. Signed with HMAC-SHA256 (RFC 7519 / HS256).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RelayJwt {
+    /// Claim: room ID being relayed.
     pub room_id: String,
+    /// Claim: WebSocket URL of the upstream SFU room endpoint.
     pub upstream_url: String,
+    /// Claim: Room token for the upstream SFU join.
     pub upstream_room_token: String,
-    pub issued_at: u64,
-    pub expires_at: u64,
-    /// Unique token ID for replay prevention.
+    /// Standard claim: issued-at (Unix seconds).
+    pub iat: u64,
+    /// Standard claim: expiry (Unix seconds).
+    pub exp: u64,
+    /// Claim: JWT ID for replay prevention.
     pub jti: String,
 }
 
@@ -32,184 +32,93 @@ pub enum RelayJwtError {
 }
 
 impl RelayJwt {
-    pub fn sign(&self, secret: &[u8]) -> String {
-        let json = serde_json::to_string(self).expect("RelayJwt is always serializable");
-        let payload_b64 = base64url_encode(json.as_bytes());
-        let tag = hmac_sign(secret, payload_b64.as_bytes());
-        let tag_b64 = base64url_encode(&tag);
-        format!("{}.{}", payload_b64, tag_b64)
+    /// Sign with HMAC-SHA256 and return a standard RFC 7519 JWT string.
+    pub fn sign(&self, secret: &[u8]) -> anyhow::Result<String> {
+        let key = EncodingKey::from_secret(secret);
+        encode(&Header::new(Algorithm::HS256), self, &key)
+            .map_err(|e| anyhow::anyhow!("relay JWT sign failed: {e}"))
     }
 
-    pub fn verify(token: &str, secret: &[u8], now_secs: u64) -> Result<Self, RelayJwtError> {
-        let (payload_b64, tag_b64) = token.split_once('.').ok_or(RelayJwtError::Malformed)?;
-        // MAC-first: reject forgeries before deserialising.
-        let expected = hmac_sign(secret, payload_b64.as_bytes());
-        let provided = base64url_decode(tag_b64).map_err(|_| RelayJwtError::Malformed)?;
-        if !constant_time_eq(&expected, &provided) {
-            return Err(RelayJwtError::InvalidSignature);
-        }
-        let payload = base64url_decode(payload_b64).map_err(|_| RelayJwtError::Malformed)?;
-        let jwt: RelayJwt =
-            serde_json::from_slice(&payload).map_err(|_| RelayJwtError::Malformed)?;
-        if now_secs >= jwt.expires_at {
-            return Err(RelayJwtError::Expired);
-        }
-        // Reject tokens issued improbably far in the future (clock skew > 30s).
-        if jwt.issued_at > now_secs + 30 {
-            return Err(RelayJwtError::Expired);
-        }
-        Ok(jwt)
+    /// Verify a JWT string. Returns `Err` if signature is invalid, expired, or malformed.
+    pub fn verify(token: &str, secret: &[u8]) -> Result<Self, RelayJwtError> {
+        let key = DecodingKey::from_secret(secret);
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.validate_exp = true;
+        // We validate jti ourselves in the handler; don't require it as a spec claim.
+        validation.required_spec_claims = std::collections::HashSet::new();
+
+        decode::<RelayJwt>(token, &key, &validation)
+            .map(|data| data.claims)
+            .map_err(|e| match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => RelayJwtError::Expired,
+                jsonwebtoken::errors::ErrorKind::InvalidSignature
+                | jsonwebtoken::errors::ErrorKind::InvalidAlgorithmName
+                | jsonwebtoken::errors::ErrorKind::InvalidKeyFormat => {
+                    RelayJwtError::InvalidSignature
+                }
+                _ => RelayJwtError::Malformed,
+            })
     }
 }
 
 pub fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn hmac_sign(secret: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
-}
-
-fn base64url_encode(data: &[u8]) -> String {
-    encode_b64(data)
-        .replace('+', "-")
-        .replace('/', "_")
-        .trim_end_matches('=')
-        .to_string()
-}
-
-fn base64url_decode(s: &str) -> Result<Vec<u8>, ()> {
-    let mut p = s.replace('-', "+").replace('_', "/");
-    match p.len() % 4 {
-        2 => p.push_str("=="),
-        3 => p.push('='),
-        _ => {}
-    }
-    decode_b64(&p).map_err(|_| ())
-}
-
-fn encode_b64(data: &[u8]) -> String {
-    const C: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    let mut i = 0;
-    while i + 3 <= data.len() {
-        let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
-        out.push(C[((n >> 18) & 63) as usize] as char);
-        out.push(C[((n >> 12) & 63) as usize] as char);
-        out.push(C[((n >> 6) & 63) as usize] as char);
-        out.push(C[(n & 63) as usize] as char);
-        i += 3;
-    }
-    match data.len() - i {
-        1 => {
-            let n = (data[i] as u32) << 16;
-            out.push(C[((n >> 18) & 63) as usize] as char);
-            out.push(C[((n >> 12) & 63) as usize] as char);
-            out.push_str("==");
-        }
-        2 => {
-            let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8);
-            out.push(C[((n >> 18) & 63) as usize] as char);
-            out.push(C[((n >> 12) & 63) as usize] as char);
-            out.push(C[((n >> 6) & 63) as usize] as char);
-            out.push('=');
-        }
-        _ => {}
-    }
-    out
-}
-
-fn decode_b64(s: &str) -> Result<Vec<u8>, ()> {
-    fn val(b: u8) -> Result<u8, ()> {
-        match b {
-            b'A'..=b'Z' => Ok(b - b'A'),
-            b'a'..=b'z' => Ok(b - b'a' + 26),
-            b'0'..=b'9' => Ok(b - b'0' + 52),
-            b'+' => Ok(62),
-            b'/' => Ok(63),
-            b'=' => Ok(0),
-            _ => Err(()),
-        }
-    }
-    let bytes = s.as_bytes();
-    if !bytes.len().is_multiple_of(4) {
-        return Err(());
-    }
-    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
-    let mut i = 0;
-    while i < bytes.len() {
-        let (a, b, c, d) = (
-            val(bytes[i])?,
-            val(bytes[i + 1])?,
-            val(bytes[i + 2])?,
-            val(bytes[i + 3])?,
-        );
-        let n = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | (d as u32);
-        out.push((n >> 16) as u8);
-        if bytes[i + 2] != b'=' {
-            out.push(((n >> 8) & 0xff) as u8);
-        }
-        if bytes[i + 3] != b'=' {
-            out.push((n & 0xff) as u8);
-        }
-        i += 4;
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn sample(issued: u64, expires: u64) -> RelayJwt {
+    fn sample_valid() -> RelayJwt {
+        let now = now_unix_secs();
         RelayJwt {
             room_id: "abc123".to_string(),
             upstream_url: "wss://eu.example/ws/sfu/abc123".to_string(),
             upstream_room_token: "tok".to_string(),
-            issued_at: issued,
-            expires_at: expires,
+            iat: now,
+            exp: now + 300,
             jti: "test-jti".to_string(),
+        }
+    }
+
+    fn sample_expired() -> RelayJwt {
+        let now = now_unix_secs();
+        RelayJwt {
+            room_id: "abc123".to_string(),
+            upstream_url: "wss://eu.example/ws/sfu/abc123".to_string(),
+            upstream_room_token: "tok".to_string(),
+            iat: now - 600,
+            exp: now - 300,
+            jti: "test-jti-exp".to_string(),
         }
     }
 
     #[test]
     fn sign_and_verify_roundtrip() {
-        let jwt = sample(1000, 1300);
-        let token = jwt.sign(b"secret");
-        let verified = RelayJwt::verify(&token, b"secret", 1100).unwrap();
+        let jwt = sample_valid();
+        let token = jwt.sign(b"secret").unwrap();
+        let verified = RelayJwt::verify(&token, b"secret").unwrap();
         assert_eq!(verified.room_id, "abc123");
         assert_eq!(verified.upstream_url, "wss://eu.example/ws/sfu/abc123");
     }
 
     #[test]
     fn verify_rejects_expired() {
-        let token = sample(1000, 1300).sign(b"s");
+        let token = sample_expired().sign(b"s").unwrap();
         assert!(matches!(
-            RelayJwt::verify(&token, b"s", 1400),
+            RelayJwt::verify(&token, b"s"),
             Err(RelayJwtError::Expired)
         ));
     }
 
     #[test]
     fn verify_rejects_wrong_secret() {
-        let token = sample(1000, 1300).sign(b"correct");
+        let token = sample_valid().sign(b"correct").unwrap();
         assert!(matches!(
-            RelayJwt::verify(&token, b"wrong", 1100),
+            RelayJwt::verify(&token, b"wrong"),
             Err(RelayJwtError::InvalidSignature)
         ));
     }
@@ -217,22 +126,25 @@ mod tests {
     #[test]
     fn verify_rejects_malformed_token() {
         assert!(matches!(
-            RelayJwt::verify("not.valid.here", b"s", 1000),
+            RelayJwt::verify("not-a-jwt", b"s"),
             Err(RelayJwtError::Malformed)
         ));
     }
 
     #[test]
     fn verify_rejects_tampered_payload() {
-        let token = sample(1000, 1300).sign(b"s");
-        let (payload, sig) = token.split_once('.').unwrap();
-        let mut p = payload.to_string();
-        let last = p.pop().unwrap_or('A');
-        p.push(if last == 'A' { 'B' } else { 'A' });
-        let tampered = format!("{p}.{sig}");
+        let token = sample_valid().sign(b"s").unwrap();
+        // JWT has 3 dot-separated parts: header.payload.signature
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "standard JWT must have 3 parts");
+        let mut payload = parts[1].to_string();
+        // Flip a char in the payload to produce a different base64url string.
+        let last = payload.pop().unwrap_or('A');
+        payload.push(if last == 'A' { 'B' } else { 'A' });
+        let tampered = format!("{}.{}.{}", parts[0], payload, parts[2]);
         assert!(matches!(
-            RelayJwt::verify(&tampered, b"s", 1100),
-            Err(RelayJwtError::InvalidSignature)
+            RelayJwt::verify(&tampered, b"s"),
+            Err(RelayJwtError::InvalidSignature | RelayJwtError::Malformed)
         ));
     }
 }
