@@ -5,6 +5,24 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.8.0...partner-edge-v0.8.1) (2026-04-24)
+
+
+### Features
+
+* **refresh:** call POST /api/partner/heartbeat on each daily run ([#4](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/4)) ([e2bc730](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e2bc730a916926f0c5b13c2c84bf131af7c095bd))
+* **security/P2:** FIPS 140-3 + Ed25519 asymmetric JWT — eliminate shared secrets ([#3](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/3)) ([c304e84](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c304e847053b87b349533f6a52ba2ffd4fe3c3ce))
+
+
+### Bug Fixes
+
+* **ci:** valid JSON in .release-please-manifest.json ([563d390](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/563d3901cda430d3ea37638f159458e68b34b209))
+* **ci:** valid JSON in release-please-config.json ([54b6e99](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/54b6e99b041904db76c82599db53430939066639))
+* **security:** CRITICAL SSRF + default-secret + panic — use JWT fields, require RELAY_JWT_SECRET ([a5763d8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a5763d8fb6769ea36cabd9ce1f91221bdf960b94))
+* **security:** HIGH relay JWT replay protection (jti store) + MEDIUM clock skew check ([4103cb5](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4103cb5658e177aa2deea5759ceb726043c9df02))
+* **security:** MEDIUM-1 migrate relay JWT to jsonwebtoken (RFC 7519) + MEDIUM-2 upstream host allow-list in relay client ([b754dbe](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/b754dbe1d11fc361e252890514827613077113cd))
+* **security:** MEDIUM-3 relay JWT iat forward-date check + test ([0a53399](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0a53399efd1429aaa9e3e1fc5f4718dc94555e84))
+
 ## [0.9.0] — 2026-04-24
 
 ### Security — Phase 2
