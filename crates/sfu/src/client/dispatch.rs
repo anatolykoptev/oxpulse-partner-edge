@@ -70,7 +70,13 @@ impl Client {
                     .channel(id)
                     .and_then(|ch| ch.config().map(|c| c.label.clone()))
                     .unwrap_or_default();
-                dc::handle_channel_data(self.id, &label, &data, self.relay_auth_secret.as_deref())
+                dc::handle_channel_data(
+                    self.id,
+                    &label,
+                    &data,
+                    self.relay_auth_secret.as_deref(),
+                    self.relay_signing_pubkey.as_deref().map(|s| s.as_str()),
+                )
             }
             _ => Propagated::Noop,
         }

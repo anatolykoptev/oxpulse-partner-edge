@@ -49,6 +49,9 @@ pub struct Registry {
     /// Shared secret for relay_source roomToken verification. Copied into each
     /// client at insert() time so DC messages can be verified in-place.
     pub(super) relay_auth_secret: Option<Arc<[u8]>>,
+    /// Ed25519 public key (PEM) for EdDSA-signed room token verification (Phase 2).
+    /// Copied into each client at insert() time alongside relay_auth_secret.
+    pub(super) relay_signing_pubkey: Option<Arc<String>>,
 }
 
 impl Registry {
@@ -60,6 +63,19 @@ impl Registry {
     /// Pass `Some(secret)` to enforce roomToken verification on relay_source DC messages.
     /// Pass `None` for dev/test mode (unauthenticated relay).
     pub fn with_relay_secret(metrics: Arc<SfuMetrics>, relay_auth_secret: Option<Arc<[u8]>>) -> Self {
+        Self::with_relay_auth(metrics, relay_auth_secret, None)
+    }
+
+    /// Construct a registry with both HS256 secret and Ed25519 pubkey for room token auth.
+    ///
+    /// When `relay_signing_pubkey` is `Some`, EdDSA verification is preferred for
+    /// relay_source DataChannel messages; HS256 is used as fallback when only
+    /// `relay_auth_secret` is set.
+    pub fn with_relay_auth(
+        metrics: Arc<SfuMetrics>,
+        relay_auth_secret: Option<Arc<[u8]>>,
+        relay_signing_pubkey: Option<Arc<String>>,
+    ) -> Self {
         let detector = ActiveSpeakerDetector::new();
         Self {
             clients: Vec::new(),
@@ -71,6 +87,7 @@ impl Registry {
             bandwidth: BandwidthEstimator::new(),
             pacer: Pacer::new(),
             relay_auth_secret,
+            relay_signing_pubkey,
         }
     }
 
@@ -107,6 +124,8 @@ impl Registry {
         // Copy the relay authentication secret so this client can verify
         // relay_source DataChannel messages in-place without touching the registry.
         client.relay_auth_secret = self.relay_auth_secret.clone();
+        // Phase 2: also copy the Ed25519 pubkey for EdDSA-preferred verification.
+        client.relay_signing_pubkey = self.relay_signing_pubkey.clone();
         for entry in self.clients.iter().flat_map(|c| c.tracks_in.iter()) {
             client.handle_track_open(std::sync::Arc::downgrade(&entry.id));
         }

@@ -50,6 +50,7 @@ impl Client {
             active_speaker_cid,
             origin: oxpulse_sfu_kit::ClientOrigin::Local,
             relay_auth_secret: None,
+            relay_signing_pubkey: None,
             #[cfg(feature = "vfm")]
             max_vfm_temporal_layer: u8::MAX,
         }
