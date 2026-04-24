@@ -1,6 +1,6 @@
 //! Integration tests for the relay HTTP API.
 
-use oxpulse_sfu::relay::handler::spawn_relay_api;
+use oxpulse_sfu::relay::handler::{spawn_relay_api, SeenJtis};
 use oxpulse_sfu::relay::task::RelayTask;
 use oxpulse_sfu::relay::types::{RelayConnectRequest, RelayConnectResponse};
 use oxpulse_sfu::relay::{now_unix_secs, RelayJwt};
@@ -14,7 +14,8 @@ async fn start_test_api(secret: Arc<[u8]>) -> (String, mpsc::Receiver<RelayTask>
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<RelayTask>(8);
-    spawn_relay_api(listener, secret, tx).unwrap();
+    let seen_jtis: SeenJtis = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    spawn_relay_api(listener, secret, tx, seen_jtis).unwrap();
     (format!("http://{addr}"), rx)
 }
 
@@ -22,12 +23,21 @@ fn make_token(secret: &[u8], room_id: &str) -> String {
     let now = now_unix_secs();
     RelayJwt {
         room_id: room_id.to_string(),
-        upstream_url: "wss://us.example/ws/sfu/test".to_string(),
+        upstream_url: "wss://localhost/ws/sfu/test".to_string(),
         upstream_room_token: "tok".to_string(),
         issued_at: now,
         expires_at: now + 60,
+        jti: uuid_v4_simple(),
     }
     .sign(secret)
+}
+
+fn uuid_v4_simple() -> String {
+    // Minimal deterministic unique ID for tests — not a real UUID.
+    format!("test-jti-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos())
 }
 
 #[tokio::test]
@@ -39,8 +49,6 @@ async fn relay_connect_accepts_valid_jwt() {
         .post(format!("{base}/relay/connect"))
         .json(&RelayConnectRequest {
             relay_token: token,
-            upstream_url: "wss://us.example/ws/sfu/room-abc".to_string(),
-            upstream_room_token: "tok".to_string(),
         })
         .send()
         .await
@@ -65,8 +73,6 @@ async fn relay_connect_rejects_invalid_jwt() {
         .post(format!("{base}/relay/connect"))
         .json(&RelayConnectRequest {
             relay_token: "completely.invalid".to_string(),
-            upstream_url: "wss://x.example/ws/sfu/x".to_string(),
-            upstream_room_token: "tok".to_string(),
         })
         .send()
         .await
