@@ -32,7 +32,7 @@
               {
                 "id": "{{REALITY_UUID}}",
                 "encryption": "{{REALITY_ENCRYPTION}}",
-                "flow": ""
+                "flow": "xtls-rprx-vision"
               }
             ]
           }
@@ -41,7 +41,11 @@
       "streamSettings": {
         "network": "xhttp",
         "xhttpSettings": {
-          "path": "/xh"
+          "path": "/xh",
+          "mode": "stream-one",
+          "extra": {
+            "xPaddingBytes": "100-1000"
+          }
         },
         "security": "reality",
         "realitySettings": {
