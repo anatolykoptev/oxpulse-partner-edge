@@ -3,6 +3,7 @@
 //! M1.5: Prometheus `/metrics` endpoint + integration test coverage.
 //! See `docs/superpowers/plans/2026-04-21-group-calls-execution.md`.
 
+pub mod bwe;
 pub mod client;
 pub mod config;
 pub mod fanout;
