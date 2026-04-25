@@ -245,6 +245,15 @@ json_get() {
 	python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get(sys.argv[2],''))" "$file" "$key" 2>/dev/null \
 		|| sed -nE "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\1/p" "$file" | head -1
 }
+json_get_raw() {
+	local key=$1 file=$2
+	python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+v=d.get(sys.argv[2])
+print(json.dumps(v) if v is not None else 'null')
+" "$file" "$key" 2>/dev/null || echo "null"
+}
 NODE_ID=$(json_get node_id "$tmp_cfg")
 BACKEND_ENDPOINT=$(json_get backend_endpoint "$tmp_cfg")
 TURN_SECRET=$(json_get turn_secret "$tmp_cfg")
@@ -259,6 +268,10 @@ REALITY_ENCRYPTION=$(json_get reality_encryption "$tmp_cfg")
 # Backend-assigned TURNS subdomain (format api-<6-hex>). Falls back to "turns"
 # only if the backend did not return one (pre-v0.2 deployments).
 REGISTER_TURNS_SUBDOMAIN=$(json_get turns_subdomain "$tmp_cfg")
+# channels[] — future-proof bypass channel array.
+# Empty if server is older than v0.12 (no channels field yet).
+CHANNELS_JSON=$(json_get_raw channels "$tmp_cfg")
+[[ "$CHANNELS_JSON" == "null" || -z "$CHANNELS_JSON" ]] && CHANNELS_JSON="[]"
 [[ -z "$NODE_ID" ]]            && NODE_ID="${PARTNER_ID}-$(hostname -s)"
 [[ -z "$BACKEND_ENDPOINT" ]]   && die "backend_endpoint missing from config"
 [[ -z "$TURN_SECRET" ]]        && die "turn_secret missing from config"
@@ -274,6 +287,18 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	install -d -m 0755 "$PREFIX_ETC"
 	install -m 0600 "$tmp_cfg" "$PREFIX_ETC/node-config.json"
 	log "  persisted node-config.json → $PREFIX_ETC/node-config.json"
+	# Merge channels[] into node-config.json if server returned it.
+	# The raw tmp_cfg already has all other fields; we just ensure channels
+	# key is present for re_render_xray and future channel renderers.
+	if [[ "$CHANNELS_JSON" != "[]" ]]; then
+		python3 - "$PREFIX_ETC/node-config.json" "$CHANNELS_JSON" << 'PYEOF'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+cfg['channels'] = json.loads(sys.argv[2])
+open(sys.argv[1], 'w').write(json.dumps(cfg, indent=2))
+PYEOF
+		log "  channels[] written to node-config.json (${#CHANNELS_JSON} bytes)"
+	fi
 fi
 [[ -z "$REALITY_SHORT_ID" ]]   && die "reality_short_id missing from config"
 [[ -z "$REALITY_SERVER_NAME" ]] && REALITY_SERVER_NAME="www.samsung.com"
