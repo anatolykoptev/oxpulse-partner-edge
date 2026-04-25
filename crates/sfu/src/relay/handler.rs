@@ -70,9 +70,13 @@ mod allow_list_tests {
     #[test]
     fn rejects_path_component_spoof() {
         // The bug fix: contains() would have returned true for these.
-        assert!(!is_allowed_upstream("wss://attacker.com/.oxpulse.chat/path"));
+        assert!(!is_allowed_upstream(
+            "wss://attacker.com/.oxpulse.chat/path"
+        ));
         assert!(!is_allowed_upstream("wss://evil.com/?x=.oxpulse.chat/foo"));
-        assert!(!is_allowed_upstream("wss://evil.com:8080/.oxpulse.chat:443/x"));
+        assert!(!is_allowed_upstream(
+            "wss://evil.com:8080/.oxpulse.chat:443/x"
+        ));
     }
 
     #[test]
@@ -130,9 +134,7 @@ async fn relay_connect(
     let verify_result = if let Some(pubkey) = &signing_public_key {
         match RelayJwt::verify_ed25519(&body.relay_token, pubkey) {
             Ok(j) => Ok(j),
-            Err(RelayJwtError::InvalidSignature) => {
-                RelayJwt::verify(&body.relay_token, &secret)
-            }
+            Err(RelayJwtError::InvalidSignature) => RelayJwt::verify(&body.relay_token, &secret),
             Err(e) => Err(e),
         }
     } else {
