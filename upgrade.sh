@@ -38,14 +38,43 @@ re_render_xray() {
         rm -f "$tpl"; return 0
     fi
 
-    # Read secrets from node-config.json (python3 available on all supported distros).
+    # Read secrets from node-config.json.
+    # Prefers channels[0].xray.* (future schema) with fallback to flat reality_* fields
+    # (current schema) for backwards compat with nodes registered before channels[] landed.
     local uuid enc pub_key short_id server_name backend
-    uuid=$(python3       -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('reality_uuid',''))"         "$NODE_CFG")
-    enc=$(python3        -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('reality_encryption','') or '')" "$NODE_CFG")
-    pub_key=$(python3    -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('reality_public_key',''))"   "$NODE_CFG")
-    short_id=$(python3   -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('reality_short_id',''))"    "$NODE_CFG")
-    server_name=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('reality_server_name','www.samsung.com'))" "$NODE_CFG")
-    backend=$(python3    -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('backend_endpoint',''))"    "$NODE_CFG")
+    uuid=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+print(x.get('uuid','') or d.get('reality_uuid',''))" "$NODE_CFG")
+    enc=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+print(x.get('encryption','') or d.get('reality_encryption','') or '')" "$NODE_CFG")
+    pub_key=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+print(x.get('public_key','') or d.get('reality_public_key',''))" "$NODE_CFG")
+    short_id=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+print(x.get('short_id','') or d.get('reality_short_id',''))" "$NODE_CFG")
+    server_name=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+names=x.get('server_names') or d.get('reality_server_names')
+print((names[0] if names else None) or x.get('server_name','') or d.get('reality_server_name','www.samsung.com'))" "$NODE_CFG")
+    backend=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+if ch and ch[0].get('protocol','')=='vless-reality':
+    c0=ch[0]; print('{}:{}'.format(c0.get('host',''),c0.get('port','')))
+else:
+    print(d.get('backend_endpoint',''))" "$NODE_CFG")
 
     if [[ -z "$uuid" || -z "$pub_key" || -z "$backend" ]]; then
         warn "node-config.json missing required fields — skipping xray template refresh"
