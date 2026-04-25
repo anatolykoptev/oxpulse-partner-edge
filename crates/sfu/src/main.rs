@@ -49,32 +49,29 @@ async fn main() -> anyhow::Result<()> {
     let metrics_handle = spawn_metrics_server(metrics_addr, metrics.clone())?;
 
     // Relay API -- JWT-authenticated POST /relay/connect for cascade relay setup.
-    let relay_secret_str = std::env::var("RELAY_JWT_SECRET").map_err(|_| {
-        anyhow::anyhow!(
-            "RELAY_JWT_SECRET environment variable is required — see README.md for setup instructions"
-        )
-    })?;
-    if relay_secret_str == "change-me-in-production" {
-        anyhow::bail!(
-            "RELAY_JWT_SECRET is the documented placeholder value — set a random secret of at least 32 bytes. \
-             Generate one with: openssl rand -hex 32"
-        );
-    }
-    if relay_secret_str.len() < 32 {
-        anyhow::bail!(
-            "RELAY_JWT_SECRET is too short ({} bytes) — minimum 32 bytes required",
-            relay_secret_str.len()
-        );
-    }
-    let relay_secret = Arc::<[u8]>::from(relay_secret_str.into_bytes());
+    // RELAY_JWT_SECRET is optional: if absent, the relay API is disabled and the
+    // SFU operates in standalone mode (no cascade relay). Set it to enable relay.
+    let relay_secret_opt = std::env::var("RELAY_JWT_SECRET").ok();
+    let relay_enabled = match &relay_secret_opt {
+        None => {
+            tracing::info!("RELAY_JWT_SECRET not set — relay API disabled (standalone mode)");
+            false
+        }
+        Some(s) if s == "change-me-in-production" => {
+            anyhow::bail!(
+                "RELAY_JWT_SECRET is the documented placeholder value — set a random secret of at least 32 bytes. \
+                 Generate one with: openssl rand -hex 32"
+            );
+        }
+        Some(s) if s.len() < 32 => {
+            anyhow::bail!(
+                "RELAY_JWT_SECRET is too short ({} bytes) — minimum 32 bytes required",
+                s.len()
+            );
+        }
+        Some(_) => true,
+    };
 
-    let relay_addr = format!("{}:{}", config.bind_address, config.relay_api_port);
-    let relay_listener = tokio::net::TcpListener::bind(&relay_addr)
-        .await
-        .with_context(|| format!("bind relay API on {relay_addr}"))?;
-    let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<RelayTask>(16);
-    let seen_jtis: SeenJtis =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     // Ed25519 public key for verifying relay JWTs (preferred over HS256).
     // Clone before spawn_relay_api consumes it — serve() needs it too.
     let relay_signing_pubkey = config
@@ -82,14 +79,30 @@ async fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|s| Arc::new(s.clone()));
 
-    let relay_handle = spawn_relay_api(
-        relay_listener,
-        relay_secret,
-        relay_signing_pubkey.clone(),
-        relay_tx,
-        seen_jtis,
-    )?;
-    tracing::info!(addr = %relay_addr, "relay API listening");
+    let (mut relay_rx, relay_handle) = if relay_enabled {
+        let relay_secret = Arc::<[u8]>::from(relay_secret_opt.unwrap().into_bytes());
+        let relay_addr = format!("{}:{}", config.bind_address, config.relay_api_port);
+        let relay_listener = tokio::net::TcpListener::bind(&relay_addr)
+            .await
+            .with_context(|| format!("bind relay API on {relay_addr}"))?;
+        let (relay_tx, relay_rx_inner) = tokio::sync::mpsc::channel::<RelayTask>(16);
+        let seen_jtis: SeenJtis =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let handle = spawn_relay_api(
+            relay_listener,
+            relay_secret,
+            relay_signing_pubkey.clone(),
+            relay_tx,
+            seen_jtis,
+        )?;
+        tracing::info!(addr = %relay_addr, "relay API listening");
+        (relay_rx_inner, Some(handle))
+    } else {
+        // Create a permanently-closed channel so the drain task exits immediately.
+        let (relay_tx, relay_rx_inner) = tokio::sync::mpsc::channel::<RelayTask>(1);
+        drop(relay_tx);
+        (relay_rx_inner, None)
+    };
 
     // Bind the UDP socket early so relay tasks can use the real local address.
     // Previously run_udp_loop() bound internally; now we bind here and pass the socket.
@@ -173,7 +186,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Stop the metrics server and relay API server.
     metrics_handle.abort();
-    relay_handle.abort();
+    if let Some(h) = relay_handle {
+        h.abort();
+    }
 
     result
 }
