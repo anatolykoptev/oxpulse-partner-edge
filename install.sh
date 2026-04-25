@@ -570,16 +570,35 @@ if [[ $DRY_RUN -eq 0 ]]; then
 			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
 		fi
 	done
+
+	# SNI rotation script + timer.
+	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-partner-edge-sni-rotate.sh" ]]; then
+		install -m 0755 "$src_dir/oxpulse-partner-edge-sni-rotate.sh" \
+			"$PREFIX_SBIN/oxpulse-partner-edge-sni-rotate"
+	else
+		curl -fsSL "$REPO_RAW/oxpulse-partner-edge-sni-rotate.sh" \
+			-o "$PREFIX_SBIN/oxpulse-partner-edge-sni-rotate"
+		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-sni-rotate"
+	fi
+	for unit in oxpulse-partner-edge-sni-rotate.service oxpulse-partner-edge-sni-rotate.timer; do
+		if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
+			install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
+		else
+			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+		fi
+	done
 	systemctl daemon-reload
 	if [ "$BAKE_MODE" = "0" ]; then
 		systemctl enable --now oxpulse-partner-edge.service
 		systemctl enable --now oxpulse-partner-cert-watch.path
 		systemctl enable --now oxpulse-partner-edge-refresh.timer
+		systemctl enable --now oxpulse-partner-edge-sni-rotate.timer
 	else
 		# Bake mode: enable hydrate so it fires on first boot after snapshot→clone.
 		# Do NOT start it now — secrets aren't present yet.
 		systemctl enable oxpulse-partner-edge-hydrate.service
 		systemctl enable oxpulse-partner-edge-refresh.timer
+		systemctl enable oxpulse-partner-edge-sni-rotate.timer
 		log "  [bake] units installed, daemon-reloaded; hydrate + refresh enabled for first boot"
 	fi
 else
