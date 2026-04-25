@@ -56,6 +56,17 @@ impl Registry {
                                     self.detector.record_level(origin.0, level, now_ms);
                                 }
                             }
+                            // Feed packet arrival timing to GoogCC v2 trendline estimator.
+                            // Only video — audio clocks are unrelated (48kHz vs 90kHz).
+                            // loss_fraction not yet available (TWCC not wired); 0.0 is safe.
+                            if data.params.spec().codec.is_video() {
+                                let arrival_ms = now
+                                    .saturating_duration_since(self.detector_epoch)
+                                    .as_millis() as f64;
+                                // data.time.numer() is the raw 90kHz RTP timestamp.
+                                let send_ms = data.time.numer() as f64 / 90.0;
+                                self.googcc.on_receive(arrival_ms, send_ms, 0.0);
+                            }
                         }
                         self.to_propagate.push_back(other);
                     }

@@ -46,6 +46,8 @@ pub struct Registry {
     pub(super) metrics: Arc<SfuMetrics>,
     pub(super) bandwidth: BandwidthEstimator,
     pub(super) pacer: Pacer,
+    /// GoogCC v2 estimator — trendline delay + AIMD (additive alongside kit BWE).
+    pub(super) googcc: crate::bwe::estimator::GoogCcEstimator,
     /// Shared secret for relay_source roomToken verification. Copied into each
     /// client at insert() time so DC messages can be verified in-place.
     pub(super) relay_auth_secret: Option<Arc<[u8]>>,
@@ -89,6 +91,7 @@ impl Registry {
             metrics,
             bandwidth: BandwidthEstimator::new(),
             pacer: Pacer::new(),
+            googcc: crate::bwe::estimator::GoogCcEstimator::new(),
             relay_auth_secret,
             relay_signing_pubkey,
         }
