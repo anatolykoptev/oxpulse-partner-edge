@@ -79,3 +79,7 @@ required-features = []
 [[test]]
 name = "fanout_relay"
 required-features = ["test-utils"]
+
+[[test]]
+name = "relay_media_e2e"
+required-features = ["test-utils"]
