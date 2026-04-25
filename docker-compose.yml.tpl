@@ -104,6 +104,8 @@ services:
       SFU_UDP_PORT: "{{SFU_UDP_PORT}}"
       SFU_METRICS_PORT: "{{SFU_METRICS_PORT}}"
       RUST_LOG: "info"
+      RELAY_JWT_SECRET: "{{RELAY_JWT_SECRET}}"
+      SFU_RELAY_API_PORT: "8912"
       PARTNER_ID: "{{PARTNER_ID}}"
       # Phase 2: Ed25519 public key for asymmetric relay JWT verification.
       # Fetched from /api/partner/keys at install time; refreshed daily by

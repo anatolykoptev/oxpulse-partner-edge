@@ -128,6 +128,11 @@ REALITY_PUBLIC_KEY=$(jq_get reality_public_key)
 REALITY_SHORT_ID=$(jq_get reality_short_id)
 REALITY_SERVER_NAME=$(jq_get reality_server_name)
 REALITY_ENCRYPTION=$(jq_get reality_encryption)
+RELAY_JWT_SECRET=$(jq_get relay_jwt_secret)
+# If not provided by backend, generate a local secret.
+# The same secret must be added to the operator's signaling server RELAY_JWT_SECRET
+# env var and SFU_EDGES relay_api_url for cascade relay to work.
+[[ -z "$RELAY_JWT_SECRET" ]] && RELAY_JWT_SECRET=$(openssl rand -hex 32)
 
 [[ -n "$NODE_ID" ]]             || die "node_id missing from registration response"
 [[ -n "$BACKEND_ENDPOINT" ]]    || die "backend_endpoint missing from registration response"
@@ -194,6 +199,7 @@ render() {
         [EXTERNAL_IP_LINE]="${EXTERNAL_IP_LINE}"
         [TURNS_SUBDOMAIN]="${TURNS_SUBDOMAIN}"
         [IMAGE_VERSION]="${IMAGE_VERSION}"
+        [RELAY_JWT_SECRET]="${RELAY_JWT_SECRET}"
     )
     for key in "${!_vars[@]}"; do
         val="${_vars[$key]}"

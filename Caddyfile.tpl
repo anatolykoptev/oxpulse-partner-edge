@@ -74,6 +74,13 @@
     # SPA contract. cover.html is still shipped for backwards-compat
     # with /etc/oxpulse-partner-edge/cover bind mount but unreachable.
 
+
+    # Relay API — JWT-authenticated cascade relay endpoint.
+    # Called by the signaling server for multi-region room bridging.
+    # Routes directly to SFU relay port (not through tunnel).
+    handle /relay/* {
+        reverse_proxy host.docker.internal:8912
+    }
     # Every GET / just serves the SPA.
     handle {
         # Cache SvelteKit hashed assets for a year (immutable by filename hash).
