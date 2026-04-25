@@ -39,6 +39,7 @@ const MAX_SLEEP: Duration = Duration::from_millis(100);
 pub async fn run_udp_loop<F>(
     config: SfuConfig,
     metrics: Arc<SfuMetrics>,
+    relay_rx: tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>,
     shutdown: F,
 ) -> anyhow::Result<()>
 where
@@ -55,6 +56,7 @@ where
         metrics,
         relay_auth_secret,
         relay_signing_pubkey,
+        relay_rx,
         shutdown,
     )
     .await
@@ -79,12 +81,15 @@ pub async fn serve<F>(
     metrics: Arc<SfuMetrics>,
     relay_auth_secret: Option<Arc<[u8]>>,
     relay_signing_pubkey: Option<Arc<String>>,
+    mut relay_rx: tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>,
     shutdown: F,
 ) -> anyhow::Result<()>
 where
     F: Future<Output = ()>,
 {
     let local = socket.local_addr().context("failed to read local_addr")?;
+    // Clone metrics before moving into Registry so relay injection can use it too.
+    let metrics_ref = metrics.clone();
     let mut registry = Registry::with_relay_auth(metrics, relay_auth_secret, relay_signing_pubkey);
     let mut buf = vec![0u8; RECV_BUFFER_BYTES];
     // M1.4: ASO tick drives dominant-speaker election. Delay-on-miss so
@@ -136,6 +141,17 @@ where
                     }
                 }
             }
+            maybe_relay = relay_rx.recv() => {
+                if let Some(pending) = maybe_relay {
+                    let room_id = pending.room_id.clone();
+                    let client = crate::client::Client::new_outbound_relay(
+                        pending,
+                        metrics_ref.clone(),
+                    );
+                    registry.insert(client);
+                    tracing::info!(%room_id, "cascade relay client injected into registry — ICE driven by main UDP loop");
+                }
+            }
         }
     }
 }
@@ -181,10 +197,75 @@ mod tests {
         let socket = bind(&cfg).await.expect("bind");
         let metrics = Arc::new(SfuMetrics::default());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let handle = tokio::spawn(serve(socket, metrics, None, None, async {
+        let (_, relay_rx) = tokio::sync::mpsc::channel(1);
+        let handle = tokio::spawn(serve(socket, metrics, None, None, relay_rx, async {
             let _ = rx.await;
         }));
         tx.send(()).unwrap();
         handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn serve_injects_relay_client_from_channel() {
+        use crate::relay::client::PendingRelay;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        let cfg = SfuConfig {
+            udp_port: 0,
+            bind_address: "127.0.0.1".to_string(),
+            ..SfuConfig::default()
+        };
+        let socket = bind(&cfg).await.unwrap();
+        let metrics = Arc::new(crate::metrics::SfuMetrics::default());
+        let (relay_tx, relay_rx) = mpsc::channel::<PendingRelay>(4);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Build a PendingRelay with a real ChannelId
+        let mut rtc = str0m::Rtc::new(std::time::Instant::now());
+        let dc_id = rtc
+            .direct_api()
+            .create_data_channel(str0m::channel::ChannelConfig {
+                label: "relay-inject-test".to_string(),
+                ordered: true,
+                reliability: str0m::channel::Reliability::Reliable,
+                negotiated: Some(5),
+                protocol: String::new(),
+            });
+        relay_tx
+            .send(PendingRelay {
+                rtc,
+                room_id: "inject-test".to_string(),
+                upstream_url: "wss://127.0.0.1:9999/ws/sfu/inject-test".to_string(),
+                upstream_room_token: "tok".to_string(),
+                dc_id,
+            })
+            .await
+            .unwrap();
+        drop(relay_tx);
+
+        let metrics_clone = metrics.clone();
+        let handle = tokio::spawn(serve(
+            socket,
+            metrics_clone,
+            None,
+            None,
+            relay_rx,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        // Give serve() time to drain the relay_rx channel
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = shutdown_tx.send(());
+        handle.await.unwrap().unwrap();
+
+        // The relay client was inserted — active_participants should be 1
+        assert_eq!(
+            metrics.active_participants.get(),
+            1,
+            "relay client must be inserted into registry via relay_rx channel"
+        );
     }
 }
