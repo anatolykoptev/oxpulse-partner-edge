@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let seen_jtis: SeenJtis =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     // Ed25519 public key for verifying relay JWTs (preferred over HS256).
+    // Clone before spawn_relay_api consumes it — serve() needs it too.
     let relay_signing_pubkey = config
         .sfu_signing_public_key
         .as_ref()
@@ -84,29 +85,59 @@ async fn main() -> anyhow::Result<()> {
     let relay_handle = spawn_relay_api(
         relay_listener,
         relay_secret,
-        relay_signing_pubkey,
+        relay_signing_pubkey.clone(),
         relay_tx,
         seen_jtis,
     )?;
     tracing::info!(addr = %relay_addr, "relay API listening");
 
-    // Drain relay task channel — spawn a WebRTC relay client for each task.
+    // Bind the UDP socket early so relay tasks can use the real local address.
+    // Previously run_udp_loop() bound internally; now we bind here and pass the socket.
+    let socket = udp_loop::bind(&config).await?;
+    let local_addr = socket.local_addr().context("get UDP local_addr")?;
+    tracing::info!(%local_addr, "SFU UDP socket bound");
+
+    // HMAC secret for authenticating relay-injected clients inside the Registry.
+    let relay_auth_secret = config
+        .relay_auth_secret
+        .clone()
+        .map(|v| Arc::from(v.as_slice()));
+
+    // Channel for injecting pre-connected relay Rtc instances into the Registry.
+    // The relay drain task (below) sends PendingRelay here after SDP exchange.
+    // serve() drains this in its select! loop and calls registry.insert().
+    let (relay_inject_tx, relay_inject_rx) =
+        tokio::sync::mpsc::channel::<oxpulse_sfu::relay::client::PendingRelay>(32);
+
+    // Drain relay task channel — spawn a WebRTC relay client for each accepted task.
+    // Each spawned task does WS connect + SDP offer/answer then sends PendingRelay
+    // to relay_inject_tx so the main UDP loop registers it in the Registry.
+    let relay_inject_tx_clone = relay_inject_tx.clone();
     tokio::spawn(async move {
         while let Some(task) = relay_rx.recv().await {
-            let url = task.upstream_url.clone();
+            let url   = task.upstream_url.clone();
             let token = task.upstream_room_token.clone();
-            let room_id = task.room_id.clone();
+            let room  = task.room_id.clone();
+            let tx    = relay_inject_tx_clone.clone();
             tokio::spawn(async move {
-                // local_udp_addr will come from SfuConfig in a follow-up task.
-                // 0.0.0.0:0 is a placeholder; ICE will not complete until this
-                // is wired to the actual public UDP port.
-                let local_addr: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
-                if let Err(e) = connect_relay(&url, &token, local_addr).await {
-                    tracing::warn!(error = %e, %room_id, "relay connection failed");
+                match connect_relay(&url, &token, local_addr, room.clone()).await {
+                    Ok(pending) => {
+                        if let Err(e) = tx.send(pending).await {
+                            tracing::warn!(
+                                error = %e, room_id = %room,
+                                "relay inject channel closed — relay Rtc dropped"
+                            );
+                        } else {
+                            tracing::info!(room_id = %room, "relay handshake complete, PendingRelay sent to registry");
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, room_id = %room, "relay connection failed"),
                 }
             });
         }
     });
+    // Drop the original sender so the channel closes when all relay tasks are done.
+    drop(relay_inject_tx);
 
     // Shutdown future: resolves on SIGINT or SIGTERM.
     let shutdown = async move {
@@ -127,7 +158,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Run the UDP loop — blocks until shutdown fires.
-    let result = udp_loop::run_udp_loop(config, metrics, shutdown).await;
+    // Pass relay_inject_rx so serve() can inject relay clients into the Registry.
+    let result = udp_loop::serve(
+        socket,
+        metrics,
+        relay_auth_secret,
+        relay_signing_pubkey,
+        relay_inject_rx,
+        shutdown,
+    ).await;
 
     // Stop the metrics server and relay API server.
     metrics_handle.abort();
