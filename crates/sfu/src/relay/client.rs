@@ -1,18 +1,33 @@
 //! Outbound WebRTC relay client — str0m as SDP offerer.
 //!
 //! Connects to an upstream edge SFU via WebSocket, performs the SDP offer/answer
-//! exchange, and once WebRTC is established sends a `relay_source` DataChannel
-//! message so the upstream knows this is a relay peer (not a normal browser).
+//! exchange, then hands the pre-ICE `Rtc` back to the caller as a `PendingRelay`.
+//! The main UDP loop (serve() in udp_loop.rs) drives ICE/DTLS/SRTP from that point,
+//! identically to browser WebRTC peers.
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
 use str0m::change::SdpAnswer;
 use str0m::media::{Direction, MediaKind};
-use str0m::{Candidate, Event, Input, Output, Rtc};
+use str0m::{Candidate, Rtc};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+
+/// A relay connection that completed SDP exchange but has not yet completed ICE.
+/// Pass to the Registry via the relay injection channel — the main UDP loop drives
+/// ICE/DTLS/SRTP alongside browser clients from that point on.
+#[derive(Debug)]
+pub struct PendingRelay {
+    pub rtc: str0m::Rtc,
+    pub room_id: String,
+    pub upstream_url: String,
+    pub upstream_room_token: String,
+    /// Pre-negotiated DC id for the relay_source announcement.
+    /// Written to upstream once Event::Connected fires in dispatch.rs.
+    pub dc_id: str0m::channel::ChannelId,
+}
 
 /// Serialise the relay-source DataChannel announcement message.
 ///
@@ -41,12 +56,10 @@ pub fn join_message() -> String {
 /// 3. Create str0m Rtc as offerer; produce SDP offer.
 /// 4. Send `{"type":"signal","payload":{"type":"offer","sdp":"..."}}` over WS.
 /// 5. Receive `{"type":"signal","payload":{"type":"answer","sdp":"..."}}`.
-/// 6. Apply answer; run ICE event loop until connected.
-/// 7. Send `relay_source` DataChannel message.
+/// 6. Apply answer; add local ICE candidate.
+/// 7. Return `PendingRelay` — the caller hands this to the main UDP loop
+///    which drives ICE/DTLS/SRTP from that point on.
 ///
-/// Returns when the relay connection is established (or errors out).
-/// Media forwarding (step 7 on-wire) is a follow-up task — the DC send here
-/// may not reach the upstream until the relay UDP path is integrated.
 /// Returns true if the upstream URL is from an allowed host.
 /// Defense-in-depth against SSRF even if a signed JWT somehow contains a bad URL.
 fn is_allowed_upstream_host(url: &str) -> bool {
@@ -72,7 +85,8 @@ pub async fn connect_relay(
     upstream_ws_url: &str,
     upstream_room_token: &str,
     local_udp_addr: SocketAddr,
-) -> anyhow::Result<()> {
+    room_id: String,
+) -> anyhow::Result<PendingRelay> {
     // Defense-in-depth: validate upstream host even though JWT is signed.
     if !is_allowed_upstream_host(upstream_ws_url) {
         anyhow::bail!(
@@ -159,79 +173,22 @@ pub async fn connect_relay(
         .context("apply SDP answer")?;
     tracing::debug!("relay: applied SDP answer");
 
-    // Add our local ICE candidate so str0m knows where to listen for STUN checks.
-    // "0.0.0.0:0" is a placeholder until the SFU's public address is threaded
-    // through from SfuConfig — will be replaced in a follow-up task.
+    // Add local ICE candidate so str0m knows where to listen for STUN checks.
     if let Ok(candidate) = Candidate::host(local_udp_addr, "udp") {
         rtc.add_local_candidate(candidate);
     }
 
-    // Run ICE/DTLS event loop until WebRTC connection is established (or timeout).
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if Instant::now() > deadline {
-            anyhow::bail!("relay: ICE connection timeout");
-        }
-
-        match rtc.poll_output().context("poll_output")? {
-            Output::Timeout(t) => {
-                let now = Instant::now();
-                if t > now {
-                    tokio::time::sleep(t - now).await;
-                }
-                rtc.handle_input(Input::Timeout(Instant::now()))
-                    .context("handle_input Timeout")?;
-            }
-            Output::Event(Event::Connected) => {
-                tracing::info!(upstream = %upstream_ws_url, "relay: WebRTC connected");
-                break;
-            }
-            Output::Event(Event::IceConnectionStateChange(s)) => {
-                tracing::debug!(state = ?s, "relay: ICE state change");
-            }
-            Output::Transmit(t) => {
-                // ICE/DTLS packets — full UDP forwarding is part of the media
-                // integration task. Logged here as a stub.
-                tracing::trace!(
-                    dest = ?t.destination,
-                    len = t.contents.len(),
-                    "relay: ICE transmit (stub — UDP not wired yet)"
-                );
-            }
-            _ => {}
-        }
-
-        // Process any incoming WS messages (ICE candidates, keepalives, etc.).
-        tokio::select! {
-            msg = ws.next() => {
-                if let Some(Ok(Message::Text(text))) = msg {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text.as_str()) {
-                        if v["type"] == "signal" {
-                            if let Some(candidate_str) = v["payload"]["candidate"].as_str() {
-                                if let Ok(candidate) = Candidate::from_sdp_string(candidate_str) {
-                                    rtc.add_remote_candidate(candidate);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
-        }
-    }
-
-    // 7. Send relay_source message on the pre-negotiated DC (id 5).
-    //    Channel becomes available after DTLS + SCTP handshake completes.
-    if let Some(mut ch) = rtc.channel(dc_id) {
-        let msg = relay_source_message(upstream_ws_url, upstream_room_token);
-        ch.write(false, msg.as_bytes())
-            .context("write relay_source DC message")?;
-        tracing::info!("relay: sent relay_source DC message");
-    } else {
-        tracing::warn!("relay: DC id {dc_id:?} not ready — relay_source deferred");
-    }
-
-    Ok(())
+    // Return the pre-ICE Rtc to the caller.
+    // The main UDP loop (serve() in udp_loop.rs) drives ICE/DTLS/SRTP
+    // for this relay client identically to browser WebRTC peers.
+    tracing::info!(upstream = %upstream_ws_url, "relay: SDP exchange complete, handing Rtc to registry");
+    Ok(PendingRelay {
+        rtc,
+        room_id,
+        upstream_url: upstream_ws_url.to_string(),
+        upstream_room_token: upstream_room_token.to_string(),
+        dc_id,
+    })
 }
 
 #[cfg(test)]
@@ -276,5 +233,35 @@ mod tests {
         assert!(!is_allowed_upstream_host("http://localhost/not-wss"));
         assert!(!is_allowed_upstream_host("wss://evil-oxpulse.chat/bypass"));
         assert!(!is_allowed_upstream_host("wss://notoxpulse.chat/bypass"));
+    }
+
+    #[test]
+    fn pending_relay_fields_are_accessible() {
+        let mut rtc = str0m::Rtc::new(std::time::Instant::now());
+        let dc_id = rtc
+            .direct_api()
+            .create_data_channel(str0m::channel::ChannelConfig {
+                label: "test".to_string(),
+                ordered: true,
+                reliability: str0m::channel::Reliability::Reliable,
+                negotiated: Some(5),
+                protocol: String::new(),
+            });
+        let p = PendingRelay {
+            rtc,
+            room_id: "room-1".to_string(),
+            upstream_url: "wss://eu.oxpulse.chat/ws/sfu/room-1".to_string(),
+            upstream_room_token: "tok".to_string(),
+            dc_id,
+        };
+        assert_eq!(p.room_id, "room-1");
+        assert_eq!(p.upstream_url, "wss://eu.oxpulse.chat/ws/sfu/room-1");
+    }
+
+    #[test]
+    fn is_allowed_upstream_host_still_works() {
+        assert!(is_allowed_upstream_host("wss://edge.oxpulse.chat/ws/sfu/r"));
+        assert!(is_allowed_upstream_host("wss://127.0.0.1:9999/ws/sfu/r"));
+        assert!(!is_allowed_upstream_host("wss://attacker.com/ssrf"));
     }
 }
