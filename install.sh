@@ -273,6 +273,15 @@ RELAY_JWT_SECRET=$(json_get relay_jwt_secret "$tmp_cfg")
 # Backend-assigned TURNS subdomain (format api-<6-hex>). Falls back to "turns"
 # only if the backend did not return one (pre-v0.2 deployments).
 REGISTER_TURNS_SUBDOMAIN=$(json_get turns_subdomain "$tmp_cfg")
+# CH3/CH5 fallback channel vars — optional; empty if backend does not provision them.
+HYSTERIA2_SERVER=$(json_get hysteria2_server "$tmp_cfg")
+HYSTERIA2_PORT=$(json_get hysteria2_port "$tmp_cfg")
+HYSTERIA2_AUTH=$(json_get hysteria2_auth "$tmp_cfg")
+HYSTERIA2_OBFS=$(json_get hysteria2_obfs "$tmp_cfg")
+NAIVE_SERVER=$(json_get naive_server "$tmp_cfg")
+NAIVE_PORT=$(json_get naive_port "$tmp_cfg")
+NAIVE_USER=$(json_get naive_user "$tmp_cfg")
+NAIVE_PASS=$(json_get naive_pass "$tmp_cfg")
 # channels[] — future-proof bypass channel array.
 # Empty if server is older than v0.12 (no channels field yet).
 CHANNELS_JSON=$(json_get_raw channels "$tmp_cfg")
@@ -370,6 +379,10 @@ fetch_tpl docker-compose.yml.tpl "$stage/compose.tpl"
 fetch_tpl Caddyfile.tpl          "$stage/caddy.tpl"
 fetch_tpl xray-client.json.tpl   "$stage/xray.tpl"
 fetch_tpl coturn.conf.tpl        "$stage/coturn.tpl"
+# CH3/CH5 templates — fetched unconditionally so nodes have them ready.
+# Rendering is skipped unless HYSTERIA2_SERVER / NAIVE_SERVER are set.
+fetch_tpl hysteria2-client.yaml.tpl "$stage/hysteria2.tpl"
+fetch_tpl naive-client.json.tpl     "$stage/naive.tpl"
 
 # Static assets bundle. cover/ is bind-mounted by docker-compose (./cover:/srv/cover:ro)
 # and read by Caddy file_server when serving the DPI-probe decoy on GET /.
@@ -403,6 +416,16 @@ render() {
 		-e "s|{{SFU_METRICS_PORT}}|${SFU_METRICS_PORT}|g" \
 		-e "s|{{SFU_SIGNING_PUBLIC_KEY}}|${SFU_SIGNING_PUBLIC_KEY:-}|g" \
 		-e "s|{{RELAY_JWT_SECRET}}|${RELAY_JWT_SECRET}|g" \
+		-e "s|{{HYSTERIA2_SERVER}}|${HYSTERIA2_SERVER:-}|g" \
+		-e "s|{{HYSTERIA2_PORT}}|${HYSTERIA2_PORT:-51822}|g" \
+		-e "s|{{HYSTERIA2_AUTH}}|${HYSTERIA2_AUTH:-}|g" \
+		-e "s|{{HYSTERIA2_OBFS}}|${HYSTERIA2_OBFS:-}|g" \
+		-e "s|{{HYSTERIA2_SOCKS_PORT}}|${HYSTERIA2_SOCKS_PORT:-18891}|g" \
+		-e "s|{{NAIVE_SERVER}}|${NAIVE_SERVER:-}|g" \
+		-e "s|{{NAIVE_PORT}}|${NAIVE_PORT:-44433}|g" \
+		-e "s|{{NAIVE_USER}}|${NAIVE_USER:-}|g" \
+		-e "s|{{NAIVE_PASS}}|${NAIVE_PASS:-}|g" \
+		-e "s|{{NAIVE_SOCKS_PORT}}|${NAIVE_SOCKS_PORT:-18892}|g" \
 		"$src" > "$dst"
 }
 
@@ -427,6 +450,17 @@ render "$stage/xray.tpl"    "$xray_out"
 render "$stage/coturn.tpl"  "$coturn_out"
 mkdir -p "$cover_out_dir"
 install -m 0644 "$stage/cover/cover.html" "$cover_out_dir/cover.html"
+# Render CH3 / CH5 if the backend provided the required vars
+if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
+	render "$stage/hysteria2.tpl" "$PREFIX_ETC/hysteria2-client.yaml"
+	chmod 0600 "$PREFIX_ETC/hysteria2-client.yaml"
+	log "  hysteria2-client.yaml rendered"
+fi
+if [[ -n "${NAIVE_SERVER:-}" ]]; then
+	render "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"
+	chmod 0600 "$PREFIX_ETC/naive-client.json"
+	log "  naive-client.json rendered"
+fi
 rm -rf "$stage"
 
 # Secrets-containing files → 0600.
