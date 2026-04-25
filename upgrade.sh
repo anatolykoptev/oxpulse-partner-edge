@@ -131,7 +131,7 @@ cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
 cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
 
 # Rewrite image tags in place.
-sed -i -E "s|(ghcr\.io/anatolykoptev/oxpulse-partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
+sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
 	"$COMPOSE_FILE"
 sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 
