@@ -25,7 +25,10 @@ fn is_allowed_upstream(url: &str) -> bool {
     url.starts_with("wss://")
         && (url.contains(".oxpulse.chat/")
             || url.contains(".oxpulse.chat:")
-            // Allow local/dev for testing — remove in production hardening
+            // Apex domain without subdomain (signaling server)
+            || url.starts_with("wss://oxpulse.chat/")
+            || url.starts_with("wss://oxpulse.chat:")
+            // Allow local/dev for testing
             || url.starts_with("wss://localhost")
             || url.starts_with("wss://127."))
 }
