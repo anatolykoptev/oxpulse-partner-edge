@@ -133,6 +133,15 @@ RELAY_JWT_SECRET=$(jq_get relay_jwt_secret)
 # The same secret must be added to the operator's signaling server RELAY_JWT_SECRET
 # env var and SFU_EDGES relay_api_url for cascade relay to work.
 [[ -z "$RELAY_JWT_SECRET" ]] && RELAY_JWT_SECRET=$(openssl rand -hex 32)
+# CH3/CH5 fallback channel vars — optional; empty if backend does not provision them.
+HYSTERIA2_SERVER=$(jq_get hysteria2_server)
+HYSTERIA2_PORT=$(jq_get hysteria2_port)
+HYSTERIA2_AUTH=$(jq_get hysteria2_auth)
+HYSTERIA2_OBFS=$(jq_get hysteria2_obfs)
+NAIVE_SERVER=$(jq_get naive_server)
+NAIVE_PORT=$(jq_get naive_port)
+NAIVE_USER=$(jq_get naive_user)
+NAIVE_PASS=$(jq_get naive_pass)
 
 [[ -n "$NODE_ID" ]]             || die "node_id missing from registration response"
 [[ -n "$BACKEND_ENDPOINT" ]]    || die "backend_endpoint missing from registration response"
@@ -200,6 +209,16 @@ render() {
         [TURNS_SUBDOMAIN]="${TURNS_SUBDOMAIN}"
         [IMAGE_VERSION]="${IMAGE_VERSION}"
         [RELAY_JWT_SECRET]="${RELAY_JWT_SECRET}"
+        [HYSTERIA2_SERVER]="${HYSTERIA2_SERVER:-}"
+        [HYSTERIA2_PORT]="${HYSTERIA2_PORT:-51822}"
+        [HYSTERIA2_AUTH]="${HYSTERIA2_AUTH:-}"
+        [HYSTERIA2_OBFS]="${HYSTERIA2_OBFS:-}"
+        [HYSTERIA2_SOCKS_PORT]="18891"
+        [NAIVE_SERVER]="${NAIVE_SERVER:-}"
+        [NAIVE_PORT]="${NAIVE_PORT:-44433}"
+        [NAIVE_USER]="${NAIVE_USER:-}"
+        [NAIVE_PASS]="${NAIVE_PASS:-}"
+        [NAIVE_SOCKS_PORT]="18892"
     )
     for key in "${!_vars[@]}"; do
         val="${_vars[$key]}"
@@ -214,6 +233,15 @@ render "$(tpl_file docker-compose.yml.tpl)" "$PREFIX_ETC/docker-compose.yml"
 render "$(tpl_file Caddyfile.tpl)"          "$PREFIX_ETC/Caddyfile"
 render "$(tpl_file xray-client.json.tpl)"   "$PREFIX_ETC/xray-client.json"
 render "$(tpl_file coturn.conf.tpl)"        "$PREFIX_ETC/coturn.conf"
+# Render CH3 / CH5 if the backend provided the required vars.
+if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
+    render "$(tpl_file hysteria2-client.yaml.tpl)" "$PREFIX_ETC/hysteria2-client.yaml"
+    log "  hysteria2-client.yaml rendered"
+fi
+if [[ -n "${NAIVE_SERVER:-}" ]]; then
+    render "$(tpl_file naive-client.json.tpl)" "$PREFIX_ETC/naive-client.json"
+    log "  naive-client.json rendered"
+fi
 
 # Static assets — Caddy DPI-probe cover served from ./cover bind-mount.
 # Missing file = silent 404 on partner root URL (regression fix 2026-04-20).

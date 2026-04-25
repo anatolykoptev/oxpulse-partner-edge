@@ -118,6 +118,28 @@ services:
       retries: 3
       start_period: 10s
 
+  # ── CH3 Hysteria2 client (fallback) ─────────────────────────────────────
+  # Uncomment and set HYSTERIA2_* env vars when CH3 is provisioned by backend.
+  # hysteria2-client:
+  #   image: ghcr.io/apernet/hysteria:app-v2.8.1
+  #   container_name: oxpulse-partner-hysteria2
+  #   restart: unless-stopped
+  #   network_mode: host
+  #   volumes:
+  #     - ./hysteria2-client.yaml:/etc/hysteria/config.yaml:ro
+  #   command: ["client", "--config", "/etc/hysteria/config.yaml"]
+
+  # ── CH5 NaiveProxy client (fallback) ────────────────────────────────────
+  # Uncomment and set NAIVE_* env vars when CH5 is provisioned by backend.
+  # naive-client:
+  #   image: ghcr.io/klzgrad/naiveproxy:v130.0.6723.58-1
+  #   container_name: oxpulse-partner-naive
+  #   restart: unless-stopped
+  #   network_mode: host
+  #   volumes:
+  #     - ./naive-client.json:/config.json:ro
+  #   command: ["/config.json"]
+
 volumes:
   caddy-data:
   caddy-config:
