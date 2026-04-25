@@ -4,14 +4,14 @@
 [![Latest release](https://img.shields.io/github/v/release/anatolykoptev/oxpulse-partner-edge?label=release)](https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
-Production-ready co-brand mirror node for the OxPulse network. One command installs TLS termination, a VLESS+Reality bypass tunnel, TURN/STUN relay, and an encrypted-group-call SFU on any VPS.
+Production-ready co-brand mirror node for the OxPulse network. One command installs TLS termination, an encrypted bypass tunnel, TURN/STUN relay, and a WebRTC SFU on any VPS.
 
 ## What's inside
 
 | Container | Purpose |
 |-----------|---------|
 | **caddy** | TLS (ACME/Let's Encrypt), SNI mux, reverse proxy for `/api/*` + `/ws/*` |
-| **xray-client** | VLESS + Reality + XHTTP outbound tunnel (bypasses DPI/censorship) |
+| **xray-client** | Encrypted outbound tunnel with traffic obfuscation (VLESS + Reality + XHTTP) |
 | **coturn** | TURN/STUN relay — UDP 3478, TURNS on 443 via Caddy SNI mux |
 | **sfu** | WebRTC Selective Forwarding Unit for encrypted group calls |
 
@@ -38,68 +38,117 @@ curl -fsSL \
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--domain=<fqdn>` | ✓ | Partner edge domain (must already resolve) |
-| `--partner-id=<id>` | ✓ | Short identifier matching backend config |
-| `--token=<ptkn_...>` | ✓* | Single-use registration token |
-| `--manual-config=<path>` | ✓* | Local JSON config (alternative to `--token`) |
-| `--image-version=<tag>` | | Pin to a specific image tag |
-| `--dry-run` | | Preview only — no docker/systemd changes |
+| `--domain=<fqdn>` | ✓ | Partner edge domain (must already resolve to this server) |
+| `--partner-id=<id>` | ✓ | Short identifier matching your backend config |
+| `--token=<ptkn_...>` | ✓* | Single-use registration token from the backend |
+| `--manual-config=<path>` | ✓* | Local JSON config file (alternative to `--token`) |
+| `--image-version=<tag>` | | Pin containers to a specific image tag (default: `latest`) |
+| `--dry-run` | | Render configs and print plan — no docker/systemd changes |
+| `--bake` | | Bake phase for snapshot workflows: install packages + images, no secrets, no start |
 
 \* Either `--token` or `--manual-config` is required.
 </details>
 
-## SFU configuration
+## Day-2 operations
 
-The `sfu` container is configured via environment variables in
-`/etc/oxpulse-partner-edge/docker-compose.yml`.
+### Upgrade
+
+```bash
+sudo oxpulse-partner-edge-upgrade                  # pull :latest images
+sudo oxpulse-partner-edge-upgrade v0.9.0           # pin to a specific tag
+sudo oxpulse-partner-edge-upgrade --check          # report whether an upgrade is available
+sudo oxpulse-partner-edge-upgrade --rollback       # revert to previous image tag
+sudo oxpulse-partner-edge-upgrade --templates-only # refresh tunnel config from upstream template only, no image pull
+```
+
+`--templates-only` is useful for applying operator-side configuration changes (cipher updates, transport parameters, SNI pool expansions) to all nodes without a full image upgrade.
+
+### Health check
+
+```bash
+sudo oxpulse-partner-edge-healthcheck          # full 12-point check (requires DNS)
+sudo oxpulse-partner-edge-healthcheck --local  # pre-DNS check (docker-network only)
+```
+
+### Logs
+
+```bash
+docker compose -f /etc/oxpulse-partner-edge/docker-compose.yml logs -f
+```
+
+## Automatic maintenance
+
+Once installed, three systemd timers run without intervention:
+
+| Timer | Schedule | Purpose |
+|-------|----------|---------|
+| `oxpulse-partner-edge-refresh.timer` | Daily | Fetches updated credentials from the backend; re-renders tunnel config if the operator has rotated keys or changed channel settings |
+| `oxpulse-partner-edge-sni-rotate.timer` | Daily (04:00–06:00 UTC, randomised) | Rotates the tunnel's server-name indicator from a pool provided by the backend; reduces long-lived traffic correlation |
+| `oxpulse-partner-cert-watch.path` | On cert change | Signals coturn to reload when Caddy renews the TURNS TLS certificate |
+
+Check timer status:
+```bash
+systemctl list-timers 'oxpulse-partner-*'
+```
+
+## State and secrets
+
+| Path | Contents |
+|------|---------|
+| `/etc/oxpulse-partner-edge/` | Rendered configs (docker-compose, Caddyfile, tunnel JSON, coturn) |
+| `/var/lib/oxpulse-partner-edge/install.env` | Installed partner ID, domain, image version |
+| `/var/lib/oxpulse-partner-edge/node-config.json` | Full node config from registration (credentials, channel list) |
+| `/var/lib/oxpulse-partner-edge/keys-version` | Last-seen key rotation version hash |
+| `/var/lib/oxpulse-partner-edge/channels-version` | Last-seen channel config version hash |
+| `/var/lib/oxpulse-partner-edge/sfu-keys.env` | Ed25519 public key for SFU relay JWT verification |
+| `/var/log/oxpulse-partner-edge-*.log` | Per-component maintenance logs |
+
+## SFU environment variables
+
+Configured via `SFU_*` entries in `/etc/oxpulse-partner-edge/sfu-extra.env` (persisted across upgrades).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SFU_UDP_PORT` | `3478` | WebRTC media port (DTLS/SRTP/STUN) |
-| `SFU_METRICS_PORT` | `9317` | Prometheus `/metrics` endpoint |
+| `SFU_UDP_PORT` | `7878` | WebRTC media port (DTLS/SRTP/STUN) |
+| `SFU_METRICS_PORT` | `8878` | Prometheus `/metrics` endpoint |
 | `SFU_RELAY_API_PORT` | `8912` | Cascade relay API (`POST /relay/connect`) |
 | `SFU_BIND_ADDRESS` | `0.0.0.0` | Bind interface |
-| `RELAY_JWT_SECRET` | — | HMAC-SHA256 secret shared with oxpulse-chat. **Required for cascade relay.** |
+| `SFU_SIGNING_PUBLIC_KEY` | (auto-fetched) | Ed25519 public key for relay JWT verification |
 | `RUST_LOG` | `info` | Log filter |
 
-## Verify
+## Snapshot scaling (multiple nodes from one image)
 
-```bash
-sudo oxpulse-partner-edge-healthcheck         # full 12-point check
-sudo oxpulse-partner-edge-healthcheck --local # pre-DNS (docker-network only)
-```
-
-## Upgrade / rollback
-
-```bash
-sudo oxpulse-partner-edge-upgrade             # pull :latest
-sudo oxpulse-partner-edge-upgrade v0.8.0      # pin to version
-sudo oxpulse-partner-edge-upgrade --rollback  # revert to previous
-```
-
-## Snapshot scaling (multiple nodes)
-
-1. Provision a master VM and run `sudo bash install.sh --bake`
-2. Snapshot the VM (before first boot hydration)
-3. Launch clones with `user_data` providing `OXPULSE_PARTNER_DOMAIN` and `OXPULSE_REGISTRATION_TOKEN`
-4. On first boot, `oxpulse-partner-edge-hydrate.service` registers the node and starts all services automatically
+1. Provision a master VM, run `sudo bash install.sh --bake`
+2. Snapshot the VM before its first hydration boot
+3. On each clone, supply `OXPULSE_PARTNER_DOMAIN` and `OXPULSE_REGISTRATION_TOKEN` via `user_data` or `/etc/oxpulse-partner-edge/hydrate.env`
+4. `oxpulse-partner-edge-hydrate.service` registers the clone and starts all services on first boot automatically
 
 ## Uninstall
 
 ```bash
-sudo systemctl disable --now oxpulse-partner-edge
+sudo systemctl disable --now \
+  oxpulse-partner-edge \
+  oxpulse-partner-edge-refresh.timer \
+  oxpulse-partner-edge-sni-rotate.timer \
+  oxpulse-partner-cert-watch.path
 sudo docker compose -f /etc/oxpulse-partner-edge/docker-compose.yml down -v
-sudo rm -rf /etc/oxpulse-partner-edge /var/lib/oxpulse-partner-edge \
-            /etc/systemd/system/oxpulse-partner-edge.service \
-            /usr/local/sbin/oxpulse-partner-edge-*
+sudo rm -rf \
+  /etc/oxpulse-partner-edge \
+  /var/lib/oxpulse-partner-edge \
+  /etc/systemd/system/oxpulse-partner-edge* \
+  /etc/systemd/system/oxpulse-partner-cert-watch* \
+  /usr/local/sbin/oxpulse-partner-edge-* \
+  /usr/local/sbin/channel-render-lib.sh
 sudo systemctl daemon-reload
 ```
 
 ## Security
 
-- Coturn runs in host-network mode and blocks SSRF into RFC1918/CGNAT/link-local ranges via `denied-peer-ip`.
+- Each partner node receives independent credentials — a single compromised node cannot affect others.
+- Coturn blocks SSRF into RFC 1918 / CGNAT / link-local ranges via `denied-peer-ip`.
 - Restrict `SFU_RELAY_API_PORT` (8912) to the OxPulse backend IP in your cloud firewall.
-- Each partner node has independent TURN credentials — one node compromise does not affect others.
+- The SFU verifies relay JWTs against an Ed25519 public key fetched from the backend (no shared secret needed).
+- Tunnel credentials and coturn secrets are stored `0600`; never appear in container environment or logs.
 
 ## Changelog
 
