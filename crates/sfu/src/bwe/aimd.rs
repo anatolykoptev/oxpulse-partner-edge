@@ -5,8 +5,8 @@
 
 const LOSS_LOW_THRESHOLD: f32 = 0.005; // 0.5% — increase
 const LOSS_HIGH_THRESHOLD: f32 = 0.02; // 2.0% — decrease
-const AI_FRACTION: f64 = 0.08;         // 8% additive increase per interval
-const MD_FACTOR: f64 = 0.85;           // multiplicative decrease
+const AI_FRACTION: f64 = 0.08; // 8% additive increase per interval
+const MD_FACTOR: f64 = 0.85; // multiplicative decrease
 
 #[derive(Debug, Clone)]
 pub struct AimdController {
@@ -32,16 +32,14 @@ impl AimdController {
             self.bitrate_bps = (self.bitrate_bps + increase.max(8_000)).min(self.max_bps);
         } else if loss_fraction > LOSS_HIGH_THRESHOLD {
             // Multiplicative decrease
-            self.bitrate_bps =
-                ((self.bitrate_bps as f64 * MD_FACTOR) as u64).max(self.min_bps);
+            self.bitrate_bps = ((self.bitrate_bps as f64 * MD_FACTOR) as u64).max(self.min_bps);
         }
         // Between thresholds: hold
         self.bitrate_bps
     }
 
     pub fn on_overuse(&mut self) -> u64 {
-        self.bitrate_bps =
-            ((self.bitrate_bps as f64 * MD_FACTOR) as u64).max(self.min_bps);
+        self.bitrate_bps = ((self.bitrate_bps as f64 * MD_FACTOR) as u64).max(self.min_bps);
         self.bitrate_bps
     }
 
