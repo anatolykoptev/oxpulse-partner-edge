@@ -81,8 +81,7 @@ fn relay_media_fans_out_to_local_peer() {
 
     // Relay client publishes a video track (media received from upstream SFU).
     let metrics = Arc::new(SfuMetrics::default());
-    let mut relay_client =
-        Client::new_outbound_relay(make_pending_relay("relay-dir-b"), metrics);
+    let mut relay_client = Client::new_outbound_relay(make_pending_relay("relay-dir-b"), metrics);
     relay_client.id = relay_id;
     let relay_track = seed_track_in(&mut relay_client, 2, MediaKind::Video);
 
