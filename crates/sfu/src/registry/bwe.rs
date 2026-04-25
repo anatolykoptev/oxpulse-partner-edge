@@ -47,6 +47,12 @@ impl Registry {
         &self.pacer
     }
 
+    /// Mutable access to the GoogCC v2 estimator. Called from the
+    /// MediaData path in poll_all to feed packet timing.
+    pub fn googcc_mut(&mut self) -> &mut crate::bwe::estimator::GoogCcEstimator {
+        &mut self.googcc
+    }
+
     /// Drop dead clients and update metrics + BWE + pacer state.
     /// Moved from [`super`] so the single code path touches every
     /// per-peer pool that needs eviction on disconnect.
@@ -133,6 +139,21 @@ impl Registry {
             );
             let prev_layer = client.desired_layer;
             let chosen = client.pacer_select_layer(&mut self.pacer, budget, available);
+            // GoogCC v2 conservative contribution: if GoogCC prefers a lower
+            // quality tier than the Pacer, use the lower one. Additive — never
+            // upgrades beyond what Pacer chose.
+            let chosen = match chosen {
+                Some(pacer_rid) => {
+                    let googcc_rid = self.googcc.preferred_rid();
+                    if rid_rank(googcc_rid) < rid_rank(pacer_rid) {
+                        client.set_desired_layer(googcc_rid);
+                        Some(googcc_rid)
+                    } else {
+                        Some(pacer_rid)
+                    }
+                }
+                None => None,
+            };
             let peer_label = (*client.id).to_string();
             if let Some(bps) = budget {
                 self.metrics
@@ -166,6 +187,18 @@ impl Registry {
 /// if you add a variant there, mirror it here so `reap_dead` scrubs
 /// the matching label series on disconnect.
 const PACER_RID_LABELS: &[&str] = &["q", "h", "f", "other"];
+
+/// Rank a simulcast `Rid` for conservative-merge comparisons.
+/// LOW = 0, MEDIUM = 1, HIGH = 2.  Mirrors `pacer::rank_of` (private).
+fn rid_rank(rid: Rid) -> u8 {
+    if rid == layer::HIGH {
+        2
+    } else if rid == layer::MEDIUM {
+        1
+    } else {
+        0
+    }
+}
 
 /// Map a simulcast `Rid` to its Prometheus label (`q` / `h` / `f`).
 fn rid_label_for(rid: Rid) -> &'static str {
