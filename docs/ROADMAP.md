@@ -14,9 +14,9 @@
 
 ---
 
-## ✅ Phase 1 — Security Hardening (shipped 2026-04-24)
+## ✅ Phase 1 — Security Hardening + BWE (shipped 2026-04-24/25)
 
-*Closed all CRITICAL/HIGH findings from internal security audit.*
+*Closed all CRITICAL/HIGH findings from internal security audit. Added GoogCC v2 bandwidth estimation.*
 
 | Finding | Fix |
 |---------|-----|
@@ -27,6 +27,18 @@
 | TURN TTL 24h | Reduced to 1h |
 | Homegrown HMAC/base64 JWT | Migrated to `jsonwebtoken` RFC 7519 |
 | Upstream allow-list in relay client | `wss://*.oxpulse.chat` only |
+| Apex domain missing from allow-list | Added `wss://oxpulse.chat/` (non-subdomain) |
+
+### GoogCC v2 BWE (shipped 2026-04-25)
+
+| Component | Implementation |
+|-----------|---------------|
+| Trendline delay detector | `crates/sfu/src/bwe/trendline.rs` — Welch regression, 20-packet window, OVERUSE_THRESHOLD=12.5 ms/s |
+| Loss-based AIMD | `crates/sfu/src/bwe/aimd.rs` — MD>2% loss, AI<0.5% loss |
+| GoogCcEstimator | `crates/sfu/src/bwe/estimator.rs` — combines trendline + AIMD, `preferred_rid()` |
+| Registry integration | `registry/mod.rs` — `googcc` field; conservative merge with Pacer in `update_pacer_layers()` |
+
+Probe controller and CongestionWindowPushback remain in Phase 2 backlog.
 
 ---
 
