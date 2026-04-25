@@ -74,6 +74,10 @@ pub struct Client {
     /// lines up. We push `{"type":"active_speaker","peerId":<u64>}` whenever
     /// the room-level `ActiveSpeakerChanged` fires.
     pub(crate) active_speaker_cid: str0m::channel::ChannelId,
+    /// For outbound relay clients: the DC message to send once Event::Connected fires.
+    /// Tuple: (dc_id, upstream_url, room_token). Cleared after send in dispatch.rs.
+    /// None for browser clients and inbound relay clients (they *receive* relay_source).
+    pub(crate) relay_source_pending: Option<(str0m::channel::ChannelId, String, String)>,
     /// Connection origin — [`oxpulse_sfu_kit::ClientOrigin::Local`] for
     /// direct browser peers; [`oxpulse_sfu_kit::ClientOrigin::RelayFromSfu`]
     /// for cascade relay nodes. Set via [`Client::set_origin`] after `insert()`
