@@ -98,6 +98,7 @@ if [[ -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" != "none" && \
         log "WARNING: channel-render-lib.sh not found at $_lib — skip re-render"
         unset _lib
     else
+        # shellcheck source=/dev/null
         source "$_lib"
         unset _lib
         if re_render_xray; then
