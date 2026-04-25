@@ -53,6 +53,36 @@ impl Client {
                 self.rtc.disconnect();
                 Propagated::Noop
             }
+            Event::Connected => {
+                tracing::info!(peer_id = *self.id, "WebRTC connected");
+                // For outbound relay clients: announce ourselves to the upstream SFU
+                // so it marks our connection as RelayFromSfu and excludes us from
+                // its speaker election. relay_source_pending is None for browser clients.
+                if let Some((dc_id, upstream_url, room_token)) =
+                    self.relay_source_pending.take()
+                {
+                    use crate::relay::client::relay_source_message;
+                    match self.rtc.channel(dc_id) {
+                        Some(mut ch) => {
+                            let msg = relay_source_message(&upstream_url, &room_token);
+                            if let Err(e) = ch.write(false, msg.as_bytes()) {
+                                tracing::warn!(error = %e, upstream = %upstream_url,
+                                    "relay: failed to write relay_source DC message");
+                            } else {
+                                tracing::info!(upstream = %upstream_url,
+                                    "relay: sent relay_source DC message to upstream");
+                            }
+                        }
+                        None => {
+                            // DC not open yet — SCTP negotiation can lag behind DTLS.
+                            // The upstream will still receive relay_source once the DC opens.
+                            tracing::warn!(upstream = %upstream_url,
+                                "relay: DC not open at Event::Connected — relay_source deferred");
+                        }
+                    }
+                }
+                Propagated::Noop
+            }
             Event::MediaAdded(m) => self.track_in_added(m.mid, m.kind),
             Event::MediaData(data) => self.track_in_media(data),
             Event::KeyframeRequest(req) => self.incoming_keyframe_req(req),
@@ -110,5 +140,49 @@ impl Client {
             self.active_rids.insert(rid);
         }
         Propagated::MediaData(self.id, data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::relay::client::PendingRelay;
+    use std::sync::Arc;
+
+    #[test]
+    fn relay_source_pending_cleared_on_connected() {
+        // Build an outbound relay client with relay_source_pending set
+        let mut rtc = str0m::Rtc::new(std::time::Instant::now());
+        let dc_id = rtc.direct_api().create_data_channel(str0m::channel::ChannelConfig {
+            label: "test-relay-src".to_string(),
+            ordered: true,
+            reliability: str0m::channel::Reliability::Reliable,
+            negotiated: Some(5),
+            protocol: String::new(),
+        });
+        let pending = PendingRelay {
+            rtc,
+            room_id: "r".to_string(),
+            upstream_url: "wss://eu.oxpulse.chat/ws/sfu/r".to_string(),
+            upstream_room_token: "tok".to_string(),
+            dc_id,
+        };
+        let mut client = Client::new_outbound_relay(
+            pending,
+            Arc::new(crate::metrics::SfuMetrics::default()),
+        );
+        assert!(
+            client.relay_source_pending.is_some(),
+            "must be set before Connected"
+        );
+
+        // Fire Event::Connected
+        client.handle_event(Event::Connected);
+
+        // relay_source_pending must be cleared regardless of whether DC was open
+        assert!(
+            client.relay_source_pending.is_none(),
+            "must be cleared after Connected"
+        );
     }
 }
