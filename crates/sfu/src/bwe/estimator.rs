@@ -7,7 +7,7 @@ use crate::bwe::aimd::AimdController;
 use crate::bwe::trendline::TrendlineDetector;
 
 // Bitrate tiers (must match Pacer floor constants)
-const H_LAYER_BPS: u64 = 400_000;   // 400 kbps — h (medium)
+const H_LAYER_BPS: u64 = 400_000; // 400 kbps — h (medium)
 const F_LAYER_BPS: u64 = 1_200_000; // 1.2 Mbps — f (full)
 
 #[derive(Debug)]
@@ -106,7 +106,10 @@ mod tests {
             let base = 20.0 * (31.0 + i as f64);
             est.on_receive(base + i as f64 * 50.0, base, 0.001);
         }
-        assert!(est.current_bps() < high_bps, "overuse should reduce bitrate");
+        assert!(
+            est.current_bps() < high_bps,
+            "overuse should reduce bitrate"
+        );
     }
 
     #[test]
