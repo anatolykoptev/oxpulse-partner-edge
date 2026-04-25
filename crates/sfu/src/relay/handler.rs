@@ -19,18 +19,81 @@ pub type SeenJtis = Arc<Mutex<HashSet<String>>>;
 /// When `None`, falls back to HS256 via `hs256_secret` (deprecated path).
 type AppState = (Arc<[u8]>, Option<Arc<String>>, Sender<RelayTask>, SeenJtis);
 
-/// Allow-list: upstream must be a wss:// URL on a trusted domain.
-/// Prevents SSRF even if JWT is somehow forged.
+/// Allow-list: upstream must be a wss:// URL on a trusted host.
+/// Prevents SSRF even if JWT is somehow forged or RELAY_JWT_SECRET leaks.
+///
+/// Extracts the hostname strictly (before first `/` or `:`) and matches
+/// against an allow-list. Rejects path-component spoofs like
+/// `wss://attacker.com/.oxpulse.chat/foo` that a naive `contains()`
+/// check would let through.
 fn is_allowed_upstream(url: &str) -> bool {
-    url.starts_with("wss://")
-        && (url.contains(".oxpulse.chat/")
-            || url.contains(".oxpulse.chat:")
-            // Apex domain without subdomain (signaling server)
-            || url.starts_with("wss://oxpulse.chat/")
-            || url.starts_with("wss://oxpulse.chat:")
-            // Allow local/dev for testing
-            || url.starts_with("wss://localhost")
-            || url.starts_with("wss://127."))
+    let Some(rest) = url.strip_prefix("wss://") else {
+        return false;
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    if host.is_empty() {
+        return false;
+    }
+    const ALLOWED: &[&str] = &[".oxpulse.chat", "localhost", "127.0.0.1", "::1"];
+    ALLOWED.iter().any(|&pattern| {
+        if let Some(suffix) = pattern.strip_prefix('.') {
+            // suffix-match `.oxpulse.chat` matches `oxpulse.chat` and `*.oxpulse.chat`
+            host == suffix || host.ends_with(pattern)
+        } else {
+            host == pattern
+        }
+    })
+}
+
+#[cfg(test)]
+mod allow_list_tests {
+    use super::is_allowed_upstream;
+
+    #[test]
+    fn accepts_apex_oxpulse_chat() {
+        assert!(is_allowed_upstream("wss://oxpulse.chat/ws/call/r"));
+        assert!(is_allowed_upstream("wss://oxpulse.chat:443/ws/call/r"));
+    }
+
+    #[test]
+    fn accepts_subdomain_oxpulse_chat() {
+        assert!(is_allowed_upstream("wss://edge.oxpulse.chat/ws/call/r"));
+        assert!(is_allowed_upstream("wss://eu.oxpulse.chat:9443/ws"));
+    }
+
+    #[test]
+    fn accepts_localhost_dev() {
+        assert!(is_allowed_upstream("wss://localhost/ws"));
+        assert!(is_allowed_upstream("wss://127.0.0.1:9443/ws"));
+    }
+
+    #[test]
+    fn rejects_path_component_spoof() {
+        // The bug fix: contains() would have returned true for these.
+        assert!(!is_allowed_upstream("wss://attacker.com/.oxpulse.chat/path"));
+        assert!(!is_allowed_upstream("wss://evil.com/?x=.oxpulse.chat/foo"));
+        assert!(!is_allowed_upstream("wss://evil.com:8080/.oxpulse.chat:443/x"));
+    }
+
+    #[test]
+    fn rejects_lookalike_domains() {
+        assert!(!is_allowed_upstream("wss://oxpulse.chat.attacker.com/x"));
+        assert!(!is_allowed_upstream("wss://notoxpulse.chat/x"));
+        assert!(!is_allowed_upstream("wss://attacker.com/x"));
+    }
+
+    #[test]
+    fn rejects_non_wss() {
+        assert!(!is_allowed_upstream("ws://oxpulse.chat/x"));
+        assert!(!is_allowed_upstream("http://oxpulse.chat/x"));
+        assert!(!is_allowed_upstream("https://oxpulse.chat/x"));
+    }
+
+    #[test]
+    fn rejects_empty_host() {
+        assert!(!is_allowed_upstream("wss:///path"));
+        assert!(!is_allowed_upstream("wss://"));
+    }
 }
 
 /// Spawn the relay API HTTP server on the given `listener`.
@@ -57,14 +120,20 @@ async fn relay_connect(
     State((secret, signing_public_key, task_tx, seen_jtis)): State<AppState>,
     Json(body): Json<RelayConnectRequest>,
 ) -> (StatusCode, Json<RelayConnectResponse>) {
-    // Prefer Ed25519 if public key is configured; fall back to HS256 shared secret.
-    // When EdDSA pubkey is present, try it first — if it fails (e.g. the sender
-    // is a signaling server using the HS256 path), fall back to HS256. This lets
-    // both EdDSA-capable and HS256-only senders interoperate during rollout.
+    // Prefer Ed25519 if public key is configured; fall back to HS256 shared secret
+    // ONLY when the EdDSA path returns InvalidSignature (i.e. the sender did not
+    // sign with EdDSA). This keeps both EdDSA-capable and HS256-only senders
+    // interoperable during rollout while preserving the strictness of the
+    // Expired/Malformed paths — an expired EdDSA token is rejected outright,
+    // not re-checked under HS256 (which could otherwise mask clock skew
+    // discrepancies between the two verifiers).
     let verify_result = if let Some(pubkey) = &signing_public_key {
         match RelayJwt::verify_ed25519(&body.relay_token, pubkey) {
             Ok(j) => Ok(j),
-            Err(_) => RelayJwt::verify(&body.relay_token, &secret),
+            Err(RelayJwtError::InvalidSignature) => {
+                RelayJwt::verify(&body.relay_token, &secret)
+            }
+            Err(e) => Err(e),
         }
     } else {
         RelayJwt::verify(&body.relay_token, &secret)
