@@ -245,16 +245,9 @@ mod tests {
         drop(relay_tx);
 
         let metrics_clone = metrics.clone();
-        let handle = tokio::spawn(serve(
-            socket,
-            metrics_clone,
-            None,
-            None,
-            relay_rx,
-            async {
-                let _ = shutdown_rx.await;
-            },
-        ));
+        let handle = tokio::spawn(serve(socket, metrics_clone, None, None, relay_rx, async {
+            let _ = shutdown_rx.await;
+        }));
 
         // Give serve() time to drain the relay_rx channel
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

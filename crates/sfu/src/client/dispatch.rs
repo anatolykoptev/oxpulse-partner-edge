@@ -58,9 +58,7 @@ impl Client {
                 // For outbound relay clients: announce ourselves to the upstream SFU
                 // so it marks our connection as RelayFromSfu and excludes us from
                 // its speaker election. relay_source_pending is None for browser clients.
-                if let Some((dc_id, upstream_url, room_token)) =
-                    self.relay_source_pending.take()
-                {
+                if let Some((dc_id, upstream_url, room_token)) = self.relay_source_pending.take() {
                     use crate::relay::client::relay_source_message;
                     match self.rtc.channel(dc_id) {
                         Some(mut ch) => {
@@ -153,13 +151,15 @@ mod tests {
     fn relay_source_pending_cleared_on_connected() {
         // Build an outbound relay client with relay_source_pending set
         let mut rtc = str0m::Rtc::new(std::time::Instant::now());
-        let dc_id = rtc.direct_api().create_data_channel(str0m::channel::ChannelConfig {
-            label: "test-relay-src".to_string(),
-            ordered: true,
-            reliability: str0m::channel::Reliability::Reliable,
-            negotiated: Some(5),
-            protocol: String::new(),
-        });
+        let dc_id = rtc
+            .direct_api()
+            .create_data_channel(str0m::channel::ChannelConfig {
+                label: "test-relay-src".to_string(),
+                ordered: true,
+                reliability: str0m::channel::Reliability::Reliable,
+                negotiated: Some(5),
+                protocol: String::new(),
+            });
         let pending = PendingRelay {
             rtc,
             room_id: "r".to_string(),
@@ -167,10 +167,8 @@ mod tests {
             upstream_room_token: "tok".to_string(),
             dc_id,
         };
-        let mut client = Client::new_outbound_relay(
-            pending,
-            Arc::new(crate::metrics::SfuMetrics::default()),
-        );
+        let mut client =
+            Client::new_outbound_relay(pending, Arc::new(crate::metrics::SfuMetrics::default()));
         assert!(
             client.relay_source_pending.is_some(),
             "must be set before Connected"

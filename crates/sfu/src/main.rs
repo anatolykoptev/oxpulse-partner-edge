@@ -115,10 +115,10 @@ async fn main() -> anyhow::Result<()> {
     let relay_inject_tx_clone = relay_inject_tx.clone();
     tokio::spawn(async move {
         while let Some(task) = relay_rx.recv().await {
-            let url   = task.upstream_url.clone();
+            let url = task.upstream_url.clone();
             let token = task.upstream_room_token.clone();
-            let room  = task.room_id.clone();
-            let tx    = relay_inject_tx_clone.clone();
+            let room = task.room_id.clone();
+            let tx = relay_inject_tx_clone.clone();
             tokio::spawn(async move {
                 match connect_relay(&url, &token, local_addr, room.clone()).await {
                     Ok(pending) => {
@@ -131,7 +131,9 @@ async fn main() -> anyhow::Result<()> {
                             tracing::info!(room_id = %room, "relay handshake complete, PendingRelay sent to registry");
                         }
                     }
-                    Err(e) => tracing::warn!(error = %e, room_id = %room, "relay connection failed"),
+                    Err(e) => {
+                        tracing::warn!(error = %e, room_id = %room, "relay connection failed")
+                    }
                 }
             });
         }
@@ -166,7 +168,8 @@ async fn main() -> anyhow::Result<()> {
         relay_signing_pubkey,
         relay_inject_rx,
         shutdown,
-    ).await;
+    )
+    .await;
 
     // Stop the metrics server and relay API server.
     metrics_handle.abort();

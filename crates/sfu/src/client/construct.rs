@@ -86,13 +86,15 @@ mod tests {
 
     fn make_pending() -> PendingRelay {
         let mut rtc = str0m::Rtc::new(std::time::Instant::now());
-        let dc_id = rtc.direct_api().create_data_channel(str0m::channel::ChannelConfig {
-            label: "test-relay".to_string(),
-            ordered: true,
-            reliability: str0m::channel::Reliability::Reliable,
-            negotiated: Some(5),
-            protocol: String::new(),
-        });
+        let dc_id = rtc
+            .direct_api()
+            .create_data_channel(str0m::channel::ChannelConfig {
+                label: "test-relay".to_string(),
+                ordered: true,
+                reliability: str0m::channel::Reliability::Reliable,
+                negotiated: Some(5),
+                protocol: String::new(),
+            });
         PendingRelay {
             rtc,
             room_id: "room-1".to_string(),
@@ -108,7 +110,10 @@ mod tests {
             make_pending(),
             Arc::new(crate::metrics::SfuMetrics::default()),
         );
-        assert!(client.is_relay(), "outbound relay client must have RelayFromSfu origin");
+        assert!(
+            client.is_relay(),
+            "outbound relay client must have RelayFromSfu origin"
+        );
     }
 
     #[test]

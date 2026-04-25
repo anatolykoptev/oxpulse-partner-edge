@@ -187,7 +187,10 @@ fn relay_client_excluded_from_speaker_detection_after_mark() {
 
     // DC handshake fires: registry promotes this client to relay origin and
     // removes it from the dominant-speaker detector.
-    registry.mark_relay_source(relay_id, "wss://eu.oxpulse.chat/ws/sfu/e2e-room".to_string());
+    registry.mark_relay_source(
+        relay_id,
+        "wss://eu.oxpulse.chat/ws/sfu/e2e-room".to_string(),
+    );
 
     // Verify the is_relay() flag changed.
     assert!(
@@ -212,7 +215,5 @@ fn relay_client_excluded_from_speaker_detection_after_mark() {
         "real peer must still appear in top speakers after relay exclusion; top={top_after:?}"
     );
 
-    println!(
-        "speaker detection: top_before={top_before:?} -> top_after={top_after:?}"
-    );
+    println!("speaker detection: top_before={top_before:?} -> top_after={top_after:?}");
 }
