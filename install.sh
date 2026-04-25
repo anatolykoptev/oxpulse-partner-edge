@@ -265,6 +265,11 @@ REALITY_SERVER_NAME=$(json_get reality_server_name "$tmp_cfg")
 # The server-side xray-reality requires matching encryption, otherwise the
 # tunnel completes the TLS handshake but silently drops payloads.
 REALITY_ENCRYPTION=$(json_get reality_encryption "$tmp_cfg")
+RELAY_JWT_SECRET=$(json_get relay_jwt_secret "$tmp_cfg")
+# If not provided by backend, generate a local secret.
+# The same secret must be added to the operator's signaling server RELAY_JWT_SECRET
+# env var and SFU_EDGES relay_api_url for cascade relay to work.
+[[ -z "$RELAY_JWT_SECRET" ]] && RELAY_JWT_SECRET=$(openssl rand -hex 32)
 # Backend-assigned TURNS subdomain (format api-<6-hex>). Falls back to "turns"
 # only if the backend did not return one (pre-v0.2 deployments).
 REGISTER_TURNS_SUBDOMAIN=$(json_get turns_subdomain "$tmp_cfg")
@@ -397,6 +402,7 @@ render() {
 		-e "s|{{SFU_UDP_PORT}}|${SFU_UDP_PORT}|g" \
 		-e "s|{{SFU_METRICS_PORT}}|${SFU_METRICS_PORT}|g" \
 		-e "s|{{SFU_SIGNING_PUBLIC_KEY}}|${SFU_SIGNING_PUBLIC_KEY:-}|g" \
+		-e "s|{{RELAY_JWT_SECRET}}|${RELAY_JWT_SECRET}|g" \
 		"$src" > "$dst"
 }
 
