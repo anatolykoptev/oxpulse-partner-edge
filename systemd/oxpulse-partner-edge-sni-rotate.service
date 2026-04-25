@@ -1,0 +1,8 @@
+[Unit]
+Description=OxPulse partner-edge — daily SNI rotation
+After=network-online.target oxpulse-partner-edge.service
+Requires=oxpulse-partner-edge.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/oxpulse-partner-edge-sni-rotate
