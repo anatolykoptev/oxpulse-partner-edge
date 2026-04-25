@@ -55,8 +55,14 @@ async fn relay_connect(
     Json(body): Json<RelayConnectRequest>,
 ) -> (StatusCode, Json<RelayConnectResponse>) {
     // Prefer Ed25519 if public key is configured; fall back to HS256 shared secret.
+    // When EdDSA pubkey is present, try it first — if it fails (e.g. the sender
+    // is a signaling server using the HS256 path), fall back to HS256. This lets
+    // both EdDSA-capable and HS256-only senders interoperate during rollout.
     let verify_result = if let Some(pubkey) = &signing_public_key {
-        RelayJwt::verify_ed25519(&body.relay_token, pubkey)
+        match RelayJwt::verify_ed25519(&body.relay_token, pubkey) {
+            Ok(j) => Ok(j),
+            Err(_) => RelayJwt::verify(&body.relay_token, &secret),
+        }
     } else {
         RelayJwt::verify(&body.relay_token, &secret)
     };
