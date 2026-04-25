@@ -32,6 +32,7 @@ if [[ -f "$_lib_local" ]]; then
     # shellcheck source=channel-render-lib.sh
     source "$_lib_local"
 elif [[ -f "$_lib_installed" ]]; then
+    # shellcheck source=/dev/null
     source "$_lib_installed"
 else
     die "channel-render-lib.sh not found (tried: $_lib_local and $_lib_installed)"
