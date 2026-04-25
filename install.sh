@@ -522,6 +522,13 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		curl -fsSL "$REPO_RAW/upgrade.sh" -o "$PREFIX_SBIN/oxpulse-partner-edge-upgrade"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-upgrade"
 	fi
+	# Shared channel render library (sourced by upgrade.sh + refresh.sh).
+	if [[ -n "$src_dir" && -f "$src_dir/channel-render-lib.sh" ]]; then
+		install -m 0644 "$src_dir/channel-render-lib.sh" "$PREFIX_SBIN/channel-render-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/channel-render-lib.sh" -o "$PREFIX_SBIN/channel-render-lib.sh"
+		chmod 0644 "$PREFIX_SBIN/channel-render-lib.sh"
+	fi
 	# Hydrate script into /usr/local/sbin (installed in all modes; needed by the
 	# oneshot unit on first boot after snapshot→clone).
 	if [[ -n "$src_dir" && -f "$src_dir/hydrate.sh" ]]; then

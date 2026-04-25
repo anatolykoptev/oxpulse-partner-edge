@@ -24,6 +24,7 @@ PREFIX_ETC=/etc/oxpulse-partner-edge
 PREFIX_LIB=/var/lib/oxpulse-partner-edge
 NODE_CFG="$PREFIX_ETC/node-config.json"
 VERSION_FILE="$PREFIX_LIB/keys-version"
+CHANNELS_VERSION_FILE="$PREFIX_LIB/channels-version"
 SFU_KEYS_ENV="$PREFIX_LIB/sfu-keys.env"
 LOG_FILE=/var/log/oxpulse-partner-edge-refresh.log
 BACKEND_URL="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
@@ -48,6 +49,9 @@ NEW_VERSION=$(printf '%s' "$RESP" | jq -r '.version' 2>/dev/null) \
     || die "empty version in response: $RESP"
 
 CURRENT_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "none")
+
+NEW_CHANNELS_VERSION=$(printf '%s' "$RESP" | jq -r '.channels_version // empty' 2>/dev/null || true)
+CURRENT_CHANNELS_VERSION=$(cat "$CHANNELS_VERSION_FILE" 2>/dev/null || echo "none")
 
 # Phase 2: Extract Ed25519 SFU signing public key on EVERY run.
 # Written before the early-exit so the SFU container always has the current
@@ -82,6 +86,27 @@ if [[ "$HB_CODE" != "200" ]]; then
     # для функциональности ноды. Продолжаем refresh.
 else
     log "heartbeat ok: $HB_BODY"
+fi
+
+# channels_version check — independent of Reality key rotation.
+# Re-renders all channel configs when operator updates channel settings.
+if [[ -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" != "none" && \
+      "$NEW_CHANNELS_VERSION" != "$CURRENT_CHANNELS_VERSION" ]]; then
+    log "channels_version changed: $CURRENT_CHANNELS_VERSION → $NEW_CHANNELS_VERSION"
+    _lib="/usr/local/sbin/channel-render-lib.sh"
+    if [[ ! -f "$_lib" ]]; then
+        log "WARNING: channel-render-lib.sh not found at $_lib — skip re-render"
+        unset _lib
+    else
+        source "$_lib"
+        unset _lib
+        if re_render_xray; then
+            echo "$NEW_CHANNELS_VERSION" > "$CHANNELS_VERSION_FILE"
+            log "channels_version updated to $NEW_CHANNELS_VERSION"
+        else
+            log "WARNING: re_render_xray failed — channels_version NOT updated (will retry tomorrow)"
+        fi
+    fi
 fi
 
 if [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
