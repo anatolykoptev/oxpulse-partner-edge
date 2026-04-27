@@ -5,6 +5,37 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] — 2026-04-25
+
+### Fixed — Phase 7 M4.A6 (real-user blocker)
+
+- **`SFU_PUBLIC_IP` env override for WebRTC host candidates.** Without
+  this fix, the SFU advertised `Candidate::host(0.0.0.0:N)` (its bind
+  address) in the SDP answer. Off-box browsers cannot route to
+  `0.0.0.0`, so ICE silently failed for every real user — only loopback
+  CloakBrowser tests on the same host worked. Set `SFU_PUBLIC_IP=<node
+  public IPv4>` (already wired in `docker-compose.yml.tpl` to the
+  install-time `$PUBLIC_IP` autodetect) and the SFU emits a routable
+  candidate.
+- **Fallback preserves dev/test behavior.** When `SFU_PUBLIC_IP` is
+  unset (or unparseable), the SFU falls back to the bind address with a
+  warn log — so loopback unit tests, dev workflows, and v0.12.0 nodes
+  awaiting redeploy keep working in their current state.
+- **Same fix applied to the cascade-relay path** (`relay::client::connect_relay`).
+  Both call sites now thread the same `host_candidate_addr` computed in
+  `main.rs`.
+
+### Deployment notes
+
+- `SFU_PUBLIC_IP` is rendered from `$PUBLIC_IP` (cloud metadata → ipify
+  → ifconfig.me) into the docker-compose template — operators on the
+  bundle install path get the fix automatically on the next refresh.
+- For manual deploys (recipe in `docs/runbooks/m4a5-deploy.md`), add
+  `-e SFU_PUBLIC_IP=<node public IPv4>` to the `docker run` line.
+- v0.12.0 nodes (rvpn) keep working without the env var — they retain
+  the v0.12.0 broken-for-off-box behavior until the env is supplied;
+  there is no regression from the upgrade.
+
 ## [0.9.0] — 2026-04-24
 
 ### Security — Phase 2
