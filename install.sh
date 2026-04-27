@@ -270,6 +270,12 @@ RELAY_JWT_SECRET=$(json_get relay_jwt_secret "$tmp_cfg")
 # The same secret must be added to the operator's signaling server RELAY_JWT_SECRET
 # env var and SFU_EDGES relay_api_url for cascade relay to work.
 [[ -z "$RELAY_JWT_SECRET" ]] && RELAY_JWT_SECRET=$(openssl rand -hex 32)
+# Phase 7 M4.A6 — note: SFU_PUBLIC_IP is rendered into docker-compose.yml from
+# the $PUBLIC_IP autodetected at line ~174 via the existing {{PUBLIC_IP}}
+# template substitution. We do NOT json_get a public_ip from the registration
+# response (the API doesn't return one — public_ip is sent UP, not down). The
+# autodetect chain (cloud metadata → ipify → ifconfig.me) is the source of
+# truth and matches what coturn already uses for PUBLIC_IPV4.
 # Phase 7 M4.A5 — HS256 secret used by the SFU client_ws endpoint to verify
 # browser-issued room JWTs. MUST match SIGNALING_SFU_SECRET on the signaling
 # server (oxpulse-chat). When empty, the SFU disables /sfu/ws/{room_id}
