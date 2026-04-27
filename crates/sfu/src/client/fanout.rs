@@ -159,9 +159,17 @@ impl Client {
             self.delivered_active_speaker
                 .fetch_add(1, Ordering::Relaxed);
         }
-        let payload = format!(
-            r#"{{"type":"active_speaker","peerId":{peer_id},"confidence":{confidence:.3}}}"#
-        );
+        let payload = format_active_speaker_payload(peer_id, confidence);
+        // Test-only seam: capture the formatted payload BEFORE the
+        // `rtc.channel()` lookup so integration tests can assert wire
+        // format on unnegotiated `Rtc` instances (no DTLS pipeline).
+        // Production fanout still proceeds to the real DC write below.
+        #[cfg(any(test, feature = "test-utils"))]
+        {
+            if let Ok(mut guard) = self.last_active_speaker_payload.lock() {
+                *guard = Some((payload.clone(), std::time::Instant::now()));
+            }
+        }
         let Some(mut ch) = self.rtc.channel(self.active_speaker_cid) else {
             // DC not yet open (DTLS still negotiating, or peer dropped).
             // The detector will fire again within ~300 ms so we don't
@@ -172,4 +180,13 @@ impl Client {
             tracing::warn!(client = *self.id, error = ?e, "active_speaker DC write failed");
         }
     }
+}
+
+/// Format the `sfu-active-speaker` DC payload. Extracted from
+/// [`Client::handle_active_speaker_changed`] so test capture and the
+/// real DC write see byte-identical output. Wire contract (M4.B1):
+/// `{"type":"active_speaker","peerId":<u64>,"confidence":<f64 with 3 fractional digits>}`.
+#[inline]
+fn format_active_speaker_payload(peer_id: u64, confidence: f64) -> String {
+    format!(r#"{{"type":"active_speaker","peerId":{peer_id},"confidence":{confidence:.3}}}"#)
 }
