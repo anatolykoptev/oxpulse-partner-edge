@@ -18,6 +18,10 @@ pub struct SfuConfig {
     /// HTTP port for the relay API (`POST /relay/connect`).
     /// Env: `SFU_RELAY_API_PORT`. Default: 8912.
     pub relay_api_port: u16,
+    /// HTTP port for the client-facing WebSocket endpoint
+    /// (`/sfu/ws/{room_id}`). Browsers connect here directly.
+    /// Env: `SFU_CLIENT_WS_PORT`. Default: 8911.
+    pub client_ws_port: u16,
     /// Shared secret for verifying room JWTs issued by oxpulse-chat signaling.
     /// Must match `SIGNALING_SFU_SECRET` on the signaling server.
     /// When `Some`, relay_source DataChannel messages MUST include a valid roomToken.
@@ -42,6 +46,7 @@ impl Default for SfuConfig {
             bind_address: "0.0.0.0".to_string(),
             log_level: "info".to_string(),
             relay_api_port: 8912,
+            client_ws_port: 8911,
             relay_auth_secret: None,
             fips_mode: false,
             sfu_signing_public_key: None,
@@ -64,6 +69,9 @@ impl SfuConfig {
             relay_api_port: env("SFU_RELAY_API_PORT", &defaults.relay_api_port.to_string())
                 .parse()
                 .expect("SFU_RELAY_API_PORT must be a number"),
+            client_ws_port: env("SFU_CLIENT_WS_PORT", &defaults.client_ws_port.to_string())
+                .parse()
+                .expect("SFU_CLIENT_WS_PORT must be a number"),
             relay_auth_secret: std::env::var("SIGNALING_SFU_SECRET")
                 .ok()
                 .filter(|s| !s.is_empty())
@@ -97,6 +105,16 @@ mod tests {
     fn relay_api_port_default_and_env() {
         let cfg = SfuConfig::default();
         assert_eq!(cfg.relay_api_port, 8912);
+    }
+
+    #[test]
+    fn client_ws_port_default_and_distinct() {
+        let cfg = SfuConfig::default();
+        assert_eq!(cfg.client_ws_port, 8911);
+        // Each port must be distinct so we can bind all four side-by-side.
+        assert_ne!(cfg.client_ws_port, cfg.relay_api_port);
+        assert_ne!(cfg.client_ws_port, cfg.metrics_port);
+        assert_ne!(cfg.client_ws_port, cfg.udp_port);
     }
 
     #[test]

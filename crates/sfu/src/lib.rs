@@ -5,6 +5,7 @@
 
 pub mod bwe;
 pub mod client;
+pub mod client_ws;
 pub mod config;
 pub mod fanout;
 pub mod metrics;
