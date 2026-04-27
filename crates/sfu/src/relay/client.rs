@@ -173,7 +173,11 @@ pub async fn connect_relay(
         .context("apply SDP answer")?;
     tracing::debug!("relay: applied SDP answer");
 
-    // Add local ICE candidate so str0m knows where to listen for STUN checks.
+    // Add the SFU's host candidate. Phase 7 M4.A6: `local_udp_addr` here
+    // is the public-IP-overridden `host_candidate_addr` from main.rs (or the
+    // raw bind address as fallback). Keeping the parameter name to avoid
+    // touching the str0m-adjacent surface area; the upstream SFU treats this
+    // candidate identically to the historical bind-address one.
     if let Ok(candidate) = Candidate::host(local_udp_addr, "udp") {
         rtc.add_local_candidate(candidate);
     }

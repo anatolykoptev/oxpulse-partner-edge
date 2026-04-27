@@ -67,6 +67,18 @@ pub struct Client {
     /// Test-only: count of `ActiveSpeakerChanged` deliveries (skip-self check).
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) delivered_active_speaker: AtomicU64,
+    /// Test-only: capture of the most-recently formatted active-speaker
+    /// payload (the JSON string written to DC id:3) plus the [`Instant`] at
+    /// which it was captured. Populated by [`fanout::handle_active_speaker_changed`]
+    /// BEFORE the `rtc.channel()` lookup so unit tests can assert wire format
+    /// without a live DTLS pipeline. Capture is parallel to (not a replacement
+    /// for) the `delivered_active_speaker` counter; both fields share the same
+    /// gate. The mutex is uncontended in tests (single-threaded fanout per
+    /// registry) — chose [`std::sync::Mutex`] over `AtomicPtr` to keep the
+    /// (String, Instant) tuple ergonomic and to mirror crate style. Released
+    /// builds elide this field entirely.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) last_active_speaker_payload: std::sync::Mutex<Option<(String, std::time::Instant)>>,
     /// Pre-negotiated DC id:3 (`sfu-active-speaker`). Allocated at
     /// construction via `direct_api().create_data_channel(...)` with
     /// `negotiated: Some(3)` so the client side's
@@ -158,6 +170,20 @@ impl Client {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn delivered_active_speaker_count(&self) -> u64 {
         self.delivered_active_speaker.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: clone the most-recent `active_speaker` JSON payload that
+    /// was formatted for this client, along with the [`Instant`] at which
+    /// fanout captured it. Returns `None` if no `ActiveSpeakerChanged` has
+    /// been delivered to this client yet. Used by integration tests to
+    /// assert wire format and cross-client isolation timing without a live
+    /// DTLS pipeline (capture happens BEFORE the `rtc.channel()` early-return).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn last_active_speaker_payload(&self) -> Option<(String, std::time::Instant)> {
+        self.last_active_speaker_payload
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     pub fn is_alive(&self) -> bool {
