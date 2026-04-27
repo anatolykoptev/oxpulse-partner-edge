@@ -105,13 +105,32 @@ async fn start_handler() -> (
     mpsc::Receiver<PendingClient>,
     tokio::task::JoinHandle<()>,
 ) {
+    let (url, rx, handle, _metrics) = start_handler_with_metrics().await;
+    (url, rx, handle)
+}
+
+async fn start_handler_with_metrics() -> (
+    String,
+    mpsc::Receiver<PendingClient>,
+    tokio::task::JoinHandle<()>,
+    Arc<SfuMetrics>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let secret: Arc<[u8]> = Arc::from(HS256_SECRET);
     let (inject_tx, inject_rx) = mpsc::channel::<PendingClient>(8);
     let local_udp = "127.0.0.1:0".parse().unwrap();
-    let handle = spawn_client_ws_api(listener, secret, None, inject_tx, local_udp).unwrap();
-    (format!("ws://{addr}"), inject_rx, handle)
+    let metrics = Arc::new(SfuMetrics::default());
+    let handle = spawn_client_ws_api(
+        listener,
+        secret,
+        None,
+        inject_tx,
+        local_udp,
+        metrics.clone(),
+    )
+    .unwrap();
+    (format!("ws://{addr}"), inject_rx, handle, metrics)
 }
 
 #[tokio::test]
@@ -298,7 +317,8 @@ async fn answer_sdp_advertises_public_ip_host_candidate() {
     //    `host_candidate_addr` from `SFU_PUBLIC_IP=203.0.113.42`.
     //    Port 7878 is the partner-edge default; any value works.
     let public_addr: std::net::SocketAddr = "203.0.113.42:7878".parse().unwrap();
-    let _handle = spawn_client_ws_api(listener, secret, None, inject_tx, public_addr).unwrap();
+    let metrics = Arc::new(SfuMetrics::default());
+    let _handle = spawn_client_ws_api(listener, secret, None, inject_tx, public_addr, metrics).unwrap();
 
     // 3. Browser side: connect WS, send offer, await answer.
     let token = make_token(ROOM_ID, 11, HS256_SECRET, 3600);
@@ -380,6 +400,7 @@ async fn end_to_end_browser_client_lands_in_registry() {
         None,
         client_inject_tx.clone(),
         local_udp,
+        metrics.clone(),
     )
     .unwrap();
     drop(client_inject_tx);
@@ -439,4 +460,71 @@ async fn end_to_end_browser_client_lands_in_registry() {
     // 7. Clean shutdown.
     let _ = shutdown_tx.send(());
     let _ = serve_handle.await;
+}
+
+#[tokio::test]
+async fn client_ws_offer_processed_increments_with_outcome_label_ok() {
+    let (base, mut inject_rx, _handle, metrics) = start_handler_with_metrics().await;
+    let token = make_token(ROOM_ID, 11, HS256_SECRET, 3600);
+    let url = format!("{base}/sfu/ws/{ROOM_ID}");
+    let req = build_request(&url, &token);
+    let (mut ws, _resp) = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio_tungstenite::connect_async(req),
+    )
+    .await
+    .expect("ws handshake within 2s")
+    .expect("ws handshake OK");
+    let (offer_sdp, _pending, _rtc) = build_browser_offer();
+    let frame = serde_json::json!({ "kind": "offer", "sdp": offer_sdp }).to_string();
+    ws.send(Message::Text(frame.into())).await.expect("send offer");
+    // Wait for the answer so we know the SDP path completed.
+    let _ = tokio::time::timeout(Duration::from_millis(500), ws.next())
+        .await
+        .expect("answer arrives")
+        .expect("stream not closed")
+        .expect("answer ok");
+    let _ = tokio::time::timeout(Duration::from_millis(200), inject_rx.recv()).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let n_ok = metrics
+        .client_ws_offer_processed_total
+        .with_label_values(&["ok"])
+        .get();
+    assert!(
+        n_ok >= 1,
+        "client_ws_offer_processed_total{{outcome=ok}} must be >= 1, got {n_ok}"
+    );
+    let n_answer = metrics.client_ws_answer_sent_total.get();
+    assert!(
+        n_answer >= 1,
+        "client_ws_answer_sent_total must be >= 1, got {n_answer}"
+    );
+}
+
+#[tokio::test]
+async fn client_ws_offer_processed_increments_with_outcome_label_parse_err() {
+    // Send a frame whose `kind` is missing — read_offer rejects, handler
+    // closes 4002 and emits offer_processed{outcome=parse_err}.
+    let (base, _inject_rx, _handle, metrics) = start_handler_with_metrics().await;
+    let token = make_token(ROOM_ID, 13, HS256_SECRET, 3600);
+    let url = format!("{base}/sfu/ws/{ROOM_ID}");
+    let req = build_request(&url, &token);
+    let (mut ws, _resp) = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio_tungstenite::connect_async(req),
+    )
+    .await
+    .expect("ws handshake within 2s")
+    .expect("ws handshake OK");
+    let bogus = serde_json::json!({ "kind": "hello", "sdp": "x" }).to_string();
+    ws.send(Message::Text(bogus.into())).await.expect("send");
+    // Drain whatever the server replies (close frame) so the session task
+    // has time to record the metric.
+    let _ = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let n = metrics
+        .client_ws_offer_processed_total
+        .with_label_values(&["parse_err"])
+        .get();
+    assert!(n >= 1, "parse_err outcome counter must be >= 1, got {n}");
 }

@@ -48,6 +48,7 @@
 //!    client DC events can reuse the same socket.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -57,6 +58,7 @@ use str0m::{Candidate, Rtc};
 use tokio::sync::mpsc::Sender;
 
 use super::handler::{close_with_code, CLOSE_DRAIN_TIMEOUT};
+use crate::metrics::{close_code_label, SfuMetrics};
 
 /// Maximum time to wait for the browser's `offer` frame after the WS
 /// upgrade completes. Slightly longer than typical browser ICE-gathering
@@ -76,6 +78,48 @@ mod close_code {
     /// Server's inject channel into the registry is closed — the SFU is
     /// shutting down or the UDP loop has exited.
     pub const SERVER_GOING_AWAY: CloseCode = 1001;
+}
+
+/// RAII guard for the `client_ws_active_sessions` gauge and
+/// `client_ws_session_duration_seconds` histogram.
+///
+/// Increments the active-sessions gauge on construction; on drop —
+/// including panics — decrements the gauge, observes the elapsed time,
+/// and increments `client_ws_session_ended_total{close_code=...}`. The
+/// `close_code` slot is mutable so each terminal branch can pin the
+/// right value before returning.
+struct ActiveSessionGuard {
+    metrics: Arc<SfuMetrics>,
+    started_at: Instant,
+    close_code: u16,
+}
+
+impl ActiveSessionGuard {
+    fn new(metrics: Arc<SfuMetrics>) -> Self {
+        metrics.client_ws_active_sessions.inc();
+        Self {
+            metrics,
+            started_at: Instant::now(),
+            close_code: 1000,
+        }
+    }
+
+    fn set_close_code(&mut self, code: u16) {
+        self.close_code = code;
+    }
+}
+
+impl Drop for ActiveSessionGuard {
+    fn drop(&mut self) {
+        self.metrics.client_ws_active_sessions.dec();
+        self.metrics
+            .client_ws_session_duration_seconds
+            .observe(self.started_at.elapsed().as_secs_f64());
+        self.metrics
+            .client_ws_session_ended_total
+            .with_label_values(&[close_code_label(self.close_code)])
+            .inc();
+    }
 }
 
 /// Pre-ICE str0m instance ready for registry adoption.
@@ -109,12 +153,19 @@ pub async fn run(
     peer_id: u64,
     local_udp_addr: SocketAddr,
     inject_tx: Sender<PendingClient>,
+    metrics: Arc<SfuMetrics>,
 ) -> anyhow::Result<()> {
+    let mut guard = ActiveSessionGuard::new(metrics.clone());
     // 1. Read the first text frame, expect a JSON offer.
     let offer_sdp = match read_offer(&mut socket).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(target: "sfu::client_ws", peer_id, %room_id, error = %e, "client_ws: bad offer frame");
+            metrics
+                .client_ws_offer_processed_total
+                .with_label_values(&["parse_err"])
+                .inc();
+            guard.set_close_code(close_code::BAD_OFFER);
             close_with_code(socket, close_code::BAD_OFFER, "bad offer").await;
             return Ok(());
         }
@@ -131,6 +182,11 @@ pub async fn run(
         Err(e) => {
             tracing::error!(target: "sfu::client_ws", peer_id, %room_id, error = %e,
                 "client_ws: failed to build host candidate from local_udp_addr");
+            metrics
+                .client_ws_offer_processed_total
+                .with_label_values(&["ice_err"])
+                .inc();
+            guard.set_close_code(close_code::SDP_INTERNAL);
             close_with_code(socket, close_code::SDP_INTERNAL, "internal").await;
             return Ok(());
         }
@@ -142,6 +198,11 @@ pub async fn run(
         Err(e) => {
             tracing::warn!(target: "sfu::client_ws", peer_id, %room_id, error = %e,
                 "client_ws: SDP offer did not parse");
+            metrics
+                .client_ws_offer_processed_total
+                .with_label_values(&["sdp_err"])
+                .inc();
+            guard.set_close_code(close_code::BAD_OFFER);
             close_with_code(socket, close_code::BAD_OFFER, "bad sdp").await;
             return Ok(());
         }
@@ -151,10 +212,21 @@ pub async fn run(
         Err(e) => {
             tracing::warn!(target: "sfu::client_ws", peer_id, %room_id, error = %e,
                 "client_ws: str0m rejected offer");
+            metrics
+                .client_ws_offer_processed_total
+                .with_label_values(&["sdp_err"])
+                .inc();
+            guard.set_close_code(close_code::SDP_INTERNAL);
             close_with_code(socket, close_code::SDP_INTERNAL, "sdp rejected").await;
             return Ok(());
         }
     };
+    // Offer survived parse + str0m accept_offer → counts as a clean
+    // outcome at the SDP layer. Inject + answer-send come next.
+    metrics
+        .client_ws_offer_processed_total
+        .with_label_values(&["ok"])
+        .inc();
 
     // 4. Build the answer frame eagerly — but DON'T send it yet. The
     //    browser starts emitting STUN binding requests against our UDP
@@ -181,6 +253,7 @@ pub async fn run(
     {
         tracing::error!(target: "sfu::client_ws", peer_id, %room_id,
             "client_ws: inject channel closed — UDP loop is shutting down");
+        guard.set_close_code(close_code::SERVER_GOING_AWAY);
         close_with_code(socket, close_code::SERVER_GOING_AWAY, "shutting down").await;
         return Ok(());
     }
@@ -193,8 +266,10 @@ pub async fn run(
         .is_err()
     {
         tracing::warn!(target: "sfu::client_ws", peer_id, %room_id, "client_ws: send(answer) failed; peer gone");
+        // Default close_code 1000 from guard — peer gone is a normal close.
         return Ok(());
     }
+    metrics.client_ws_answer_sent_total.inc();
     tracing::info!(target: "sfu::client_ws", peer_id, %room_id, bytes = answer_sdp.len(),
         "client_ws: answer sent; client already injected into registry");
 

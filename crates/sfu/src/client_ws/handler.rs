@@ -10,6 +10,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::metrics::SfuMetrics;
 use axum::{
     extract::{
         ws::{CloseCode, CloseFrame, Message, WebSocket, WebSocketUpgrade},
@@ -73,6 +74,10 @@ pub struct ClientWsState {
     /// `relay::client::connect_relay`, so cascade and browser paths emit
     /// matching candidates.
     pub local_udp_addr: SocketAddr,
+    /// Process-wide SFU metrics (M4.B1 client_ws verification). Increments
+    /// happen at handshake-accept, handshake-reject (per reason), and
+    /// session-end inside [`crate::client_ws::session::run`].
+    pub metrics: Arc<SfuMetrics>,
 }
 
 /// Spawn the client WS API on the given listener. Returns the join handle
@@ -83,12 +88,14 @@ pub fn spawn_client_ws_api(
     signing_pubkey: Option<Arc<String>>,
     client_inject_tx: Sender<PendingClient>,
     local_udp_addr: SocketAddr,
+    metrics: Arc<SfuMetrics>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let state = ClientWsState {
         secret,
         signing_pubkey,
         client_inject_tx,
         local_udp_addr,
+        metrics,
     };
     let app = Router::new()
         // axum 0.8 routes WS upgrades through `any` (the upgrade is GET
@@ -170,6 +177,11 @@ pub async fn client_ws_upgrade(
 ) -> Response {
     let Some(token) = extract_bearer_from_subprotocols(&headers) else {
         warn!("client_ws: missing Bearer in Sec-WebSocket-Protocol");
+        state
+            .metrics
+            .client_ws_handshake_failures_total
+            .with_label_values(&["missing_token"])
+            .inc();
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
@@ -181,6 +193,11 @@ pub async fn client_ws_upgrade(
             // close with application code 4001 — this gives the client a
             // clear "wrong room" signal as opposed to a generic 401.
             warn!(%room_id, %token_room, "client_ws: token/path room mismatch");
+            state
+                .metrics
+                .client_ws_handshake_failures_total
+                .with_label_values(&["room_mismatch"])
+                .inc();
             return ws
                 .protocols([SUBPROTOCOL])
                 .on_upgrade(|socket| {
@@ -188,10 +205,22 @@ pub async fn client_ws_upgrade(
                 })
                 .into_response();
         }
-        Err(RoomAuthError::InvalidSignature)
-        | Err(RoomAuthError::Expired)
-        | Err(RoomAuthError::Malformed) => {
-            warn!(%room_id, "client_ws: invalid, expired, or malformed token");
+        Err(RoomAuthError::Expired) => {
+            warn!(%room_id, "client_ws: expired token");
+            state
+                .metrics
+                .client_ws_handshake_failures_total
+                .with_label_values(&["expired_token"])
+                .inc();
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        Err(RoomAuthError::InvalidSignature) | Err(RoomAuthError::Malformed) => {
+            warn!(%room_id, "client_ws: invalid or malformed token");
+            state
+                .metrics
+                .client_ws_handshake_failures_total
+                .with_label_values(&["invalid_token"])
+                .inc();
             return StatusCode::UNAUTHORIZED.into_response();
         }
     };
@@ -199,6 +228,7 @@ pub async fn client_ws_upgrade(
     let peer_id = claims.sub;
     let inject_tx = state.client_inject_tx.clone();
     let local_udp_addr = state.local_udp_addr;
+    let metrics = state.metrics.clone();
     tracing::info!(
         target: "sfu::client_ws",
         peer_id, %room_id,
@@ -206,8 +236,16 @@ pub async fn client_ws_upgrade(
     );
     ws.protocols([SUBPROTOCOL])
         .on_upgrade(move |socket| async move {
-            if let Err(e) =
-                run_session(socket, room_id.clone(), peer_id, local_udp_addr, inject_tx).await
+            metrics.client_ws_sessions_started_total.inc();
+            if let Err(e) = run_session(
+                socket,
+                room_id.clone(),
+                peer_id,
+                local_udp_addr,
+                inject_tx,
+                metrics.clone(),
+            )
+            .await
             {
                 tracing::warn!(target: "sfu::client_ws", peer_id, %room_id, error = %e, "client_ws session ended with error");
             }

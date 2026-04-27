@@ -15,9 +15,11 @@
 //! carries it automatically; differentiate edges in PromQL with
 //! `{edge_id="ed-moscow-1"}`.
 
+mod client_ws;
 mod m6;
 mod server;
 
+pub use client_ws::close_code_label;
 pub use server::spawn_metrics_server;
 
 use std::collections::HashMap;
@@ -64,6 +66,25 @@ pub struct SfuMetrics {
     pub speaker_medium: GaugeVec,
     /// M6.2: long-window audio activity score per peer.
     pub speaker_long: GaugeVec,
+    // ── M4.B1 client_ws verification metrics ─────────────────────────────────
+    /// Currently open client_ws sessions (incremented on session-open,
+    /// decremented on session-close via [`ActiveSessionGuard`]).
+    pub client_ws_active_sessions: IntGauge,
+    /// Accepted upgrades (token verified, WS upgrade succeeded).
+    pub client_ws_sessions_started_total: IntCounter,
+    /// label: reason — `missing_token | expired_token | invalid_token |
+    /// room_mismatch | other`. (`bad_subprotocol` is reserved but not
+    /// currently emitted — handler accepts any subprotocol list as long
+    /// as a `Bearer` entry is present.)
+    pub client_ws_handshake_failures_total: IntCounterVec,
+    /// label: outcome — `ok | parse_err | sdp_err | ice_err`.
+    pub client_ws_offer_processed_total: IntCounterVec,
+    /// Answer frames successfully sent to the browser.
+    pub client_ws_answer_sent_total: IntCounter,
+    /// label: close_code — bucketed via [`close_code_label`].
+    pub client_ws_session_ended_total: IntCounterVec,
+    /// Wall-clock duration of a client_ws session.
+    pub client_ws_session_duration_seconds: Histogram,
 }
 
 impl SfuMetrics {
@@ -160,6 +181,8 @@ impl SfuMetrics {
             speaker_long,
         ) = m6::register(&registry)?;
 
+        let client_ws_metrics = client_ws::register(&registry)?;
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -177,6 +200,13 @@ impl SfuMetrics {
             speaker_immediate,
             speaker_medium,
             speaker_long,
+            client_ws_active_sessions: client_ws_metrics.active_sessions,
+            client_ws_sessions_started_total: client_ws_metrics.sessions_started_total,
+            client_ws_handshake_failures_total: client_ws_metrics.handshake_failures_total,
+            client_ws_offer_processed_total: client_ws_metrics.offer_processed_total,
+            client_ws_answer_sent_total: client_ws_metrics.answer_sent_total,
+            client_ws_session_ended_total: client_ws_metrics.session_ended_total,
+            client_ws_session_duration_seconds: client_ws_metrics.session_duration_seconds,
         })
     }
 
