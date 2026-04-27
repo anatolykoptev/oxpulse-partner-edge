@@ -271,6 +271,82 @@ async fn wrong_kind_first_frame_closes_with_4002() {
     }
 }
 
+/// Phase 7 M4.A6 — when the host candidate address is built from
+/// `SFU_PUBLIC_IP` the answer SDP must advertise that IP, not the bind
+/// address. The bug we're protecting against: in production
+/// `SFU_BIND_ADDRESS=0.0.0.0` and the SFU was emitting `c=IN IP4 0.0.0.0`
+/// host candidates, breaking ICE for off-box browsers. The fix
+/// (main.rs:host_candidate_addr) replaces the bind IP with the node's
+/// public IP for the candidate while keeping the kernel-assigned port.
+///
+/// We verify this end-to-end through the WS handler: pass a fake
+/// public-IP `SocketAddr` (RFC 5737 TEST-NET-3 `203.0.113.42`) into
+/// `spawn_client_ws_api`, drive an offer, then assert the answer SDP's
+/// `c=IN IP4 ...` line carries `203.0.113.42` and not `127.0.0.1`.
+#[tokio::test]
+async fn answer_sdp_advertises_public_ip_host_candidate() {
+    // 1. Bind a real WS listener on loopback (no UDP loop here — we
+    //    only care about the SDP exchange and the candidate that
+    //    appears in the answer).
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let secret: Arc<[u8]> = Arc::from(HS256_SECRET);
+    let (inject_tx, _inject_rx) = mpsc::channel::<PendingClient>(8);
+
+    // 2. Hand the handler a host-candidate addr whose IP is NOT the
+    //    bind address. This simulates main.rs computing
+    //    `host_candidate_addr` from `SFU_PUBLIC_IP=203.0.113.42`.
+    //    Port 7878 is the partner-edge default; any value works.
+    let public_addr: std::net::SocketAddr = "203.0.113.42:7878".parse().unwrap();
+    let _handle = spawn_client_ws_api(listener, secret, None, inject_tx, public_addr).unwrap();
+
+    // 3. Browser side: connect WS, send offer, await answer.
+    let token = make_token(ROOM_ID, 11, HS256_SECRET, 3600);
+    let url = format!("ws://{addr}/sfu/ws/{ROOM_ID}");
+    let req = build_request(&url, &token);
+    let (mut ws, _resp) = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio_tungstenite::connect_async(req),
+    )
+    .await
+    .expect("ws handshake within 2s")
+    .expect("ws handshake OK");
+
+    let (offer_sdp, _pending, _rtc) = build_browser_offer();
+    ws.send(Message::Text(
+        serde_json::json!({"kind":"offer","sdp":offer_sdp})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+
+    let answer_msg = tokio::time::timeout(Duration::from_millis(500), ws.next())
+        .await
+        .expect("answer arrives")
+        .expect("stream open")
+        .expect("frame OK");
+    let answer_text = match answer_msg {
+        Message::Text(t) => t,
+        other => panic!("expected text answer, got {other:?}"),
+    };
+    let v: Value = serde_json::from_str(answer_text.as_str()).unwrap();
+    let answer_sdp = v["sdp"].as_str().expect("answer.sdp present");
+
+    // 4. The host candidate's IP must come from `SFU_PUBLIC_IP`, not
+    //    the bind address. str0m emits the candidate as an
+    //    `a=candidate:...` line in the answer SDP — we assert the
+    //    public IP appears and 127.0.0.1 does not.
+    assert!(
+        answer_sdp.contains("203.0.113.42"),
+        "answer SDP must advertise SFU_PUBLIC_IP override 203.0.113.42 —          off-box browsers cannot ICE without it. SDP follows:\n{answer_sdp}"
+    );
+    assert!(
+        !answer_sdp.contains("127.0.0.1"),
+        "answer SDP must NOT leak loopback bind address 127.0.0.1          when SFU_PUBLIC_IP is set. SDP follows:\n{answer_sdp}"
+    );
+}
+
 /// In-process end-to-end variant: drive a real `udp_loop::serve` task
 /// alongside the WS handler and assert the browser client lands in the
 /// Registry (visible via `metrics.active_participants`).

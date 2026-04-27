@@ -25,6 +25,19 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // M4.A6 - parse_public_ip_env() emitted any warning *before* the
+    // subscriber was initialized, so re-check here for visibility.
+    if let Ok(raw) = std::env::var("SFU_PUBLIC_IP") {
+        if !raw.is_empty() && config.public_ip.is_none() {
+            tracing::warn!(
+                value = %raw,
+                "SFU_PUBLIC_IP is set but did not parse as an IP address \
+            falling back to the bind address for host candidates. \
+            Off-box browsers will fail ICE."
+            );
+        }
+    }
+
     #[cfg(unix)]
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
         .expect("failed to install SIGTERM handler at startup");
@@ -113,6 +126,38 @@ async fn main() -> anyhow::Result<()> {
     let local_addr = socket.local_addr().context("get UDP local_addr")?;
     tracing::info!(%local_addr, "SFU UDP socket bound");
 
+    // Phase 7 M4.A6 — host candidate address.
+    //
+    // The bind address is typically `0.0.0.0:N`, which is unroutable
+    // from off-box browsers and breaks ICE in production. When
+    // `SFU_PUBLIC_IP` is set we override the candidate IP to the node's
+    // public IP while keeping the kernel-assigned port. When unset we
+    // fall back to `local_addr` (the historical behavior), so dev/test
+    // on loopback keeps working.
+    let host_candidate_addr = match config.public_ip {
+        Some(ip) => {
+            let addr = std::net::SocketAddr::new(ip, local_addr.port());
+            tracing::info!(
+                %addr, bind = %local_addr,
+                "SFU host candidate uses SFU_PUBLIC_IP override (M4.A6)"
+            );
+            addr
+        }
+        None => {
+            if local_addr.ip().is_unspecified() {
+                tracing::warn!(
+                    bind = %local_addr,
+                    "SFU_PUBLIC_IP not set and bind address is wildcard \
+                host candidate is unroutable from off-box browsers. \
+                Set SFU_PUBLIC_IP=<node-public-ip> in the env to fix off-box ICE."
+                );
+            } else {
+                tracing::info!(%local_addr, "SFU host candidate uses bind address (no SFU_PUBLIC_IP override)");
+            }
+            local_addr
+        }
+    };
+
     // Channel for injecting browser clients (post-SDP) from the
     // client_ws session into the main UDP loop. Mirrors `relay_inject_*`
     // below — same pattern, different producer.
@@ -135,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
             secret_arc,
             relay_signing_pubkey.clone(),
             client_inject_tx.clone(),
-            local_addr,
+            host_candidate_addr,
         )?;
         tracing::info!(addr = %client_ws_addr, "client_ws API listening (Phase 7 M4.A1+M4.A2)");
         Some(handle)
@@ -173,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
             let room = task.room_id.clone();
             let tx = relay_inject_tx_clone.clone();
             tokio::spawn(async move {
-                match connect_relay(&url, &token, local_addr, room.clone()).await {
+                match connect_relay(&url, &token, host_candidate_addr, room.clone()).await {
                     Ok(pending) => {
                         if let Err(e) = tx.send(pending).await {
                             tracing::warn!(

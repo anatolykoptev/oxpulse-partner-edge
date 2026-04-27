@@ -2,6 +2,8 @@
 //! `crates/server/src/config.rs` -- `from_env()` with sensible defaults
 //! and panics only on obviously malformed numeric input at startup.
 
+use std::net::IpAddr;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SfuConfig {
     /// UDP port the SFU listens on for WebRTC media (DTLS/SRTP/STUN
@@ -43,6 +45,18 @@ pub struct SfuConfig {
     /// Env: SFU_SIGNING_PUBLIC_KEY.
     /// If None, falls back to HS256 RELAY_JWT_SECRET (deprecated -- use Ed25519).
     pub sfu_signing_public_key: Option<String>,
+    /// Public IP advertised in WebRTC host candidates. When `Some`, the
+    /// SFU emits `Candidate::host(SocketAddr::new(public_ip, udp_port))`
+    /// instead of the bind address (which is typically `0.0.0.0:N` and
+    /// unroutable from off-box browsers). Env: `SFU_PUBLIC_IP`.
+    ///
+    /// Phase 7 M4.A6 — without this, browsers from off-box networks
+    /// cannot complete ICE because the SFU's only host candidate is
+    /// `0.0.0.0:N`. Falls back to the bind address when unset, which
+    /// preserves the dev/test loopback behavior. Set this to the node's
+    /// public IPv4 in production (rendered by install.sh / docker-compose
+    /// from the `$PUBLIC_IP` autodetect).
+    pub public_ip: Option<IpAddr>,
 }
 
 impl Default for SfuConfig {
@@ -57,6 +71,7 @@ impl Default for SfuConfig {
             relay_auth_secret: None,
             fips_mode: false,
             sfu_signing_public_key: None,
+            public_ip: None,
         }
     }
 }
@@ -85,12 +100,35 @@ impl SfuConfig {
                 .map(|s| s.into_bytes()),
             fips_mode: std::env::var("SFU_FIPS").as_deref() == Ok("1"),
             sfu_signing_public_key: std::env::var("SFU_SIGNING_PUBLIC_KEY").ok(),
+            public_ip: parse_public_ip_env(),
         }
     }
 }
 
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Parse `SFU_PUBLIC_IP` into an `IpAddr`. Garbage input produces a
+/// `warn` log and `None` — startup must continue (degraded to the bind
+/// address fallback) rather than crash, because the env var is a
+/// production-quality knob and dev/test still works without it.
+fn parse_public_ip_env() -> Option<IpAddr> {
+    let raw = std::env::var("SFU_PUBLIC_IP").ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    match raw.parse::<IpAddr>() {
+        Ok(ip) => Some(ip),
+        Err(e) => {
+            tracing::warn!(
+                value = %raw, error = %e,
+                "SFU_PUBLIC_IP failed to parse as an IP address — falling back to bind address \
+                 for host candidates (off-box ICE will likely fail)"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -154,5 +192,53 @@ mod tests {
         let cfg = SfuConfig::from_env();
         assert!(!cfg.fips_mode);
         std::env::remove_var("SFU_FIPS");
+    }
+
+    #[test]
+    fn public_ip_default_is_none() {
+        let cfg = SfuConfig::default();
+        assert!(
+            cfg.public_ip.is_none(),
+            "public_ip must default to None (preserves dev/test bind-address behavior)"
+        );
+    }
+
+    #[test]
+    fn public_ip_env_parses_ipv4() {
+        // RFC 5737 TEST-NET-3 — reserved for documentation / examples.
+        std::env::set_var("SFU_PUBLIC_IP", "203.0.113.42");
+        let cfg = SfuConfig::from_env();
+        assert_eq!(
+            cfg.public_ip,
+            Some("203.0.113.42".parse().unwrap()),
+            "valid IPv4 must round-trip through SFU_PUBLIC_IP"
+        );
+        std::env::remove_var("SFU_PUBLIC_IP");
+    }
+
+    #[test]
+    fn public_ip_env_empty_is_none() {
+        std::env::set_var("SFU_PUBLIC_IP", "");
+        let cfg = SfuConfig::from_env();
+        assert!(
+            cfg.public_ip.is_none(),
+            "empty SFU_PUBLIC_IP must be treated as unset (compose passes empty string when var unset)"
+        );
+        std::env::remove_var("SFU_PUBLIC_IP");
+    }
+
+    #[test]
+    fn public_ip_env_garbage_warns_and_falls_back() {
+        // Non-fatal: log a warning and fall back to the bind address.
+        // Crashing on a malformed env var would block startup for a
+        // typo in the operator's compose env block — the SFU degrades
+        // to the (already known) loopback-only candidate instead.
+        std::env::set_var("SFU_PUBLIC_IP", "not-an-ip-address");
+        let cfg = SfuConfig::from_env();
+        assert!(
+            cfg.public_ip.is_none(),
+            "garbage SFU_PUBLIC_IP must yield None, not panic"
+        );
+        std::env::remove_var("SFU_PUBLIC_IP");
     }
 }
