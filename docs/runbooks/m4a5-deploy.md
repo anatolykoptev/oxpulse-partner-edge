@@ -1,8 +1,9 @@
 # M4.A5 — Client-Facing SFU WebSocket Deploy Runbook
 
-**Tag:** `partner-edge-v0.12.0`
-**Phase:** 7 / Track A / M4.A5
+**Tag:** `partner-edge-v0.12.1` (M4.A6 fix on top of v0.12.0)
+**Phase:** 7 / Track A / M4.A5 + M4.A6
 **Adds:** `/sfu/ws/{room_id}` browser-facing WebSocket on the partner edge.
+**M4.A6 fix:** `SFU_PUBLIC_IP` env override for host candidates — without this the SFU advertised `0.0.0.0:N` and off-box ICE failed.
 **Rolls back to:** `partner-edge-v0.11.9` (no client_ws endpoint exposed).
 
 ---
@@ -33,12 +34,16 @@
 - [ ] Signaling server side has `SIGNALING_SFU_SECRET` configured AND
       `/api/partner/keys` (or `node-config.json`) returns it. Without
       this the `/sfu/ws/*` endpoint stays disabled — feature ships dead.
-- [ ] Confirm `SFU_BIND_ADDRESS` is the node's public IP, **not**
-      `0.0.0.0`. The host candidate produced from the bind address is
-      what the browser uses for STUN; `0.0.0.0:N` is unreachable from
-      off-box clients. (Pre-existing limitation, same on the cascade-
-      relay path. See `crates/sfu/src/client_ws/handler.rs`
-      `local_udp_addr` doc.)
+- [ ] Confirm `SFU_PUBLIC_IP` is set in compose (M4.A6). Value comes
+      from install.sh `$PUBLIC_IP` autodetect — the SFU advertises
+      `Candidate::host(SFU_PUBLIC_IP, SFU_UDP_PORT)` so off-box browsers
+      can complete ICE. Falls back to the bind address when unset, so
+      v0.12.0 nodes that haven't been re-rendered keep working in their
+      current (broken-for-off-box, fine-for-loopback) state until upgrade.
+- [ ] `SFU_BIND_ADDRESS=0.0.0.0` is now SAFE for production — the host
+      candidate IP is decoupled from the bind via `SFU_PUBLIC_IP`. Keep
+      `0.0.0.0` for multi-NIC nodes; the bind controls *which* interfaces
+      receive packets, the public IP controls *what address browsers see*.
 
 ---
 
@@ -54,7 +59,7 @@
 ssh <node>            # rvpn / piter / krolik
 
 # 1. Pull the new image (built by CI on tag push)
-docker pull ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.0
+docker pull ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.1
 
 # 2. Stop the running SFU
 docker stop oxpulse-partner-sfu
@@ -76,7 +81,8 @@ docker run -d \
   -e RELAY_JWT_SECRET=<32+ byte hex> \
   -e SFU_SIGNING_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----' \
   -e SIGNALING_SFU_SECRET=<HS256 secret matching oxpulse-chat> \
-  ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.0
+  -e SFU_PUBLIC_IP=<PUBLIC_IP> \
+  ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.1
 
 # 4. Reload Caddy with the new template (only if running outside the
 #    bundle's docker-compose; the bundle picks this up on `docker compose
@@ -143,8 +149,10 @@ docker run -d \
   ghcr.io/anatolykoptev/partner-edge-sfu:v0.11.9
 ```
 
-(The new env vars `SFU_CLIENT_WS_PORT` and `SIGNALING_SFU_SECRET` are
-ignored by v0.11.9 — no manual cleanup needed.)
+(The new env vars `SFU_CLIENT_WS_PORT`, `SIGNALING_SFU_SECRET`, and
+`SFU_PUBLIC_IP` are ignored by v0.11.9 — no manual cleanup needed.
+For an in-place v0.12.1 → v0.12.0 rollback, simply unset `SFU_PUBLIC_IP`
+and the SFU falls back to the historical bind-address candidate behavior.)
 
 ---
 
