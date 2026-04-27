@@ -5,7 +5,7 @@ use tracing_subscriber::EnvFilter;
 
 use anyhow::Context;
 use oxpulse_sfu::{
-    client_ws::spawn_client_ws_api,
+    client_ws::{spawn_client_ws_api, PendingClient},
     metrics::spawn_metrics_server,
     relay::{
         client::connect_relay,
@@ -105,6 +105,19 @@ async fn main() -> anyhow::Result<()> {
         (relay_rx_inner, None)
     };
 
+    // Bind the UDP socket early so relay tasks AND the client_ws session
+    // can use the real local address as their host candidate. Previously
+    // run_udp_loop() bound internally; now we bind here and pass the
+    // socket.
+    let socket = udp_loop::bind(&config).await?;
+    let local_addr = socket.local_addr().context("get UDP local_addr")?;
+    tracing::info!(%local_addr, "SFU UDP socket bound");
+
+    // Channel for injecting browser clients (post-SDP) from the
+    // client_ws session into the main UDP loop. Mirrors `relay_inject_*`
+    // below — same pattern, different producer.
+    let (client_inject_tx, client_inject_rx) = tokio::sync::mpsc::channel::<PendingClient>(32);
+
     // Phase 7 M4.A1 — client-facing WebSocket API at /sfu/ws/{room_id}.
     // Browsers connect here directly with a room JWT in the
     // Sec-WebSocket-Protocol header. The endpoint is enabled when
@@ -117,9 +130,14 @@ async fn main() -> anyhow::Result<()> {
             .await
             .with_context(|| format!("bind client_ws API on {client_ws_addr}"))?;
         let secret_arc: Arc<[u8]> = Arc::from(secret_bytes.as_slice());
-        let handle =
-            spawn_client_ws_api(client_ws_listener, secret_arc, relay_signing_pubkey.clone())?;
-        tracing::info!(addr = %client_ws_addr, "client_ws API listening (Phase 7 M4.A1)");
+        let handle = spawn_client_ws_api(
+            client_ws_listener,
+            secret_arc,
+            relay_signing_pubkey.clone(),
+            client_inject_tx.clone(),
+            local_addr,
+        )?;
+        tracing::info!(addr = %client_ws_addr, "client_ws API listening (Phase 7 M4.A1+M4.A2)");
         Some(handle)
     } else {
         tracing::info!(
@@ -128,12 +146,9 @@ async fn main() -> anyhow::Result<()> {
         );
         None
     };
-
-    // Bind the UDP socket early so relay tasks can use the real local address.
-    // Previously run_udp_loop() bound internally; now we bind here and pass the socket.
-    let socket = udp_loop::bind(&config).await?;
-    let local_addr = socket.local_addr().context("get UDP local_addr")?;
-    tracing::info!(%local_addr, "SFU UDP socket bound");
+    // Drop the spare sender so the client_inject channel closes when the
+    // client_ws task exits and no PendingClient is in flight.
+    drop(client_inject_tx);
 
     // HMAC secret for authenticating relay-injected clients inside the Registry.
     let relay_auth_secret = config
@@ -198,13 +213,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Run the UDP loop — blocks until shutdown fires.
-    // Pass relay_inject_rx so serve() can inject relay clients into the Registry.
+    // Pass relay_inject_rx so serve() can inject relay clients into the Registry,
+    // and client_inject_rx so serve() can inject browser clients post-SDP.
     let result = udp_loop::serve(
         socket,
         metrics,
         relay_auth_secret,
         relay_signing_pubkey,
         relay_inject_rx,
+        client_inject_rx,
         shutdown,
     )
     .await;

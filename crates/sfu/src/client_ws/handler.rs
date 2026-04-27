@@ -1,7 +1,13 @@
 //! Axum handler for `/sfu/ws/{room_id}` — client-facing WebSocket endpoint.
 //!
 //! See [module docs](super) for the auth contract.
+//!
+//! M4.A1 added auth + WS upgrade.
+//! M4.A2 wires the upgraded socket into [`crate::client_ws::session::run`]
+//! so the SDP exchange and Registry registration happen here, then the
+//! main UDP loop drives ICE/DTLS just like for relay clients.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
@@ -15,8 +21,10 @@ use axum::{
     Router,
 };
 use tokio::net::TcpListener;
-use tracing::{debug, info, instrument, warn};
+use tokio::sync::mpsc::Sender;
+use tracing::{instrument, warn};
 
+use crate::client_ws::session::{run as run_session, PendingClient};
 use crate::room_auth::{verify_room_token, verify_room_token_ed25519, RoomAuthError, RoomClaims};
 
 /// WS subprotocol identifier this server speaks. Browsers MUST list it in
@@ -28,8 +36,14 @@ pub const SUBPROTOCOL: &str = "oxpulse-sfu-v1";
 /// (RFC 6455 §7.4.2).
 pub const CLOSE_CODE_ROOM_MISMATCH: CloseCode = 4001;
 
+/// Upper bound for draining an application-initiated close handshake.
+/// Stops a misbehaving peer from leaving the session task hanging on TCP
+/// keepalive after we've sent a `Close` frame.
+pub(crate) const CLOSE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Shared state for the client_ws router: HS256 secret + optional
-/// Ed25519 verifier. Cloned cheaply (Arc<[u8]>, Arc<String>).
+/// Ed25519 verifier + injection channel into the registry. Cloned cheaply
+/// (Arc<[u8]>, Arc<String>, Sender, SocketAddr).
 #[derive(Clone)]
 pub struct ClientWsState {
     /// HS256 shared secret (`SIGNALING_SFU_SECRET`).
@@ -37,12 +51,28 @@ pub struct ClientWsState {
     /// Optional EdDSA public key PEM (`SFU_SIGNING_PUBLIC_KEY`).
     /// When present, takes precedence over HS256 with a strict fallback
     /// rule: HS256 is tried only when the EdDSA path returns
-    /// `RoomAuthError::InvalidSignature`. `Expired` and `Malformed`
-    /// propagate immediately so a forged token cannot bypass exp
-    /// validation by being re-checked under HS256, and a malformed
-    /// token cannot mask a real signature failure. Mirrors
+    /// `RoomAuthError::InvalidSignature` (i.e. the token was likely
+    /// HS256-signed by a legacy signaling server). `Expired` and
+    /// `Malformed` propagate immediately — mirrors
     /// `relay/handler.rs:relay_connect`.
     pub signing_pubkey: Option<Arc<String>>,
+    /// Channel back to the main UDP loop. Once the session has built an
+    /// `Rtc` and exchanged SDP with the browser, it sends a
+    /// [`PendingClient`] here; `udp_loop::serve` calls
+    /// `Client::new(rtc, metrics)` (origin defaults to
+    /// `ClientOrigin::Local`) and `Registry::insert`.
+    pub client_inject_tx: Sender<PendingClient>,
+    /// Local address of the SFU's UDP socket, used as the host candidate
+    /// in the SDP answer. Reuses the same socket the main UDP loop owns —
+    /// no new bind in the session.
+    ///
+    /// **Caveat (pre-existing):** if `SFU_BIND_ADDRESS=0.0.0.0`, this is
+    /// `0.0.0.0:N`, which is not a useful candidate for off-box browsers.
+    /// The relay path (`relay::client::connect_relay`) has the same
+    /// limitation today; production must either set `SFU_BIND_ADDRESS` to
+    /// the public IP or wait for a dedicated public-IP discovery feature
+    /// (M4.A5 territory).
+    pub local_udp_addr: SocketAddr,
 }
 
 /// Spawn the client WS API on the given listener. Returns the join handle
@@ -51,10 +81,14 @@ pub fn spawn_client_ws_api(
     listener: TcpListener,
     secret: Arc<[u8]>,
     signing_pubkey: Option<Arc<String>>,
+    client_inject_tx: Sender<PendingClient>,
+    local_udp_addr: SocketAddr,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let state = ClientWsState {
         secret,
         signing_pubkey,
+        client_inject_tx,
+        local_udp_addr,
     };
     let app = Router::new()
         // axum 0.8 routes WS upgrades through `any` (the upgrade is GET
@@ -126,7 +160,7 @@ fn verify_token(
 /// HTTP handler for the WS upgrade. Returns `401` (no upgrade) on auth
 /// failure, otherwise upgrades and either:
 /// - on room mismatch, sends a close frame with code 4001 and drops;
-/// - on success, runs the (stub) per-connection loop.
+/// - on success, runs the per-connection session loop (M4.A2).
 #[instrument(skip(ws, headers, state), fields(room_id = %room_id))]
 pub async fn client_ws_upgrade(
     ws: WebSocketUpgrade,
@@ -163,59 +197,43 @@ pub async fn client_ws_upgrade(
     };
 
     let peer_id = claims.sub;
-    info!(
+    let inject_tx = state.client_inject_tx.clone();
+    let local_udp_addr = state.local_udp_addr;
+    tracing::info!(
         target: "sfu::client_ws",
-        peer_id,
-        "M4.A1 client_ws established for room={room_id} peer={peer_id}"
+        peer_id, %room_id,
+        "client_ws upgrade accepted; running M4.A2 session"
     );
     ws.protocols([SUBPROTOCOL])
-        .on_upgrade(move |socket| run_session_stub(socket, room_id, peer_id))
+        .on_upgrade(move |socket| async move {
+            if let Err(e) =
+                run_session(socket, room_id.clone(), peer_id, local_udp_addr, inject_tx).await
+            {
+                tracing::warn!(target: "sfu::client_ws", peer_id, %room_id, error = %e, "client_ws session ended with error");
+            }
+        })
         .into_response()
 }
 
-/// Stub per-connection handler. M4.A2 will replace this with the real
-/// SDP exchange + Registry insertion. Until then, log received frames
-/// and respond to pings; close cleanly when the peer goes away.
-async fn run_session_stub(mut socket: WebSocket, room_id: String, peer_id: u64) {
-    while let Some(msg) = socket.recv().await {
-        match msg {
-            Ok(Message::Text(t)) => {
-                debug!(target: "sfu::client_ws", %room_id, peer_id, bytes = t.len(), "client_ws text frame (M4.A1 stub: ignored)");
-            }
-            Ok(Message::Binary(b)) => {
-                debug!(target: "sfu::client_ws", %room_id, peer_id, bytes = b.len(), "client_ws binary frame (M4.A1 stub: ignored)");
-            }
-            Ok(Message::Ping(p)) => {
-                if socket.send(Message::Pong(p)).await.is_err() {
-                    break;
-                }
-            }
-            Ok(Message::Pong(_)) => { /* ignore */ }
-            Ok(Message::Close(_)) => break,
-            Err(e) => {
-                debug!(target: "sfu::client_ws", %room_id, peer_id, error = %e, "client_ws recv error");
-                break;
-            }
-        }
-    }
-    info!(target: "sfu::client_ws", %room_id, peer_id, "client_ws closed");
-}
-
-/// Close the upgraded WS with a custom application close code.
-async fn close_with_code(mut socket: WebSocket, code: CloseCode, reason: &'static str) {
+/// Close the upgraded WS with a custom application close code, then drain
+/// any further frames the peer may send up to [`CLOSE_DRAIN_TIMEOUT`].
+pub(crate) async fn close_with_code(mut socket: WebSocket, code: CloseCode, reason: &'static str) {
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
             code,
             reason: reason.into(),
         })))
         .await;
-    // Drain any further frames the peer may send before they observe the
-    // close; ignore errors — the peer may already have hung up.
-    while let Some(msg) = socket.recv().await {
-        if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
-            break;
+    // Bound the drain so a misbehaving peer can't pin this task open via
+    // TCP keepalive.
+    let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, async {
+        while let Some(msg) = socket.recv().await {
+            if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
+                break;
+            }
         }
-    }
+    })
+    .await;
 }
 
 #[cfg(test)]

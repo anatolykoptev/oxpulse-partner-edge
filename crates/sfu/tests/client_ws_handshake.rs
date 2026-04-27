@@ -7,14 +7,16 @@
 //!   3. Rejects token/path room mismatch with WS close code 4001
 //!      after the upgrade completes (101 first, then close).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use jsonwebtoken::{encode, EncodingKey, Header};
-use oxpulse_sfu::client_ws::spawn_client_ws_api;
+use oxpulse_sfu::client_ws::{spawn_client_ws_api, PendingClient};
 use oxpulse_sfu::room_auth::RoomClaims;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest,
     handshake::client::generate_key,
@@ -50,7 +52,12 @@ async fn start_test_handler() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let secret: Arc<[u8]> = Arc::from(HS256_SECRET);
-    let _handle = spawn_client_ws_api(listener, secret, None).unwrap();
+    // Discard inject channel — these tests stop at the auth/upgrade boundary.
+    let (inject_tx, _inject_rx) = mpsc::channel::<PendingClient>(8);
+    // Dummy local UDP addr; the auth/upgrade tests never reach the SDP path
+    // where this is actually used.
+    let local_udp: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let _handle = spawn_client_ws_api(listener, secret, None, inject_tx, local_udp).unwrap();
     format!("ws://{addr}")
 }
 

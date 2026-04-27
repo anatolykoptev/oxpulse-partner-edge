@@ -83,3 +83,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "relay_media_e2e"
 required-features = ["test-utils"]
+
+[[test]]
+name = "client_ws_session"
+required-features = []

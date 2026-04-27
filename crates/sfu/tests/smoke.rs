@@ -38,10 +38,20 @@ async fn udp_loop_binds_receives_and_shuts_down() {
     let metrics = Arc::new(SfuMetrics::default());
     let (tx, rx) = oneshot::channel::<()>();
     let (_, relay_rx) = tokio::sync::mpsc::channel(1);
+    let (_, client_inject_rx) =
+        tokio::sync::mpsc::channel::<oxpulse_sfu::client_ws::PendingClient>(1);
     let handle = tokio::spawn(async move {
-        udp_loop::serve(server_sock, metrics, None, None, relay_rx, async {
-            let _ = rx.await;
-        })
+        udp_loop::serve(
+            server_sock,
+            metrics,
+            None,
+            None,
+            relay_rx,
+            client_inject_rx,
+            async {
+                let _ = rx.await;
+            },
+        )
         .await
     });
 

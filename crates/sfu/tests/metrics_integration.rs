@@ -63,10 +63,20 @@ async fn udp_loop_serves_with_registry_and_shuts_down() {
 
     let (tx, rx) = oneshot::channel::<()>();
     let (_relay_tx, relay_rx) = tokio::sync::mpsc::channel(1);
+    let (_client_tx, client_inject_rx) =
+        tokio::sync::mpsc::channel::<oxpulse_sfu::client_ws::PendingClient>(1);
     let handle = tokio::spawn(async move {
-        udp_loop::serve(server_sock, metrics, None, None, relay_rx, async {
-            let _ = rx.await;
-        })
+        udp_loop::serve(
+            server_sock,
+            metrics,
+            None,
+            None,
+            relay_rx,
+            client_inject_rx,
+            async {
+                let _ = rx.await;
+            },
+        )
         .await
     });
 
