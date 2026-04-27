@@ -5,9 +5,17 @@
 //! outbound queue back to the socket, and honors a shutdown future
 //! so the caller can stop the loop cleanly.
 //!
-//! Client registration (SDP offer/answer, ICE, TURN bridging) is the
-//! signaling layer's job in M2; until then the registry starts empty
-//! and the loop's demux branch simply logs `no client accepts`.
+//! Two side-channels feed the loop:
+//! * `relay_rx` — outbound cascade-relay clients (str0m as offerer);
+//!   produced by `relay::client::connect_relay`.
+//! * `client_inject_rx` — browser clients (str0m as answerer); produced
+//!   by `client_ws::session::run` after an SDP exchange completes.
+//!
+//! Both produce a pre-ICE `Rtc` that the loop turns into a [`Client`]
+//! and inserts into the registry — from there ICE/DTLS/SRTP flow
+//! identically.
+//!
+//! [`Client`]: crate::client::Client
 
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -36,10 +44,12 @@ const MAX_SLEEP: Duration = Duration::from_millis(100);
 /// Run the SFU UDP loop until `shutdown` resolves. The bound
 /// `SocketAddr` is not returned from here — tests that need it should
 /// call [`bind`] and pass the resulting socket into [`serve`].
+#[allow(clippy::too_many_arguments)]
 pub async fn run_udp_loop<F>(
     config: SfuConfig,
     metrics: Arc<SfuMetrics>,
     relay_rx: tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>,
+    client_inject_rx: tokio::sync::mpsc::Receiver<crate::client_ws::PendingClient>,
     shutdown: F,
 ) -> anyhow::Result<()>
 where
@@ -57,6 +67,7 @@ where
         relay_auth_secret,
         relay_signing_pubkey,
         relay_rx,
+        client_inject_rx,
         shutdown,
     )
     .await
@@ -76,12 +87,14 @@ pub async fn bind(config: &SfuConfig) -> anyhow::Result<UdpSocket> {
 
 /// Drive the receive loop on an already-bound socket. Returns once
 /// `shutdown` resolves or a fatal socket error occurs.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve<F>(
     socket: UdpSocket,
     metrics: Arc<SfuMetrics>,
     relay_auth_secret: Option<Arc<[u8]>>,
     relay_signing_pubkey: Option<Arc<String>>,
     mut relay_rx: tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>,
+    mut client_inject_rx: tokio::sync::mpsc::Receiver<crate::client_ws::PendingClient>,
     shutdown: F,
 ) -> anyhow::Result<()>
 where
@@ -152,6 +165,18 @@ where
                     tracing::info!(%room_id, "cascade relay client injected into registry — ICE driven by main UDP loop");
                 }
             }
+            maybe_client = client_inject_rx.recv() => {
+                if let Some(pending) = maybe_client {
+                    let room_id = pending.room_id.clone();
+                    let external_peer_id = pending.external_peer_id;
+                    // `Client::new` defaults `origin = ClientOrigin::Local` —
+                    // exactly what M4.A2 needs for browser peers.
+                    let client = crate::client::Client::new(pending.rtc, metrics_ref.clone());
+                    registry.insert(client);
+                    tracing::info!(%room_id, external_peer_id,
+                        "browser client injected into registry — ICE driven by main UDP loop");
+                }
+            }
         }
     }
 }
@@ -198,9 +223,18 @@ mod tests {
         let metrics = Arc::new(SfuMetrics::default());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let (_, relay_rx) = tokio::sync::mpsc::channel(1);
-        let handle = tokio::spawn(serve(socket, metrics, None, None, relay_rx, async {
-            let _ = rx.await;
-        }));
+        let (_, client_inject_rx) = tokio::sync::mpsc::channel(1);
+        let handle = tokio::spawn(serve(
+            socket,
+            metrics,
+            None,
+            None,
+            relay_rx,
+            client_inject_rx,
+            async {
+                let _ = rx.await;
+            },
+        ));
         tx.send(()).unwrap();
         handle.await.unwrap().unwrap();
     }
@@ -219,6 +253,7 @@ mod tests {
         let socket = bind(&cfg).await.unwrap();
         let metrics = Arc::new(crate::metrics::SfuMetrics::default());
         let (relay_tx, relay_rx) = mpsc::channel::<PendingRelay>(4);
+        let (_client_tx, client_inject_rx) = mpsc::channel::<crate::client_ws::PendingClient>(4);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         // Build a PendingRelay with a real ChannelId
@@ -245,9 +280,17 @@ mod tests {
         drop(relay_tx);
 
         let metrics_clone = metrics.clone();
-        let handle = tokio::spawn(serve(socket, metrics_clone, None, None, relay_rx, async {
-            let _ = shutdown_rx.await;
-        }));
+        let handle = tokio::spawn(serve(
+            socket,
+            metrics_clone,
+            None,
+            None,
+            relay_rx,
+            client_inject_rx,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
 
         // Give serve() time to drain the relay_rx channel
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -259,6 +302,64 @@ mod tests {
             metrics.active_participants.get(),
             1,
             "relay client must be inserted into registry via relay_rx channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_injects_browser_client_from_channel() {
+        use crate::client_ws::PendingClient;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        let cfg = SfuConfig {
+            udp_port: 0,
+            bind_address: "127.0.0.1".to_string(),
+            ..SfuConfig::default()
+        };
+        let socket = bind(&cfg).await.unwrap();
+        let metrics = Arc::new(crate::metrics::SfuMetrics::default());
+        let (_relay_tx, relay_rx) = mpsc::channel::<crate::relay::client::PendingRelay>(1);
+        let (client_tx, client_inject_rx) = mpsc::channel::<PendingClient>(4);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Build a fresh str0m Rtc as if the SDP exchange had completed.
+        let rtc = str0m::Rtc::new(std::time::Instant::now());
+        client_tx
+            .send(PendingClient {
+                rtc,
+                room_id: "browser-inject-test".to_string(),
+                external_peer_id: 99,
+            })
+            .await
+            .unwrap();
+        drop(client_tx);
+
+        let metrics_clone = metrics.clone();
+        let handle = tokio::spawn(serve(
+            socket,
+            metrics_clone,
+            None,
+            None,
+            relay_rx,
+            client_inject_rx,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        // Give serve() time to drain the client_inject_rx channel.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = shutdown_tx.send(());
+        handle.await.unwrap().unwrap();
+
+        // The browser client was inserted — active_participants should be 1.
+        // Browser-origin is implied by-construction: `Client::new` defaults
+        // `origin = ClientOrigin::Local` (vs `Client::new_outbound_relay` for
+        // the relay path), and we never wired the relay channel.
+        assert_eq!(
+            metrics.active_participants.get(),
+            1,
+            "browser client must be inserted into registry via client_inject_rx"
         );
     }
 }

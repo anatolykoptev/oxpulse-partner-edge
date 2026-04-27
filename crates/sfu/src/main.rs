@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 
 use anyhow::Context;
 use oxpulse_sfu::{
+    client_ws::{spawn_client_ws_api, PendingClient},
     metrics::spawn_metrics_server,
     relay::{
         client::connect_relay,
@@ -23,6 +24,19 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level)),
         )
         .init();
+
+    // M4.A6 - parse_public_ip_env() emitted any warning *before* the
+    // subscriber was initialized, so re-check here for visibility.
+    if let Ok(raw) = std::env::var("SFU_PUBLIC_IP") {
+        if !raw.is_empty() && config.public_ip.is_none() {
+            tracing::warn!(
+                value = %raw,
+                "SFU_PUBLIC_IP is set but did not parse as an IP address \
+            falling back to the bind address for host candidates. \
+            Off-box browsers will fail ICE."
+            );
+        }
+    }
 
     #[cfg(unix)]
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
@@ -104,11 +118,83 @@ async fn main() -> anyhow::Result<()> {
         (relay_rx_inner, None)
     };
 
-    // Bind the UDP socket early so relay tasks can use the real local address.
-    // Previously run_udp_loop() bound internally; now we bind here and pass the socket.
+    // Bind the UDP socket early so relay tasks AND the client_ws session
+    // can use the real local address as their host candidate. Previously
+    // run_udp_loop() bound internally; now we bind here and pass the
+    // socket.
     let socket = udp_loop::bind(&config).await?;
     let local_addr = socket.local_addr().context("get UDP local_addr")?;
     tracing::info!(%local_addr, "SFU UDP socket bound");
+
+    // Phase 7 M4.A6 — host candidate address.
+    //
+    // The bind address is typically `0.0.0.0:N`, which is unroutable
+    // from off-box browsers and breaks ICE in production. When
+    // `SFU_PUBLIC_IP` is set we override the candidate IP to the node's
+    // public IP while keeping the kernel-assigned port. When unset we
+    // fall back to `local_addr` (the historical behavior), so dev/test
+    // on loopback keeps working.
+    let host_candidate_addr = match config.public_ip {
+        Some(ip) => {
+            let addr = std::net::SocketAddr::new(ip, local_addr.port());
+            tracing::info!(
+                %addr, bind = %local_addr,
+                "SFU host candidate uses SFU_PUBLIC_IP override (M4.A6)"
+            );
+            addr
+        }
+        None => {
+            if local_addr.ip().is_unspecified() {
+                tracing::warn!(
+                    bind = %local_addr,
+                    "SFU_PUBLIC_IP not set and bind address is wildcard \
+                host candidate is unroutable from off-box browsers. \
+                Set SFU_PUBLIC_IP=<node-public-ip> in the env to fix off-box ICE."
+                );
+            } else {
+                tracing::info!(%local_addr, "SFU host candidate uses bind address (no SFU_PUBLIC_IP override)");
+            }
+            local_addr
+        }
+    };
+
+    // Channel for injecting browser clients (post-SDP) from the
+    // client_ws session into the main UDP loop. Mirrors `relay_inject_*`
+    // below — same pattern, different producer.
+    let (client_inject_tx, client_inject_rx) = tokio::sync::mpsc::channel::<PendingClient>(32);
+
+    // Phase 7 M4.A1 — client-facing WebSocket API at /sfu/ws/{room_id}.
+    // Browsers connect here directly with a room JWT in the
+    // Sec-WebSocket-Protocol header. The endpoint is enabled when
+    // SIGNALING_SFU_SECRET is configured (HS256 verifier) — without a
+    // secret there is no way to authenticate browsers, so we refuse to
+    // expose an unauthenticated entry point.
+    let client_ws_handle = if let Some(secret_bytes) = config.relay_auth_secret.as_ref() {
+        let client_ws_addr = format!("{}:{}", config.bind_address, config.client_ws_port);
+        let client_ws_listener = tokio::net::TcpListener::bind(&client_ws_addr)
+            .await
+            .with_context(|| format!("bind client_ws API on {client_ws_addr}"))?;
+        let secret_arc: Arc<[u8]> = Arc::from(secret_bytes.as_slice());
+        let handle = spawn_client_ws_api(
+            client_ws_listener,
+            secret_arc,
+            relay_signing_pubkey.clone(),
+            client_inject_tx.clone(),
+            host_candidate_addr,
+            metrics.clone(),
+        )?;
+        tracing::info!(addr = %client_ws_addr, "client_ws API listening (Phase 7 M4.A1+M4.A2)");
+        Some(handle)
+    } else {
+        tracing::info!(
+            "SIGNALING_SFU_SECRET not set — client_ws API disabled \
+             (Phase 7 M4.A1 requires HS256 secret for browser auth)"
+        );
+        None
+    };
+    // Drop the spare sender so the client_inject channel closes when the
+    // client_ws task exits and no PendingClient is in flight.
+    drop(client_inject_tx);
 
     // HMAC secret for authenticating relay-injected clients inside the Registry.
     let relay_auth_secret = config
@@ -133,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
             let room = task.room_id.clone();
             let tx = relay_inject_tx_clone.clone();
             tokio::spawn(async move {
-                match connect_relay(&url, &token, local_addr, room.clone()).await {
+                match connect_relay(&url, &token, host_candidate_addr, room.clone()).await {
                     Ok(pending) => {
                         if let Err(e) = tx.send(pending).await {
                             tracing::warn!(
@@ -173,20 +259,25 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Run the UDP loop — blocks until shutdown fires.
-    // Pass relay_inject_rx so serve() can inject relay clients into the Registry.
+    // Pass relay_inject_rx so serve() can inject relay clients into the Registry,
+    // and client_inject_rx so serve() can inject browser clients post-SDP.
     let result = udp_loop::serve(
         socket,
         metrics,
         relay_auth_secret,
         relay_signing_pubkey,
         relay_inject_rx,
+        client_inject_rx,
         shutdown,
     )
     .await;
 
-    // Stop the metrics server and relay API server.
+    // Stop the metrics, relay API, and client_ws API servers.
     metrics_handle.abort();
     if let Some(h) = relay_handle {
+        h.abort();
+    }
+    if let Some(h) = client_ws_handle {
         h.abort();
     }
 

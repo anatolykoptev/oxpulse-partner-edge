@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
 dominant-speaker = { package = "rust-dominant-speaker", version = "0.3" }
 oxpulse-sfu-kit = { version = "0.6", features = [
     "active-speaker",
@@ -82,4 +82,20 @@ required-features = ["test-utils"]
 
 [[test]]
 name = "relay_media_e2e"
+required-features = ["test-utils"]
+
+[[test]]
+name = "client_ws_session"
+required-features = []
+
+[[test]]
+name = "client_ws_fanout"
+# M4.A3 fanout/simulcast tests use `test_seed::*` and the
+# `Registry::*_for_tests` seams, both gated behind `test-utils`.
+required-features = ["test-utils"]
+
+[[test]]
+name = "client_ws_active_speaker"
+# M4.A4 — uses the cfg-gated `last_active_speaker_payload` capture seam
+# on `Client`, parallel to `delivered_active_speaker: AtomicU64`.
 required-features = ["test-utils"]

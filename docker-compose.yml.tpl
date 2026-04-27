@@ -6,6 +6,7 @@
 #   {{TURN_SECRET}} {{REALITY_UUID}} {{REALITY_PUBLIC_KEY}} {{REALITY_SHORT_ID}}
 #   {{REALITY_SERVER_NAME}} {{PUBLIC_IP}} {{PRIVATE_IP}} {{IMAGE_VERSION}}
 #   {{SFU_UDP_PORT}} {{SFU_METRICS_PORT}} {{SFU_SIGNING_PUBLIC_KEY}}
+#   {{SIGNALING_SFU_SECRET}}
 
 name: oxpulse-partner-edge
 
@@ -111,6 +112,20 @@ services:
       # Fetched from /api/partner/keys at install time; refreshed daily by
       # oxpulse-partner-edge-refresh.sh (written to sfu-keys.env).
       SFU_SIGNING_PUBLIC_KEY: "{{SFU_SIGNING_PUBLIC_KEY}}"
+      # Phase 7 M4.A5 — client-facing WS endpoint /sfu/ws/{room_id}.
+      # Caddy reverse_proxies to host.docker.internal:8920 (see Caddyfile).
+      # The endpoint binds only when SIGNALING_SFU_SECRET is non-empty —
+      # without an HS256 secret the SFU has no way to verify browser
+      # room JWTs and refuses to expose an unauthenticated entry point.
+      SFU_CLIENT_WS_PORT: "8920"
+      SIGNALING_SFU_SECRET: "{{SIGNALING_SFU_SECRET}}"
+      # Phase 7 M4.A6 — public IP advertised in WebRTC host candidates.
+      # Without this the SFU emits `0.0.0.0:N` host candidates (the bind
+      # address) and off-box browsers cannot complete ICE. The value
+      # comes from install.sh `$PUBLIC_IP` autodetect (cloud metadata →
+      # ipify → ifconfig.me). Operators may override at compose render
+      # time via OXPULSE_PUBLIC_IP. Falls back to bind address when empty.
+      SFU_PUBLIC_IP: "{{PUBLIC_IP}}"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:{{SFU_METRICS_PORT}}/metrics >/dev/null 2>&1 || exit 1"]
       interval: 30s
