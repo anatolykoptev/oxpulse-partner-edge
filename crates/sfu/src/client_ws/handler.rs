@@ -35,11 +35,13 @@ pub struct ClientWsState {
     /// HS256 shared secret (`SIGNALING_SFU_SECRET`).
     pub secret: Arc<[u8]>,
     /// Optional EdDSA public key PEM (`SFU_SIGNING_PUBLIC_KEY`).
-    /// When present, takes precedence over HS256 with a fallback to
-    /// HS256 on `RoomAuthError::Invalid` (the only granular variant the
-    /// `room_auth` API currently exposes — TODO M4.A2: tighten to fall
-    /// back only on InvalidSignature once `RoomAuthError` grows finer
-    /// variants, mirroring `relay/handler.rs:relay_connect`).
+    /// When present, takes precedence over HS256 with a strict fallback
+    /// rule: HS256 is tried only when the EdDSA path returns
+    /// `RoomAuthError::InvalidSignature`. `Expired` and `Malformed`
+    /// propagate immediately so a forged token cannot bypass exp
+    /// validation by being re-checked under HS256, and a malformed
+    /// token cannot mask a real signature failure. Mirrors
+    /// `relay/handler.rs:relay_connect`.
     pub signing_pubkey: Option<Arc<String>>,
 }
 
@@ -98,8 +100,11 @@ fn extract_bearer_from_subprotocols(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Verify a room token against the configured auth backend(s). Mirrors
-/// the EdDSA→HS256 fallback in `relay/handler.rs:relay_connect`, but
-/// uses the (less granular) `room_auth::RoomAuthError` API.
+/// the strict EdDSA→HS256 fallback in `relay/handler.rs:relay_connect`:
+/// only `InvalidSignature` from the EdDSA path triggers an HS256 retry;
+/// `Expired` and `Malformed` propagate immediately so a forged token
+/// cannot bypass exp validation by being re-checked under HS256, and a
+/// malformed token cannot mask a real signature failure.
 fn verify_token(
     token: &str,
     room_id: &str,
@@ -108,16 +113,11 @@ fn verify_token(
     if let Some(pubkey) = &state.signing_pubkey {
         match verify_room_token_ed25519(token, room_id, pubkey) {
             Ok(c) => return Ok(c),
-            // Mismatch is a definitive verdict — signature was OK,
-            // claims are trustworthy, and the room is wrong. Don't
-            // fall through to HS256.
-            Err(e @ RoomAuthError::RoomMismatch { .. }) => return Err(e),
-            // Token may have been signed with HS256 by a legacy
-            // signaling server; fall through to HS256 verification.
-            // (The current `RoomAuthError::Invalid` variant lumps
-            // together InvalidSignature and Expired; M4.A2 should
-            // tighten this to fall back only on InvalidSignature.)
-            Err(RoomAuthError::Invalid) => {}
+            // The token was probably HS256-signed by a legacy signaling
+            // server; try HS256.
+            Err(RoomAuthError::InvalidSignature) => {}
+            // Mismatch / expired / malformed are definitive verdicts.
+            Err(e) => return Err(e),
         }
     }
     verify_room_token(token, room_id, &state.secret)
@@ -154,8 +154,10 @@ pub async fn client_ws_upgrade(
                 })
                 .into_response();
         }
-        Err(RoomAuthError::Invalid) => {
-            warn!(%room_id, "client_ws: invalid or expired token");
+        Err(RoomAuthError::InvalidSignature)
+        | Err(RoomAuthError::Expired)
+        | Err(RoomAuthError::Malformed) => {
+            warn!(%room_id, "client_ws: invalid, expired, or malformed token");
             return StatusCode::UNAUTHORIZED.into_response();
         }
     };
