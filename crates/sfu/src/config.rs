@@ -19,8 +19,15 @@ pub struct SfuConfig {
     /// Env: `SFU_RELAY_API_PORT`. Default: 8912.
     pub relay_api_port: u16,
     /// HTTP port for the client-facing WebSocket endpoint
-    /// (`/sfu/ws/{room_id}`). Browsers connect here directly.
-    /// Env: `SFU_CLIENT_WS_PORT`. Default: 8911.
+    /// (`/sfu/ws/{room_id}`). Browsers connect here directly via the
+    /// Caddy `/sfu/ws/*` reverse_proxy. Env: `SFU_CLIENT_WS_PORT`.
+    /// Default: 8920.
+    ///
+    /// Note: 8911 was the original choice but is squatted on krolik
+    /// (San Jose) by an unrelated go-imagine process. 8920 was picked
+    /// to avoid a fleet-wide eviction; the value is partner-edge-wide
+    /// (rvpn / piter / krolik all bind 8920) so the same Caddy
+    /// template ships everywhere.
     pub client_ws_port: u16,
     /// Shared secret for verifying room JWTs issued by oxpulse-chat signaling.
     /// Must match `SIGNALING_SFU_SECRET` on the signaling server.
@@ -46,7 +53,7 @@ impl Default for SfuConfig {
             bind_address: "0.0.0.0".to_string(),
             log_level: "info".to_string(),
             relay_api_port: 8912,
-            client_ws_port: 8911,
+            client_ws_port: 8920,
             relay_auth_secret: None,
             fips_mode: false,
             sfu_signing_public_key: None,
@@ -110,7 +117,7 @@ mod tests {
     #[test]
     fn client_ws_port_default_and_distinct() {
         let cfg = SfuConfig::default();
-        assert_eq!(cfg.client_ws_port, 8911);
+        assert_eq!(cfg.client_ws_port, 8920);
         // Each port must be distinct so we can bind all four side-by-side.
         assert_ne!(cfg.client_ws_port, cfg.relay_api_port);
         assert_ne!(cfg.client_ws_port, cfg.metrics_port);
