@@ -270,6 +270,12 @@ RELAY_JWT_SECRET=$(json_get relay_jwt_secret "$tmp_cfg")
 # The same secret must be added to the operator's signaling server RELAY_JWT_SECRET
 # env var and SFU_EDGES relay_api_url for cascade relay to work.
 [[ -z "$RELAY_JWT_SECRET" ]] && RELAY_JWT_SECRET=$(openssl rand -hex 32)
+# Phase 7 M4.A5 — HS256 secret used by the SFU client_ws endpoint to verify
+# browser-issued room JWTs. MUST match SIGNALING_SFU_SECRET on the signaling
+# server (oxpulse-chat). When empty, the SFU disables /sfu/ws/{room_id}
+# entirely and Caddy's reverse_proxy to :8920 will return 502 — that's
+# the safe default (no unauthenticated browser WS exposure).
+SIGNALING_SFU_SECRET=$(json_get signaling_sfu_secret "$tmp_cfg")
 # Backend-assigned TURNS subdomain (format api-<6-hex>). Falls back to "turns"
 # only if the backend did not return one (pre-v0.2 deployments).
 REGISTER_TURNS_SUBDOMAIN=$(json_get turns_subdomain "$tmp_cfg")
@@ -416,6 +422,7 @@ render() {
 		-e "s|{{SFU_METRICS_PORT}}|${SFU_METRICS_PORT}|g" \
 		-e "s|{{SFU_SIGNING_PUBLIC_KEY}}|${SFU_SIGNING_PUBLIC_KEY:-}|g" \
 		-e "s|{{RELAY_JWT_SECRET}}|${RELAY_JWT_SECRET}|g" \
+		-e "s|{{SIGNALING_SFU_SECRET}}|${SIGNALING_SFU_SECRET:-}|g" \
 		-e "s|{{HYSTERIA2_SERVER}}|${HYSTERIA2_SERVER:-}|g" \
 		-e "s|{{HYSTERIA2_PORT}}|${HYSTERIA2_PORT:-51822}|g" \
 		-e "s|{{HYSTERIA2_AUTH}}|${HYSTERIA2_AUTH:-}|g" \

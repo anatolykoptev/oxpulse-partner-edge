@@ -81,6 +81,19 @@
     handle /relay/* {
         reverse_proxy host.docker.internal:8912
     }
+
+    # Phase 7 M4.A5 — client-facing SFU WebSocket endpoint.
+    # Browsers connect here with a room JWT in Sec-WebSocket-Protocol.
+    # The SFU container runs network_mode: host, so 8920 is reachable via
+    # the bridge gateway alias `host.docker.internal` (see extra_hosts in
+    # docker-compose.yml.tpl). Caddy auto-handles the WS upgrade for any
+    # reverse_proxy upstream (Connection/Upgrade headers preserved).
+    # `handle` (not `handle_path`) keeps the full /sfu/ws/{room_id} path
+    # so the SFU's axum router matches.
+    # Port 8920 chosen because 8911 is squatted on krolik (San Jose).
+    handle /sfu/ws/* {
+        reverse_proxy host.docker.internal:8920
+    }
     # Every GET / just serves the SPA.
     handle {
         # Cache SvelteKit hashed assets for a year (immutable by filename hash).
