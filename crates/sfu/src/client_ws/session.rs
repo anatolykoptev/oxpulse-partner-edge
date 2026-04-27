@@ -34,11 +34,16 @@
 //!    *before* `accept_offer` (so the candidate appears in the answer
 //!    SDP — see spike line 173 for the rationale).
 //! 3. `accept_offer(SdpOffer::from_sdp_string(...))` → `SdpAnswer`.
-//! 4. Send `{kind:"answer", sdp:...}` over WS.
+//! 4. Build the answer frame string (don't send yet).
 //! 5. Send the `PendingClient` over the inject channel — the main UDP
 //!    loop calls `Client::new(rtc, metrics)` (which defaults
-//!    `origin = ClientOrigin::Local`) and `Registry::insert`.
-//! 6. Park, ignoring further frames, until WS closes. Unlike the relay
+//!    `origin = ClientOrigin::Local`) and `Registry::insert`. **Order
+//!    matters:** this happens BEFORE step 6 to avoid a window where the
+//!    browser has the answer (and is emitting STUN) but the registry
+//!    hasn't adopted the peer yet — those packets would be logged as
+//!    `no client accepts udp datagram` (registry::mod.rs).
+//! 6. Send `{kind:"answer", sdp:...}` over WS.
+//! 7. Park, ignoring further frames, until WS closes. Unlike the relay
 //!    drop-and-go path, we keep the WS open so future M4.A4 server→
 //!    client DC events can reuse the same socket.
 
@@ -151,21 +156,18 @@ pub async fn run(
         }
     };
 
-    // 4. Send the answer back over WS.
+    // 4. Build the answer frame eagerly — but DON'T send it yet. The
+    //    browser starts emitting STUN binding requests against our UDP
+    //    socket as soon as it sees the answer SDP. If we send the answer
+    //    *before* the registry has adopted this peer, those STUN packets
+    //    get logged as `no client accepts udp datagram` (registry::mod.rs)
+    //    until `client_inject_rx` is drained on the next `serve()` tick.
+    //    Reordering inject-then-answer closes that race window. (See
+    //    M4.A2 follow-up.)
     let answer_sdp = answer.to_sdp_string();
     let answer_frame = serde_json::json!({ "kind": "answer", "sdp": answer_sdp }).to_string();
-    if socket
-        .send(Message::Text(answer_frame.into()))
-        .await
-        .is_err()
-    {
-        tracing::warn!(target: "sfu::client_ws", peer_id, %room_id, "client_ws: send(answer) failed; peer gone");
-        return Ok(());
-    }
-    tracing::info!(target: "sfu::client_ws", peer_id, %room_id, bytes = answer_sdp.len(),
-        "client_ws: answer sent; injecting into registry");
 
-    // 5. Hand the pre-ICE Rtc to the main UDP loop. From here on,
+    // 5. Hand the pre-ICE Rtc to the main UDP loop FIRST. From here on,
     //    ICE/DTLS/SRTP run via udp_loop::serve identically to relay
     //    clients (see `udp_loop::serve` `relay_rx` arm).
     if inject_tx
@@ -183,7 +185,20 @@ pub async fn run(
         return Ok(());
     }
 
-    // 6. Park: keep the WS open and consume frames so future M4.A4 DC
+    // 6. Now send the answer — the browser may begin STUN immediately,
+    //    and the client is already in the registry channel queue.
+    if socket
+        .send(Message::Text(answer_frame.into()))
+        .await
+        .is_err()
+    {
+        tracing::warn!(target: "sfu::client_ws", peer_id, %room_id, "client_ws: send(answer) failed; peer gone");
+        return Ok(());
+    }
+    tracing::info!(target: "sfu::client_ws", peer_id, %room_id, bytes = answer_sdp.len(),
+        "client_ws: answer sent; client already injected into registry");
+
+    // 7. Park: keep the WS open and consume frames so future M4.A4 DC
     //    events can be sent in parallel. Trickle ICE candidates from the
     //    browser are accepted but logged-and-ignored today (non-trickle
     //    is the M4.A2 contract; M4.A4 introduces the registry→session
