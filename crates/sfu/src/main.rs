@@ -181,6 +181,7 @@ async fn main() -> anyhow::Result<()> {
             relay_signing_pubkey.clone(),
             client_inject_tx.clone(),
             host_candidate_addr,
+            metrics.clone(),
         )?;
         tracing::info!(addr = %client_ws_addr, "client_ws API listening (Phase 7 M4.A1+M4.A2)");
         Some(handle)

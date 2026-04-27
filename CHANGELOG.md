@@ -5,6 +5,53 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.2] — 2026-04-27
+
+### Added — Phase 7 M4.B1 client_ws verification metrics
+
+- **`sfu_client_ws_active_sessions`** — gauge of currently open M4.A1
+  client_ws sessions. Inc on session-open, dec on close (Drop-guard
+  protected so panics also decrement).
+- **`sfu_client_ws_sessions_started_total`** — counter, every accepted
+  upgrade (token verified, WS handshake succeeded).
+- **`sfu_client_ws_handshake_failures_total{reason}`** — counter, rejection
+  reasons before session start. Bounded reason set:
+  `missing_token | invalid_token | expired_token | room_mismatch`.
+  (`bad_subprotocol` from the original spec was dropped — handler does
+  not currently validate the subprotocol list, only the `Bearer` entry.)
+- **`sfu_client_ws_offer_processed_total{outcome}`** — counter, outcomes
+  of SDP offer processing inside the session. Bounded outcome set:
+  `ok | parse_err | sdp_err | ice_err`.
+- **`sfu_client_ws_answer_sent_total`** — counter, every successful answer
+  frame written to the browser.
+- **`sfu_client_ws_session_ended_total{close_code}`** — counter, session
+  terminations bucketed by close code: `1000 | 1001 | 4001 | 4002 | 4003 | other`.
+- **`sfu_client_ws_session_duration_seconds`** — histogram of full
+  session wall-clock duration (every upgrade, including short
+  rejected sessions). Buckets: `[1, 5, 30, 60, 300, 1800, 3600, +Inf]`.
+
+All metrics inherit the registry's const `edge_id` label automatically.
+
+### Why this matters
+
+After Phase 7 M4 SFU group-call cutover, central signaling correctly
+emits `upgrade_to_sfu` and selects geo-nearest healthy edge — visible
+in logs. But there was a verification gap: we had no way to prove the
+client actually opens the WS to `/sfu/ws/{room_id}`, completes SDP
+exchange, and forwards media. CloakBrowser headless tests don't
+reliably trigger the WS path. With these counters, a single real
+browser session generates ticks across the pipeline; counter values
+prove which step works and which is blocked.
+
+### Tests
+
+- `crates/sfu/tests/client_ws_handshake.rs` — 4 new tests assert the
+  `started`, `missing_token`, `room_mismatch`, and `expired_token`
+  counters tick on real WS roundtrips.
+- `crates/sfu/tests/client_ws_session.rs` — 2 new tests assert
+  `offer_processed{outcome=ok|parse_err}` and `answer_sent_total`
+  tick during real SDP exchange.
+
 ## [0.12.1] — 2026-04-25
 
 ### Fixed — Phase 7 M4.A6 (real-user blocker)
