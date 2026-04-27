@@ -87,3 +87,9 @@ required-features = ["test-utils"]
 [[test]]
 name = "client_ws_session"
 required-features = []
+
+[[test]]
+name = "client_ws_fanout"
+# M4.A3 fanout/simulcast tests use `test_seed::*` and the
+# `Registry::*_for_tests` seams, both gated behind `test-utils`.
+required-features = ["test-utils"]
