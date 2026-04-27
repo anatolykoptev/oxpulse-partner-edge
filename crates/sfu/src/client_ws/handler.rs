@@ -62,16 +62,16 @@ pub struct ClientWsState {
     /// `Client::new(rtc, metrics)` (origin defaults to
     /// `ClientOrigin::Local`) and `Registry::insert`.
     pub client_inject_tx: Sender<PendingClient>,
-    /// Local address of the SFU's UDP socket, used as the host candidate
-    /// in the SDP answer. Reuses the same socket the main UDP loop owns —
-    /// no new bind in the session.
+    /// Address advertised in the SFU's host candidate (`Candidate::host`)
+    /// in the SDP answer. The session installs this on the `Rtc` before
+    /// `accept_offer`, so the answer SDP carries it in `a=candidate`.
     ///
-    /// **Caveat (pre-existing):** if `SFU_BIND_ADDRESS=0.0.0.0`, this is
-    /// `0.0.0.0:N`, which is not a useful candidate for off-box browsers.
-    /// The relay path (`relay::client::connect_relay`) has the same
-    /// limitation today; production must either set `SFU_BIND_ADDRESS` to
-    /// the public IP or wait for a dedicated public-IP discovery feature
-    /// (M4.A5 territory).
+    /// Phase 7 M4.A6 - main.rs now computes this as `host_candidate_addr`:
+    /// when `SFU_PUBLIC_IP` is set, the IP is overridden to the node's
+    /// public IPv4 (port stays the kernel-bound one); otherwise it falls
+    /// back to the bind address. The same value is threaded into
+    /// `relay::client::connect_relay`, so cascade and browser paths emit
+    /// matching candidates.
     pub local_udp_addr: SocketAddr,
 }
 
