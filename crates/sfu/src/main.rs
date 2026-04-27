@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 
 use anyhow::Context;
 use oxpulse_sfu::{
+    client_ws::spawn_client_ws_api,
     metrics::spawn_metrics_server,
     relay::{
         client::connect_relay,
@@ -104,6 +105,30 @@ async fn main() -> anyhow::Result<()> {
         (relay_rx_inner, None)
     };
 
+    // Phase 7 M4.A1 — client-facing WebSocket API at /sfu/ws/{room_id}.
+    // Browsers connect here directly with a room JWT in the
+    // Sec-WebSocket-Protocol header. The endpoint is enabled when
+    // SIGNALING_SFU_SECRET is configured (HS256 verifier) — without a
+    // secret there is no way to authenticate browsers, so we refuse to
+    // expose an unauthenticated entry point.
+    let client_ws_handle = if let Some(secret_bytes) = config.relay_auth_secret.as_ref() {
+        let client_ws_addr = format!("{}:{}", config.bind_address, config.client_ws_port);
+        let client_ws_listener = tokio::net::TcpListener::bind(&client_ws_addr)
+            .await
+            .with_context(|| format!("bind client_ws API on {client_ws_addr}"))?;
+        let secret_arc: Arc<[u8]> = Arc::from(secret_bytes.as_slice());
+        let handle =
+            spawn_client_ws_api(client_ws_listener, secret_arc, relay_signing_pubkey.clone())?;
+        tracing::info!(addr = %client_ws_addr, "client_ws API listening (Phase 7 M4.A1)");
+        Some(handle)
+    } else {
+        tracing::info!(
+            "SIGNALING_SFU_SECRET not set — client_ws API disabled \
+             (Phase 7 M4.A1 requires HS256 secret for browser auth)"
+        );
+        None
+    };
+
     // Bind the UDP socket early so relay tasks can use the real local address.
     // Previously run_udp_loop() bound internally; now we bind here and pass the socket.
     let socket = udp_loop::bind(&config).await?;
@@ -184,9 +209,12 @@ async fn main() -> anyhow::Result<()> {
     )
     .await;
 
-    // Stop the metrics server and relay API server.
+    // Stop the metrics, relay API, and client_ws API servers.
     metrics_handle.abort();
     if let Some(h) = relay_handle {
+        h.abort();
+    }
+    if let Some(h) = client_ws_handle {
         h.abort();
     }
 
