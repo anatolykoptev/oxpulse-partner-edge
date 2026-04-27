@@ -45,61 +45,6 @@ fn is_allowed_upstream(url: &str) -> bool {
     })
 }
 
-#[cfg(test)]
-mod allow_list_tests {
-    use super::is_allowed_upstream;
-
-    #[test]
-    fn accepts_apex_oxpulse_chat() {
-        assert!(is_allowed_upstream("wss://oxpulse.chat/ws/call/r"));
-        assert!(is_allowed_upstream("wss://oxpulse.chat:443/ws/call/r"));
-    }
-
-    #[test]
-    fn accepts_subdomain_oxpulse_chat() {
-        assert!(is_allowed_upstream("wss://edge.oxpulse.chat/ws/call/r"));
-        assert!(is_allowed_upstream("wss://eu.oxpulse.chat:9443/ws"));
-    }
-
-    #[test]
-    fn accepts_localhost_dev() {
-        assert!(is_allowed_upstream("wss://localhost/ws"));
-        assert!(is_allowed_upstream("wss://127.0.0.1:9443/ws"));
-    }
-
-    #[test]
-    fn rejects_path_component_spoof() {
-        // The bug fix: contains() would have returned true for these.
-        assert!(!is_allowed_upstream(
-            "wss://attacker.com/.oxpulse.chat/path"
-        ));
-        assert!(!is_allowed_upstream("wss://evil.com/?x=.oxpulse.chat/foo"));
-        assert!(!is_allowed_upstream(
-            "wss://evil.com:8080/.oxpulse.chat:443/x"
-        ));
-    }
-
-    #[test]
-    fn rejects_lookalike_domains() {
-        assert!(!is_allowed_upstream("wss://oxpulse.chat.attacker.com/x"));
-        assert!(!is_allowed_upstream("wss://notoxpulse.chat/x"));
-        assert!(!is_allowed_upstream("wss://attacker.com/x"));
-    }
-
-    #[test]
-    fn rejects_non_wss() {
-        assert!(!is_allowed_upstream("ws://oxpulse.chat/x"));
-        assert!(!is_allowed_upstream("http://oxpulse.chat/x"));
-        assert!(!is_allowed_upstream("https://oxpulse.chat/x"));
-    }
-
-    #[test]
-    fn rejects_empty_host() {
-        assert!(!is_allowed_upstream("wss:///path"));
-        assert!(!is_allowed_upstream("wss://"));
-    }
-}
-
 /// Spawn the relay API HTTP server on the given `listener`.
 pub fn spawn_relay_api(
     listener: TcpListener,
@@ -225,4 +170,59 @@ fn error_response(msg: &str) -> (StatusCode, Json<RelayConnectResponse>) {
             relay_id: None,
         }),
     )
+}
+
+#[cfg(test)]
+mod allow_list_tests {
+    use super::is_allowed_upstream;
+
+    #[test]
+    fn accepts_apex_oxpulse_chat() {
+        assert!(is_allowed_upstream("wss://oxpulse.chat/ws/call/r"));
+        assert!(is_allowed_upstream("wss://oxpulse.chat:443/ws/call/r"));
+    }
+
+    #[test]
+    fn accepts_subdomain_oxpulse_chat() {
+        assert!(is_allowed_upstream("wss://edge.oxpulse.chat/ws/call/r"));
+        assert!(is_allowed_upstream("wss://eu.oxpulse.chat:9443/ws"));
+    }
+
+    #[test]
+    fn accepts_localhost_dev() {
+        assert!(is_allowed_upstream("wss://localhost/ws"));
+        assert!(is_allowed_upstream("wss://127.0.0.1:9443/ws"));
+    }
+
+    #[test]
+    fn rejects_path_component_spoof() {
+        // The bug fix: contains() would have returned true for these.
+        assert!(!is_allowed_upstream(
+            "wss://attacker.com/.oxpulse.chat/path"
+        ));
+        assert!(!is_allowed_upstream("wss://evil.com/?x=.oxpulse.chat/foo"));
+        assert!(!is_allowed_upstream(
+            "wss://evil.com:8080/.oxpulse.chat:443/x"
+        ));
+    }
+
+    #[test]
+    fn rejects_lookalike_domains() {
+        assert!(!is_allowed_upstream("wss://oxpulse.chat.attacker.com/x"));
+        assert!(!is_allowed_upstream("wss://notoxpulse.chat/x"));
+        assert!(!is_allowed_upstream("wss://attacker.com/x"));
+    }
+
+    #[test]
+    fn rejects_non_wss() {
+        assert!(!is_allowed_upstream("ws://oxpulse.chat/x"));
+        assert!(!is_allowed_upstream("http://oxpulse.chat/x"));
+        assert!(!is_allowed_upstream("https://oxpulse.chat/x"));
+    }
+
+    #[test]
+    fn rejects_empty_host() {
+        assert!(!is_allowed_upstream("wss:///path"));
+        assert!(!is_allowed_upstream("wss://"));
+    }
 }
