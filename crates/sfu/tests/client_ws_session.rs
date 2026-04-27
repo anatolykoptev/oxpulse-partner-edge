@@ -158,12 +158,28 @@ async fn offer_returns_answer_and_injects_pending_client() {
         "answer SDP must include rtcp-mux"
     );
 
-    // PendingClient must arrive on the inject channel — this is the
-    // M4.A2 contract (registry adoption, browser-origin by construction).
-    let pending = tokio::time::timeout(Duration::from_millis(500), inject_rx.recv())
-        .await
-        .expect("PendingClient within 500ms")
-        .expect("inject channel still open");
+    // PendingClient must arrive on the inject channel.
+    //
+    // M4.A2-followup race fix (`session::run` step 5 reordered ahead of
+    // step 6): the production motivation is UDP — as soon as the
+    // browser observes the answer SDP, it sends STUN to the SFU's UDP
+    // socket. Those datagrams reach the registry on a separate task
+    // (`udp_loop::serve`'s `socket.recv_from` arm) and were getting
+    // logged as `no client accepts udp datagram` for every packet that
+    // arrived before the `client_inject_rx` arm pulled the
+    // `PendingClient` off the channel. The reorder closes that
+    // window.
+    //
+    // We can't deterministically observe the *pre-fix* race in this
+    // harness — both sends complete sub-ms with no real network in
+    // between, so `try_recv` here would also succeed pre-fix. The
+    // assertion is therefore documentation of the post-fix invariant
+    // (queued before answer fully read by test), not a red→green
+    // proof. The genuine red→green proof is by code inspection of the
+    // two-statement reorder in `session::run`.
+    let pending = inject_rx
+        .try_recv()
+        .expect("PendingClient must be queued by the time the WS answer reaches the offerer");
     assert_eq!(pending.external_peer_id, 7);
     assert_eq!(pending.room_id, ROOM_ID);
 
