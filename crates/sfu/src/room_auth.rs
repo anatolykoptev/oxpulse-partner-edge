@@ -1,20 +1,22 @@
-//! Room token verification -- validates HS256 JWTs issued by oxpulse-chat signaling.
+//! Room token verification -- validates JWTs issued by oxpulse-chat signaling.
 //!
 //! The signaling server (oxpulse-chat) mints tokens with:
 //!   claims: { sub: u64 (peer_id), room: String, iat: u64, exp: u64 }
-//!   alg:    HS256
-//!   secret: SIGNALING_SFU_SECRET env var
+//!   alg:    HS256 (legacy) or EdDSA (Phase 2 preferred)
+//!   secret: SIGNALING_SFU_SECRET env var (HS256) or SFU_SIGNING_PUBLIC_KEY (EdDSA)
 //!
 //! The SFU verifies these tokens before promoting any DataChannel peer to
-//! ClientOrigin::RelayFromSfu status. The same secret must be set on both
+//! ClientOrigin::RelayFromSfu status, and (Phase 7 M4.A1+) before upgrading any
+//! browser WebSocket at `/sfu/ws/{room_id}`. The same secret must be set on both
 //! the signaling server (as SIGNALING_SFU_SECRET) and the SFU (same var).
 //!
 //! Architectural note: the SFU binary has no WebSocket signaling server --
-//! it is pure UDP (WebRTC media) + relay HTTP API. Room-token verification
-//! at join time as described in CRITICAL-3 is therefore not applicable here;
-//! the gap exists at the signaling layer (oxpulse-chat). What IS actionable
-//! in this crate is gating the DataChannel relay_source privilege escalation
-//! behind a verified token.
+//! it is pure UDP (WebRTC media) + relay HTTP API + (M4.A1) client_ws upgrade
+//! endpoint. Room-token verification at join time as described in CRITICAL-3
+//! is therefore not applicable here; the gap exists at the signaling layer
+//! (oxpulse-chat). What IS actionable in this crate is gating the DataChannel
+//! relay_source privilege escalation behind a verified token, and gating
+//! browser WS upgrades the same way.
 
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
@@ -39,10 +41,31 @@ pub struct RoomClaims {
 }
 
 /// Error returned when token verification fails.
+///
+/// Phase 7 M4.A2 split the prior coarse `Invalid` variant into three granular
+/// kinds so callers can implement strict EdDSA-with-HS256-fallback rules
+/// (mirroring `relay::RelayJwtError`): only `InvalidSignature` should ever
+/// trigger an HS256 fallback after an EdDSA failure; `Expired` and `Malformed`
+/// must propagate immediately to avoid masking clock-skew or forgery attempts.
 #[derive(Debug, thiserror::Error)]
 pub enum RoomAuthError {
-    #[error("invalid or expired room token")]
-    Invalid,
+    /// JWT decode reached the signature step and the signature did not verify
+    /// against the supplied key. Includes wrong-secret and wrong-algorithm
+    /// cases (an HS256-signed token presented to an EdDSA verifier maps here).
+    #[error("invalid room token signature")]
+    InvalidSignature,
+    /// JWT was syntactically well-formed and signed correctly, but its `exp`
+    /// claim is in the past.
+    #[error("expired room token")]
+    Expired,
+    /// JWT could not be parsed (missing parts, invalid base64, claims missing
+    /// required fields, key PEM malformed). Caller should NOT fall through to
+    /// alternative algorithms — a malformed token is a malformed token.
+    #[error("malformed room token")]
+    Malformed,
+    /// Signature and expiry both passed, but the `room` claim does not match
+    /// the path/request room. This is a definitive verdict — do not retry
+    /// under another algorithm.
     #[error("token is for room {token_room}, not {request_room}")]
     RoomMismatch {
         token_room: String,
@@ -50,10 +73,22 @@ pub enum RoomAuthError {
     },
 }
 
-/// Verify token for access to room_id.
+/// Map a `jsonwebtoken::errors::Error` to the appropriate granular
+/// `RoomAuthError` kind. Mirrors the mapping in `relay::RelayJwt::verify`.
+fn map_jwt_error(e: jsonwebtoken::errors::Error) -> RoomAuthError {
+    match e.kind() {
+        jsonwebtoken::errors::ErrorKind::ExpiredSignature => RoomAuthError::Expired,
+        jsonwebtoken::errors::ErrorKind::InvalidSignature
+        | jsonwebtoken::errors::ErrorKind::InvalidAlgorithmName
+        | jsonwebtoken::errors::ErrorKind::InvalidAlgorithm => RoomAuthError::InvalidSignature,
+        _ => RoomAuthError::Malformed,
+    }
+}
+
+/// Verify token for access to room_id using HMAC-SHA256.
 ///
-/// Returns the verified claims on success, or RoomAuthError on failure.
-/// secret must match SIGNALING_SFU_SECRET on the signaling server.
+/// Returns the verified claims on success, or `RoomAuthError` on failure.
+/// `secret` must match `SIGNALING_SFU_SECRET` on the signaling server.
 pub fn verify_room_token(
     token: &str,
     room_id: &str,
@@ -68,7 +103,7 @@ pub fn verify_room_token(
 
     let claims = decode::<RoomClaims>(token, &key, &validation)
         .map(|t| t.claims)
-        .map_err(|_| RoomAuthError::Invalid)?;
+        .map_err(map_jwt_error)?;
 
     if claims.room != room_id {
         return Err(RoomAuthError::RoomMismatch {
@@ -83,14 +118,17 @@ pub fn verify_room_token(
 /// Verify a room token signed with Ed25519 (Phase 2 replacement for HS256).
 ///
 /// `public_key_pem` is the Ed25519 public key obtained from `/api/partner/keys`.
-/// Partner-edge nodes fetch this key on startup and cache it.
+/// Partner-edge nodes fetch this key on startup and cache it. A failure to parse
+/// the PEM is a configuration bug, not a signature problem; it maps to
+/// `Malformed` so callers don't accidentally fall back to HS256 on a deploy
+/// misconfiguration.
 pub fn verify_room_token_ed25519(
     token: &str,
     room_id: &str,
     public_key_pem: &str,
 ) -> Result<RoomClaims, RoomAuthError> {
-    let key =
-        DecodingKey::from_ed_pem(public_key_pem.as_bytes()).map_err(|_| RoomAuthError::Invalid)?;
+    let key = DecodingKey::from_ed_pem(public_key_pem.as_bytes())
+        .map_err(|_| RoomAuthError::Malformed)?;
     let mut validation = Validation::new(Algorithm::EdDSA);
     validation.validate_exp = true;
     validation.leeway = 0;
@@ -99,7 +137,7 @@ pub fn verify_room_token_ed25519(
 
     let claims = decode::<RoomClaims>(token, &key, &validation)
         .map(|t| t.claims)
-        .map_err(|_| RoomAuthError::Invalid)?;
+        .map_err(map_jwt_error)?;
 
     if claims.room != room_id {
         return Err(RoomAuthError::RoomMismatch {
@@ -158,7 +196,7 @@ mod tests {
         let token = make_token("room-abc", 1, secret, -10);
         assert!(matches!(
             verify_room_token(&token, "room-abc", secret),
-            Err(RoomAuthError::Invalid)
+            Err(RoomAuthError::Expired)
         ));
     }
 
@@ -167,7 +205,7 @@ mod tests {
         let token = make_token("room-abc", 1, b"correct-secret-32-bytes-long!!!!!", 3600);
         assert!(matches!(
             verify_room_token(&token, "room-abc", b"wrong-secret-32-bytes-long-ok!!!"),
-            Err(RoomAuthError::Invalid)
+            Err(RoomAuthError::InvalidSignature)
         ));
     }
 
@@ -175,7 +213,7 @@ mod tests {
     fn malformed_token_rejected() {
         assert!(matches!(
             verify_room_token("not.a.valid.jwt", "room-abc", b"any-secret"),
-            Err(RoomAuthError::Invalid)
+            Err(RoomAuthError::Malformed)
         ));
     }
 
@@ -183,7 +221,7 @@ mod tests {
     fn empty_token_rejected() {
         assert!(matches!(
             verify_room_token("", "room-abc", b"secret"),
-            Err(RoomAuthError::Invalid)
+            Err(RoomAuthError::Malformed)
         ));
     }
 
@@ -244,7 +282,7 @@ mod tests {
         let token = make_ed25519_room_token("room-abc", 1, &priv_pem, -10);
         assert!(matches!(
             verify_room_token_ed25519(&token, "room-abc", &pub_pem),
-            Err(RoomAuthError::Invalid)
+            Err(RoomAuthError::Expired)
         ));
     }
 
@@ -255,19 +293,35 @@ mod tests {
         let token = make_ed25519_room_token("room-abc", 1, &priv_pem, 3600);
         assert!(matches!(
             verify_room_token_ed25519(&token, "room-abc", &pub_pem2),
-            Err(RoomAuthError::Invalid)
+            Err(RoomAuthError::InvalidSignature)
         ));
     }
 
     #[test]
     fn verify_room_token_ed25519_hs256_token_rejected() {
         // An HS256-signed token must not be accepted by the EdDSA verifier.
+        // Algorithm-mismatch failures are mapped to `InvalidSignature` so the
+        // caller's EdDSA→HS256 fallback rule kicks in (see
+        // `client_ws::handler::verify_token`).
         let secret = b"test-secret-32-bytes-long-enough!";
         let hs256_token = make_token("room-abc", 1, secret, 3600);
         let (_priv, pub_pem) = generate_test_keypair_room();
         assert!(matches!(
             verify_room_token_ed25519(&hs256_token, "room-abc", &pub_pem),
-            Err(RoomAuthError::Invalid)
+            Err(RoomAuthError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn verify_room_token_ed25519_malformed_pubkey_pem_returns_malformed() {
+        // Configuration error (operator pasted a corrupt PEM): must NOT trigger
+        // the HS256 fallback path. `Malformed` makes the caller's distinction
+        // explicit.
+        let token = "any.thing.here";
+        let bad_pem = "-----BEGIN PUBLIC KEY-----\nnot-base64\n-----END PUBLIC KEY-----\n";
+        assert!(matches!(
+            verify_room_token_ed25519(token, "room-abc", bad_pem),
+            Err(RoomAuthError::Malformed)
         ));
     }
 }
