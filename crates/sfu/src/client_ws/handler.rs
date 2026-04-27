@@ -113,24 +113,32 @@ pub fn spawn_client_ws_api(
 /// Extract the bearer token from the comma-separated
 /// `Sec-WebSocket-Protocol` header. The browser cannot set
 /// `Authorization` on a WS upgrade, so the standard pattern is to put
-/// the token *inside* the subprotocol list as `Bearer <token>`.
+/// the token *inside* the subprotocol list.
 ///
-/// We accept the header in either of these forms (axum/tungstenite split
-/// the comma-separated value into one entry per protocol):
-/// - `oxpulse-sfu-v1, Bearer <token>` (offered protocols include both)
-/// - `Bearer <token>, oxpulse-sfu-v1` (order-insensitive)
+/// Two formats accepted (order-insensitive):
+/// - `bearer.<token>` — preferred. Each subprotocol value must satisfy
+///   the RFC 7230 `token` grammar (no spaces, no separators), so we use
+///   `.` as the literal separator. Browsers' WebSocket constructor
+///   validates this client-side, and rejects values containing spaces.
+/// - `Bearer <token>` — legacy form (with space). Still accepted because
+///   server-to-server callers and tests pass headers directly without
+///   going through the browser's strict subprotocol validation. Will be
+///   removed after the client transition lands in oxpulse-chat.
 ///
-/// Returns `None` if no `Bearer ` entry is present.
+/// Returns `None` if neither prefix is present.
 fn extract_bearer_from_subprotocols(headers: &HeaderMap) -> Option<String> {
-    // We read the raw header rather than `WebSocketUpgrade::requested_protocols`
-    // because the latter is on the extractor (not on a `HeaderMap`); the
-    // axum upgrade itself parses the header into a `BTreeSet<HeaderValue>`,
-    // so duplicate entries collapse — but for our needs the raw
-    // comma-split is fine and works in any axum version.
     let raw = headers.get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)?;
     let raw_str = raw.to_str().ok()?;
     for part in raw_str.split(',') {
         let trimmed = part.trim();
+        // Preferred form — `bearer.<token>`. RFC 7230 token-grammar safe,
+        // so browsers accept it as a subprotocol value.
+        if let Some(token) = trimmed.strip_prefix("bearer.") {
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+        // Legacy form — kept for back-compat during migration.
         if let Some(token) = trimmed.strip_prefix("Bearer ") {
             if !token.is_empty() {
                 return Some(token.to_string());
