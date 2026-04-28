@@ -229,8 +229,10 @@ async fn client_ws_handshake_increments_failure_counter_on_missing_token() {
         "sec-websocket-protocol",
         HeaderValue::from_static("oxpulse-sfu-v1"),
     );
-    req.headers_mut()
-        .insert("sec-websocket-key", HeaderValue::from_str(&generate_key()).unwrap());
+    req.headers_mut().insert(
+        "sec-websocket-key",
+        HeaderValue::from_str(&generate_key()).unwrap(),
+    );
     req.headers_mut()
         .insert("sec-websocket-version", HeaderValue::from_static("13"));
     req.headers_mut()
@@ -253,7 +255,10 @@ async fn client_ws_handshake_increments_failure_counter_on_missing_token() {
         .client_ws_handshake_failures_total
         .with_label_values(&["missing_token"])
         .get();
-    assert!(n >= 1, "missing_token handshake failure counter must be >= 1, got {n}");
+    assert!(
+        n >= 1,
+        "missing_token handshake failure counter must be >= 1, got {n}"
+    );
     assert_eq!(
         metrics.client_ws_sessions_started_total.get(),
         0,
@@ -280,7 +285,10 @@ async fn client_ws_handshake_increments_failure_counter_on_room_mismatch() {
         .client_ws_handshake_failures_total
         .with_label_values(&["room_mismatch"])
         .get();
-    assert!(n >= 1, "room_mismatch handshake failure counter must be >= 1, got {n}");
+    assert!(
+        n >= 1,
+        "room_mismatch handshake failure counter must be >= 1, got {n}"
+    );
 }
 
 #[tokio::test]
@@ -300,5 +308,8 @@ async fn client_ws_handshake_increments_failure_counter_on_expired_token() {
         .client_ws_handshake_failures_total
         .with_label_values(&["expired_token"])
         .get();
-    assert!(n >= 1, "expired_token handshake failure counter must be >= 1, got {n}");
+    assert!(
+        n >= 1,
+        "expired_token handshake failure counter must be >= 1, got {n}"
+    );
 }

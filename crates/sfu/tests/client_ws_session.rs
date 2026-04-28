@@ -318,7 +318,8 @@ async fn answer_sdp_advertises_public_ip_host_candidate() {
     //    Port 7878 is the partner-edge default; any value works.
     let public_addr: std::net::SocketAddr = "203.0.113.42:7878".parse().unwrap();
     let metrics = Arc::new(SfuMetrics::default());
-    let _handle = spawn_client_ws_api(listener, secret, None, inject_tx, public_addr, metrics).unwrap();
+    let _handle =
+        spawn_client_ws_api(listener, secret, None, inject_tx, public_addr, metrics).unwrap();
 
     // 3. Browser side: connect WS, send offer, await answer.
     let token = make_token(ROOM_ID, 11, HS256_SECRET, 3600);
@@ -477,7 +478,9 @@ async fn client_ws_offer_processed_increments_with_outcome_label_ok() {
     .expect("ws handshake OK");
     let (offer_sdp, _pending, _rtc) = build_browser_offer();
     let frame = serde_json::json!({ "kind": "offer", "sdp": offer_sdp }).to_string();
-    ws.send(Message::Text(frame.into())).await.expect("send offer");
+    ws.send(Message::Text(frame.into()))
+        .await
+        .expect("send offer");
     // Wait for the answer so we know the SDP path completed.
     let _ = tokio::time::timeout(Duration::from_millis(500), ws.next())
         .await
