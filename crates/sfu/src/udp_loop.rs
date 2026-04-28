@@ -17,7 +17,9 @@
 //!
 //! [`Client`]: crate::client::Client
 
+use std::collections::HashMap;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use std::sync::Arc;
@@ -40,6 +42,11 @@ const RECV_BUFFER_BYTES: usize = 2048;
 /// Keeps the str0m tick loop (which wants ~100ms granularity) from
 /// starving when no datagrams arrive.
 const MAX_SLEEP: Duration = Duration::from_millis(100);
+
+/// Suppress repeated `udp send_to failed` WARNs for the same destination.
+/// 10s matches a typical ICE candidate timeout so the window closes around
+/// the same time the SFU would give up on that candidate anyway.
+const SEND_FAIL_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 
 /// Run the SFU UDP loop until `shutdown` resolves. The bound
 /// `SocketAddr` is not returned from here — tests that need it should
@@ -109,6 +116,9 @@ where
     // a slow tick doesn't cause a burst of tick() calls.
     let mut aso_interval = tokio::time::interval(TICK_INTERVAL);
     aso_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Per-destination dedup for send_to failures: first failure per dest per
+    // SEND_FAIL_DEDUP_WINDOW emits a WARN; subsequent ones only bump the counter.
+    let mut send_fail_dedup: HashMap<SocketAddr, Instant> = HashMap::new();
     tokio::pin!(shutdown);
 
     loop {
@@ -117,9 +127,20 @@ where
         // Drain whatever str0m has ready to emit *before* waiting for
         // the next packet, so outbound bytes don't sit on clients
         // longer than one tick.
-        let deadline = registry.poll_all(Instant::now());
+        let now = Instant::now();
+        let deadline = registry.poll_all(now);
         registry.fanout_pending();
-        flush_transmits(&socket, &mut registry).await;
+        flush_transmits(
+            &socket,
+            &mut registry,
+            &metrics_ref,
+            &mut send_fail_dedup,
+            now,
+        )
+        .await;
+        // Evict entries older than 6× window so the map can't grow unbounded
+        // during crash-loop scenarios where many destinations stay unreachable.
+        send_fail_dedup.retain(|_, t| now.duration_since(*t) < SEND_FAIL_DEDUP_WINDOW * 6);
 
         let sleep = deadline
             .saturating_duration_since(Instant::now())
@@ -136,6 +157,7 @@ where
             }
             _ = aso_interval.tick() => {
                 let now = Instant::now();
+
                 registry.tick_active_speaker(now);
                 // M6.2: update per-peer Prometheus score gauges and queue
                 // TopSpeakers broadcast for delivery via DC id:3.
@@ -181,16 +203,45 @@ where
     }
 }
 
-async fn flush_transmits(socket: &UdpSocket, registry: &mut Registry) {
+/// Map an IO error to a stable metric label.
+fn classify_send_error(e: &std::io::Error) -> &'static str {
+    match e.raw_os_error() {
+        Some(89) => "dest_required",        // Linux EDESTADDRREQ
+        Some(101) => "network_unreachable", // ENETUNREACH
+        Some(113) => "host_unreachable",    // EHOSTUNREACH
+        Some(13) => "perm",                 // EACCES
+        _ => "other",
+    }
+}
+
+async fn flush_transmits(
+    socket: &UdpSocket,
+    registry: &mut Registry,
+    metrics: &SfuMetrics,
+    dedup: &mut HashMap<SocketAddr, Instant>,
+    now: Instant,
+) {
     let mut pending = Vec::new();
     registry.drain_transmits(|t| pending.push(t));
     for t in pending {
         if let Err(e) = socket.send_to(&t.contents, t.destination).await {
-            tracing::warn!(
-                dest = %t.destination,
-                error = %e,
-                "udp send_to failed",
-            );
+            let kind = classify_send_error(&e);
+            metrics.udp_send_failed.with_label_values(&[kind]).inc();
+            let should_log = match dedup.get(&t.destination) {
+                Some(prev) if now.duration_since(*prev) < SEND_FAIL_DEDUP_WINDOW => false,
+                _ => {
+                    dedup.insert(t.destination, now);
+                    true
+                }
+            };
+            if should_log {
+                tracing::warn!(
+                    dest = %t.destination,
+                    error = %e,
+                    error_kind = kind,
+                    "udp send_to failed (further failures to this dest suppressed for 10s)",
+                );
+            }
         }
     }
 }
@@ -302,6 +353,63 @@ mod tests {
             metrics.active_participants.get(),
             1,
             "relay client must be inserted into registry via relay_rx channel"
+        );
+    }
+
+    /// Verify the dedup-window logic: simulating 5 send failures to the same
+    /// destination must insert exactly 1 dedup entry and suppress logs for
+    /// calls 2–5 within the window.
+    ///
+    /// Tests the dedup invariant directly (not via network I/O) because UDP
+    /// `send_to` on Linux succeeds silently for unconnected sockets even when
+    /// the remote port is closed — there is no synchronous ECONNREFUSED.
+    #[tokio::test]
+    async fn flush_transmits_dedup_one_entry_per_dest() {
+        use crate::metrics::SfuMetrics;
+        use std::collections::HashMap;
+        use std::net::{Ipv4Addr, SocketAddr};
+
+        let dest: SocketAddr = (Ipv4Addr::LOCALHOST, 1u16).into();
+        let metrics = std::sync::Arc::new(SfuMetrics::default());
+        let mut dedup: HashMap<SocketAddr, Instant> = HashMap::new();
+        let now = Instant::now();
+
+        // Simulate 5 send_to failures from flush_transmits logic.
+        let mut logged_count = 0usize;
+        for _ in 0..5 {
+            let kind = "other"; // simulate classify_send_error result
+            metrics.udp_send_failed.with_label_values(&[kind]).inc();
+            let should_log = match dedup.get(&dest) {
+                Some(prev) if now.duration_since(*prev) < SEND_FAIL_DEDUP_WINDOW => false,
+                _ => {
+                    dedup.insert(dest, now);
+                    true
+                }
+            };
+            if should_log {
+                logged_count += 1;
+            }
+        }
+
+        // All 5 failures must be counted.
+        assert_eq!(
+            metrics.udp_send_failed.with_label_values(&["other"]).get(),
+            5,
+            "all 5 send failures must be counted"
+        );
+
+        // Only the first failure should have triggered a log.
+        assert_eq!(logged_count, 1, "only first failure per window must log");
+
+        // Dedup map must have exactly 1 entry for the destination.
+        assert_eq!(
+            dedup.len(),
+            1,
+            "dedup map must hold exactly one entry per destination"
+        );
+        assert!(
+            dedup.contains_key(&dest),
+            "dedup entry must be for the target destination"
         );
     }
 

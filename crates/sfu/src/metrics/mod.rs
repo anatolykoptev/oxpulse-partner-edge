@@ -85,6 +85,12 @@ pub struct SfuMetrics {
     pub client_ws_session_ended_total: IntCounterVec,
     /// Wall-clock duration of a client_ws session.
     pub client_ws_session_duration_seconds: Histogram,
+    /// UDP `send_to` failures, labelled by `error_kind`.
+    /// Incremented on every failure; only the first per destination per
+    /// 10-second window emits a WARN (see `udp_loop::flush_transmits`).
+    /// Exposed so task #28 can threshold on per-dest failure rate to drop
+    /// dead ICE candidates without needing a separate map.
+    pub udp_send_failed: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -183,6 +189,15 @@ impl SfuMetrics {
 
         let client_ws_metrics = client_ws::register(&registry)?;
 
+        let udp_send_failed = reg!(IntCounterVec::new(
+            Opts::new(
+                "udp_send_failed_total",
+                "UDP send_to failures by error kind (dest_required | network_unreachable | host_unreachable | perm | other)",
+            ),
+            &["error_kind"],
+        )
+        .context("udp_send_failed_total")?);
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -207,6 +222,7 @@ impl SfuMetrics {
             client_ws_answer_sent_total: client_ws_metrics.answer_sent_total,
             client_ws_session_ended_total: client_ws_metrics.session_ended_total,
             client_ws_session_duration_seconds: client_ws_metrics.session_duration_seconds,
+            udp_send_failed,
         })
     }
 
