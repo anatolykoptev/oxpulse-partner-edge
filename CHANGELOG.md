@@ -5,6 +5,15 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.2...partner-edge-v0.12.3) (2026-04-28)
+
+
+### Bug Fixes
+
+* **sfu/client_ws:** accept `bearer.<token>` subprotocol (no-space form) ([87f2388](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/87f2388ae6b5bb21fd4ee0c16136d06107f1f44d))
+* **sfu/client_ws:** accept bearer.&lt;token&gt; subprotocol (no-space form) ([146c5f7](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/146c5f79e9067042f051e38da9ec548898bee1fa))
+* **sfu:** rate-limit udp send_to failed warns + udp_send_failed_total ([#12](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/12)) ([9e6e3ce](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/9e6e3ceb9cc001637f46902ab75a48f05d364c13))
+
 ## [0.12.2] — 2026-04-27
 
 ### Added — Phase 7 M4.B1 client_ws verification metrics
