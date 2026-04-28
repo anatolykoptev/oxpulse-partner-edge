@@ -63,7 +63,7 @@ use crate::metrics::{close_code_label, SfuMetrics};
 /// Maximum time to wait for the browser's `offer` frame after the WS
 /// upgrade completes. Slightly longer than typical browser ICE-gathering
 /// time (~1–3s on a healthy network).
-const OFFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const OFFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// WS application close codes used by this module. 4xxx is the
 /// RFC 6455 §7.4.2 "private use" range.

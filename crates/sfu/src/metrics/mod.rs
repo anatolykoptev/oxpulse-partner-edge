@@ -18,6 +18,9 @@
 mod client_ws;
 mod m6;
 mod server;
+mod udp;
+
+pub use udp::classify_send_error;
 
 pub use client_ws::close_code_label;
 pub use server::spawn_metrics_server;
@@ -85,6 +88,11 @@ pub struct SfuMetrics {
     pub client_ws_session_ended_total: IntCounterVec,
     /// Wall-clock duration of a client_ws session.
     pub client_ws_session_duration_seconds: Histogram,
+    // ── UDP-loop send observability ───────────────────────────────────
+    /// Total RTP/RTCP packets dispatched via send_to (denominator).
+    pub udp_packets_sent_total: IntCounter,
+    /// label: kind — bounded set, see [].
+    pub udp_send_errors_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -182,6 +190,7 @@ impl SfuMetrics {
         ) = m6::register(&registry)?;
 
         let client_ws_metrics = client_ws::register(&registry)?;
+        let udp_metrics = udp::register(&registry)?;
 
         Ok(Self {
             registry: Arc::new(registry),
@@ -207,6 +216,8 @@ impl SfuMetrics {
             client_ws_answer_sent_total: client_ws_metrics.answer_sent_total,
             client_ws_session_ended_total: client_ws_metrics.session_ended_total,
             client_ws_session_duration_seconds: client_ws_metrics.session_duration_seconds,
+            udp_packets_sent_total: udp_metrics.packets_sent_total,
+            udp_send_errors_total: udp_metrics.send_errors_total,
         })
     }
 

@@ -119,7 +119,7 @@ where
         // longer than one tick.
         let deadline = registry.poll_all(Instant::now());
         registry.fanout_pending();
-        flush_transmits(&socket, &mut registry).await;
+        flush_transmits(&socket, &mut registry, &metrics_ref).await;
 
         let sleep = deadline
             .saturating_duration_since(Instant::now())
@@ -181,16 +181,31 @@ where
     }
 }
 
-async fn flush_transmits(socket: &UdpSocket, registry: &mut Registry) {
+async fn flush_transmits(
+    socket: &UdpSocket,
+    registry: &mut Registry,
+    metrics: &SfuMetrics,
+) {
     let mut pending = Vec::new();
     registry.drain_transmits(|t| pending.push(t));
     for t in pending {
-        if let Err(e) = socket.send_to(&t.contents, t.destination).await {
-            tracing::warn!(
-                dest = %t.destination,
-                error = %e,
-                "udp send_to failed",
-            );
+        match socket.send_to(&t.contents, t.destination).await {
+            Ok(_) => {
+                metrics.udp_packets_sent_total.inc();
+            }
+            Err(e) => {
+                let kind = crate::metrics::classify_send_error(&e);
+                metrics
+                    .udp_send_errors_total
+                    .with_label_values(&[kind])
+                    .inc();
+                tracing::warn!(
+                    dest = %t.destination,
+                    error = %e,
+                    error_kind = kind,
+                    "udp send_to failed",
+                );
+            }
         }
     }
 }
