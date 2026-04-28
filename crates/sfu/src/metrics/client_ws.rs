@@ -95,9 +95,7 @@ pub(super) fn register(registry: &Registry) -> anyhow::Result<ClientWsMetrics> {
             "client_ws_session_duration_seconds",
             "Wall-clock duration of a client_ws session from upgrade-accepted to close",
         )
-        .buckets(vec![
-            1.0, 5.0, 30.0, 60.0, 300.0, 1_800.0, 3_600.0,
-        ]),
+        .buckets(vec![1.0, 5.0, 30.0, 60.0, 300.0, 1_800.0, 3_600.0,]),
     )
     .context("client_ws_session_duration_seconds")?);
 
