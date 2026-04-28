@@ -1,0 +1,101 @@
+name: promote-stable
+
+# Manual operator gate that retags an existing :vX.Y.Z release as :stable on
+# GHCR. Once promoted, the per-host watchtowers in piter-server (motherly Mon
+# 03:00, piter Tue 03:33) will pick up the new version on their next timer
+# fire — see piter-server/docs/oxpulse-sfu-auto-update.md.
+#
+# Why a separate workflow (not auto in release.yml):
+#   release.yml runs on every tag push, which means every patch release would
+#   immediately become the stable rollout target. We want a deliberate human
+#   step ("this version actually got prod traffic and looked OK") between
+#   "shipped to GHCR" and "edges should auto-pull this".
+#
+# Why no rebuild: `docker buildx imagetools create` operates on registry
+# manifests directly — multi-arch tag retag is a metadata-only operation,
+# no images are downloaded or pushed.
+#
+# Security: input.version is a workflow_dispatch parameter (only callable by
+# repo maintainers via gh CLI / web UI), but we still validate format and
+# pass it through env: to all run: blocks rather than ${{ }} interpolation.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to promote (without v prefix), e.g. 0.12.4'
+        required: true
+        type: string
+
+permissions:
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be MAJOR.MINOR.PATCH (got '$VERSION')"
+            exit 1
+          fi
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify source tags exist
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for c in sfu coturn caddy xray; do
+            ref="${REGISTRY}/${OWNER}/partner-edge-${c}:v${VERSION}"
+            echo ">> inspecting $ref"
+            docker buildx imagetools inspect "$ref" >/dev/null
+          done
+
+      - name: Retag to :stable
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for c in sfu coturn caddy xray; do
+            src="${REGISTRY}/${OWNER}/partner-edge-${c}:v${VERSION}"
+            dst="${REGISTRY}/${OWNER}/partner-edge-${c}:stable"
+            echo ">> $src -> $dst"
+            docker buildx imagetools create --tag "$dst" "$src"
+          done
+
+      - name: Print summary
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          {
+            echo "## Promoted to :stable"
+            echo ""
+            echo "Version: \`v${VERSION}\`"
+            echo ""
+            echo "Edges with auto-update timers (see piter-server) will pick up"
+            echo "the new \`:stable\` on their next fire:"
+            echo ""
+            echo "| Edge | Timer |"
+            echo "|------|-------|"
+            echo "| motherly (krolik) | Mon 03:00 +30min |"
+            echo "| piter | Tue 03:33 +2h |"
+            echo ""
+            echo "Components retagged: sfu, coturn, caddy, xray"
+          } >> "$GITHUB_STEP_SUMMARY"
