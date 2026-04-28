@@ -38,6 +38,14 @@ impl Registry {
 
     /// Mutable access to the [`Pacer`]. The per-client fanout path
     /// calls `preferred_rid` via this handle on every forwarded packet.
+    ///
+    /// Reserved for Phase 2 ProbeController integration (see
+    /// `docs/ROADMAP.md` Phase 2 backlog: "Probe controller — send
+    /// burst at target+30% for 1-2s on ramp-up"). Currently flagged
+    /// dead by static analysis because internal call sites use
+    /// `self.pacer` field access; do NOT remove until probe wiring
+    /// lands or the ProbeController item is dropped from the roadmap.
+    #[allow(dead_code)]
     pub fn pacer_mut(&mut self) -> &mut Pacer {
         &mut self.pacer
     }
@@ -49,6 +57,16 @@ impl Registry {
 
     /// Mutable access to the GoogCC v2 estimator. Called from the
     /// MediaData path in poll_all to feed packet timing.
+    ///
+    /// Reserved for Phase 2 ProbeController integration (see
+    /// `docs/ROADMAP.md` Phase 2 backlog and oxpulse-chat ROADMAP
+    /// Priority 1 GoogCC v2 §"Probe controller"). The probe loop
+    /// will need an external mutator handle to inject synthetic
+    /// probe packets into the estimator. Currently flagged dead by
+    /// static analysis because the in-tree poll loop uses field
+    /// access via `self.googcc`; do NOT remove until probe wiring
+    /// lands or the item is dropped from the roadmap.
+    #[allow(dead_code)]
     pub fn googcc_mut(&mut self) -> &mut crate::bwe::estimator::GoogCcEstimator {
         &mut self.googcc
     }
