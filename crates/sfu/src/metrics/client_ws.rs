@@ -26,9 +26,14 @@ pub(super) struct ClientWsMetrics {
     /// labels: outcome ∈ {ok, parse_err, sdp_err, ice_err}.
     pub offer_processed_total: IntCounterVec,
     pub answer_sent_total: IntCounter,
-    /// labels: close_code ∈ {"1000","1001","4001","4002","4003","other"}.
+    /// labels: close_code ∈ {"1000","1001","4001","4002","4003","4031","other"}.
     pub session_ended_total: IntCounterVec,
     pub session_duration_seconds: Histogram,
+    /// Phase A Task A1: count of older sessions evicted by a newer
+    /// upgrade for the same `(room_id, peer_id)` (peer_id-keyed session
+    /// steal). Defends against duplicate upgrades from client multi-mount
+    /// races (SvelteKit hydration, stale SW caches, lobby double-click).
+    pub session_replaced_total: IntCounter,
 }
 
 /// Construct and register the client_ws metrics onto the SFU registry.
@@ -99,6 +104,13 @@ pub(super) fn register(registry: &Registry) -> anyhow::Result<ClientWsMetrics> {
     )
     .context("client_ws_session_duration_seconds")?);
 
+    // Phase A Task A1: peer_id-keyed session steal — see field doc.
+    let session_replaced_total = reg!(IntCounter::with_opts(Opts::new(
+        "session_replaced_total",
+        "Older session evicted by newer upgrade for same peer_id (Phase A Task A1)",
+    ))
+    .context("session_replaced_total")?);
+
     Ok(ClientWsMetrics {
         active_sessions,
         sessions_started_total,
@@ -107,6 +119,7 @@ pub(super) fn register(registry: &Registry) -> anyhow::Result<ClientWsMetrics> {
         answer_sent_total,
         session_ended_total,
         session_duration_seconds,
+        session_replaced_total,
     })
 }
 
@@ -121,6 +134,7 @@ pub fn close_code_label(code: u16) -> &'static str {
         4001 => "4001",
         4002 => "4002",
         4003 => "4003",
+        4031 => "4031",
         _ => "other",
     }
 }

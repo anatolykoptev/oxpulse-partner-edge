@@ -186,7 +186,11 @@ impl Registry {
 /// `sfu_pacer_layer_total`. Kept in lockstep with [`rid_label_for`] —
 /// if you add a variant there, mirror it here so `reap_dead` scrubs
 /// the matching label series on disconnect.
-const PACER_RID_LABELS: &[&str] = &["q", "h", "f", "other"];
+///
+/// Visible to sibling registry modules so [`super::Registry::insert`]'s
+/// session-steal eviction path can run the same scrub without
+/// duplicating the list.
+pub(super) const PACER_RID_LABELS: &[&str] = &["q", "h", "f", "other"];
 
 /// Rank a simulcast `Rid` for conservative-merge comparisons.
 /// LOW = 0, MEDIUM = 1, HIGH = 2.  Mirrors `pacer::rank_of` (private).
