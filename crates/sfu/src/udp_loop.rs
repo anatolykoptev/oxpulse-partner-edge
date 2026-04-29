@@ -192,8 +192,14 @@ where
                     let room_id = pending.room_id.clone();
                     let external_peer_id = pending.external_peer_id;
                     // `Client::new` defaults `origin = ClientOrigin::Local` —
-                    // exactly what M4.A2 needs for browser peers.
-                    let client = crate::client::Client::new(pending.rtc, metrics_ref.clone());
+                    // exactly what M4.A2 needs for browser peers. Phase A
+                    // Task A1: also tag with `external_peer_id` so
+                    // `Registry::insert` can dedupe duplicate upgrades, and
+                    // hand the steal-signal sender to the registry so the
+                    // older WS task can be woken with `4031 session_replaced`.
+                    let client = crate::client::Client::new(pending.rtc, metrics_ref.clone())
+                        .with_external_peer_id(external_peer_id)
+                        .with_close_signal(pending.close_signal);
                     registry.insert(client);
                     tracing::info!(%room_id, external_peer_id,
                         "browser client injected into registry — ICE driven by main UDP loop");
@@ -432,11 +438,13 @@ mod tests {
 
         // Build a fresh str0m Rtc as if the SDP exchange had completed.
         let rtc = str0m::Rtc::new(std::time::Instant::now());
+        let (close_tx, _close_rx) = tokio::sync::oneshot::channel();
         client_tx
             .send(PendingClient {
                 rtc,
                 room_id: "browser-inject-test".to_string(),
                 external_peer_id: 99,
+                close_signal: close_tx,
             })
             .await
             .unwrap();
