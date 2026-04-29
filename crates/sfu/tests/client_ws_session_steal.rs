@@ -138,12 +138,19 @@ async fn start_full_pipeline() -> (
         },
     ));
 
-    (format!("ws://{ws_addr}"), metrics, shutdown_tx, serve_handle)
+    (
+        format!("ws://{ws_addr}"),
+        metrics,
+        shutdown_tx,
+        serve_handle,
+    )
 }
 
 /// Drive an offer/answer over an upgraded WS. Returns the answer SDP.
 async fn complete_handshake(
-    ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
 ) -> String {
     let (offer_sdp, _pending, _rtc) = build_browser_offer();
     ws.send(Message::Text(
@@ -180,11 +187,7 @@ async fn wait_active(metrics: &SfuMetrics, target: i64, max_ms: u64) -> i64 {
 }
 
 /// Wait for an `IntCounter` to reach `target` (or timeout). Polls every 5ms.
-async fn wait_metric_ge(
-    metric: &prometheus::IntCounter,
-    target: u64,
-    max_ms: u64,
-) -> u64 {
+async fn wait_metric_ge(metric: &prometheus::IntCounter, target: u64, max_ms: u64) -> u64 {
     for _ in 0..(max_ms / 5) {
         let got = metric.get();
         if got >= target {
