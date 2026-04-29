@@ -103,6 +103,9 @@ impl Registry {
                 let _ = metrics
                     .bandwidth_estimate_bps
                     .remove_label_values(&[&peer_label]);
+                let _ = metrics
+                    .client_delivered_media_count
+                    .remove_label_values(&[&peer_label]);
                 for rid_label in PACER_RID_LABELS {
                     let _ = metrics
                         .pacer_layer_total
@@ -179,6 +182,13 @@ impl Registry {
                     .with_label_values(&[&peer_label])
                     .set(bps as i64);
             }
+            // Per-peer media-throughput snapshot — diagnoses
+            // 'connected but no media' cases. Cheap (atomic load
+            // + gauge set).
+            self.metrics
+                .client_delivered_media_count
+                .with_label_values(&[&peer_label])
+                .set(client.delivered_media_count() as i64);
             if let Some(rid) = chosen {
                 self.metrics
                     .pacer_layer_total
