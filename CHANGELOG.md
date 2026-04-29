@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.4](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.3...partner-edge-v0.12.4) (2026-04-29)
+
+
+### Features
+
+* **sfu/A1:** peer_id-keyed session steal — close 4031 on duplicate /sfu/ws upgrade ([1b50ac5](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1b50ac58938093f58fb9cb40242fe42f5238393d))
+* **sfu:** peer_id-keyed session steal with WS close 4031 ([ca18972](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ca18972a4a64f240180fbd809cfa05f95f94484b))
+
 ## [0.12.3](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.2...partner-edge-v0.12.3) (2026-04-28)
 
 
