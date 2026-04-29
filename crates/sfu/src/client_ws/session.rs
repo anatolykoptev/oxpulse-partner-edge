@@ -51,13 +51,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use serde_json::Value;
 use str0m::change::SdpOffer;
 use str0m::{Candidate, Rtc};
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
 
 use super::handler::{close_with_code, CLOSE_DRAIN_TIMEOUT};
+use crate::client::CloseReason;
 use crate::metrics::{close_code_label, SfuMetrics};
 
 /// Maximum time to wait for the browser's `offer` frame after the WS
@@ -67,6 +69,11 @@ const OFFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// WS application close codes used by this module. 4xxx is the
 /// RFC 6455 §7.4.2 "private use" range.
+///
+/// Code 4031 ("session replaced") is emitted via
+/// [`crate::client::CloseReason::SessionReplaced::ws_close_code`] —
+/// kept on the enum rather than duplicated here so the metric label and
+/// wire code agree by construction.
 mod close_code {
     use axum::extract::ws::CloseCode;
     /// Browser sent a malformed first frame (not JSON, missing `kind`,
@@ -138,11 +145,18 @@ pub struct PendingClient {
     /// already room-scoped at the process level (one SFU instance per
     /// room set).
     pub room_id: String,
-    /// `sub` claim from the room JWT (signaling-assigned peer id). Not
-    /// used by `Client::new` today (the registry assigns its own
-    /// `ClientId`); carried so M4.A4 can correlate active-speaker
-    /// broadcasts with signaling peers.
+    /// `sub` claim from the room JWT (signaling-assigned peer id).
+    /// Threaded onto [`crate::client::Client::external_peer_id`] in the
+    /// `udp_loop::serve` `client_inject_rx` arm so
+    /// [`crate::registry::Registry::insert`] can dedupe by
+    /// `(room_id, peer_id)` and trigger a session steal when a newer
+    /// upgrade arrives (Phase A Task A1).
     pub external_peer_id: u64,
+    /// Phase A Task A1: sender half of the steal-signal channel. The
+    /// receiver half lives on the WS task; the registry holds this
+    /// sender and fires it (delivers [`CloseReason::SessionReplaced`])
+    /// when a duplicate upgrade evicts the older session.
+    pub close_signal: oneshot::Sender<CloseReason>,
 }
 
 /// Run a single WS session. Returns `Ok` on clean shutdown; `Err` on
@@ -242,11 +256,18 @@ pub async fn run(
     // 5. Hand the pre-ICE Rtc to the main UDP loop FIRST. From here on,
     //    ICE/DTLS/SRTP run via udp_loop::serve identically to relay
     //    clients (see `udp_loop::serve` `relay_rx` arm).
+    //
+    //    Phase A Task A1: pair the inject with a fresh oneshot
+    //    `close_signal` channel — the registry holds the sender and
+    //    fires it when a newer upgrade for this `external_peer_id`
+    //    arrives (session steal).
+    let (close_signal_tx, mut close_signal_rx) = oneshot::channel::<CloseReason>();
     if inject_tx
         .send(PendingClient {
             rtc,
             room_id: room_id.clone(),
             external_peer_id: peer_id,
+            close_signal: close_signal_tx,
         })
         .await
         .is_err()
@@ -278,14 +299,42 @@ pub async fn run(
     //    browser are accepted but logged-and-ignored today (non-trickle
     //    is the M4.A2 contract; M4.A4 introduces the registry→session
     //    backchannel needed to round-trip).
-    park_until_close(&mut socket, &room_id, peer_id).await;
+    //
+    //    Phase A Task A1: also watch `close_signal_rx`. A steal beats
+    //    normal traffic (`biased`) so the new session's WS B doesn't
+    //    have to wait through queued frames before the older WS A
+    //    receives its 4031 close.
+    let stole = park_until_close_or_steal(
+        &mut socket,
+        &mut close_signal_rx,
+        &room_id,
+        peer_id,
+        &mut guard,
+    )
+    .await;
+
+    if stole {
+        // Steal-driven close already wrote the 4031 frame; just drain
+        // and return.
+        let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, async {
+            while let Some(msg) = socket.recv().await {
+                if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
+                    break;
+                }
+            }
+        })
+        .await;
+        tracing::info!(target: "sfu::client_ws", peer_id, %room_id,
+            "client_ws: session ended (replaced by newer upgrade)");
+        return Ok(());
+    }
 
     // Bound the close handshake — a misbehaving peer can otherwise pin
     // this task open via TCP keepalive.
     let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, async {
         // If the peer hasn't already closed, send a clean close ourselves.
         let _ = socket
-            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            .send(Message::Close(Some(CloseFrame {
                 code: 1000,
                 reason: "session ended".into(),
             })))
@@ -348,35 +397,75 @@ async fn read_offer(socket: &mut WebSocket) -> anyhow::Result<String> {
     Ok(sdp)
 }
 
-/// Consume frames until the peer closes. ICE-trickle frames from the
-/// browser are accepted but ignored — see module doc.
-async fn park_until_close(socket: &mut WebSocket, room_id: &str, peer_id: u64) {
-    while let Some(msg) = socket.recv().await {
-        match msg {
-            Ok(Message::Text(t)) => {
-                if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
-                    if v.get("kind").and_then(|k| k.as_str()) == Some("ice") {
+/// Consume frames until either the peer closes or the registry signals
+/// a session steal. Returns `true` when the steal path fired, `false`
+/// when the peer closed normally. ICE-trickle frames from the browser
+/// are accepted but ignored — see module doc.
+///
+/// Phase A Task A1: the steal arm is `biased` first, so an inbound
+/// duplicate-upgrade reliably beats any queued normal traffic. On
+/// fire, the `4031 session_replaced` close frame is written here (not
+/// in the caller) so `ActiveSessionGuard` can record the right
+/// `close_code` label without a second branch.
+async fn park_until_close_or_steal(
+    socket: &mut WebSocket,
+    close_signal_rx: &mut oneshot::Receiver<CloseReason>,
+    room_id: &str,
+    peer_id: u64,
+    guard: &mut ActiveSessionGuard,
+) -> bool {
+    loop {
+        tokio::select! {
+            biased;
+            reason = &mut *close_signal_rx => {
+                let reason = reason.unwrap_or(CloseReason::ServerShutdown);
+                let code = reason.ws_close_code();
+                tracing::warn!(
+                    target: "sfu::client_ws",
+                    peer_id, %room_id, reason = reason.as_label(), code,
+                    "client_ws: server-initiated close (Phase A Task A1)"
+                );
+                guard.set_close_code(code);
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code,
+                        reason: reason.as_label().into(),
+                    })))
+                    .await;
+                return true;
+            }
+            msg = socket.recv() => {
+                let Some(msg) = msg else {
+                    return false;
+                };
+                match msg {
+                    Ok(Message::Text(t)) => {
+                        if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
+                            if v.get("kind").and_then(|k| k.as_str()) == Some("ice") {
+                                tracing::debug!(target: "sfu::client_ws", peer_id, %room_id,
+                                    "client_ws: ignoring trickle-ice frame (M4.A2 is non-trickle)");
+                                continue;
+                            }
+                        }
                         tracing::debug!(target: "sfu::client_ws", peer_id, %room_id,
-                            "client_ws: ignoring trickle-ice frame (M4.A2 is non-trickle)");
-                        continue;
+                            bytes = t.len(), "client_ws: ignoring post-handshake text frame");
+                    }
+                    Ok(Message::Binary(_)) => { /* ignore */ }
+                    Ok(Message::Ping(p)) => {
+                        if socket.send(Message::Pong(p)).await.is_err() {
+                            return false;
+                        }
+                    }
+                    Ok(Message::Pong(_)) => { /* ignore */ }
+                    Ok(Message::Close(_)) => return false,
+                    Err(e) => {
+                        tracing::debug!(target: "sfu::client_ws", peer_id, %room_id,
+                            error = %e, "client_ws: recv error");
+                        return false;
                     }
                 }
-                tracing::debug!(target: "sfu::client_ws", peer_id, %room_id,
-                    bytes = t.len(), "client_ws: ignoring post-handshake text frame");
-            }
-            Ok(Message::Binary(_)) => { /* ignore */ }
-            Ok(Message::Ping(p)) => {
-                if socket.send(Message::Pong(p)).await.is_err() {
-                    break;
-                }
-            }
-            Ok(Message::Pong(_)) => { /* ignore */ }
-            Ok(Message::Close(_)) => break,
-            Err(e) => {
-                tracing::debug!(target: "sfu::client_ws", peer_id, %room_id,
-                    error = %e, "client_ws: recv error");
-                break;
             }
         }
     }
 }
+

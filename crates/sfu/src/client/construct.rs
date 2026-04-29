@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use str0m::channel::{ChannelConfig, Reliability};
 use str0m::Rtc;
+use tokio::sync::oneshot;
 
-use super::{layer, Client};
+use super::{layer, Client, CloseReason};
 use crate::metrics::SfuMetrics;
 use crate::propagate::ClientId;
 
@@ -56,7 +57,38 @@ impl Client {
             relay_signing_pubkey: None,
             #[cfg(feature = "vfm")]
             max_vfm_temporal_layer: u8::MAX,
+            // Phase A Task A1 — defaults are `None`. The browser
+            // injection path (`udp_loop::serve` `client_inject_rx` arm)
+            // calls `with_external_peer_id` and `with_close_signal`
+            // before insertion; relay clients leave them `None` and are
+            // not subject to peer-id steal.
+            external_peer_id: None,
+            close_signal: None,
         }
+    }
+
+    /// Phase A Task A1: tag this client with the JWT `sub` from the
+    /// signaling token so [`crate::registry::Registry::insert`] can
+    /// dedupe by `(room_id, peer_id)`.
+    ///
+    /// Browser path only — relay clients pass through their own identity
+    /// scheme (`upstream_url`) and must NOT be tagged here.
+    pub fn with_external_peer_id(mut self, peer_id: u64) -> Self {
+        self.external_peer_id = Some(peer_id);
+        self
+    }
+
+    /// Phase A Task A1: install the channel the registry will use to
+    /// signal a session-steal eviction. The corresponding receiver is
+    /// held by the WS task (`client_ws::session::run`), which selects
+    /// on it and translates [`CloseReason`] into the wire-level close.
+    ///
+    /// Idempotent in the sense that Drop on the sender simply closes
+    /// the receiver — the WS task observes that as `Err(_)` and falls
+    /// back to its normal close path.
+    pub fn with_close_signal(mut self, tx: oneshot::Sender<CloseReason>) -> Self {
+        self.close_signal = Some(tx);
+        self
     }
 
     /// Construct an outbound relay client from a [`crate::relay::client::PendingRelay`].
