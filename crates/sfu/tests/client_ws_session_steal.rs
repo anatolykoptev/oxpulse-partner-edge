@@ -179,6 +179,22 @@ async fn wait_active(metrics: &SfuMetrics, target: i64, max_ms: u64) -> i64 {
     got
 }
 
+/// Wait for an `IntCounter` to reach `target` (or timeout). Polls every 5ms.
+async fn wait_metric_ge(
+    metric: &prometheus::IntCounter,
+    target: u64,
+    max_ms: u64,
+) -> u64 {
+    for _ in 0..(max_ms / 5) {
+        let got = metric.get();
+        if got >= target {
+            return got;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    metric.get()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn duplicate_upgrade_replaces_older_session() {
     let (base, metrics, shutdown_tx, serve_handle) = start_full_pipeline().await;
@@ -279,10 +295,10 @@ async fn duplicate_upgrade_increments_metric() {
     .unwrap();
     let _ = complete_handshake(&mut ws_b).await;
 
-    // Wait for steal to settle.
-    let _ = tokio::time::timeout(Duration::from_secs(2), ws_a.next()).await;
-
-    let after = metrics.session_replaced_total.get();
+    // Poll the metric directly rather than waiting on WS A's close frame as a
+    // proxy: under CPU pressure the close-frame round-trip can exceed 2s, but
+    // the metric increment happens earlier on the SFU side.
+    let after = wait_metric_ge(&metrics.session_replaced_total, before + 1, 2000).await;
     assert_eq!(
         after,
         before + 1,
