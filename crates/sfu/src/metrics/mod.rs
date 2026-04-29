@@ -85,6 +85,11 @@ pub struct SfuMetrics {
     pub client_ws_session_ended_total: IntCounterVec,
     /// Wall-clock duration of a client_ws session.
     pub client_ws_session_duration_seconds: Histogram,
+    /// Phase A Task A1: count of older sessions evicted by a newer upgrade
+    /// for the same `(room_id, peer_id)` (peer_id-keyed session steal).
+    /// Incremented inside [`crate::registry::Registry::insert`] when a
+    /// duplicate `external_peer_id` is detected.
+    pub session_replaced_total: IntCounter,
     /// UDP `send_to` failures, labelled by `error_kind`.
     /// Incremented on every failure; only the first per destination per
     /// 10-second window emits a WARN (see `udp_loop::flush_transmits`).
@@ -222,6 +227,7 @@ impl SfuMetrics {
             client_ws_answer_sent_total: client_ws_metrics.answer_sent_total,
             client_ws_session_ended_total: client_ws_metrics.session_ended_total,
             client_ws_session_duration_seconds: client_ws_metrics.session_duration_seconds,
+            session_replaced_total: client_ws_metrics.session_replaced_total,
             udp_send_failed,
         })
     }

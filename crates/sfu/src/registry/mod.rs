@@ -26,6 +26,8 @@ mod poll;
 #[cfg(any(test, feature = "test-utils"))]
 mod test_seams;
 
+use bwe::PACER_RID_LABELS;
+
 /// Single-owner registry of connected peers. M1.4 adds an
 /// `ActiveSpeakerDetector` driven by `udp_loop::serve`'s 300ms interval
 /// (no detached tick task — preserves the single-task invariant).
@@ -123,6 +125,17 @@ impl Registry {
     /// tracks to the newcomer (chat.rs cross-advertisement pattern).
     /// The client's metrics handle is replaced with the registry's own
     /// so all counters (including per-forward) flow to one registry.
+    ///
+    /// Phase A Task A1 — peer_id-keyed session steal: if a client with
+    /// the same `external_peer_id` (JWT `sub`) is already registered,
+    /// the older session is signaled over its `close_signal` channel
+    /// (delivers WS close 4031), evicted from the clients vec, and the
+    /// newcomer adopts the slot. Defends against duplicate `/sfu/ws`
+    /// upgrades from client multi-mount races (SvelteKit hydration,
+    /// stale SW caches, lobby double-click). Live-debugged on
+    /// MTBX-6732 2026-04-28: peer_id=2 opened two upgrades 144 ms apart
+    /// and the older one's 15 s `bad offer` timeout poisoned the
+    /// newer session's UI.
     pub fn insert(&mut self, mut client: Client) {
         // Adopt the registry's metrics so forwarded_packets / layer_selection
         // increments land on the same Prometheus registry as connect / disconnect.
@@ -132,6 +145,22 @@ impl Registry {
         client.relay_auth_secret = self.relay_auth_secret.clone();
         // Phase 2: also copy the Ed25519 pubkey for EdDSA-preferred verification.
         client.relay_signing_pubkey = self.relay_signing_pubkey.clone();
+
+        // Session steal — drop the older entry sharing this external
+        // peer_id BEFORE the cross-advertisement loop so the newcomer
+        // doesn't see itself as a peer to subscribe to. Only browser
+        // clients carry an `external_peer_id`; relay clients (None)
+        // bypass this check entirely.
+        if let Some(new_pid) = client.external_peer_id {
+            if let Some(idx) = self
+                .clients
+                .iter()
+                .position(|c| c.external_peer_id == Some(new_pid))
+            {
+                self.evict_for_steal(idx);
+            }
+        }
+
         for entry in self.clients.iter().flat_map(|c| c.tracks_in.iter()) {
             client.handle_track_open(std::sync::Arc::downgrade(&entry.id));
         }
@@ -148,6 +177,70 @@ impl Registry {
             opus_red: true,
             opus_dred: true,
         });
+    }
+
+    /// Evict the client at `idx` because a newer upgrade for the same
+    /// `external_peer_id` is replacing it. Mirrors the cleanup in
+    /// [`Self::reap_dead`]: signals the WS task to close, decrements
+    /// the active-participants gauge, scrubs detector / BWE / pacer /
+    /// per-peer label series, and bumps `client_disconnect_total` plus
+    /// the dedicated `session_replaced_total` counter.
+    ///
+    /// `swap_remove` is safe here — `self.clients` ordering is not
+    /// load-bearing (the registry iterates with `iter`/`iter_mut` and
+    /// looks up by `id` or `accepts(input)` everywhere).
+    fn evict_for_steal(&mut self, idx: usize) {
+        let mut old = self.clients.swap_remove(idx);
+        let peer_label = (*old.id).to_string();
+        let external_peer_id = old.external_peer_id;
+
+        // Wake the old WS task so it sends the 4031 close frame and
+        // returns. `send` returning `Err` means the receiver was already
+        // dropped (e.g. WS task exited on its own); benign.
+        if let Some(tx) = old.close_signal.take() {
+            let _ = tx.send(crate::client::CloseReason::SessionReplaced);
+        }
+
+        // Mark the str0m instance dead so any in-flight UDP demux drops
+        // the datagram instead of routing to a soon-to-be-gone Rtc.
+        old.rtc.disconnect();
+
+        // Mirror reap_dead's scrub: detector / BWE / pacer / labels.
+        self.detector.remove_peer(&old.id.0);
+        self.bandwidth
+            .reap_dead(oxpulse_sfu_kit::propagate::ClientId(*old.id));
+        self.pacer.remove(&old.id);
+
+        let _ = self
+            .metrics
+            .bandwidth_estimate_bps
+            .remove_label_values(&[&peer_label]);
+        for rid_label in PACER_RID_LABELS {
+            let _ = self
+                .metrics
+                .pacer_layer_total
+                .remove_label_values(&[&peer_label, rid_label]);
+            for to_label in PACER_RID_LABELS {
+                let _ = self.metrics.layer_transitions_total.remove_label_values(&[
+                    rid_label,
+                    to_label,
+                    &peer_label,
+                ]);
+            }
+        }
+
+        self.metrics.client_disconnect_total.inc();
+        self.metrics.active_participants.dec();
+        self.metrics.session_replaced_total.inc();
+
+        tracing::warn!(
+            target: "sfu::registry",
+            peer_id = ?external_peer_id,
+            internal_id = *old.id,
+            "session replaced — older client evicted (Phase A Task A1)"
+        );
+
+        // `old` drops here — str0m Rtc Drop cleans ICE/DTLS state.
     }
 
     /// Mark a connected client as a cascade relay from an upstream SFU.

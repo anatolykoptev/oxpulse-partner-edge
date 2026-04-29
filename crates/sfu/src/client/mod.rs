@@ -15,11 +15,56 @@ use std::sync::{Arc, Weak};
 
 use str0m::media::Rid;
 use str0m::{Input, Rtc};
+use tokio::sync::oneshot;
 
 use oxpulse_sfu_kit::ClientOrigin;
 
 use crate::metrics::SfuMetrics;
 use crate::propagate::ClientId;
+
+/// Reason a per-connection session is being closed. Carried over the
+/// `Client::close_signal` channel so the WS task can translate the
+/// reason into the right WebSocket close code and tracing label.
+///
+/// Phase A Task A1 introduces the channel pipeline; today only
+/// [`CloseReason::SessionReplaced`] actually fires (registry steal).
+/// `PeerLeft` and `ServerShutdown` are reserved for future tasks that
+/// need server-initiated closes for non-steal reasons.
+#[derive(Debug, Clone, Copy)]
+pub enum CloseReason {
+    /// A newer `/sfu/ws` upgrade arrived for the same `(room_id, peer_id)`.
+    /// The older session must release the slot — closes with WS code 4031.
+    SessionReplaced,
+    /// Reserved: server is gracefully removing this peer (e.g. moderator
+    /// kick). Maps to WS close code 4002 today; will get its own code
+    /// when the kick path lands.
+    PeerLeft,
+    /// Reserved: SFU process is shutting down. Maps to WS close code 1001
+    /// (Going Away).
+    ServerShutdown,
+}
+
+impl CloseReason {
+    /// WS close code emitted on the wire when this reason fires.
+    pub fn ws_close_code(self) -> u16 {
+        match self {
+            CloseReason::SessionReplaced => 4031,
+            CloseReason::PeerLeft => 4002,
+            CloseReason::ServerShutdown => 1001,
+        }
+    }
+
+    /// Stable label used in metrics / tracing fields. Matches
+    /// `client_ws_session_ended_total{close_code=...}` bucketing where
+    /// applicable.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            CloseReason::SessionReplaced => "session_replaced",
+            CloseReason::PeerLeft => "peer_left",
+            CloseReason::ServerShutdown => "server_shutdown",
+        }
+    }
+}
 
 pub mod construct;
 pub mod dc;
@@ -109,6 +154,18 @@ pub struct Client {
     /// forwarding. `u8::MAX` means "no cap" (forward all layers).
     #[cfg(feature = "vfm")]
     pub(crate) max_vfm_temporal_layer: u8,
+    /// External peer identifier from the room JWT's `sub` claim. Used by
+    /// [`crate::registry::Registry::insert`] to detect duplicate upgrades
+    /// for the same `(room_id, peer_id)` and trigger a session steal
+    /// (Phase A Task A1). `None` for relay-origin clients — they live in a
+    /// separate identity namespace and are not subject to peer-id steal.
+    pub(crate) external_peer_id: Option<u64>,
+    /// Set by [`crate::registry::Registry::insert`] when this session must
+    /// yield to a newer one for the same `external_peer_id`. The WS task
+    /// selects on the receiver and translates the [`CloseReason`] into a
+    /// WebSocket close frame. `None` for relay-origin clients (no WS task
+    /// to wake up) and consumed (`take()`) on first send.
+    pub(crate) close_signal: Option<oneshot::Sender<CloseReason>>,
 }
 
 impl Client {
