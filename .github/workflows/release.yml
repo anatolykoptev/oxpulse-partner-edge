@@ -74,7 +74,10 @@ jobs:
         env:
           EXPECTED_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          file_version=$(cat VERSION)
+          # Strip the release-please marker comment — VERSION is
+          # "X.Y.Z  # x-release-please-version" so release-please can update it
+          # automatically (see release-please-config.json extra-files generic).
+          file_version=$(awk '{print $1}' VERSION)
           if [[ "$file_version" != "$EXPECTED_VERSION" ]]; then
             echo "::error::VERSION file ($file_version) != tag version ($EXPECTED_VERSION)"
             exit 1
