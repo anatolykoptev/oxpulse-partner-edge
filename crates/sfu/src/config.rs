@@ -134,6 +134,19 @@ fn parse_public_ip_env() -> Option<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes env-mutating tests in this module — `cargo test` runs
+    /// tests in parallel within a single process, but `std::env` is
+    /// process-global. Without serialization a test that sets
+    /// `SFU_PUBLIC_IP=203.0.113.42` can race a sibling that sets
+    /// `SFU_PUBLIC_IP=""` and observe `None`, producing the flaky
+    /// CI failure tracked as task #63.
+    ///
+    /// Holds the lock for the env set/read/remove cycle. Recovers from
+    /// a poisoned mutex (a sibling test panicked while holding it) —
+    /// we want "sequential access to env", not "trust prior state".
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn default_is_sensible() {
@@ -173,6 +186,7 @@ mod tests {
 
     #[test]
     fn fips_mode_defaults_false() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::remove_var("SFU_FIPS");
         let cfg = SfuConfig::default();
         assert!(!cfg.fips_mode, "fips_mode must default to false");
@@ -180,6 +194,7 @@ mod tests {
 
     #[test]
     fn fips_mode_env_one_enables() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("SFU_FIPS", "1");
         let cfg = SfuConfig::from_env();
         assert!(cfg.fips_mode);
@@ -188,6 +203,7 @@ mod tests {
 
     #[test]
     fn fips_mode_env_empty_is_false() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("SFU_FIPS", "");
         let cfg = SfuConfig::from_env();
         assert!(!cfg.fips_mode);
@@ -205,6 +221,7 @@ mod tests {
 
     #[test]
     fn public_ip_env_parses_ipv4() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // RFC 5737 TEST-NET-3 — reserved for documentation / examples.
         std::env::set_var("SFU_PUBLIC_IP", "203.0.113.42");
         let cfg = SfuConfig::from_env();
@@ -218,6 +235,7 @@ mod tests {
 
     #[test]
     fn public_ip_env_empty_is_none() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("SFU_PUBLIC_IP", "");
         let cfg = SfuConfig::from_env();
         assert!(
@@ -229,6 +247,7 @@ mod tests {
 
     #[test]
     fn public_ip_env_garbage_warns_and_falls_back() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // Non-fatal: log a warning and fall back to the bind address.
         // Crashing on a malformed env var would block startup for a
         // typo in the operator's compose env block — the SFU degrades
