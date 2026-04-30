@@ -5,6 +5,18 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.5](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.4...partner-edge-v0.12.5) (2026-04-30)
+
+
+### Features
+
+* **sfu/metrics:** observability follow-ups — sub-second buckets + per-peer media gauge + Phase 2 reserve annotations ([#22](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/22)) ([7b521fb](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7b521fb0368971c14f29c6525d8af38d5bbc7a41))
+
+
+### Bug Fixes
+
+* **sfu/config:** serialize env-mutating tests — unbreak flaky CI ([#24](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/24)) ([51615fa](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/51615fa1fbd88e043b1e70eb228af7e19de2495c))
+
 ## [0.12.4](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.3...partner-edge-v0.12.4) (2026-04-29)
 
 
