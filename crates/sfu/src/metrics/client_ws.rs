@@ -93,14 +93,20 @@ pub(super) fn register(registry: &Registry) -> anyhow::Result<ClientWsMetrics> {
     )
     .context("client_ws_session_ended_total")?);
 
-    // Buckets sized for video calls: short-lived rejections (<5s),
-    // typical exchanges (5-30s SDP), and full call durations.
+    // Buckets sized for video calls. Sub-second resolution
+    // (0.1, 0.25, 0.5) distinguishes handshake-fast-rejection
+    // (token invalid → close in <100ms) from offer-not-received
+    // timeout (close at OFFER_TIMEOUT). Without these, a fast-reject
+    // vs slow-reject mix collapses into a single <1s bucket and
+    // p50/p95 derived from the histogram is meaningless.
     let session_duration_seconds = reg!(Histogram::with_opts(
         HistogramOpts::new(
             "client_ws_session_duration_seconds",
             "Wall-clock duration of a client_ws session from upgrade-accepted to close",
         )
-        .buckets(vec![1.0, 5.0, 30.0, 60.0, 300.0, 1_800.0, 3_600.0,]),
+        .buckets(vec![
+            0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 30.0, 60.0, 300.0, 1_800.0, 3_600.0,
+        ]),
     )
     .context("client_ws_session_duration_seconds")?);
 
