@@ -96,6 +96,13 @@ pub struct SfuMetrics {
     /// Exposed so task #28 can threshold on per-dest failure rate to drop
     /// dead ICE candidates without needing a separate map.
     pub udp_send_failed: IntCounterVec,
+    /// label: peer_id — per-client snapshot of the running
+    /// `Client::delivered_media_count` atomic counter, refreshed once
+    /// per fanout pass. Diagnoses 'WS connected, ICE connected, but
+    /// no media flowing' (mobile peers behind broken NAT, stuck codec
+    /// init). Series scrubbed on `reap_dead` to keep peer_id
+    /// cardinality bounded across reconnects.
+    pub client_delivered_media_count: IntGaugeVec,
 }
 
 impl SfuMetrics {
@@ -203,6 +210,15 @@ impl SfuMetrics {
         )
         .context("udp_send_failed_total")?);
 
+        let client_delivered_media_count = reg!(IntGaugeVec::new(
+            Opts::new(
+                "client_delivered_media_count",
+                "Per-peer count of MediaData events fanned out to this client (snapshot of Client::delivered_media_count). Stuck at 0 after WS+ICE connected = forwarding broken.",
+            ),
+            &["peer_id"],
+        )
+        .context("client_delivered_media_count")?);
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -229,6 +245,7 @@ impl SfuMetrics {
             client_ws_session_duration_seconds: client_ws_metrics.session_duration_seconds,
             session_replaced_total: client_ws_metrics.session_replaced_total,
             udp_send_failed,
+            client_delivered_media_count,
         })
     }
 
