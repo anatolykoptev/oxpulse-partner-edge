@@ -178,6 +178,35 @@ if [[ $DRY_RUN -eq 0 && $OS_FAMILY == rhel ]] \
 	fi
 fi
 
+# ---------- Step 1c: dnf cache sanity (rhel only) ----------
+# Some VPS providers (e.g. fvds.ru / hoztnode) ship images where every
+# `metalink=` and `baseurl=` line in /etc/yum.repos.d/centos.repo is
+# commented out, expecting the operator to wire in a private mirror.
+# `dnf install` then fails with the unhelpful "Cannot find a valid
+# baseurl for repo: baseos" deep inside get.docker.com — confusing and
+# hard to debug. Detect early and re-enable the official metalink.
+if [[ $DRY_RUN -eq 0 && $OS_FAMILY == rhel ]] && command -v dnf >/dev/null 2>&1; then
+	if ! dnf -q makecache --setopt=metadata_expire=0 >/dev/null 2>&1; then
+		warn "  dnf makecache failed — checking for commented metalinks in /etc/yum.repos.d"
+		repaired=0
+		for f in /etc/yum.repos.d/centos.repo /etc/yum.repos.d/centos-addons.repo; do
+			[[ -f "$f" ]] || continue
+			if grep -q '^#metalink=https://mirrors.centos.org' "$f"; then
+				sed -i 's|^#metalink=https://mirrors.centos.org|metalink=https://mirrors.centos.org|g' "$f"
+				log "  re-enabled metalinks in $f"
+				repaired=1
+			fi
+		done
+		if [[ $repaired -eq 1 ]]; then
+			dnf -q makecache --setopt=metadata_expire=0 >/dev/null 2>&1 \
+				|| die "dnf still broken after metalink re-enable — inspect /etc/yum.repos.d/ manually"
+			log "  dnf cache rebuilt"
+		else
+			die "dnf makecache failed and no commented-metalink pattern matched — inspect /etc/yum.repos.d/ and DNS"
+		fi
+	fi
+fi
+
 # ---------- Step 2: Docker ----------
 log "[2/10] ensuring docker + compose plugin"
 if [[ $DRY_RUN -eq 0 ]]; then
