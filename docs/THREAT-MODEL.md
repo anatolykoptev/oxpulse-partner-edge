@@ -143,10 +143,10 @@ possibility of future decryption.
   quarterly. Tracks whether OxPulse has received National Security
   Letters, FISA court orders, or requests to insert backdoors.
 
-- **US Delaware operating jurisdiction.** The OxPulse operating entity
-  is subject to US legal process, which requires judicial oversight for
-  surveillance orders. This is documented transparently, not presented
-  as absolute protection.
+- **US legal jurisdiction.** OxPulse is being incorporated as a US
+  Delaware C-Corp; the operating entity is subject to US legal process,
+  which requires judicial oversight for surveillance orders. This is
+  documented transparently, not presented as absolute protection.
 
 - **Minimal data retention.** The partner-edge node does not store call
   content, participant identities, or session logs beyond what is
@@ -213,12 +213,13 @@ boundary of the partner-edge system:
   being socially engineered into actions that do not manifest as
   detectable technical deviations.
 
-- **Legal compulsion of the OxPulse operating entity.** OxPulse
-  operates as a US Delaware C-Corp and is subject to standard US legal
-  process (subpoenas, court orders, National Security Letters). The
-  warrant canary in `TRANSPARENCY.md` tracks this risk. The system is
-  designed so that even under compulsion, the operating entity cannot
-  decrypt end-to-end encrypted content — it does not possess the keys.
+- **Legal compulsion of the OxPulse operating entity.** OxPulse is
+  being incorporated as a US Delaware C-Corp and will be subject to
+  standard US legal process (subpoenas, court orders, National Security
+  Letters). The warrant canary in `TRANSPARENCY.md` tracks this risk.
+  The system is designed so that even under compulsion, the operating
+  entity cannot decrypt end-to-end encrypted content — it does not
+  possess the keys.
 
 - **Compromise of upstream cryptographic libraries.** OxPulse depends
   on established libraries (libsodium, ring, xray-core, str0m). A
