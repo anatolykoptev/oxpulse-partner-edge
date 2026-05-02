@@ -53,6 +53,13 @@ REGION="${REGION:-}"
 # rate limiter throttles; 120 was too tight on call.cheburator.bot and
 # left the operator staring at a `still red after 120s` warn.
 HEALTHCHECK_TIMEOUT="${HEALTHCHECK_TIMEOUT:-300}"
+# Optional path to a BrandingConfig JSON the operator wants to ship to
+# the backend with this clone. The file is read literally and inlined
+# into the /api/partner/register body as `branding`. Backend validates
+# against branding::BrandingConfig and rejects malformed payloads with
+# HTTP 400. Absent → backend stores NULL → resolver synthesizes an
+# OxPulse default stub (display_name "OxPulse" + co_brand_partner=$PARTNER_ID).
+BRANDING_CONFIG="${BRANDING_CONFIG:-}"
 DRY_RUN=0
 BAKE_MODE=0
 
@@ -75,6 +82,8 @@ Optional:
   --image-version=<tag>      Pull a specific image tag (default: latest)
   --region=<tag>             Region tag (e.g. pl-waw, ru-msk). Auto-detected from public IP if omitted.
   --healthcheck-timeout=<s>  Step 7 wait deadline in seconds (default: 300, env: HEALTHCHECK_TIMEOUT)
+  --branding-config=<path>   BrandingConfig JSON to ship with /api/partner/register (env: BRANDING_CONFIG).
+                             Absent → backend synthesises an OxPulse default stub for the partner.
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
   -h|--help                  Show this help
@@ -95,6 +104,7 @@ while [[ $# -gt 0 ]]; do
 		--image-version=*)  IMAGE_VERSION="${1#*=}" ;;
 		--region=*)         REGION="${1#*=}" ;;
 		--healthcheck-timeout=*) HEALTHCHECK_TIMEOUT="${1#*=}" ;;
+		--branding-config=*) BRANDING_CONFIG="${1#*=}" ;;
 		--dry-run)          DRY_RUN=1 ;;
 		--bake)             BAKE_MODE=1 ;;
 		-h|--help)          usage ;;
@@ -122,6 +132,16 @@ fi
 
 if [[ "$BAKE_MODE" = "0" && -z "$TOKEN" && -z "$MANUAL_CONFIG" ]]; then
 	die "either --token / --token-file / OXPULSE_PARTNER_TOKEN or --manual-config is required (see --help)"
+fi
+
+# Validate --branding-config=<path> at arg-parse time so dry-run + first
+# real run both fail fast on a malformed file. Burning a single-use
+# bootstrap token on a backend 400 is exactly the failure mode this
+# dance prevents.
+if [[ -n "$BRANDING_CONFIG" ]]; then
+	[[ -r "$BRANDING_CONFIG" ]] || die "--branding-config not readable: $BRANDING_CONFIG"
+	python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$BRANDING_CONFIG" 2>/dev/null \
+		|| die "--branding-config is not valid JSON: $BRANDING_CONFIG"
 fi
 case "$TUNNEL" in
 	vless|wg|https) : ;;
@@ -413,10 +433,12 @@ elif [[ $DRY_RUN -eq 1 ]]; then
 DRYJSON
 else
 	log "  POST $BACKEND_API/api/partner/register"
-	# Build body via python so we omit `region` cleanly when empty (the
-	# backend column is nullable and the partner_registry register handler
-	# treats absent + null + "" as Option::None — see register.rs:80).
-	register_body=$(REG_PARTNER="$PARTNER_ID" REG_DOMAIN="$DOMAIN" REG_TOKEN="$TOKEN" REG_PUBLIC_IP="$PUBLIC_IP" REG_REGION="$REGION" python3 -c '
+	[[ -n "$BRANDING_CONFIG" ]] && log "  shipping branding-config: $BRANDING_CONFIG"
+	# Build body via python so we (1) omit `region` cleanly when empty
+	# and (2) inline `branding` as a parsed object, not a quoted string.
+	# The backend column is nullable and the partner_registry register
+	# handler treats absent + null + "" as Option::None — see register.rs.
+	register_body=$(REG_PARTNER="$PARTNER_ID" REG_DOMAIN="$DOMAIN" REG_TOKEN="$TOKEN" REG_PUBLIC_IP="$PUBLIC_IP" REG_REGION="$REGION" REG_BRANDING_FILE="$BRANDING_CONFIG" python3 -c '
 import json, os
 body = {
     "partner_id": os.environ["REG_PARTNER"],
@@ -427,6 +449,10 @@ body = {
 region = os.environ.get("REG_REGION", "").strip()
 if region:
     body["region"] = region
+branding_path = os.environ.get("REG_BRANDING_FILE", "").strip()
+if branding_path:
+    with open(branding_path) as f:
+        body["branding"] = json.load(f)
 print(json.dumps(body))
 ')
 	if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
