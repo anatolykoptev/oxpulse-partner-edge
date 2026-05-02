@@ -370,6 +370,24 @@ if [ "$BAKE_MODE" = "0" ]; then
 log "[4/10] fetching node config"
 tmp_cfg=$(mktemp)
 trap 'rm -f "$tmp_cfg"' EXIT
+# Idempotent re-install protection: if state file from a prior install
+# exists and the operator passed --token=<raw> (which is single-use and
+# would 409 on the backend), short-circuit before burning the token.
+# Operator is expected to use the upgrade tool, --manual-config=, or
+# regenerate a token via partner-cli issue-token.
+if [[ -f "$PREFIX_LIB/install.env" && -z "$MANUAL_CONFIG" ]]; then
+	# shellcheck source=/dev/null
+	prior_node_id=$(. "$PREFIX_LIB/install.env" 2>/dev/null && printf '%s' "${NODE_ID:-}")
+	if [[ -n "$prior_node_id" ]]; then
+		log "  existing install detected (node_id=$prior_node_id) — skipping registration"
+		warn "  bootstrap tokens are single-use; the backend would return 409. To re-deploy:"
+		warn "    • upgrade in place: sudo $PREFIX_SBIN/oxpulse-partner-edge-upgrade"
+		warn "    • apply a freshly-issued config: rerun with --manual-config=<path>"
+		log  "  running healthcheck and exiting 0"
+		"$PREFIX_SBIN/oxpulse-partner-edge-healthcheck" || true
+		exit 0
+	fi
+fi
 if [[ -n "$MANUAL_CONFIG" ]]; then
 	[[ -r "$MANUAL_CONFIG" ]] || die "manual-config file not readable: $MANUAL_CONFIG"
 	cp "$MANUAL_CONFIG" "$tmp_cfg"
