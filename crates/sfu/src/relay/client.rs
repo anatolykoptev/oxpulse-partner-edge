@@ -81,6 +81,7 @@ fn is_allowed_upstream_host(url: &str) -> bool {
     })
 }
 
+#[tracing::instrument(skip(upstream_room_token), fields(otel.kind = "client"))]
 pub async fn connect_relay(
     upstream_ws_url: &str,
     upstream_room_token: &str,

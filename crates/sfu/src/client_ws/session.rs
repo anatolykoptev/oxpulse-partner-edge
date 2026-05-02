@@ -161,6 +161,10 @@ pub struct PendingClient {
 
 /// Run a single WS session. Returns `Ok` on clean shutdown; `Err` on
 /// internal failure that should be logged by the caller.
+#[tracing::instrument(
+    skip(socket, inject_tx, metrics),
+    fields(otel.kind = "server", room_id = %room_id, peer_id = peer_id)
+)]
 pub async fn run(
     mut socket: WebSocket,
     room_id: String,

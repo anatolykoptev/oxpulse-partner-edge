@@ -110,6 +110,7 @@ pub async fn bind(config: &SfuConfig) -> anyhow::Result<UdpSocket> {
 /// Drive the receive loop on an already-bound socket. Returns once
 /// `shutdown` resolves or a fatal socket error occurs.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, name = "udp_loop.serve")]
 pub async fn serve<F>(
     socket: UdpSocket,
     metrics: Arc<SfuMetrics>,
