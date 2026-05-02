@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use tokio::signal;
-use tracing_subscriber::EnvFilter;
 
 use anyhow::Context;
 use oxpulse_sfu::{
@@ -12,18 +11,20 @@ use oxpulse_sfu::{
         handler::{spawn_relay_api, SeenJtis},
         task::RelayTask,
     },
-    udp_loop, SfuConfig, SfuMetrics,
+    telemetry, udp_loop, SfuConfig, SfuMetrics,
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = SfuConfig::from_env();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level)),
-        )
-        .init();
+    // edge_id / partner_id are read directly from env so they reach the OTLP
+    // resource attributes — config.rs doesn't expose them yet (and we don't
+    // want to add fields there for one consumer).
+    let edge_id = std::env::var("SFU_EDGE_ID").unwrap_or_else(|_| "local".to_string());
+    let partner_id = std::env::var("PARTNER_ID").unwrap_or_else(|_| "unknown".to_string());
+    let trace_provider =
+        telemetry::init(&config.log_level, &edge_id, &partner_id).context("init telemetry")?;
 
     // M4.A6 - parse_public_ip_env() emitted any warning *before* the
     // subscriber was initialized, so re-check here for visibility.
@@ -284,6 +285,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(h) = client_ws_handle {
         h.abort();
     }
+
+    // Flush in-flight spans before exit. No-op when OTLP wasn't configured.
+    telemetry::shutdown(trace_provider);
 
     result
 }

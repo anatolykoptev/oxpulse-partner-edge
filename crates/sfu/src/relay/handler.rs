@@ -64,7 +64,7 @@ pub fn spawn_relay_api(
     Ok(handle)
 }
 
-#[instrument(skip_all)]
+#[instrument(skip_all, fields(otel.kind = "server", relay.endpoint = "/relay/connect"))]
 async fn relay_connect(
     State((secret, signing_public_key, task_tx, seen_jtis)): State<AppState>,
     Json(body): Json<RelayConnectRequest>,
