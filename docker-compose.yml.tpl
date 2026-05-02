@@ -104,6 +104,10 @@ services:
       SFU_BIND_ADDRESS: "0.0.0.0"
       SFU_UDP_PORT: "{{SFU_UDP_PORT}}"
       SFU_METRICS_PORT: "{{SFU_METRICS_PORT}}"
+      # Per-edge label baked into every Prometheus series via the SFU's
+      # const_label registry. Empty → "local" (default), which collides
+      # with other edges in the central Prom view. Convention: <partner>1.
+      SFU_EDGE_ID: "{{SFU_EDGE_ID}}"
       RUST_LOG: "info"
       RELAY_JWT_SECRET: "{{RELAY_JWT_SECRET}}"
       SFU_RELAY_API_PORT: "8912"
