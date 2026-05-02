@@ -37,14 +37,30 @@ TOKEN="${OXPULSE_PARTNER_TOKEN:-}"
 TOKEN_FILE=""
 TUNNEL=vless
 MANUAL_CONFIG=""
-IMAGE_VERSION="${OXPULSE_IMAGE_VERSION:-latest}"
+# Default to `stable` channel (manually promoted post-validation by
+# .github/workflows/promote-stable.yml) rather than `latest` (mutable on
+# every merge). stable still drifts on promotion, but only after a human
+# pushed the channel forward — `latest` floats on every CI green and is
+# how cheburator wound up running an unpinned partner-edge-sfu on prod.
+# Operators can pin further via --image-version=v0.12.7.
+IMAGE_VERSION="${OXPULSE_IMAGE_VERSION:-stable}"
 # v0.2.0-rc1 placeholder: real per-clone value comes from /api/partner/register
 # response rendered by hydrate.sh in Phase 6 (Task 5.2).
 TURNS_SUBDOMAIN="${TURNS_SUBDOMAIN:-turns}"
 # M2.1: SFU UDP media port + Prometheus metrics port. Overridable via env or
 # interactive prompt so operators with port conflicts don't need to edit files.
 SFU_UDP_PORT="${SFU_UDP_PORT:-7878}"
-SFU_METRICS_PORT="${SFU_METRICS_PORT:-8878}"
+# Canonical Prom port per fleet convention (PROM_PORT = MCP_PORT + 1000 → 9317
+# pairs with the SFU client_ws/relay base 8317). Older 0.12.x installs used
+# 8878; new installs default to 9317 so prometheus.yml scrape config can
+# treat all edges uniformly. Override via env when reinstalling on top of
+# an older edge whose firewall / Oracle VCN was already provisioned for 8878.
+SFU_METRICS_PORT="${SFU_METRICS_PORT:-9317}"
+# Per-edge label for Prometheus const_label `edge_id` and Grafana dashboards.
+# Default falls back from PARTNER_ID after CLI args parse — see derive block
+# below the arg parser. Empty → SFU emits "local" which collides across edges
+# in the central Prom view, so the post-parse derive ensures it is always set.
+SFU_EDGE_ID="${SFU_EDGE_ID:-}"
 # Region tag (e.g. `pl-waw`, `ru-msk`, `us-east`). Empty → auto-detect from
 # public IP via ipinfo.io after Step 3. Honored over auto-detect when set.
 REGION="${REGION:-}"
@@ -783,6 +799,22 @@ NAIVE_PASS=$(json_get naive_pass "$tmp_cfg")
 CHANNELS_JSON=$(json_get_raw channels "$tmp_cfg")
 [[ "$CHANNELS_JSON" == "null" || -z "$CHANNELS_JSON" ]] && CHANNELS_JSON="[]"
 [[ -z "$NODE_ID" ]]            && NODE_ID="${PARTNER_ID}-$(hostname -s)"
+# SFU_EDGE_ID derives from PARTNER_ID once it is known. Convention is
+# `<partner>1` to leave room for `<partner>2` if the partner ever runs
+# more than one edge (rvpn1, piter1, motherly1, cheburator1).
+[[ -z "$SFU_EDGE_ID" ]]        && SFU_EDGE_ID="${PARTNER_ID}1"
+# Spin-trap guard: SFU v0.12.5 and earlier had a bug where setting
+# RELAY_JWT_SECRET without SIGNALING_SFU_SECRET caused the udp_loop
+# select! to spin at 95% CPU (closed inject channel polled forever).
+# Fixed in v0.12.7 (Option<Receiver> arm guard), but warn here so new
+# installs notice the configuration is partial: with SIGNALING empty
+# the /sfu/ws/{room_id} endpoint is disabled and browsers cannot reach
+# this edge directly (only relay flows from another SFU work).
+if [[ -z "${SIGNALING_SFU_SECRET:-}" ]]; then
+	warn "SIGNALING_SFU_SECRET is empty — /sfu/ws browser endpoint disabled."
+	warn "  Direct browser→edge calls will fail; only cascade-relay paths work."
+	warn "  Backend should provision signaling_sfu_secret in /api/partner/register."
+fi
 [[ -z "$BACKEND_ENDPOINT" ]]   && die "backend_endpoint missing from config"
 [[ -z "$TURN_SECRET" ]]        && die "turn_secret missing from config"
 [[ -z "$REALITY_UUID" ]]       && die "reality_uuid missing from config"
@@ -910,6 +942,7 @@ render() {
 		-e "s|{{IMAGE_VERSION}}|${IMAGE_VERSION}|g" \
 		-e "s|{{SFU_UDP_PORT}}|${SFU_UDP_PORT}|g" \
 		-e "s|{{SFU_METRICS_PORT}}|${SFU_METRICS_PORT}|g" \
+		-e "s|{{SFU_EDGE_ID}}|${SFU_EDGE_ID}|g" \
 		-e "s|{{SFU_SIGNING_PUBLIC_KEY}}|${SFU_SIGNING_PUBLIC_KEY:-}|g" \
 		-e "s|{{RELAY_JWT_SECRET}}|${RELAY_JWT_SECRET}|g" \
 		-e "s|{{SIGNALING_SFU_SECRET}}|${SIGNALING_SFU_SECRET:-}|g" \
