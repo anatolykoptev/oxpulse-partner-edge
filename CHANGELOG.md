@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.7](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.6...partner-edge-v0.12.7) (2026-05-02)
+
+
+### Bug Fixes
+
+* **install:** replace backticks with single quotes in --help (SC2215) ([#31](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/31)) ([a3b8df9](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a3b8df9c0ab72fc3374c7a325f1122d80acd74b4))
+
 ## [0.12.6](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.5...partner-edge-v0.12.6) (2026-05-02)
 
 
