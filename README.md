@@ -6,6 +6,10 @@
 
 Production-ready co-brand mirror node for the OxPulse network. One command installs TLS termination, an encrypted bypass tunnel, TURN/STUN relay, and a WebRTC SFU on any VPS.
 
+## Why
+
+OxPulse is encrypted real-time communication built to work under network-level filtering. The partner-edge bundle in this repository is the open-source component that operators self-host to extend the OxPulse mesh. Every byte that passes through a partner-edge node is end-to-end encrypted between participants — operators see only ciphertext and minimal forwarding metadata. Run by individual sysadmins, civic-tech communities, and university labs in jurisdictions that respect privacy.
+
 ## What's inside
 
 | Container | Purpose |
@@ -153,6 +157,19 @@ sudo systemctl daemon-reload
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).
+
+## Documentation
+
+- [Roadmap](docs/ROADMAP.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Threat model](docs/THREAT-MODEL.md)
+- [Security policy](SECURITY.md)
+- [Transparency report](TRANSPARENCY.md)
+- [Contributing guide](CONTRIBUTING.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Contributor License Agreement](CLA.md)
+- [Commercial license](LICENSE-COMMERCIAL.md)
+- [Architecture decisions](DECISION.md)
 
 ## License
 
