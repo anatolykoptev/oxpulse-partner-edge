@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.9](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.8...partner-edge-v0.12.9) (2026-05-02)
+
+
+### Features
+
+* **install:** zero-touch AmneziaWG mesh + OTel onboarding ([#36](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/36)) ([1d7b7ec](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1d7b7ec628e469064920254c418d9226f786f470))
+
 ## [0.12.8](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.7...partner-edge-v0.12.8) (2026-05-02)
 
 
