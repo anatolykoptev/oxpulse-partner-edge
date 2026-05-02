@@ -414,8 +414,8 @@ async fn end_to_end_browser_client_lands_in_registry() {
         metrics_clone,
         None,
         None,
-        relay_rx,
-        client_inject_rx,
+        Some(relay_rx),
+        Some(client_inject_rx),
         async {
             let _ = shutdown_rx.await;
         },

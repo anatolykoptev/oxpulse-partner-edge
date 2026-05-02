@@ -48,6 +48,21 @@ const MAX_SLEEP: Duration = Duration::from_millis(100);
 /// the same time the SFU would give up on that candidate anyway.
 const SEND_FAIL_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 
+/// Receive on the channel if `Some`, otherwise wait forever. Used by `serve()`
+/// to disable a `select!` arm whose `Option<Receiver>` is `None` — either
+/// because the corresponding feature is disabled at startup, or because the
+/// channel observed all senders dropped at runtime and was taken out.
+///
+/// Without this, polling a closed `Receiver` returns `Ready(None)` instantly
+/// and forever, causing the select! loop to spin at 100% CPU. Observed in
+/// prod on partner-edge-sfu v0.12.4 (3 days × 95% CPU, zero clients).
+async fn recv_or_pending<T>(rx: Option<&mut tokio::sync::mpsc::Receiver<T>>) -> Option<T> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Run the SFU UDP loop until `shutdown` resolves. The bound
 /// `SocketAddr` is not returned from here — tests that need it should
 /// call [`bind`] and pass the resulting socket into [`serve`].
@@ -55,8 +70,8 @@ const SEND_FAIL_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 pub async fn run_udp_loop<F>(
     config: SfuConfig,
     metrics: Arc<SfuMetrics>,
-    relay_rx: tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>,
-    client_inject_rx: tokio::sync::mpsc::Receiver<crate::client_ws::PendingClient>,
+    relay_rx: Option<tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>>,
+    client_inject_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::PendingClient>>,
     shutdown: F,
 ) -> anyhow::Result<()>
 where
@@ -100,8 +115,8 @@ pub async fn serve<F>(
     metrics: Arc<SfuMetrics>,
     relay_auth_secret: Option<Arc<[u8]>>,
     relay_signing_pubkey: Option<Arc<String>>,
-    mut relay_rx: tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>,
-    mut client_inject_rx: tokio::sync::mpsc::Receiver<crate::client_ws::PendingClient>,
+    mut relay_rx: Option<tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>>,
+    mut client_inject_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::PendingClient>>,
     shutdown: F,
 ) -> anyhow::Result<()>
 where
@@ -122,6 +137,7 @@ where
     tokio::pin!(shutdown);
 
     loop {
+        metrics_ref.udp_loop_iterations_total.inc();
         registry.reap_dead();
 
         // Drain whatever str0m has ready to emit *before* waiting for
@@ -176,33 +192,45 @@ where
                     }
                 }
             }
-            maybe_relay = relay_rx.recv() => {
-                if let Some(pending) = maybe_relay {
-                    let room_id = pending.room_id.clone();
-                    let client = crate::client::Client::new_outbound_relay(
-                        pending,
-                        metrics_ref.clone(),
-                    );
-                    registry.insert(client);
-                    tracing::info!(%room_id, "cascade relay client injected into registry — ICE driven by main UDP loop");
+            maybe_relay = recv_or_pending(relay_rx.as_mut()) => {
+                match maybe_relay {
+                    Some(pending) => {
+                        let room_id = pending.room_id.clone();
+                        let client = crate::client::Client::new_outbound_relay(
+                            pending,
+                            metrics_ref.clone(),
+                        );
+                        registry.insert(client);
+                        tracing::info!(%room_id, "cascade relay client injected into registry — ICE driven by main UDP loop");
+                    }
+                    None => {
+                        // All senders dropped at runtime (typically: relay drain
+                        // task panicked or exited). Switch the arm to `pending()`
+                        // by taking the receiver out of the Option — `recv_or_pending`
+                        // sees None next iteration and never resolves again.
+                        metrics_ref.inject_channel_closed_total.with_label_values(&["relay"]).inc();
+                        tracing::warn!("relay inject channel closed at runtime — arm disabled");
+                        relay_rx = None;
+                    }
                 }
             }
-            maybe_client = client_inject_rx.recv() => {
-                if let Some(pending) = maybe_client {
-                    let room_id = pending.room_id.clone();
-                    let external_peer_id = pending.external_peer_id;
-                    // `Client::new` defaults `origin = ClientOrigin::Local` —
-                    // exactly what M4.A2 needs for browser peers. Phase A
-                    // Task A1: also tag with `external_peer_id` so
-                    // `Registry::insert` can dedupe duplicate upgrades, and
-                    // hand the steal-signal sender to the registry so the
-                    // older WS task can be woken with `4031 session_replaced`.
-                    let client = crate::client::Client::new(pending.rtc, metrics_ref.clone())
-                        .with_external_peer_id(external_peer_id)
-                        .with_close_signal(pending.close_signal);
-                    registry.insert(client);
-                    tracing::info!(%room_id, external_peer_id,
-                        "browser client injected into registry — ICE driven by main UDP loop");
+            maybe_client = recv_or_pending(client_inject_rx.as_mut()) => {
+                match maybe_client {
+                    Some(pending) => {
+                        let room_id = pending.room_id.clone();
+                        let external_peer_id = pending.external_peer_id;
+                        let client = crate::client::Client::new(pending.rtc, metrics_ref.clone())
+                            .with_external_peer_id(external_peer_id)
+                            .with_close_signal(pending.close_signal);
+                        registry.insert(client);
+                        tracing::info!(%room_id, external_peer_id,
+                            "browser client injected into registry — ICE driven by main UDP loop");
+                    }
+                    None => {
+                        metrics_ref.inject_channel_closed_total.with_label_values(&["client"]).inc();
+                        tracing::warn!("client inject channel closed at runtime — arm disabled");
+                        client_inject_rx = None;
+                    }
                 }
             }
         }
@@ -279,21 +307,123 @@ mod tests {
         let socket = bind(&cfg).await.expect("bind");
         let metrics = Arc::new(SfuMetrics::default());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let (_, relay_rx) = tokio::sync::mpsc::channel(1);
-        let (_, client_inject_rx) = tokio::sync::mpsc::channel(1);
-        let handle = tokio::spawn(serve(
+        let handle = tokio::spawn(serve(socket, metrics, None, None, None, None, async {
+            let _ = rx.await;
+        }));
+        tx.send(()).unwrap();
+        handle.await.unwrap().unwrap();
+    }
+
+    /// Regression: standalone mode (no relay, no client_ws) used to feed
+    /// `serve()` two channels whose only senders had already been dropped.
+    /// `Receiver::recv()` then resolves to `Ready(None)` instantly and the
+    /// `select!` loop spins at 100% CPU — observed on partner-edge-sfu
+    /// v0.12.4 (3 days × 95% CPU, zero clients). The fix passes
+    /// `Option<Receiver>` and substitutes `pending()` for `None`.
+    ///
+    /// Verifies low loop iteration count: at MAX_SLEEP=100ms the steady
+    /// rate is ~10/s. A 200ms window must produce ≤ a few iterations,
+    /// not the ~200k a tight loop would.
+    #[tokio::test]
+    async fn serve_idle_loop_rate_stays_within_max_sleep_budget() {
+        use crate::metrics::SfuMetrics;
+        use std::sync::Arc;
+
+        let cfg = SfuConfig {
+            udp_port: 0,
+            bind_address: "127.0.0.1".to_string(),
+            ..SfuConfig::default()
+        };
+        let socket = bind(&cfg).await.expect("bind");
+        let metrics = Arc::new(SfuMetrics::default());
+        let counter = metrics.udp_loop_iterations_total.clone();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(serve(
             socket,
             metrics,
             None,
             None,
-            relay_rx,
-            client_inject_rx,
+            None, // standalone — no relay channel
+            None, // standalone — no client inject channel
             async {
-                let _ = rx.await;
+                let _ = shutdown_rx.await;
             },
         ));
-        tx.send(()).unwrap();
-        handle.await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        shutdown_tx.send(()).expect("shutdown signal");
+        task.await.expect("join").expect("serve ok");
+
+        let iters = counter.get();
+        // 200ms / 100ms MAX_SLEEP = ~2 iterations expected, plus a couple
+        // of ASO-tick-driven wakes (TICK_INTERVAL=300ms — usually 0). Cap
+        // generously at 50 to absorb CI jitter; a real spin produces 10k+.
+        assert!(
+            iters < 50,
+            "udp_loop_iterations_total={iters} — expected <50 in 200ms idle (spin regression)"
+        );
+    }
+
+    /// Runtime-close path: when the relay producer task panics mid-flight,
+    /// the inject channel's last sender drops. `serve()` must observe `None`,
+    /// bump `inject_channel_closed_total{kind=relay}`, switch its receiver
+    /// to `None`, and continue idling — not spin.
+    #[tokio::test]
+    async fn serve_handles_runtime_channel_close_without_spin() {
+        use crate::metrics::SfuMetrics;
+        use std::sync::Arc;
+
+        let cfg = SfuConfig {
+            udp_port: 0,
+            bind_address: "127.0.0.1".to_string(),
+            ..SfuConfig::default()
+        };
+        let socket = bind(&cfg).await.expect("bind");
+        let metrics = Arc::new(SfuMetrics::default());
+        let iter_counter = metrics.udp_loop_iterations_total.clone();
+        let close_counter = metrics
+            .inject_channel_closed_total
+            .with_label_values(&["relay"]);
+
+        let (relay_tx, relay_rx) =
+            tokio::sync::mpsc::channel::<crate::relay::client::PendingRelay>(1);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(serve(
+            socket,
+            metrics,
+            None,
+            None,
+            Some(relay_rx),
+            None,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        // Let serve see the channel as live, then close it (simulates spawn panic).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(relay_tx);
+        // Give serve one tick to observe the close and switch arm to pending().
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let iters_after_close = iter_counter.get();
+        // Run another idle window and assert the rate dropped to ~MAX_SLEEP cadence.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let iters_final = iter_counter.get();
+
+        shutdown_tx.send(()).expect("shutdown signal");
+        task.await.expect("join").expect("serve ok");
+
+        assert_eq!(
+            close_counter.get(),
+            1,
+            "close counter should fire exactly once"
+        );
+        let post_close_iters = iters_final - iters_after_close;
+        assert!(
+            post_close_iters < 50,
+            "post-close iterations={post_close_iters} in 200ms — arm did not stop polling closed channel"
+        );
     }
 
     #[tokio::test]
@@ -342,8 +472,8 @@ mod tests {
             metrics_clone,
             None,
             None,
-            relay_rx,
-            client_inject_rx,
+            Some(relay_rx),
+            Some(client_inject_rx),
             async {
                 let _ = shutdown_rx.await;
             },
@@ -456,8 +586,8 @@ mod tests {
             metrics_clone,
             None,
             None,
-            relay_rx,
-            client_inject_rx,
+            Some(relay_rx),
+            Some(client_inject_rx),
             async {
                 let _ = shutdown_rx.await;
             },

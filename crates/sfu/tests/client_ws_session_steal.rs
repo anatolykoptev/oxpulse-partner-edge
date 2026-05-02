@@ -131,8 +131,8 @@ async fn start_full_pipeline() -> (
         metrics.clone(),
         None,
         None,
-        relay_rx,
-        client_inject_rx,
+        Some(relay_rx),
+        Some(client_inject_rx),
         async {
             let _ = shutdown_rx.await;
         },
