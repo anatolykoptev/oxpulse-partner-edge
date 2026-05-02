@@ -490,6 +490,23 @@ REALITY_SERVER_NAME=$(json_get reality_server_name "$tmp_cfg")
 # The server-side xray-reality requires matching encryption, otherwise the
 # tunnel completes the TLS handshake but silently drops payloads.
 REALITY_ENCRYPTION=$(json_get reality_encryption "$tmp_cfg")
+# Sanity: server-side xray-reality with `decryption: mlkem768x25519plus...`
+# (post-quantum VLESS) silently rejects clients with `encryption: none`,
+# producing 502s at Caddy with cryptic "connection reset by peer" /
+# EOF entries — the handshake completes at TLS but VLESS auth fails
+# without a log line. Catch the missing PARTNER_REALITY_ENCRYPTION
+# env on the operator side here, with an actionable hint, instead of
+# letting the operator chase tunnels for an hour.
+# Reproduced 2026-05-02 on call.cheburator.bot — operator's .env had
+# the var stripped, every fresh registration silently broke.
+if [[ -z "$REALITY_ENCRYPTION" && -n "$REALITY_PUBLIC_KEY" ]]; then
+	warn "  backend returned reality_encryption=\"\" but reality_public_key is set"
+	warn "  this almost always means PARTNER_REALITY_ENCRYPTION is missing from oxpulse-chat .env"
+	warn "  the tunnel will silently fail at VLESS auth (Caddy 502 with 'connection reset by peer')"
+	warn "  ask the operator to set PARTNER_REALITY_ENCRYPTION on the signaling server, recreate"
+	warn "  oxpulse-chat, then re-issue the bootstrap token and rerun this install"
+	die "stale backend reality creds — refusing to write a known-broken xray-client config"
+fi
 RELAY_JWT_SECRET=$(json_get relay_jwt_secret "$tmp_cfg")
 # If not provided by backend, generate a local secret.
 # The same secret must be added to the operator's signaling server RELAY_JWT_SECRET
