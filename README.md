@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/anatolykoptev/oxpulse-partner-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/anatolykoptev/oxpulse-partner-edge/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/anatolykoptev/oxpulse-partner-edge?label=release)](https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![License: AGPL-3.0 OR Commercial](https://img.shields.io/badge/license-AGPL--3.0%20OR%20Commercial-blue.svg)](LICENSE)
 
 Production-ready co-brand mirror node for the OxPulse network. One command installs TLS termination, an encrypted bypass tunnel, TURN/STUN relay, and a WebRTC SFU on any VPS.
 
@@ -156,4 +156,9 @@ See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-MIT OR Apache-2.0
+`oxpulse-partner-edge` is dual-licensed:
+
+- **AGPL-3.0** — the default. See [`LICENSE`](LICENSE). Suitable for community deployments, self-hosters, partners running unmodified or AGPL-compatible modified versions.
+- **Commercial license** — for organizations that cannot accept AGPL § 13 (network use as SaaS) or want to ship proprietary modifications. See [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
+
+Contributions to this repo require signing the [Contributor License Agreement](CLA.md) — necessary for the dual-licensing model. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the contribution flow.
