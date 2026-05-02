@@ -128,17 +128,29 @@ fi
 log "  os=$OS_ID family=$OS_FAMILY"
 
 if [[ $DRY_RUN -eq 0 ]]; then
+	# Idempotency: if our own oxpulse-partner-* containers are already
+	# bound to the ports, treat preflight as a no-op (re-install path).
+	# Otherwise an unrelated process holding the port is still a hard fail.
+	owned_by_oxpulse=0
+	if command -v docker >/dev/null 2>&1 \
+		&& docker ps --filter 'name=oxpulse-partner-' --format '{{.Names}}' 2>/dev/null \
+		| grep -q .; then
+		owned_by_oxpulse=1
+	fi
 	check_port_free() {
 		local port=$1 proto=$2
-		if ss -ln"${proto}" 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
-			die "port $port/$proto is already in use — free it before installing"
+		ss -ln"${proto}" 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$" || return 0
+		if [[ $owned_by_oxpulse -eq 1 ]]; then
+			warn "port $port/$proto held by existing oxpulse-partner-* container — re-install path, continuing"
+			return 0
 		fi
+		die "port $port/$proto is already in use — free it before installing"
 	}
 	for p in 80 443 3478 5349 "$SFU_METRICS_PORT"; do check_port_free "$p" t; done
 	check_port_free 3478 u
 	# M2.1: str0m SFU media port (UDP). Default 7878 avoids coturn's 3478.
 	check_port_free "$SFU_UDP_PORT" u
-	log "  ports 80/443/3478/5349/${SFU_UDP_PORT}(udp)/${SFU_METRICS_PORT}(tcp) are free"
+	log "  ports 80/443/3478/5349/${SFU_UDP_PORT}(udp)/${SFU_METRICS_PORT}(tcp) preflight done (oxpulse-owned=${owned_by_oxpulse})"
 fi
 
 # ---------- Step 2: Docker ----------
