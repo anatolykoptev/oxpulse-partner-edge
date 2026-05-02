@@ -158,18 +158,20 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Channel for injecting browser clients (post-SDP) from the
-    // client_ws session into the main UDP loop. Mirrors `relay_inject_*`
-    // below — same pattern, different producer.
-    let (client_inject_tx, client_inject_rx) = tokio::sync::mpsc::channel::<PendingClient>(32);
-
     // Phase 7 M4.A1 — client-facing WebSocket API at /sfu/ws/{room_id}.
     // Browsers connect here directly with a room JWT in the
     // Sec-WebSocket-Protocol header. The endpoint is enabled when
     // SIGNALING_SFU_SECRET is configured (HS256 verifier) — without a
     // secret there is no way to authenticate browsers, so we refuse to
     // expose an unauthenticated entry point.
-    let client_ws_handle = if let Some(secret_bytes) = config.relay_auth_secret.as_ref() {
+    //
+    // The inject channel is created **only** when the feature is enabled,
+    // so `serve()` receives `Option::None` in standalone mode and never
+    // polls a closed receiver (which would spin the select! loop).
+    let (client_inject_rx, client_ws_handle) = if let Some(secret_bytes) =
+        config.relay_auth_secret.as_ref()
+    {
+        let (client_inject_tx, client_inject_rx) = tokio::sync::mpsc::channel::<PendingClient>(32);
         let client_ws_addr = format!("{}:{}", config.bind_address, config.client_ws_port);
         let client_ws_listener = tokio::net::TcpListener::bind(&client_ws_addr)
             .await
@@ -179,22 +181,19 @@ async fn main() -> anyhow::Result<()> {
             client_ws_listener,
             secret_arc,
             relay_signing_pubkey.clone(),
-            client_inject_tx.clone(),
+            client_inject_tx,
             host_candidate_addr,
             metrics.clone(),
         )?;
         tracing::info!(addr = %client_ws_addr, "client_ws API listening (Phase 7 M4.A1+M4.A2)");
-        Some(handle)
+        (Some(client_inject_rx), Some(handle))
     } else {
         tracing::info!(
             "SIGNALING_SFU_SECRET not set — client_ws API disabled \
              (Phase 7 M4.A1 requires HS256 secret for browser auth)"
         );
-        None
+        (None, None)
     };
-    // Drop the spare sender so the client_inject channel closes when the
-    // client_ws task exits and no PendingClient is in flight.
-    drop(client_inject_tx);
 
     // HMAC secret for authenticating relay-injected clients inside the Registry.
     let relay_auth_secret = config
@@ -203,42 +202,47 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| Arc::from(v.as_slice()));
 
     // Channel for injecting pre-connected relay Rtc instances into the Registry.
-    // The relay drain task (below) sends PendingRelay here after SDP exchange.
-    // serve() drains this in its select! loop and calls registry.insert().
-    let (relay_inject_tx, relay_inject_rx) =
-        tokio::sync::mpsc::channel::<oxpulse_sfu::relay::client::PendingRelay>(32);
+    // Created **only** when relay is enabled — same Option<Receiver> pattern as
+    // client_inject above. In standalone mode `serve()` receives None and the
+    // relay arm of select! is replaced by `pending()`, so no spin.
+    let relay_inject_rx = if relay_enabled {
+        let (relay_inject_tx, relay_inject_rx) =
+            tokio::sync::mpsc::channel::<oxpulse_sfu::relay::client::PendingRelay>(32);
 
-    // Drain relay task channel — spawn a WebRTC relay client for each accepted task.
-    // Each spawned task does WS connect + SDP offer/answer then sends PendingRelay
-    // to relay_inject_tx so the main UDP loop registers it in the Registry.
-    let relay_inject_tx_clone = relay_inject_tx.clone();
-    tokio::spawn(async move {
-        while let Some(task) = relay_rx.recv().await {
-            let url = task.upstream_url.clone();
-            let token = task.upstream_room_token.clone();
-            let room = task.room_id.clone();
-            let tx = relay_inject_tx_clone.clone();
-            tokio::spawn(async move {
-                match connect_relay(&url, &token, host_candidate_addr, room.clone()).await {
-                    Ok(pending) => {
-                        if let Err(e) = tx.send(pending).await {
-                            tracing::warn!(
-                                error = %e, room_id = %room,
-                                "relay inject channel closed — relay Rtc dropped"
-                            );
-                        } else {
-                            tracing::info!(room_id = %room, "relay handshake complete, PendingRelay sent to registry");
+        // Drain relay task channel — spawn a WebRTC relay client for each accepted task.
+        // Each spawned task does WS connect + SDP offer/answer then sends PendingRelay
+        // to relay_inject_tx so the main UDP loop registers it in the Registry.
+        // relay_inject_tx is moved into the spawn task and lives as long as it does;
+        // serve() observes a runtime close (None on recv) only if the spawn panics.
+        tokio::spawn(async move {
+            while let Some(task) = relay_rx.recv().await {
+                let url = task.upstream_url.clone();
+                let token = task.upstream_room_token.clone();
+                let room = task.room_id.clone();
+                let tx = relay_inject_tx.clone();
+                tokio::spawn(async move {
+                    match connect_relay(&url, &token, host_candidate_addr, room.clone()).await {
+                        Ok(pending) => {
+                            if let Err(e) = tx.send(pending).await {
+                                tracing::warn!(
+                                    error = %e, room_id = %room,
+                                    "relay inject channel closed — relay Rtc dropped"
+                                );
+                            } else {
+                                tracing::info!(room_id = %room, "relay handshake complete, PendingRelay sent to registry");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, room_id = %room, "relay connection failed")
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, room_id = %room, "relay connection failed")
-                    }
-                }
-            });
-        }
-    });
-    // Drop the original sender so the channel closes when all relay tasks are done.
-    drop(relay_inject_tx);
+                });
+            }
+        });
+        Some(relay_inject_rx)
+    } else {
+        None
+    };
 
     // Shutdown future: resolves on SIGINT or SIGTERM.
     let shutdown = async move {

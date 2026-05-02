@@ -71,8 +71,8 @@ async fn udp_loop_serves_with_registry_and_shuts_down() {
             metrics,
             None,
             None,
-            relay_rx,
-            client_inject_rx,
+            Some(relay_rx),
+            Some(client_inject_rx),
             async {
                 let _ = rx.await;
             },
