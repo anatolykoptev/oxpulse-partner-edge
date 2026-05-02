@@ -30,7 +30,11 @@ die()  { printf '\033[31mERR\033[0m %s\n' "$*" >&2; exit 1; }
 # ---------- Args ----------
 DOMAIN=""
 PARTNER_ID=""
-TOKEN=""
+# Prefer env-passed token over CLI arg so secrets don't appear in
+# /proc/<pid>/cmdline or shell history. Caller can also use --token-file=
+# or pass `--token=-` to read from stdin (see arg parser below).
+TOKEN="${OXPULSE_PARTNER_TOKEN:-}"
+TOKEN_FILE=""
 TUNNEL=vless
 MANUAL_CONFIG=""
 IMAGE_VERSION="${OXPULSE_IMAGE_VERSION:-latest}"
@@ -41,6 +45,21 @@ TURNS_SUBDOMAIN="${TURNS_SUBDOMAIN:-turns}"
 # interactive prompt so operators with port conflicts don't need to edit files.
 SFU_UDP_PORT="${SFU_UDP_PORT:-7878}"
 SFU_METRICS_PORT="${SFU_METRICS_PORT:-8878}"
+# Region tag (e.g. `pl-waw`, `ru-msk`, `us-east`). Empty → auto-detect from
+# public IP via ipinfo.io after Step 3. Honored over auto-detect when set.
+REGION="${REGION:-}"
+# Step 7 healthcheck loop deadline (seconds). ACME first-issuance can
+# legitimately take 2–4 minutes when DNS is slow to propagate or the LE
+# rate limiter throttles; 120 was too tight on call.cheburator.bot and
+# left the operator staring at a `still red after 120s` warn.
+HEALTHCHECK_TIMEOUT="${HEALTHCHECK_TIMEOUT:-300}"
+# Optional path to a BrandingConfig JSON the operator wants to ship to
+# the backend with this clone. The file is read literally and inlined
+# into the /api/partner/register body as `branding`. Backend validates
+# against branding::BrandingConfig and rejects malformed payloads with
+# HTTP 400. Absent → backend stores NULL → resolver synthesizes an
+# OxPulse default stub (display_name "OxPulse" + co_brand_partner=$PARTNER_ID).
+BRANDING_CONFIG="${BRANDING_CONFIG:-}"
 DRY_RUN=0
 BAKE_MODE=0
 
@@ -54,16 +73,22 @@ Required:
 
 Registration (pick one):
   --token=<ptkn_...>         Fetch node config from $BACKEND_API/api/partner/register
+                             (also accepts `-` to read from stdin; OXPULSE_PARTNER_TOKEN env supported)
+  --token-file=<path>        Read token from a file (chmod 0600 recommended)
   --manual-config=<path>     Read node config from a local JSON file
 
 Optional:
   --tunnel=vless|wg|https    Backend tunnel kind (default: vless)
   --image-version=<tag>      Pull a specific image tag (default: latest)
+  --region=<tag>             Region tag (e.g. pl-waw, ru-msk). Auto-detected from public IP if omitted.
+  --healthcheck-timeout=<s>  Step 7 wait deadline in seconds (default: 300, env: HEALTHCHECK_TIMEOUT)
+  --branding-config=<path>   BrandingConfig JSON to ship with /api/partner/register (env: BRANDING_CONFIG).
+                             Absent → backend synthesises an OxPulse default stub for the partner.
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
   -h|--help                  Show this help
 
-Env overrides: OXPULSE_IMAGE_REGISTRY, OXPULSE_BACKEND_API, OXPULSE_REPO_RAW
+Env overrides: OXPULSE_IMAGE_REGISTRY, OXPULSE_BACKEND_API, OXPULSE_REPO_RAW, REGION
 USAGE
 	exit 2
 }
@@ -73,9 +98,13 @@ while [[ $# -gt 0 ]]; do
 		--domain=*)         DOMAIN="${1#*=}" ;;
 		--partner-id=*)     PARTNER_ID="${1#*=}" ;;
 		--token=*)          TOKEN="${1#*=}" ;;
+		--token-file=*)     TOKEN_FILE="${1#*=}" ;;
 		--manual-config=*)  MANUAL_CONFIG="${1#*=}" ;;
 		--tunnel=*)         TUNNEL="${1#*=}" ;;
 		--image-version=*)  IMAGE_VERSION="${1#*=}" ;;
+		--region=*)         REGION="${1#*=}" ;;
+		--healthcheck-timeout=*) HEALTHCHECK_TIMEOUT="${1#*=}" ;;
+		--branding-config=*) BRANDING_CONFIG="${1#*=}" ;;
 		--dry-run)          DRY_RUN=1 ;;
 		--bake)             BAKE_MODE=1 ;;
 		-h|--help)          usage ;;
@@ -86,8 +115,33 @@ done
 
 [[ -z "$DOMAIN" ]]     && die "--domain is required"
 [[ -z "$PARTNER_ID" ]] && die "--partner-id is required"
+
+# Resolve token from --token=- (stdin) / --token-file= / --token=raw / env.
+# Order: explicit --token-file beats inline --token; stdin only when
+# --token=- given so we don't block when stdin is a tty by mistake.
+if [[ "$TOKEN" == "-" ]]; then
+	IFS= read -r TOKEN || die "--token=- given but stdin closed before token arrived"
+fi
+if [[ -n "$TOKEN_FILE" ]]; then
+	[[ -r "$TOKEN_FILE" ]] || die "token-file not readable: $TOKEN_FILE"
+	TOKEN="$(tr -d '\r\n[:space:]' < "$TOKEN_FILE")"
+fi
+if [[ -n "$TOKEN" && -t 1 ]] && [[ "$*" == *"--token=ptkn_"* ]]; then
+	warn "  --token=<raw> on the command line leaks via /proc/<pid>/cmdline + shell history; prefer --token-file= or OXPULSE_PARTNER_TOKEN env"
+fi
+
 if [[ "$BAKE_MODE" = "0" && -z "$TOKEN" && -z "$MANUAL_CONFIG" ]]; then
-	die "either --token or --manual-config is required (see --help)"
+	die "either --token / --token-file / OXPULSE_PARTNER_TOKEN or --manual-config is required (see --help)"
+fi
+
+# Validate --branding-config=<path> at arg-parse time so dry-run + first
+# real run both fail fast on a malformed file. Burning a single-use
+# bootstrap token on a backend 400 is exactly the failure mode this
+# dance prevents.
+if [[ -n "$BRANDING_CONFIG" ]]; then
+	[[ -r "$BRANDING_CONFIG" ]] || die "--branding-config not readable: $BRANDING_CONFIG"
+	python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$BRANDING_CONFIG" 2>/dev/null \
+		|| die "--branding-config is not valid JSON: $BRANDING_CONFIG"
 fi
 case "$TUNNEL" in
 	vless|wg|https) : ;;
@@ -123,17 +177,101 @@ fi
 log "  os=$OS_ID family=$OS_FAMILY"
 
 if [[ $DRY_RUN -eq 0 ]]; then
+	# Idempotency: if our own oxpulse-partner-* containers are already
+	# bound to the ports, treat preflight as a no-op (re-install path).
+	# Otherwise an unrelated process holding the port is still a hard fail.
+	owned_by_oxpulse=0
+	if command -v docker >/dev/null 2>&1 \
+		&& docker ps --filter 'name=oxpulse-partner-' --format '{{.Names}}' 2>/dev/null \
+		| grep -q .; then
+		owned_by_oxpulse=1
+	fi
 	check_port_free() {
 		local port=$1 proto=$2
-		if ss -ln"${proto}" 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"; then
-			die "port $port/$proto is already in use — free it before installing"
+		ss -ln"${proto}" 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$" || return 0
+		if [[ $owned_by_oxpulse -eq 1 ]]; then
+			warn "port $port/$proto held by existing oxpulse-partner-* container — re-install path, continuing"
+			return 0
 		fi
+		die "port $port/$proto is already in use — free it before installing"
 	}
 	for p in 80 443 3478 5349 "$SFU_METRICS_PORT"; do check_port_free "$p" t; done
 	check_port_free 3478 u
 	# M2.1: str0m SFU media port (UDP). Default 7878 avoids coturn's 3478.
 	check_port_free "$SFU_UDP_PORT" u
-	log "  ports 80/443/3478/5349/${SFU_UDP_PORT}(udp)/${SFU_METRICS_PORT}(tcp) are free"
+	log "  ports 80/443/3478/5349/${SFU_UDP_PORT}(udp)/${SFU_METRICS_PORT}(tcp) preflight done (oxpulse-owned=${owned_by_oxpulse})"
+fi
+
+# ---------- Step 1b: firewall auto-open ----------
+# Without this, ACME HTTP-01 silently fails (port 80) and TURN/SFU media
+# never reach the host. Confirmed 2026-05-01 on a fresh CentOS Stream 9
+# install where firewalld was active by default.
+#
+# Supports two stacks (whichever is active):
+#   firewalld   — default on RHEL/CentOS/Rocky/Alma
+#   ufw         — common on Ubuntu/Debian when explicitly enabled
+#
+# If neither is active, assume operator runs an external SG / cloud
+# firewall and skip silently.
+fw_specs=(80/tcp 443/tcp 3478/tcp 3478/udp 5349/tcp \
+	"${SFU_UDP_PORT}/udp" "${SFU_METRICS_PORT}/tcp")
+
+if [[ $DRY_RUN -eq 0 ]] \
+	&& command -v firewall-cmd >/dev/null 2>&1 \
+	&& systemctl is-active --quiet firewalld; then
+	log "[1b] opening firewalld ports"
+	fw_added=0
+	for spec in "${fw_specs[@]}"; do
+		if ! firewall-cmd --query-port="$spec" >/dev/null 2>&1; then
+			firewall-cmd --add-port="$spec" --permanent >/dev/null
+			fw_added=1
+			log "  + $spec"
+		fi
+	done
+	if [[ $fw_added -eq 1 ]]; then
+		firewall-cmd --reload >/dev/null
+		log "  firewalld reloaded"
+	else
+		log "  all required ports already open"
+	fi
+elif [[ $DRY_RUN -eq 0 ]] \
+	&& command -v ufw >/dev/null 2>&1 \
+	&& ufw status 2>/dev/null | head -1 | grep -qi 'Status: active'; then
+	log "[1b] opening ufw ports"
+	for spec in "${fw_specs[@]}"; do
+		# ufw allow takes "<port>/<proto>" directly; idempotent on identical rules.
+		ufw allow "$spec" >/dev/null
+		log "  + $spec"
+	done
+fi
+
+# ---------- Step 1c: dnf cache sanity (rhel only) ----------
+# Some VPS providers (e.g. fvds.ru / hoztnode) ship images where every
+# `metalink=` and `baseurl=` line in /etc/yum.repos.d/centos.repo is
+# commented out, expecting the operator to wire in a private mirror.
+# `dnf install` then fails with the unhelpful "Cannot find a valid
+# baseurl for repo: baseos" deep inside get.docker.com — confusing and
+# hard to debug. Detect early and re-enable the official metalink.
+if [[ $DRY_RUN -eq 0 && $OS_FAMILY == rhel ]] && command -v dnf >/dev/null 2>&1; then
+	if ! dnf -q makecache --setopt=metadata_expire=0 >/dev/null 2>&1; then
+		warn "  dnf makecache failed — checking for commented metalinks in /etc/yum.repos.d"
+		repaired=0
+		for f in /etc/yum.repos.d/centos.repo /etc/yum.repos.d/centos-addons.repo; do
+			[[ -f "$f" ]] || continue
+			if grep -q '^#metalink=https://mirrors.centos.org' "$f"; then
+				sed -i 's|^#metalink=https://mirrors.centos.org|metalink=https://mirrors.centos.org|g' "$f"
+				log "  re-enabled metalinks in $f"
+				repaired=1
+			fi
+		done
+		if [[ $repaired -eq 1 ]]; then
+			dnf -q makecache --setopt=metadata_expire=0 >/dev/null 2>&1 \
+				|| die "dnf still broken after metalink re-enable — inspect /etc/yum.repos.d/ manually"
+			log "  dnf cache rebuilt"
+		else
+			die "dnf makecache failed and no commented-metalink pattern matched — inspect /etc/yum.repos.d/ and DNS"
+		fi
+	fi
 fi
 
 # ---------- Step 2: Docker ----------
@@ -183,6 +321,34 @@ if [[ -z "$PRIVATE_IP" ]]; then
 fi
 log "  public=$PUBLIC_IP private=${PRIVATE_IP:-<none>}"
 
+# Auto-detect region tag from PUBLIC_IP via ipinfo.io when --region= /
+# REGION env was not supplied. Format: lowercase `<country>-<city3>` to
+# match existing tags (`pl-waw`, `ru-msk`, `us-east`). Failure leaves
+# REGION empty — backend stores NULL and excludes the node from
+# region-aware turn pool ordering, which is fine for first-boot.
+_detect_region() {
+	local payload cc city
+	payload=$(curl -fsS --max-time 3 "https://ipinfo.io/${PUBLIC_IP}/json" 2>/dev/null || true)
+	[[ -z "$payload" ]] && return 1
+	cc=$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("country") or "").lower())' 2>/dev/null || true)
+	city=$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("city") or "").lower())' 2>/dev/null || true)
+	[[ -z "$cc" || -z "$city" ]] && return 1
+	# strip non-ascii-letters from city, take first 3 chars
+	city=$(printf '%s' "$city" | tr -cd 'a-z' | cut -c1-3)
+	[[ -z "$city" ]] && return 1
+	printf '%s-%s' "$cc" "$city"
+}
+if [[ -z "$REGION" ]]; then
+	if REGION=$(_detect_region); then
+		log "  region auto-detected: $REGION"
+	else
+		REGION=""
+		warn "  region auto-detect failed (ipinfo.io unreachable or missing fields) — registering with NULL region"
+	fi
+else
+	log "  region (override): $REGION"
+fi
+
 # Detect local checkout directory for template files (used in Steps 5 and 9).
 # When invoked via `curl ... | bash`, BASH_SOURCE is unset and `set -u` would error;
 # default to empty so the local-checkout branch falls through to REPO_RAW fetches.
@@ -224,16 +390,75 @@ if [ "$BAKE_MODE" = "0" ]; then
 log "[4/10] fetching node config"
 tmp_cfg=$(mktemp)
 trap 'rm -f "$tmp_cfg"' EXIT
+# Idempotent re-install protection: if state file from a prior install
+# exists and the operator passed --token=<raw> (which is single-use and
+# would 409 on the backend), short-circuit before burning the token.
+# Operator is expected to use the upgrade tool, --manual-config=, or
+# regenerate a token via partner-cli issue-token.
+if [[ -f "$PREFIX_LIB/install.env" && -z "$MANUAL_CONFIG" ]]; then
+	# shellcheck source=/dev/null
+	prior_node_id=$(. "$PREFIX_LIB/install.env" 2>/dev/null && printf '%s' "${NODE_ID:-}")
+	if [[ -n "$prior_node_id" ]]; then
+		log "  existing install detected (node_id=$prior_node_id) — skipping registration"
+		warn "  bootstrap tokens are single-use; the backend would return 409. To re-deploy:"
+		warn "    • upgrade in place: sudo $PREFIX_SBIN/oxpulse-partner-edge-upgrade"
+		warn "    • apply a freshly-issued config: rerun with --manual-config=<path>"
+		log  "  running healthcheck and exiting 0"
+		"$PREFIX_SBIN/oxpulse-partner-edge-healthcheck" || true
+		exit 0
+	fi
+fi
 if [[ -n "$MANUAL_CONFIG" ]]; then
 	[[ -r "$MANUAL_CONFIG" ]] || die "manual-config file not readable: $MANUAL_CONFIG"
 	cp "$MANUAL_CONFIG" "$tmp_cfg"
 	log "  using manual config: $MANUAL_CONFIG"
+elif [[ $DRY_RUN -eq 1 ]]; then
+	warn "  [dry-run] skipping POST $BACKEND_API/api/partner/register"
+	# Synthesize a placeholder node config so Step 5 templates render without
+	# leaking real secrets. Values must match the schema expected by json_get
+	# below; secrets are obvious sentinels (DRYRUN-…).
+	cat >"$tmp_cfg" <<DRYJSON
+{
+  "node_id": "${PARTNER_ID}-DRYRUN",
+  "backend_endpoint": "https://api.oxpulse.chat",
+  "turn_secret": "DRYRUN-turn-secret",
+  "reality_uuid": "00000000-0000-0000-0000-000000000000",
+  "reality_public_key": "DRYRUN-reality-pubkey",
+  "reality_short_id": "0123456789abcdef",
+  "reality_server_name": "www.cloudflare.com",
+  "reality_encryption": "",
+  "relay_jwt_secret": "DRYRUN-relay-jwt-secret",
+  "turns_subdomain": "${TURNS_SUBDOMAIN}"
+}
+DRYJSON
 else
 	log "  POST $BACKEND_API/api/partner/register"
+	[[ -n "$BRANDING_CONFIG" ]] && log "  shipping branding-config: $BRANDING_CONFIG"
+	# Build body via python so we (1) omit `region` cleanly when empty
+	# and (2) inline `branding` as a parsed object, not a quoted string.
+	# The backend column is nullable and the partner_registry register
+	# handler treats absent + null + "" as Option::None — see register.rs.
+	register_body=$(REG_PARTNER="$PARTNER_ID" REG_DOMAIN="$DOMAIN" REG_TOKEN="$TOKEN" REG_PUBLIC_IP="$PUBLIC_IP" REG_REGION="$REGION" REG_BRANDING_FILE="$BRANDING_CONFIG" python3 -c '
+import json, os
+body = {
+    "partner_id": os.environ["REG_PARTNER"],
+    "domain":     os.environ["REG_DOMAIN"],
+    "token":      os.environ["REG_TOKEN"],
+    "public_ip":  os.environ["REG_PUBLIC_IP"],
+}
+region = os.environ.get("REG_REGION", "").strip()
+if region:
+    body["region"] = region
+branding_path = os.environ.get("REG_BRANDING_FILE", "").strip()
+if branding_path:
+    with open(branding_path) as f:
+        body["branding"] = json.load(f)
+print(json.dumps(body))
+')
 	if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
 		-X POST "$BACKEND_API/api/partner/register" \
 		-H 'Content-Type: application/json' \
-		-d "{\"partner_id\":\"$PARTNER_ID\",\"domain\":\"$DOMAIN\",\"token\":\"$TOKEN\",\"public_ip\":\"$PUBLIC_IP\",\"region\":\"$REGION\"}" \
+		-d "$register_body" \
 		-o "$tmp_cfg"; then
 		die "registration failed — endpoint may not yet be implemented (Task 4). Retry with --manual-config=<path>"
 	fi
@@ -503,9 +728,9 @@ else
 fi
 
 # ---------- Step 7: healthcheck ----------
-log "[7/10] waiting for healthcheck (timeout 120s)"
+log "[7/10] waiting for healthcheck (timeout ${HEALTHCHECK_TIMEOUT}s)"
 if [[ $DRY_RUN -eq 0 ]]; then
-	deadline=$(( $(date +%s) + 120 ))
+	deadline=$(( $(date +%s) + HEALTHCHECK_TIMEOUT ))
 	hc_script="$PREFIX_SBIN/oxpulse-partner-edge-healthcheck"
 	# Ship healthcheck.sh into /usr/local/sbin too so systemd + manual runs both work.
 	if [[ -n "$src_dir" && -f "$src_dir/healthcheck.sh" ]]; then
