@@ -108,6 +108,11 @@ services:
       # const_label registry. Empty → "local" (default), which collides
       # with other edges in the central Prom view. Convention: <partner>1.
       SFU_EDGE_ID: "{{SFU_EDGE_ID}}"
+      # OpenTelemetry trace export — empty / unset = exporter disabled at SFU
+      # init (zero overhead). When set by install.sh from the central's awg
+      # response (typical: http://10.9.0.2:4317), spans flow through awg0
+      # to the central Jaeger.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "{{OTEL_EXPORTER_OTLP_ENDPOINT}}"
       RUST_LOG: "info"
       RELAY_JWT_SECRET: "{{RELAY_JWT_SECRET}}"
       SFU_RELAY_API_PORT: "8912"

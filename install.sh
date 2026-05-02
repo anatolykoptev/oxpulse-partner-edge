@@ -27,6 +27,109 @@ log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { printf '\033[31mERR\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Best-effort install of `wg`/`wg-quick` for keygen and conf rendering. The
+# AmneziaWG userspace binary (`amneziawg-go` + `awg`/`awg-quick`) is built
+# from source in install_amneziawg() below; this helper only ensures the
+# upstream wg-tools are present so we can `wg genkey | wg pubkey` before
+# the awg-go build completes.
+install_wg_tools_for_keygen() {
+	if command -v dnf >/dev/null 2>&1; then
+		dnf install -y wireguard-tools >/dev/null 2>&1 || \
+		  dnf install -y --enablerepo=epel wireguard-tools >/dev/null 2>&1 || \
+		  warn "could not install wireguard-tools via dnf — falling back"
+	elif command -v apt-get >/dev/null 2>&1; then
+		apt-get install -y -q wireguard-tools >/dev/null 2>&1 || \
+		  warn "could not install wireguard-tools via apt"
+	else
+		warn "no supported package manager — wg keygen will fail"
+	fi
+}
+
+# Build amneziawg-go (userspace daemon) + amneziawg-tools (awg / awg-quick)
+# from the upstream Amnezia GitHub source. We don't ship pre-built binaries
+# because the project has no canonical Linux x86_64 release artifact today
+# (only Alpine + Ubuntu 22.04 zips and Windows). The build needs go + git +
+# make + gcc — install_build_deps_for_awg() handles that. Idempotent: if
+# /usr/local/bin/amneziawg-go exists with non-zero size, the build is skipped.
+install_amneziawg() {
+	if [[ -s /usr/local/bin/amneziawg-go && -x /usr/bin/awg-quick ]]; then
+		log "  amneziawg already installed (skip)"
+		return 0
+	fi
+	log "  building amneziawg from source (one-time)"
+	if command -v dnf >/dev/null 2>&1; then
+		dnf install -y golang git make gcc >/dev/null 2>&1 || \
+		  die "dnf install of go/git/make/gcc failed — install manually then re-run"
+	elif command -v apt-get >/dev/null 2>&1; then
+		apt-get install -y -q golang git make gcc >/dev/null 2>&1 || \
+		  die "apt-get install of go/git/make/gcc failed"
+	else
+		die "no supported package manager for the awg build toolchain"
+	fi
+	local build_root
+	build_root=$(mktemp -d)
+	(
+		cd "$build_root" && \
+		git clone --depth 1 -q https://github.com/amnezia-vpn/amneziawg-go.git && \
+		git clone --depth 1 -q https://github.com/amnezia-vpn/amneziawg-tools.git
+	) || die "amneziawg git clone failed"
+	(cd "$build_root/amneziawg-go" && make) >/dev/null 2>&1 || die "amneziawg-go build failed"
+	install -m 0755 "$build_root/amneziawg-go/amneziawg-go" /usr/local/bin/amneziawg-go
+	(cd "$build_root/amneziawg-tools/src" && make && make install) >/dev/null 2>&1 || \
+	  die "amneziawg-tools build failed"
+	rm -rf "$build_root"
+}
+
+# Render /etc/amnezia/amneziawg/awg0.conf from the register response and
+# bring the interface up. Reads AWG_* vars set by the json_get block after
+# registration, plus AWG_PRIV_PATH from earlier in install.sh.
+configure_amneziawg() {
+	local conf_path="/etc/amnezia/amneziawg/awg0.conf"
+	install -d -m 0700 /etc/amnezia/amneziawg
+	# ListenPort is intentionally a high random — outbound only, NAT-traversed
+	# via PersistentKeepalive, no inbound peer dials this edge directly. We
+	# pick a fresh port at install time so two edges on the same NAT don't
+	# collide.
+	local listen_port=$((43800 + RANDOM % 200))
+	cat > "$conf_path" <<-AWGCONF
+		[Interface]
+		PrivateKey = $(cat "$AWG_PRIV_PATH")
+		Address = ${AWG_ALLOCATED_IP}
+		ListenPort = ${listen_port}
+		Jc = ${AWG_JC}
+		Jmin = ${AWG_JMIN}
+		Jmax = ${AWG_JMAX}
+		S1 = ${AWG_S1}
+		S2 = ${AWG_S2}
+		S4 = ${AWG_S4}
+		H1 = ${AWG_H1}
+		H2 = ${AWG_H2}
+		H3 = ${AWG_H3}
+		H4 = ${AWG_H4}
+		Table = off
+		MTU = 1300
+
+		[Peer]
+		PublicKey = ${AWG_MOTHERLY_PUBKEY}
+		Endpoint = ${AWG_MOTHERLY_ENDPOINT}
+		AllowedIPs = ${AWG_MOTHERLY_AWG_IP}/32
+		PersistentKeepalive = 25
+	AWGCONF
+	chmod 0600 "$conf_path"
+	systemctl daemon-reload
+	systemctl enable --now awg-quick@awg0 >/dev/null 2>&1 || \
+	  warn "awg-quick@awg0 enable failed — see 'systemctl status awg-quick@awg0'"
+	# Sanity check: a successful handshake within 10s means the central
+	# pre-added our peer and iptables let UDP through. Don't die() — the
+	# rest of the install can still finish; operator can debug awg later.
+	sleep 8
+	if awg show awg0 2>/dev/null | grep -q "latest handshake"; then
+		log "  awg0 handshake confirmed with motherly"
+	else
+		warn "awg0 handshake not seen yet — central may still be adding the peer"
+	fi
+}
+
 # ---------- Args ----------
 DOMAIN=""
 PARTNER_ID=""
@@ -568,6 +671,35 @@ else
 	log "  POST $BACKEND_API/api/partner/register"
 	[[ -n "$BRANDING_CONFIG" ]] && log "  shipping branding-config: $BRANDING_CONFIG"
 	[[ $brand_flag_set -eq 1 ]] && log "  shipping branding from --brand-* shorthand flags"
+
+	# AmneziaWG keypair — generated locally so the private key never leaves
+	# this host. Public key is sent UP at registration so the central can
+	# pre-create the awg0 peer entry on motherly before we bring up our own
+	# interface. Key persists at /etc/amnezia/amneziawg/private.key (mode
+	# 0600) so re-runs of install.sh re-use it instead of churning a fresh
+	# pubkey every time.
+	AWG_PRIV_PATH="$PREFIX_ETC/awg-private.key"
+	AWG_PUB_PATH="$PREFIX_ETC/awg-public.key"
+	if [[ $DRY_RUN -eq 0 ]]; then
+		install -d -m 0700 "$PREFIX_ETC"
+		if [[ ! -s "$AWG_PRIV_PATH" ]]; then
+			# wg genkey is the same binary across wg-tools and amneziawg-tools
+			# (just calls into the kernel CSPRNG); we use whichever is on PATH.
+			# wg-tools is dnf-installable on every supported edge OS, so we
+			# can rely on it being available before the awg-go binaries are.
+			if ! command -v wg >/dev/null 2>&1; then
+				install_wg_tools_for_keygen
+			fi
+			umask 077
+			wg genkey > "$AWG_PRIV_PATH"
+			chmod 0600 "$AWG_PRIV_PATH"
+		fi
+		wg pubkey < "$AWG_PRIV_PATH" > "$AWG_PUB_PATH"
+		AWG_PUBKEY=$(cat "$AWG_PUB_PATH")
+		log "  awg pubkey: $AWG_PUBKEY"
+	else
+		AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
+	fi
 	# Build body via python so we (1) omit `region` cleanly when empty,
 	# (2) inline `branding` as a parsed object, and (3) assemble a
 	# minimal BrandingConfig from --brand-* flags when they are set
@@ -578,6 +710,7 @@ else
 		REG_PARTNER="$PARTNER_ID" REG_DOMAIN="$DOMAIN" REG_TOKEN="$TOKEN" \
 		REG_PUBLIC_IP="$PUBLIC_IP" REG_REGION="$REGION" \
 		REG_BRANDING_FILE="$BRANDING_CONFIG" \
+		REG_AWG_PUBKEY="$AWG_PUBKEY" \
 		REG_BRAND_DISPLAY_NAME="$BRAND_DISPLAY_NAME" \
 		REG_BRAND_DESCRIPTION="$BRAND_DESCRIPTION" \
 		REG_BRAND_COLOR_PRIMARY="$BRAND_COLOR_PRIMARY" \
@@ -624,6 +757,9 @@ body = {
 region = env("REG_REGION")
 if region:
     body["region"] = region
+awg_pubkey = env("REG_AWG_PUBKEY")
+if awg_pubkey:
+    body["awg_pubkey"] = awg_pubkey
 
 branding_path = env("REG_BRANDING_FILE")
 if branding_path:
@@ -782,6 +918,35 @@ RELAY_JWT_SECRET=$(json_get relay_jwt_secret "$tmp_cfg")
 # entirely and Caddy's reverse_proxy to :8920 will return 502 — that's
 # the safe default (no unauthenticated browser WS exposure).
 SIGNALING_SFU_SECRET=$(json_get signaling_sfu_secret "$tmp_cfg")
+
+# AmneziaWG mesh config — present when the central is awg-equipped (the
+# register handler returns the `awg` object only when motherly's awg pubkey
+# is configured AND we sent up our awg_pubkey). All fields are extracted
+# from the nested `awg` object via python — sed-based json_get only handles
+# top-level scalars.
+awg_extract() {
+	python3 -c "import json,sys; d=json.load(open(sys.argv[1])); a=d.get('awg') or {}; print(a.get(sys.argv[2],''))" "$1" "$2" 2>/dev/null
+}
+AWG_ALLOCATED_IP=$(awg_extract     "$tmp_cfg" allocated_ip)
+AWG_MOTHERLY_PUBKEY=$(awg_extract  "$tmp_cfg" motherly_pubkey)
+AWG_MOTHERLY_ENDPOINT=$(awg_extract "$tmp_cfg" motherly_endpoint)
+AWG_MOTHERLY_AWG_IP=$(awg_extract  "$tmp_cfg" motherly_awg_ip)
+AWG_JC=$(awg_extract               "$tmp_cfg" jc)
+AWG_JMIN=$(awg_extract             "$tmp_cfg" jmin)
+AWG_JMAX=$(awg_extract             "$tmp_cfg" jmax)
+AWG_S1=$(awg_extract               "$tmp_cfg" s1)
+AWG_S2=$(awg_extract               "$tmp_cfg" s2)
+AWG_S4=$(awg_extract               "$tmp_cfg" s4)
+AWG_H1=$(awg_extract               "$tmp_cfg" h1)
+AWG_H2=$(awg_extract               "$tmp_cfg" h2)
+AWG_H3=$(awg_extract               "$tmp_cfg" h3)
+AWG_H4=$(awg_extract               "$tmp_cfg" h4)
+SFU_EDGE_ID=$(awg_extract          "$tmp_cfg" edge_id)
+OTEL_EXPORTER_OTLP_ENDPOINT=$(awg_extract "$tmp_cfg" otel_endpoint)
+# Pre-existing SFU_EDGE_ID derivation (post-arg-parse) is the fallback when
+# backend doesn't return one — keep that path.
+[[ -z "$SFU_EDGE_ID" ]] && SFU_EDGE_ID="${PARTNER_ID}1"
+
 # Backend-assigned TURNS subdomain (format api-<6-hex>). Falls back to "turns"
 # only if the backend did not return one (pre-v0.2 deployments).
 REGISTER_TURNS_SUBDOMAIN=$(json_get turns_subdomain "$tmp_cfg")
@@ -943,6 +1108,7 @@ render() {
 		-e "s|{{SFU_UDP_PORT}}|${SFU_UDP_PORT}|g" \
 		-e "s|{{SFU_METRICS_PORT}}|${SFU_METRICS_PORT}|g" \
 		-e "s|{{SFU_EDGE_ID}}|${SFU_EDGE_ID}|g" \
+		-e "s|{{OTEL_EXPORTER_OTLP_ENDPOINT}}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|g" \
 		-e "s|{{SFU_SIGNING_PUBLIC_KEY}}|${SFU_SIGNING_PUBLIC_KEY:-}|g" \
 		-e "s|{{RELAY_JWT_SECRET}}|${RELAY_JWT_SECRET}|g" \
 		-e "s|{{SIGNALING_SFU_SECRET}}|${SIGNALING_SFU_SECRET:-}|g" \
@@ -978,6 +1144,17 @@ render "$stage/compose.tpl" "$compose_out"
 render "$stage/caddy.tpl"   "$caddy_out"
 render "$stage/xray.tpl"    "$xray_out"
 render "$stage/coturn.tpl"  "$coturn_out"
+
+# AmneziaWG mesh setup — runs only when the central returned an awg block.
+# Builds amneziawg from source, writes /etc/amnezia/amneziawg/awg0.conf
+# from the register response, brings up awg-quick@awg0, verifies handshake.
+if [[ -n "${AWG_ALLOCATED_IP:-}" && -n "${AWG_MOTHERLY_PUBKEY:-}" && $DRY_RUN -eq 0 ]]; then
+	log "[awg] central allocated $AWG_ALLOCATED_IP edge_id=$SFU_EDGE_ID — bringing up awg0"
+	install_amneziawg
+	configure_amneziawg
+elif [[ -z "${AWG_ALLOCATED_IP:-}" ]]; then
+	log "[awg] central did not return awg config — running without VPN mesh (legacy path)"
+fi
 mkdir -p "$cover_out_dir"
 install -m 0644 "$stage/cover/cover.html" "$cover_out_dir/cover.html"
 # Render CH3 / CH5 if the backend provided the required vars
