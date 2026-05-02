@@ -5,6 +5,18 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.8](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.7...partner-edge-v0.12.8) (2026-05-02)
+
+
+### Features
+
+* **sfu:** OpenTelemetry / Jaeger trace pipeline (opt-in) ([#35](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/35)) ([9cbe75e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/9cbe75ec25b777aa2a2d986e7d358b733804083d))
+
+
+### Bug Fixes
+
+* **install:** canonical metrics port + edge_id + spin-trap warn ([#33](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/33)) ([ab38b92](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ab38b928f6ce2a9920797c58fd8c77444d8cc8b0))
+
 ## [0.12.7](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.6...partner-edge-v0.12.7) (2026-05-02)
 
 
