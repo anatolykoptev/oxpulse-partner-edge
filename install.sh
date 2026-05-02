@@ -113,7 +113,7 @@ Required:
 
 Registration (pick one):
   --token=<ptkn_...>         Fetch node config from $BACKEND_API/api/partner/register
-                             (also accepts `-` to read from stdin; OXPULSE_PARTNER_TOKEN env supported)
+                             (also accepts '-' to read from stdin; OXPULSE_PARTNER_TOKEN env supported)
   --token-file=<path>        Read token from a file (chmod 0600 recommended)
   --manual-config=<path>     Read node config from a local JSON file
 
