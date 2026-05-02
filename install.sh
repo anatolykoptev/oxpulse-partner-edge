@@ -261,6 +261,25 @@ if [[ -n "$MANUAL_CONFIG" ]]; then
 	[[ -r "$MANUAL_CONFIG" ]] || die "manual-config file not readable: $MANUAL_CONFIG"
 	cp "$MANUAL_CONFIG" "$tmp_cfg"
 	log "  using manual config: $MANUAL_CONFIG"
+elif [[ $DRY_RUN -eq 1 ]]; then
+	warn "  [dry-run] skipping POST $BACKEND_API/api/partner/register"
+	# Synthesize a placeholder node config so Step 5 templates render without
+	# leaking real secrets. Values must match the schema expected by json_get
+	# below; secrets are obvious sentinels (DRYRUN-…).
+	cat >"$tmp_cfg" <<DRYJSON
+{
+  "node_id": "${PARTNER_ID}-DRYRUN",
+  "backend_endpoint": "https://api.oxpulse.chat",
+  "turn_secret": "DRYRUN-turn-secret",
+  "reality_uuid": "00000000-0000-0000-0000-000000000000",
+  "reality_public_key": "DRYRUN-reality-pubkey",
+  "reality_short_id": "0123456789abcdef",
+  "reality_server_name": "www.cloudflare.com",
+  "reality_encryption": "",
+  "relay_jwt_secret": "DRYRUN-relay-jwt-secret",
+  "turns_subdomain": "${TURNS_SUBDOMAIN}"
+}
+DRYJSON
 else
 	log "  POST $BACKEND_API/api/partner/register"
 	# Build body via python so we omit `region` cleanly when empty (the
