@@ -30,7 +30,11 @@ die()  { printf '\033[31mERR\033[0m %s\n' "$*" >&2; exit 1; }
 # ---------- Args ----------
 DOMAIN=""
 PARTNER_ID=""
-TOKEN=""
+# Prefer env-passed token over CLI arg so secrets don't appear in
+# /proc/<pid>/cmdline or shell history. Caller can also use --token-file=
+# or pass `--token=-` to read from stdin (see arg parser below).
+TOKEN="${OXPULSE_PARTNER_TOKEN:-}"
+TOKEN_FILE=""
 TUNNEL=vless
 MANUAL_CONFIG=""
 IMAGE_VERSION="${OXPULSE_IMAGE_VERSION:-latest}"
@@ -57,6 +61,8 @@ Required:
 
 Registration (pick one):
   --token=<ptkn_...>         Fetch node config from $BACKEND_API/api/partner/register
+                             (also accepts `-` to read from stdin; OXPULSE_PARTNER_TOKEN env supported)
+  --token-file=<path>        Read token from a file (chmod 0600 recommended)
   --manual-config=<path>     Read node config from a local JSON file
 
 Optional:
@@ -77,6 +83,7 @@ while [[ $# -gt 0 ]]; do
 		--domain=*)         DOMAIN="${1#*=}" ;;
 		--partner-id=*)     PARTNER_ID="${1#*=}" ;;
 		--token=*)          TOKEN="${1#*=}" ;;
+		--token-file=*)     TOKEN_FILE="${1#*=}" ;;
 		--manual-config=*)  MANUAL_CONFIG="${1#*=}" ;;
 		--tunnel=*)         TUNNEL="${1#*=}" ;;
 		--image-version=*)  IMAGE_VERSION="${1#*=}" ;;
@@ -91,8 +98,23 @@ done
 
 [[ -z "$DOMAIN" ]]     && die "--domain is required"
 [[ -z "$PARTNER_ID" ]] && die "--partner-id is required"
+
+# Resolve token from --token=- (stdin) / --token-file= / --token=raw / env.
+# Order: explicit --token-file beats inline --token; stdin only when
+# --token=- given so we don't block when stdin is a tty by mistake.
+if [[ "$TOKEN" == "-" ]]; then
+	IFS= read -r TOKEN || die "--token=- given but stdin closed before token arrived"
+fi
+if [[ -n "$TOKEN_FILE" ]]; then
+	[[ -r "$TOKEN_FILE" ]] || die "token-file not readable: $TOKEN_FILE"
+	TOKEN="$(tr -d '\r\n[:space:]' < "$TOKEN_FILE")"
+fi
+if [[ -n "$TOKEN" && -t 1 ]] && [[ "$*" == *"--token=ptkn_"* ]]; then
+	warn "  --token=<raw> on the command line leaks via /proc/<pid>/cmdline + shell history; prefer --token-file= or OXPULSE_PARTNER_TOKEN env"
+fi
+
 if [[ "$BAKE_MODE" = "0" && -z "$TOKEN" && -z "$MANUAL_CONFIG" ]]; then
-	die "either --token or --manual-config is required (see --help)"
+	die "either --token / --token-file / OXPULSE_PARTNER_TOKEN or --manual-config is required (see --help)"
 fi
 case "$TUNNEL" in
 	vless|wg|https) : ;;
@@ -153,17 +175,26 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	log "  ports 80/443/3478/5349/${SFU_UDP_PORT}(udp)/${SFU_METRICS_PORT}(tcp) preflight done (oxpulse-owned=${owned_by_oxpulse})"
 fi
 
-# ---------- Step 1b: firewall (rhel only — debian usually has ufw inactive) ----------
+# ---------- Step 1b: firewall auto-open ----------
 # Without this, ACME HTTP-01 silently fails (port 80) and TURN/SFU media
 # never reach the host. Confirmed 2026-05-01 on a fresh CentOS Stream 9
 # install where firewalld was active by default.
-if [[ $DRY_RUN -eq 0 && $OS_FAMILY == rhel ]] \
+#
+# Supports two stacks (whichever is active):
+#   firewalld   — default on RHEL/CentOS/Rocky/Alma
+#   ufw         — common on Ubuntu/Debian when explicitly enabled
+#
+# If neither is active, assume operator runs an external SG / cloud
+# firewall and skip silently.
+fw_specs=(80/tcp 443/tcp 3478/tcp 3478/udp 5349/tcp \
+	"${SFU_UDP_PORT}/udp" "${SFU_METRICS_PORT}/tcp")
+
+if [[ $DRY_RUN -eq 0 ]] \
 	&& command -v firewall-cmd >/dev/null 2>&1 \
 	&& systemctl is-active --quiet firewalld; then
 	log "[1b] opening firewalld ports"
 	fw_added=0
-	for spec in 80/tcp 443/tcp 3478/tcp 3478/udp 5349/tcp \
-		"${SFU_UDP_PORT}/udp" "${SFU_METRICS_PORT}/tcp"; do
+	for spec in "${fw_specs[@]}"; do
 		if ! firewall-cmd --query-port="$spec" >/dev/null 2>&1; then
 			firewall-cmd --add-port="$spec" --permanent >/dev/null
 			fw_added=1
@@ -176,6 +207,15 @@ if [[ $DRY_RUN -eq 0 && $OS_FAMILY == rhel ]] \
 	else
 		log "  all required ports already open"
 	fi
+elif [[ $DRY_RUN -eq 0 ]] \
+	&& command -v ufw >/dev/null 2>&1 \
+	&& ufw status 2>/dev/null | head -1 | grep -qi 'Status: active'; then
+	log "[1b] opening ufw ports"
+	for spec in "${fw_specs[@]}"; do
+		# ufw allow takes "<port>/<proto>" directly; idempotent on identical rules.
+		ufw allow "$spec" >/dev/null
+		log "  + $spec"
+	done
 fi
 
 # ---------- Step 1c: dnf cache sanity (rhel only) ----------
