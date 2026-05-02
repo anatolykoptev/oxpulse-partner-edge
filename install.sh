@@ -48,6 +48,11 @@ SFU_METRICS_PORT="${SFU_METRICS_PORT:-8878}"
 # Region tag (e.g. `pl-waw`, `ru-msk`, `us-east`). Empty → auto-detect from
 # public IP via ipinfo.io after Step 3. Honored over auto-detect when set.
 REGION="${REGION:-}"
+# Step 7 healthcheck loop deadline (seconds). ACME first-issuance can
+# legitimately take 2–4 minutes when DNS is slow to propagate or the LE
+# rate limiter throttles; 120 was too tight on call.cheburator.bot and
+# left the operator staring at a `still red after 120s` warn.
+HEALTHCHECK_TIMEOUT="${HEALTHCHECK_TIMEOUT:-300}"
 DRY_RUN=0
 BAKE_MODE=0
 
@@ -69,6 +74,7 @@ Optional:
   --tunnel=vless|wg|https    Backend tunnel kind (default: vless)
   --image-version=<tag>      Pull a specific image tag (default: latest)
   --region=<tag>             Region tag (e.g. pl-waw, ru-msk). Auto-detected from public IP if omitted.
+  --healthcheck-timeout=<s>  Step 7 wait deadline in seconds (default: 300, env: HEALTHCHECK_TIMEOUT)
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
   -h|--help                  Show this help
@@ -88,6 +94,7 @@ while [[ $# -gt 0 ]]; do
 		--tunnel=*)         TUNNEL="${1#*=}" ;;
 		--image-version=*)  IMAGE_VERSION="${1#*=}" ;;
 		--region=*)         REGION="${1#*=}" ;;
+		--healthcheck-timeout=*) HEALTHCHECK_TIMEOUT="${1#*=}" ;;
 		--dry-run)          DRY_RUN=1 ;;
 		--bake)             BAKE_MODE=1 ;;
 		-h|--help)          usage ;;
@@ -677,9 +684,9 @@ else
 fi
 
 # ---------- Step 7: healthcheck ----------
-log "[7/10] waiting for healthcheck (timeout 120s)"
+log "[7/10] waiting for healthcheck (timeout ${HEALTHCHECK_TIMEOUT}s)"
 if [[ $DRY_RUN -eq 0 ]]; then
-	deadline=$(( $(date +%s) + 120 ))
+	deadline=$(( $(date +%s) + HEALTHCHECK_TIMEOUT ))
 	hc_script="$PREFIX_SBIN/oxpulse-partner-edge-healthcheck"
 	# Ship healthcheck.sh into /usr/local/sbin too so systemd + manual runs both work.
 	if [[ -n "$src_dir" && -f "$src_dir/healthcheck.sh" ]]; then
