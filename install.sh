@@ -41,6 +41,9 @@ TURNS_SUBDOMAIN="${TURNS_SUBDOMAIN:-turns}"
 # interactive prompt so operators with port conflicts don't need to edit files.
 SFU_UDP_PORT="${SFU_UDP_PORT:-7878}"
 SFU_METRICS_PORT="${SFU_METRICS_PORT:-8878}"
+# Region tag (e.g. `pl-waw`, `ru-msk`, `us-east`). Empty → auto-detect from
+# public IP via ipinfo.io after Step 3. Honored over auto-detect when set.
+REGION="${REGION:-}"
 DRY_RUN=0
 BAKE_MODE=0
 
@@ -59,11 +62,12 @@ Registration (pick one):
 Optional:
   --tunnel=vless|wg|https    Backend tunnel kind (default: vless)
   --image-version=<tag>      Pull a specific image tag (default: latest)
+  --region=<tag>             Region tag (e.g. pl-waw, ru-msk). Auto-detected from public IP if omitted.
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
   -h|--help                  Show this help
 
-Env overrides: OXPULSE_IMAGE_REGISTRY, OXPULSE_BACKEND_API, OXPULSE_REPO_RAW
+Env overrides: OXPULSE_IMAGE_REGISTRY, OXPULSE_BACKEND_API, OXPULSE_REPO_RAW, REGION
 USAGE
 	exit 2
 }
@@ -76,6 +80,7 @@ while [[ $# -gt 0 ]]; do
 		--manual-config=*)  MANUAL_CONFIG="${1#*=}" ;;
 		--tunnel=*)         TUNNEL="${1#*=}" ;;
 		--image-version=*)  IMAGE_VERSION="${1#*=}" ;;
+		--region=*)         REGION="${1#*=}" ;;
 		--dry-run)          DRY_RUN=1 ;;
 		--bake)             BAKE_MODE=1 ;;
 		-h|--help)          usage ;;
@@ -183,6 +188,34 @@ if [[ -z "$PRIVATE_IP" ]]; then
 fi
 log "  public=$PUBLIC_IP private=${PRIVATE_IP:-<none>}"
 
+# Auto-detect region tag from PUBLIC_IP via ipinfo.io when --region= /
+# REGION env was not supplied. Format: lowercase `<country>-<city3>` to
+# match existing tags (`pl-waw`, `ru-msk`, `us-east`). Failure leaves
+# REGION empty — backend stores NULL and excludes the node from
+# region-aware turn pool ordering, which is fine for first-boot.
+_detect_region() {
+	local payload cc city
+	payload=$(curl -fsS --max-time 3 "https://ipinfo.io/${PUBLIC_IP}/json" 2>/dev/null || true)
+	[[ -z "$payload" ]] && return 1
+	cc=$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("country") or "").lower())' 2>/dev/null || true)
+	city=$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("city") or "").lower())' 2>/dev/null || true)
+	[[ -z "$cc" || -z "$city" ]] && return 1
+	# strip non-ascii-letters from city, take first 3 chars
+	city=$(printf '%s' "$city" | tr -cd 'a-z' | cut -c1-3)
+	[[ -z "$city" ]] && return 1
+	printf '%s-%s' "$cc" "$city"
+}
+if [[ -z "$REGION" ]]; then
+	if REGION=$(_detect_region); then
+		log "  region auto-detected: $REGION"
+	else
+		REGION=""
+		warn "  region auto-detect failed (ipinfo.io unreachable or missing fields) — registering with NULL region"
+	fi
+else
+	log "  region (override): $REGION"
+fi
+
 # Detect local checkout directory for template files (used in Steps 5 and 9).
 # When invoked via `curl ... | bash`, BASH_SOURCE is unset and `set -u` would error;
 # default to empty so the local-checkout branch falls through to REPO_RAW fetches.
@@ -230,10 +263,26 @@ if [[ -n "$MANUAL_CONFIG" ]]; then
 	log "  using manual config: $MANUAL_CONFIG"
 else
 	log "  POST $BACKEND_API/api/partner/register"
+	# Build body via python so we omit `region` cleanly when empty (the
+	# backend column is nullable and the partner_registry register handler
+	# treats absent + null + "" as Option::None — see register.rs:80).
+	register_body=$(REG_PARTNER="$PARTNER_ID" REG_DOMAIN="$DOMAIN" REG_TOKEN="$TOKEN" REG_PUBLIC_IP="$PUBLIC_IP" REG_REGION="$REGION" python3 -c '
+import json, os
+body = {
+    "partner_id": os.environ["REG_PARTNER"],
+    "domain":     os.environ["REG_DOMAIN"],
+    "token":      os.environ["REG_TOKEN"],
+    "public_ip":  os.environ["REG_PUBLIC_IP"],
+}
+region = os.environ.get("REG_REGION", "").strip()
+if region:
+    body["region"] = region
+print(json.dumps(body))
+')
 	if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
 		-X POST "$BACKEND_API/api/partner/register" \
 		-H 'Content-Type: application/json' \
-		-d "{\"partner_id\":\"$PARTNER_ID\",\"domain\":\"$DOMAIN\",\"token\":\"$TOKEN\",\"public_ip\":\"$PUBLIC_IP\",\"region\":\"$REGION\"}" \
+		-d "$register_body" \
 		-o "$tmp_cfg"; then
 		die "registration failed — endpoint may not yet be implemented (Task 4). Retry with --manual-config=<path>"
 	fi
