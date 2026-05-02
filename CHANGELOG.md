@@ -5,6 +5,20 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.6](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.5...partner-edge-v0.12.6) (2026-05-02)
+
+
+### Features
+
+* **install:** --brand-* CLI shorthands for inline branding ([#29](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/29)) ([36ff498](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/36ff498fa26121eb07f308a058a5e452e655cb15))
+
+
+### Bug Fixes
+
+* **install:** die early when backend returns empty reality_encryption ([#28](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/28)) ([3580a3f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3580a3f382b7a38218e30020ef631e77445ea966))
+* **install:** unblock fresh CentOS provisioning + 8 robustness fixes ([#27](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/27)) ([563c7e6](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/563c7e65b8a7f5847c4e9f8459dd08479e2515fd))
+* **sfu:** eliminate udp_loop spin on closed inject channels ([#30](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/30)) ([fe193b5](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/fe193b50daa117ba72a11aad922a4d85141b9194))
+
 ## [0.12.5](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.4...partner-edge-v0.12.5) (2026-04-30)
 
 
