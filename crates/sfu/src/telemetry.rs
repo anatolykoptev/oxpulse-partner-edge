@@ -47,7 +47,8 @@ pub fn init(
     edge_id: &str,
     partner_id: &str,
 ) -> anyhow::Result<Option<SdkTracerProvider>> {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
     let stdout_layer = tracing_subscriber::fmt::layer();
 
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_default();
