@@ -60,6 +60,46 @@ HEALTHCHECK_TIMEOUT="${HEALTHCHECK_TIMEOUT:-300}"
 # HTTP 400. Absent → backend stores NULL → resolver synthesizes an
 # OxPulse default stub (display_name "OxPulse" + co_brand_partner=$PARTNER_ID).
 BRANDING_CONFIG="${BRANDING_CONFIG:-}"
+# Per-field branding shortcuts. When --branding-config is not used, the
+# operator can supply individual brand attributes via these flags and
+# install.sh assembles a minimal BrandingConfig payload on the fly.
+# All are optional — unset fields fall back to backend defaults
+# (display_name="OxPulse" + co_brand_partner=$PARTNER_ID).
+BRAND_DISPLAY_NAME=""
+BRAND_DESCRIPTION=""
+BRAND_COLOR_PRIMARY=""
+BRAND_COLOR_SECONDARY=""
+BRAND_COLOR_ACCENT=""
+BRAND_COLOR_ON_PRIMARY=""
+BRAND_LOGO_LIGHT=""
+BRAND_LOGO_DARK=""
+BRAND_FAVICON=""
+BRAND_OG_IMAGE=""
+BRAND_CO_BRAND=""
+BRAND_CANONICAL=""
+BRAND_WORDMARK=""
+# Hero title — single value applies to ru+en; per-locale flags override.
+BRAND_HERO_TITLE=""
+BRAND_HERO_TITLE_RU=""
+BRAND_HERO_TITLE_EN=""
+BRAND_HERO_TITLE_ZH=""
+BRAND_HERO_TITLE_FA=""
+# VPN affiliate CTA. --brand-cta-url + --brand-cta-text apply to ru+en;
+# per-locale flags override (handy for partners with localized landings).
+BRAND_CTA_URL=""
+BRAND_CTA_TEXT=""
+BRAND_CTA_URL_RU=""
+BRAND_CTA_URL_EN=""
+BRAND_CTA_URL_ZH=""
+BRAND_CTA_URL_FA=""
+BRAND_CTA_TEXT_RU=""
+BRAND_CTA_TEXT_EN=""
+BRAND_CTA_TEXT_ZH=""
+BRAND_CTA_TEXT_FA=""
+# Legal block — partner_entity / partner_country / partner_contact.
+BRAND_LEGAL_ENTITY=""
+BRAND_LEGAL_COUNTRY=""
+BRAND_LEGAL_CONTACT=""
 DRY_RUN=0
 BAKE_MODE=0
 
@@ -84,6 +124,31 @@ Optional:
   --healthcheck-timeout=<s>  Step 7 wait deadline in seconds (default: 300, env: HEALTHCHECK_TIMEOUT)
   --branding-config=<path>   BrandingConfig JSON to ship with /api/partner/register (env: BRANDING_CONFIG).
                              Absent → backend synthesises an OxPulse default stub for the partner.
+
+Brand shortcut flags (used when --branding-config is NOT set; install.sh
+assembles a minimal BrandingConfig payload from whichever flags are set):
+  --brand-display-name=<text>      Override display_name (default: OxPulse)
+  --brand-description=<text>       <meta name=description> + OG description
+  --brand-color-primary=<#hex>     CTA / accent UI colour
+  --brand-color-secondary=<#hex>   Background / chrome colour
+  --brand-color-accent=<#hex>      Tertiary highlight (optional)
+  --brand-color-on-primary=<#hex>  Foreground on primary (optional)
+  --brand-logo-light=<url>         Light-theme logo (absolute URL recommended)
+  --brand-logo-dark=<url>          Dark-theme logo
+  --brand-favicon=<url>            Favicon URL
+  --brand-og-image=<url>           OG image (1200x630 PNG)
+  --brand-co-brand=<name>          Co-brand label, e.g. "Cheburator"
+  --brand-canonical=<url>          Canonical override (default https://oxpulse.chat/)
+  --brand-wordmark=<url>           Partner wordmark image (rendered next to OxPulse logo)
+  --brand-hero-title=<text>        Sets hero_title_ru + hero_title_en at once
+  --brand-hero-title-{ru,en,zh,fa}=<text>   Per-locale override
+  --brand-cta-url=<url>            Affiliate CTA URL (sets ru + en)
+  --brand-cta-text=<text>          Affiliate CTA label (sets ru + en)
+  --brand-cta-url-{ru,en,zh,fa}=<url>       Per-locale CTA URL
+  --brand-cta-text-{ru,en,zh,fa}=<text>     Per-locale CTA label
+  --brand-legal-entity=<text>      Legal entity name
+  --brand-legal-country=<code>     ISO 3166 alpha-2 country code
+  --brand-legal-contact=<email>    Legal contact email
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
   -h|--help                  Show this help
@@ -105,6 +170,37 @@ while [[ $# -gt 0 ]]; do
 		--region=*)         REGION="${1#*=}" ;;
 		--healthcheck-timeout=*) HEALTHCHECK_TIMEOUT="${1#*=}" ;;
 		--branding-config=*) BRANDING_CONFIG="${1#*=}" ;;
+		--brand-display-name=*)    BRAND_DISPLAY_NAME="${1#*=}" ;;
+		--brand-description=*)     BRAND_DESCRIPTION="${1#*=}" ;;
+		--brand-color-primary=*)   BRAND_COLOR_PRIMARY="${1#*=}" ;;
+		--brand-color-secondary=*) BRAND_COLOR_SECONDARY="${1#*=}" ;;
+		--brand-color-accent=*)    BRAND_COLOR_ACCENT="${1#*=}" ;;
+		--brand-color-on-primary=*) BRAND_COLOR_ON_PRIMARY="${1#*=}" ;;
+		--brand-logo-light=*)      BRAND_LOGO_LIGHT="${1#*=}" ;;
+		--brand-logo-dark=*)       BRAND_LOGO_DARK="${1#*=}" ;;
+		--brand-favicon=*)         BRAND_FAVICON="${1#*=}" ;;
+		--brand-og-image=*)        BRAND_OG_IMAGE="${1#*=}" ;;
+		--brand-co-brand=*)        BRAND_CO_BRAND="${1#*=}" ;;
+		--brand-canonical=*)       BRAND_CANONICAL="${1#*=}" ;;
+		--brand-wordmark=*)        BRAND_WORDMARK="${1#*=}" ;;
+		--brand-hero-title=*)      BRAND_HERO_TITLE="${1#*=}" ;;
+		--brand-hero-title-ru=*)   BRAND_HERO_TITLE_RU="${1#*=}" ;;
+		--brand-hero-title-en=*)   BRAND_HERO_TITLE_EN="${1#*=}" ;;
+		--brand-hero-title-zh=*)   BRAND_HERO_TITLE_ZH="${1#*=}" ;;
+		--brand-hero-title-fa=*)   BRAND_HERO_TITLE_FA="${1#*=}" ;;
+		--brand-cta-url=*)         BRAND_CTA_URL="${1#*=}" ;;
+		--brand-cta-text=*)        BRAND_CTA_TEXT="${1#*=}" ;;
+		--brand-cta-url-ru=*)      BRAND_CTA_URL_RU="${1#*=}" ;;
+		--brand-cta-url-en=*)      BRAND_CTA_URL_EN="${1#*=}" ;;
+		--brand-cta-url-zh=*)      BRAND_CTA_URL_ZH="${1#*=}" ;;
+		--brand-cta-url-fa=*)      BRAND_CTA_URL_FA="${1#*=}" ;;
+		--brand-cta-text-ru=*)     BRAND_CTA_TEXT_RU="${1#*=}" ;;
+		--brand-cta-text-en=*)     BRAND_CTA_TEXT_EN="${1#*=}" ;;
+		--brand-cta-text-zh=*)     BRAND_CTA_TEXT_ZH="${1#*=}" ;;
+		--brand-cta-text-fa=*)     BRAND_CTA_TEXT_FA="${1#*=}" ;;
+		--brand-legal-entity=*)    BRAND_LEGAL_ENTITY="${1#*=}" ;;
+		--brand-legal-country=*)   BRAND_LEGAL_COUNTRY="${1#*=}" ;;
+		--brand-legal-contact=*)   BRAND_LEGAL_CONTACT="${1#*=}" ;;
 		--dry-run)          DRY_RUN=1 ;;
 		--bake)             BAKE_MODE=1 ;;
 		-h|--help)          usage ;;
@@ -142,6 +238,27 @@ if [[ -n "$BRANDING_CONFIG" ]]; then
 	[[ -r "$BRANDING_CONFIG" ]] || die "--branding-config not readable: $BRANDING_CONFIG"
 	python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$BRANDING_CONFIG" 2>/dev/null \
 		|| die "--branding-config is not valid JSON: $BRANDING_CONFIG"
+fi
+
+# --brand-* shorthand flags + --branding-config don't compose: the file
+# is a literal payload, the flags are an alternative way to assemble
+# one. Conflicting both would make the resulting branding ambiguous.
+# Detect any BRAND_* set and error early.
+brand_flag_set=0
+for v in BRAND_DISPLAY_NAME BRAND_DESCRIPTION BRAND_COLOR_PRIMARY \
+	BRAND_COLOR_SECONDARY BRAND_COLOR_ACCENT BRAND_COLOR_ON_PRIMARY \
+	BRAND_LOGO_LIGHT BRAND_LOGO_DARK BRAND_FAVICON BRAND_OG_IMAGE \
+	BRAND_CO_BRAND BRAND_CANONICAL BRAND_WORDMARK \
+	BRAND_HERO_TITLE BRAND_HERO_TITLE_RU BRAND_HERO_TITLE_EN \
+	BRAND_HERO_TITLE_ZH BRAND_HERO_TITLE_FA \
+	BRAND_CTA_URL BRAND_CTA_TEXT \
+	BRAND_CTA_URL_RU BRAND_CTA_URL_EN BRAND_CTA_URL_ZH BRAND_CTA_URL_FA \
+	BRAND_CTA_TEXT_RU BRAND_CTA_TEXT_EN BRAND_CTA_TEXT_ZH BRAND_CTA_TEXT_FA \
+	BRAND_LEGAL_ENTITY BRAND_LEGAL_COUNTRY BRAND_LEGAL_CONTACT; do
+	[[ -n "${!v:-}" ]] && brand_flag_set=1 && break
+done
+if [[ $brand_flag_set -eq 1 && -n "$BRANDING_CONFIG" ]]; then
+	die "--branding-config and --brand-* shorthand flags are mutually exclusive (use one or the other)"
 fi
 case "$TUNNEL" in
 	vless|wg|https) : ;;
@@ -434,26 +551,151 @@ DRYJSON
 else
 	log "  POST $BACKEND_API/api/partner/register"
 	[[ -n "$BRANDING_CONFIG" ]] && log "  shipping branding-config: $BRANDING_CONFIG"
-	# Build body via python so we (1) omit `region` cleanly when empty
-	# and (2) inline `branding` as a parsed object, not a quoted string.
-	# The backend column is nullable and the partner_registry register
-	# handler treats absent + null + "" as Option::None — see register.rs.
-	register_body=$(REG_PARTNER="$PARTNER_ID" REG_DOMAIN="$DOMAIN" REG_TOKEN="$TOKEN" REG_PUBLIC_IP="$PUBLIC_IP" REG_REGION="$REGION" REG_BRANDING_FILE="$BRANDING_CONFIG" python3 -c '
+	[[ $brand_flag_set -eq 1 ]] && log "  shipping branding from --brand-* shorthand flags"
+	# Build body via python so we (1) omit `region` cleanly when empty,
+	# (2) inline `branding` as a parsed object, and (3) assemble a
+	# minimal BrandingConfig from --brand-* flags when they are set
+	# (and --branding-config is not). The backend column is nullable
+	# and the register handler treats absent + null + "" as
+	# Option::None — see register.rs.
+	register_body=$(
+		REG_PARTNER="$PARTNER_ID" REG_DOMAIN="$DOMAIN" REG_TOKEN="$TOKEN" \
+		REG_PUBLIC_IP="$PUBLIC_IP" REG_REGION="$REGION" \
+		REG_BRANDING_FILE="$BRANDING_CONFIG" \
+		REG_BRAND_DISPLAY_NAME="$BRAND_DISPLAY_NAME" \
+		REG_BRAND_DESCRIPTION="$BRAND_DESCRIPTION" \
+		REG_BRAND_COLOR_PRIMARY="$BRAND_COLOR_PRIMARY" \
+		REG_BRAND_COLOR_SECONDARY="$BRAND_COLOR_SECONDARY" \
+		REG_BRAND_COLOR_ACCENT="$BRAND_COLOR_ACCENT" \
+		REG_BRAND_COLOR_ON_PRIMARY="$BRAND_COLOR_ON_PRIMARY" \
+		REG_BRAND_LOGO_LIGHT="$BRAND_LOGO_LIGHT" \
+		REG_BRAND_LOGO_DARK="$BRAND_LOGO_DARK" \
+		REG_BRAND_FAVICON="$BRAND_FAVICON" \
+		REG_BRAND_OG_IMAGE="$BRAND_OG_IMAGE" \
+		REG_BRAND_CO_BRAND="$BRAND_CO_BRAND" \
+		REG_BRAND_CANONICAL="$BRAND_CANONICAL" \
+		REG_BRAND_WORDMARK="$BRAND_WORDMARK" \
+		REG_BRAND_HERO_TITLE="$BRAND_HERO_TITLE" \
+		REG_BRAND_HERO_TITLE_RU="$BRAND_HERO_TITLE_RU" \
+		REG_BRAND_HERO_TITLE_EN="$BRAND_HERO_TITLE_EN" \
+		REG_BRAND_HERO_TITLE_ZH="$BRAND_HERO_TITLE_ZH" \
+		REG_BRAND_HERO_TITLE_FA="$BRAND_HERO_TITLE_FA" \
+		REG_BRAND_CTA_URL="$BRAND_CTA_URL" \
+		REG_BRAND_CTA_TEXT="$BRAND_CTA_TEXT" \
+		REG_BRAND_CTA_URL_RU="$BRAND_CTA_URL_RU" \
+		REG_BRAND_CTA_URL_EN="$BRAND_CTA_URL_EN" \
+		REG_BRAND_CTA_URL_ZH="$BRAND_CTA_URL_ZH" \
+		REG_BRAND_CTA_URL_FA="$BRAND_CTA_URL_FA" \
+		REG_BRAND_CTA_TEXT_RU="$BRAND_CTA_TEXT_RU" \
+		REG_BRAND_CTA_TEXT_EN="$BRAND_CTA_TEXT_EN" \
+		REG_BRAND_CTA_TEXT_ZH="$BRAND_CTA_TEXT_ZH" \
+		REG_BRAND_CTA_TEXT_FA="$BRAND_CTA_TEXT_FA" \
+		REG_BRAND_LEGAL_ENTITY="$BRAND_LEGAL_ENTITY" \
+		REG_BRAND_LEGAL_COUNTRY="$BRAND_LEGAL_COUNTRY" \
+		REG_BRAND_LEGAL_CONTACT="$BRAND_LEGAL_CONTACT" \
+		python3 -c '
 import json, os
+
+def env(name, default=""):
+    return os.environ.get(name, default).strip()
+
 body = {
-    "partner_id": os.environ["REG_PARTNER"],
-    "domain":     os.environ["REG_DOMAIN"],
-    "token":      os.environ["REG_TOKEN"],
-    "public_ip":  os.environ["REG_PUBLIC_IP"],
+    "partner_id": env("REG_PARTNER"),
+    "domain":     env("REG_DOMAIN"),
+    "token":      env("REG_TOKEN"),
+    "public_ip":  env("REG_PUBLIC_IP"),
 }
-region = os.environ.get("REG_REGION", "").strip()
+region = env("REG_REGION")
 if region:
     body["region"] = region
-branding_path = os.environ.get("REG_BRANDING_FILE", "").strip()
+
+branding_path = env("REG_BRANDING_FILE")
 if branding_path:
     with open(branding_path) as f:
         body["branding"] = json.load(f)
-print(json.dumps(body))
+else:
+    # Assemble a BrandingConfig from --brand-* flags. Only fields with
+    # non-empty values are emitted; the backend deserializer rejects a
+    # payload that lacks BrandingConfig required keys, so we pre-fill
+    # sensible defaults (display_name="OxPulse" + co_brand=$PARTNER_ID,
+    # the same shape the resolver synthesises for NULL rows) when ANY
+    # brand flag is set.
+    brand_keys = [
+        "DISPLAY_NAME","DESCRIPTION","COLOR_PRIMARY","COLOR_SECONDARY",
+        "COLOR_ACCENT","COLOR_ON_PRIMARY","LOGO_LIGHT","LOGO_DARK",
+        "FAVICON","OG_IMAGE","CO_BRAND","CANONICAL","WORDMARK",
+        "HERO_TITLE","HERO_TITLE_RU","HERO_TITLE_EN","HERO_TITLE_ZH","HERO_TITLE_FA",
+        "CTA_URL","CTA_TEXT","CTA_URL_RU","CTA_URL_EN","CTA_URL_ZH","CTA_URL_FA",
+        "CTA_TEXT_RU","CTA_TEXT_EN","CTA_TEXT_ZH","CTA_TEXT_FA",
+        "LEGAL_ENTITY","LEGAL_COUNTRY","LEGAL_CONTACT",
+    ]
+    any_set = any(env("REG_BRAND_"+k) for k in brand_keys)
+    if any_set:
+        b = {
+            "partner_id":   body["partner_id"],
+            "domains":      [body["domain"]],
+            "display_name": env("REG_BRAND_DISPLAY_NAME") or "OxPulse",
+            "description":  env("REG_BRAND_DESCRIPTION") or "End-to-end encrypted video calls. Free, anonymous, no account.",
+            "logo": {
+                "light": env("REG_BRAND_LOGO_LIGHT") or "/logo-light.svg",
+                "dark":  env("REG_BRAND_LOGO_DARK")  or "/logo-dark.svg",
+            },
+            "favicon":   env("REG_BRAND_FAVICON")  or "/favicon.svg",
+            "og_image":  env("REG_BRAND_OG_IMAGE") or "/og-image.png",
+            "colors": {
+                "primary":   env("REG_BRAND_COLOR_PRIMARY")   or "#C9A96E",
+                "secondary": env("REG_BRAND_COLOR_SECONDARY") or "#1E293B",
+            },
+            "copy": {},
+            "co_brand_partner": env("REG_BRAND_CO_BRAND") or body["partner_id"],
+            "canonical_override": env("REG_BRAND_CANONICAL") or "https://oxpulse.chat/",
+        }
+        accent = env("REG_BRAND_COLOR_ACCENT")
+        if accent: b["colors"]["accent"] = accent
+        on_primary = env("REG_BRAND_COLOR_ON_PRIMARY")
+        if on_primary: b["colors"]["on_primary"] = on_primary
+        wordmark = env("REG_BRAND_WORDMARK")
+        if wordmark: b["partner_wordmark"] = wordmark
+
+        # hero_title — single value populates ru+en; per-locale wins.
+        hero_short = env("REG_BRAND_HERO_TITLE")
+        for loc in ("ru","en","zh","fa"):
+            specific = env(f"REG_BRAND_HERO_TITLE_{loc.upper()}")
+            value = specific or (hero_short if loc in ("ru","en") else "")
+            if value:
+                b["copy"][f"hero_title_{loc}"] = value
+
+        # affiliate CTA — short flags populate ru+en; per-locale wins.
+        cta_url_short  = env("REG_BRAND_CTA_URL")
+        cta_text_short = env("REG_BRAND_CTA_TEXT")
+        cta_urls, cta_texts = {}, {}
+        for loc in ("ru","en","zh","fa"):
+            url  = env(f"REG_BRAND_CTA_URL_{loc.upper()}")  or (cta_url_short  if loc in ("ru","en") else "")
+            txt  = env(f"REG_BRAND_CTA_TEXT_{loc.upper()}") or (cta_text_short if loc in ("ru","en") else "")
+            if url:  cta_urls[loc]  = url
+            if txt:  cta_texts[loc] = txt
+        if cta_urls or cta_texts:
+            # BrandingConfig::AffiliateConfig requires both maps. Fall
+            # back to first available locale to preserve schema validity.
+            if cta_urls and not cta_texts:
+                cta_texts = {next(iter(cta_urls)): "Try VPN"}
+            if cta_texts and not cta_urls:
+                cta_urls = {next(iter(cta_texts)): "https://example.com/"}
+            b["affiliate"] = {"vpn_cta_url": cta_urls, "vpn_cta_text": cta_texts}
+
+        legal_entity  = env("REG_BRAND_LEGAL_ENTITY")
+        legal_country = env("REG_BRAND_LEGAL_COUNTRY")
+        legal_contact = env("REG_BRAND_LEGAL_CONTACT")
+        if legal_entity or legal_country or legal_contact:
+            b["legal"] = {
+                "partner_entity":  legal_entity  or body["partner_id"],
+                "partner_country": legal_country or "unknown",
+                "partner_contact": legal_contact or "partnerships@oxpulse.chat",
+            }
+
+        body["branding"] = b
+
+print(json.dumps(body, ensure_ascii=False))
 ')
 	if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
 		-X POST "$BACKEND_API/api/partner/register" \
