@@ -153,6 +153,31 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	log "  ports 80/443/3478/5349/${SFU_UDP_PORT}(udp)/${SFU_METRICS_PORT}(tcp) preflight done (oxpulse-owned=${owned_by_oxpulse})"
 fi
 
+# ---------- Step 1b: firewall (rhel only — debian usually has ufw inactive) ----------
+# Without this, ACME HTTP-01 silently fails (port 80) and TURN/SFU media
+# never reach the host. Confirmed 2026-05-01 on a fresh CentOS Stream 9
+# install where firewalld was active by default.
+if [[ $DRY_RUN -eq 0 && $OS_FAMILY == rhel ]] \
+	&& command -v firewall-cmd >/dev/null 2>&1 \
+	&& systemctl is-active --quiet firewalld; then
+	log "[1b] opening firewalld ports"
+	fw_added=0
+	for spec in 80/tcp 443/tcp 3478/tcp 3478/udp 5349/tcp \
+		"${SFU_UDP_PORT}/udp" "${SFU_METRICS_PORT}/tcp"; do
+		if ! firewall-cmd --query-port="$spec" >/dev/null 2>&1; then
+			firewall-cmd --add-port="$spec" --permanent >/dev/null
+			fw_added=1
+			log "  + $spec"
+		fi
+	done
+	if [[ $fw_added -eq 1 ]]; then
+		firewall-cmd --reload >/dev/null
+		log "  firewalld reloaded"
+	else
+		log "  all required ports already open"
+	fi
+fi
+
 # ---------- Step 2: Docker ----------
 log "[2/10] ensuring docker + compose plugin"
 if [[ $DRY_RUN -eq 0 ]]; then
