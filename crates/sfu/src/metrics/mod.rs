@@ -103,6 +103,15 @@ pub struct SfuMetrics {
     /// init). Series scrubbed on `reap_dead` to keep peer_id
     /// cardinality bounded across reconnects.
     pub client_delivered_media_count: IntGaugeVec,
+    /// UDP loop iterations. `rate(sfu_udp_loop_iterations_total[1m])` >> the
+    /// expected ~10/s steady-state (driven by the 100ms wake) signals a
+    /// select! arm spinning — typically a closed channel that wasn't
+    /// `Option::None`'d out. Alert at >500/s sustained.
+    pub udp_loop_iterations_total: IntCounter,
+    /// One-shot counter for inject channels closing at runtime, label `kind`
+    /// = `relay | client`. Should stay 0 in healthy operation; any non-zero
+    /// reading means a producer task panicked or exited.
+    pub inject_channel_closed_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -219,6 +228,32 @@ impl SfuMetrics {
         )
         .context("client_delivered_media_count")?);
 
+        let udp_loop_iterations_total = reg!(IntCounter::with_opts(Opts::new(
+            "udp_loop_iterations_total",
+            "UDP select! loop iteration count. Steady-state ~10/s (one wake per MAX_SLEEP=100ms). Sustained rate >>10/s = a select! arm is hot — typically a closed channel polled without an `if guard` or `Option::None` substitution. Alert: rate(sfu_udp_loop_iterations_total[1m]) > 500.",
+        ))
+        .context("udp_loop_iterations_total")?);
+
+        let inject_channel_closed_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "inject_channel_closed_total",
+                "Inject channel observed all senders dropped at runtime. Should stay 0; non-zero = producer task panicked. Label `kind` = relay | client.",
+            ),
+            &["kind"],
+        )
+        .context("inject_channel_closed_total")?);
+        // Preload both label values at 0 so the series exist from startup —
+        // Prometheus IntCounterVec lazy-registers only on first .inc(), which
+        // would mean the `SfuInjectChannelClosed` alert rule has no baseline
+        // until something actually fires. Touching .get() materialises the
+        // child without bumping the count.
+        let _ = inject_channel_closed_total
+            .with_label_values(&["relay"])
+            .get();
+        let _ = inject_channel_closed_total
+            .with_label_values(&["client"])
+            .get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -246,6 +281,8 @@ impl SfuMetrics {
             session_replaced_total: client_ws_metrics.session_replaced_total,
             udp_send_failed,
             client_delivered_media_count,
+            udp_loop_iterations_total,
+            inject_channel_closed_total,
         })
     }
 
