@@ -35,27 +35,14 @@ impl Client {
             negotiated: Some(3),
             protocol: String::new(),
         });
-        // Phase 2b: open chat-data DC (id:4, reliable, ordered) +
-        // chat-ctrl DC (id:5, unordered, MaxRetransmits{0}). The browser
-        // side opens symmetric pre-negotiated channels with the same ids.
-        // Server-side reliability config takes effect on the SFU→peer leg
-        // independently from the originator's leg — see
-        // `crates/sfu/tests/relay_chat_e2e.rs` for the partial-reliability
-        // round-trip.
-        let chat_data_cid = rtc.direct_api().create_data_channel(ChannelConfig {
-            label: "chat-data".to_string(),
-            ordered: true,
-            reliability: Reliability::Reliable,
-            negotiated: Some(4),
-            protocol: String::new(),
-        });
-        let chat_ctrl_cid = rtc.direct_api().create_data_channel(ChannelConfig {
-            label: "chat-ctrl".to_string(),
-            ordered: false,
-            reliability: Reliability::MaxRetransmits { retransmits: 0 },
-            negotiated: Some(5),
-            protocol: String::new(),
-        });
+        // Phase 2b chat-data (id:4) + chat-ctrl (id:5) DCs are opened
+        // separately via `with_chat_dcs()` — the relay code path
+        // (`relay/client.rs`) pre-opens id=5 as `sfu-relay-source` on the
+        // outbound rtc *before* `Self::new` runs, and calling
+        // `direct_api().create_data_channel(... id=5)` here would panic
+        // with "sctp_stream_id (5) exists already". Browser construction
+        // sites chain `Client::new(rtc, metrics).with_chat_dcs()`; relay
+        // construction sites do not — cascade SFU edges have no UI chat.
         Self {
             id: next_client_id(),
             rtc,
@@ -72,8 +59,8 @@ impl Client {
             #[cfg(any(test, feature = "test-utils"))]
             last_active_speaker_payload: std::sync::Mutex::new(None),
             active_speaker_cid,
-            chat_data_cid,
-            chat_ctrl_cid,
+            chat_data_cid: None,
+            chat_ctrl_cid: None,
             relay_source_pending: None,
             origin: oxpulse_sfu_kit::ClientOrigin::Local,
             relay_auth_secret: None,
@@ -88,6 +75,46 @@ impl Client {
             external_peer_id: None,
             close_signal: None,
         }
+    }
+
+    /// Phase 2b: open the pre-negotiated chat-data (id:4, reliable,
+    /// ordered) + chat-ctrl (id:5, !ordered, `MaxRetransmits{0}`) DCs
+    /// so this client participates in browser-side chat fanout. Browser
+    /// construction sites in `udp_loop::serve` call this after
+    /// [`Client::new`]; cascade relay clients skip it because
+    /// `relay/client.rs` already owns SCTP stream id 5 for
+    /// `sfu-relay-source` on the outbound rtc and a second create on
+    /// id 5 would panic with `sctp_stream_id (5) exists already`.
+    ///
+    /// `MaxRetransmits{0}` semantics on str0m 0.18.1 are confirmed at
+    /// `src/sctp/mod.rs:187-200` — partial reliability is wired through
+    /// `set_reliability_params()` at `:214` without any fork.
+    pub fn with_chat_dcs(mut self) -> Self {
+        let chat_data_cid = self.rtc.direct_api().create_data_channel(ChannelConfig {
+            label: "chat-data".to_string(),
+            ordered: true,
+            reliability: Reliability::Reliable,
+            negotiated: Some(4),
+            protocol: String::new(),
+        });
+        let chat_ctrl_cid = self.rtc.direct_api().create_data_channel(ChannelConfig {
+            label: "chat-ctrl".to_string(),
+            ordered: false,
+            reliability: Reliability::MaxRetransmits { retransmits: 0 },
+            negotiated: Some(5),
+            protocol: String::new(),
+        });
+        self.chat_data_cid = Some(chat_data_cid);
+        self.chat_ctrl_cid = Some(chat_ctrl_cid);
+        self.metrics
+            .chat_relay_active_channels
+            .with_label_values(&["data"])
+            .inc();
+        self.metrics
+            .chat_relay_active_channels
+            .with_label_values(&["ctrl"])
+            .inc();
+        self
     }
 
     /// Phase A Task A1: tag this client with the JWT `sub` from the

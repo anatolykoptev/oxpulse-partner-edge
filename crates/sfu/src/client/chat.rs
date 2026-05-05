@@ -46,9 +46,11 @@ const REASON_WRITE_ERR: &str = "write_err";
 impl Client {
     /// Forward a `Propagated::ChatData` payload to *this* peer over the
     /// pre-negotiated `chat-data` DC. No-op when `origin == self.id`
-    /// (skip-self echo guard). Errors and oversize frames are dropped
-    /// with a metric emit; we never disconnect the peer on a chat-relay
-    /// failure (a flaky chat-data DC must not tear down the media path).
+    /// (skip-self echo guard) or when the chat DCs were never opened
+    /// (relay clients — see [`Client::with_chat_dcs`]). Errors and
+    /// oversize frames are dropped with a metric emit; we never
+    /// disconnect the peer on a chat-relay failure (a flaky chat-data
+    /// DC must not tear down the media path).
     pub fn handle_chat_data_out(&mut self, origin: ClientId, payload: &[u8]) {
         if self.id == origin {
             return;
@@ -68,7 +70,7 @@ impl Client {
     fn write_chat_frame(
         &mut self,
         dc_label: &'static str,
-        cid: str0m::channel::ChannelId,
+        cid: Option<str0m::channel::ChannelId>,
         payload: &[u8],
     ) {
         if payload.len() > CHAT_FRAME_MAX_BYTES {
@@ -84,6 +86,19 @@ impl Client {
                 .inc();
             return;
         }
+
+        // No DC opened (relay client, or with_chat_dcs() not called) — this
+        // is not an error, just a pre-handshake or relay-path skip. Bump
+        // the no_channel counter so dashboards can see relay-path skips
+        // versus DTLS-handshake-window misses (today same label; can be
+        // split via a follow-up if the volumes differ).
+        let Some(cid) = cid else {
+            self.metrics
+                .chat_relay_dropped_total
+                .with_label_values(&[dc_label, REASON_NO_CHANNEL])
+                .inc();
+            return;
+        };
 
         // Pre-format the client_id label once. Allocates per send — cheap
         // at the expected steady-state of <100 evt/s and avoids cardinality

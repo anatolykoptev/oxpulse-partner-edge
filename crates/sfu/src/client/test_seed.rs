@@ -42,7 +42,12 @@ impl Client {
 pub fn new_client(id: ClientId) -> Client {
     let rtc = Rtc::builder().build(Instant::now());
     let metrics = Arc::new(SfuMetrics::default());
-    let mut c = Client::new(rtc, metrics);
+    // Phase 2b: test seam mirrors the production browser path
+    // (`udp_loop::serve` browser-inject arm) which chains
+    // `Client::new(...).with_chat_dcs()`. Tests covering relay-only
+    // scenarios still go through `Client::new_outbound_relay` and never
+    // hit this seam, so the conflicting SCTP id 5 case is preserved.
+    let mut c = Client::new(rtc, metrics).with_chat_dcs();
     c.id = id;
     c
 }
