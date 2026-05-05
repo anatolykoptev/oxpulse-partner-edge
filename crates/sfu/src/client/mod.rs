@@ -131,6 +131,19 @@ pub struct Client {
     /// lines up. We push `{"type":"active_speaker","peerId":<u64>}` whenever
     /// the room-level `ActiveSpeakerChanged` fires.
     pub(crate) active_speaker_cid: str0m::channel::ChannelId,
+    /// Phase 2b: pre-negotiated DC id:4 (`chat-data`,
+    /// `negotiated: Some(4), ordered: true, reliability: Reliable`).
+    /// SFU terminates the SCTP association and re-emits per-peer; this
+    /// is the channel handle used by [`Client::handle_chat_data_out`] to
+    /// write fanned-out chat envelopes to *this* subscriber.
+    #[allow(dead_code, reason = "consumed by handle_chat_data_out in a follow-up commit")]
+    pub(crate) chat_data_cid: str0m::channel::ChannelId,
+    /// Phase 2b: pre-negotiated DC id:5 (`chat-ctrl`,
+    /// `negotiated: Some(5), ordered: false, reliability:
+    /// MaxRetransmits{0}`). Best-effort drop-on-loss leg for typing /
+    /// presence / BWE-hint frames; HOL-isolated from `chat-data`.
+    #[allow(dead_code, reason = "consumed by handle_chat_ctrl_out in a follow-up commit")]
+    pub(crate) chat_ctrl_cid: str0m::channel::ChannelId,
     /// For outbound relay clients: the DC message to send once Event::Connected fires.
     /// Tuple: (dc_id, upstream_url, room_token). Cleared after send in dispatch.rs.
     /// None for browser clients and inbound relay clients (they *receive* relay_source).

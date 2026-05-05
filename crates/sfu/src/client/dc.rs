@@ -1,9 +1,16 @@
 //! Data-channel ingestion for the SFU-side subscriber path.
 //!
-//! Currently handles one channel:
+//! Channels handled:
 //!   * DC id:2, label `sfu-budget` (negotiated, unordered) — subscriber
 //!     control messages. Wire format parsed without serde; malformed
 //!     messages are logged at WARN and dropped.
+//!   * DC id:4, label `chat-data` (negotiated, ordered, reliable) —
+//!     Phase 2b. Opaque payloads are wrapped in
+//!     `Propagated::ChatData(client_id, bytes)` and fanned out to every
+//!     other peer.
+//!   * DC id:5, label `chat-ctrl` (negotiated, unordered,
+//!     `MaxRetransmits{0}`) — Phase 2b. Same shape as `chat-data` but
+//!     emits `Propagated::ChatCtrl(...)`.
 //!
 //! Supported message types:
 //!   * `{ "type": "budget", "bps": <u64> }` →
@@ -23,6 +30,18 @@ use crate::room_auth;
 
 /// Label of the pre-negotiated budget data channel.
 const BUDGET_CHANNEL_LABEL: &str = "sfu-budget";
+
+/// Label of the pre-negotiated Phase 2b reliable chat data channel.
+const CHAT_DATA_CHANNEL_LABEL: &str = "chat-data";
+
+/// Label of the pre-negotiated Phase 2b unreliable chat control channel.
+const CHAT_CTRL_CHANNEL_LABEL: &str = "chat-ctrl";
+
+/// Maximum accepted chat-data / chat-ctrl payload size in bytes. Matches
+/// the client-side wire codec's hard cap (`web/src/lib/_kit/wire-codec.ts`
+/// 256 KB envelope bomb cap). Larger frames are dropped at the SFU edge
+/// without forwarding so a single peer cannot saturate the relay.
+const CHAT_FRAME_MAX_BYTES: usize = 256 * 1024;
 
 /// Handle an incoming `Event::ChannelData` from str0m.
 ///
@@ -117,6 +136,33 @@ pub(super) fn handle_channel_data(
 
             return Propagated::MarkRelaySource(client_id, upstream_url.to_string());
         }
+    }
+
+    // Phase 2b: chat-data / chat-ctrl are opaque payloads (already
+    // AEAD-sealed by the client wire codec for chat-data; ctrl frames
+    // are unsealed-by-design). The SFU does not parse them — it only
+    // applies a size cap and re-emits per-peer via the fanout pipeline.
+    if label == CHAT_DATA_CHANNEL_LABEL {
+        if data.len() > CHAT_FRAME_MAX_BYTES {
+            tracing::warn!(
+                client = *client_id,
+                len = data.len(),
+                "chat-data DC: frame exceeds size cap, dropping"
+            );
+            return Propagated::Noop;
+        }
+        return Propagated::ChatData(client_id, data.to_vec());
+    }
+    if label == CHAT_CTRL_CHANNEL_LABEL {
+        if data.len() > CHAT_FRAME_MAX_BYTES {
+            tracing::warn!(
+                client = *client_id,
+                len = data.len(),
+                "chat-ctrl DC: frame exceeds size cap, dropping"
+            );
+            return Propagated::Noop;
+        }
+        return Propagated::ChatCtrl(client_id, data.to_vec());
     }
 
     if label != BUDGET_CHANNEL_LABEL {
@@ -465,6 +511,60 @@ mod tests {
             Some(pub_pem2.as_str()),
         );
         assert!(matches!(result, Propagated::Noop));
+    }
+
+    // ── Phase 2b chat-data / chat-ctrl tests ────────────────────────────────
+
+    #[test]
+    fn chat_data_label_emits_chat_data_propagated() {
+        let payload = b"\xC7sealed-envelope-bytes";
+        let result = handle_channel_data(ClientId(70), "chat-data", payload, None, None);
+        match result {
+            Propagated::ChatData(cid, bytes) => {
+                assert_eq!(*cid, 70);
+                assert_eq!(bytes, payload);
+            }
+            other => panic!("expected ChatData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_ctrl_label_emits_chat_ctrl_propagated() {
+        let payload = br#"{"kind":"typing"}"#;
+        let result = handle_channel_data(ClientId(71), "chat-ctrl", payload, None, None);
+        match result {
+            Propagated::ChatCtrl(cid, bytes) => {
+                assert_eq!(*cid, 71);
+                assert_eq!(bytes, payload);
+            }
+            other => panic!("expected ChatCtrl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_data_oversize_dropped() {
+        let big = vec![0u8; super::CHAT_FRAME_MAX_BYTES + 1];
+        let result = handle_channel_data(ClientId(72), "chat-data", &big, None, None);
+        assert!(matches!(result, Propagated::Noop));
+    }
+
+    #[test]
+    fn chat_ctrl_oversize_dropped() {
+        let big = vec![0u8; super::CHAT_FRAME_MAX_BYTES + 1];
+        let result = handle_channel_data(ClientId(73), "chat-ctrl", &big, None, None);
+        assert!(matches!(result, Propagated::Noop));
+    }
+
+    #[test]
+    fn chat_label_carries_binary_unmodified() {
+        // chat-data is opaque to the SFU — non-UTF8 must pass through
+        // unmodified. The SFU never parses the AEAD-sealed envelope.
+        let bin: Vec<u8> = (0u8..=255u8).collect();
+        let result = handle_channel_data(ClientId(74), "chat-data", &bin, None, None);
+        match result {
+            Propagated::ChatData(_, bytes) => assert_eq!(bytes, bin),
+            other => panic!("expected ChatData passthrough, got {other:?}"),
+        }
     }
 
     #[test]

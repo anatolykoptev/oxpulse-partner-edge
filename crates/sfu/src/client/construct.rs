@@ -35,6 +35,27 @@ impl Client {
             negotiated: Some(3),
             protocol: String::new(),
         });
+        // Phase 2b: open chat-data DC (id:4, reliable, ordered) +
+        // chat-ctrl DC (id:5, unordered, MaxRetransmits{0}). The browser
+        // side opens symmetric pre-negotiated channels with the same ids.
+        // Server-side reliability config takes effect on the SFU→peer leg
+        // independently from the originator's leg — see
+        // `crates/sfu/tests/relay_chat_e2e.rs` for the partial-reliability
+        // round-trip.
+        let chat_data_cid = rtc.direct_api().create_data_channel(ChannelConfig {
+            label: "chat-data".to_string(),
+            ordered: true,
+            reliability: Reliability::Reliable,
+            negotiated: Some(4),
+            protocol: String::new(),
+        });
+        let chat_ctrl_cid = rtc.direct_api().create_data_channel(ChannelConfig {
+            label: "chat-ctrl".to_string(),
+            ordered: false,
+            reliability: Reliability::MaxRetransmits { retransmits: 0 },
+            negotiated: Some(5),
+            protocol: String::new(),
+        });
         Self {
             id: next_client_id(),
             rtc,
@@ -51,6 +72,8 @@ impl Client {
             #[cfg(any(test, feature = "test-utils"))]
             last_active_speaker_payload: std::sync::Mutex::new(None),
             active_speaker_cid,
+            chat_data_cid,
+            chat_ctrl_cid,
             relay_source_pending: None,
             origin: oxpulse_sfu_kit::ClientOrigin::Local,
             relay_auth_secret: None,
