@@ -1157,16 +1157,21 @@ elif [[ -z "${AWG_ALLOCATED_IP:-}" ]]; then
 fi
 mkdir -p "$cover_out_dir"
 install -m 0644 "$stage/cover/cover.html" "$cover_out_dir/cover.html"
-# Render CH3 / CH5 if the backend provided the required vars
+# Render CH3 / CH5 if the backend provided the required vars.
+# When rendered, activate the corresponding docker compose profile so the
+# service starts alongside the core stack (docker compose --profile ch3 up).
+COMPOSE_PROFILES_EXTRA=""
 if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
 	render "$stage/hysteria2.tpl" "$PREFIX_ETC/hysteria2-client.yaml"
 	chmod 0600 "$PREFIX_ETC/hysteria2-client.yaml"
-	log "  hysteria2-client.yaml rendered"
+	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
+	log "  hysteria2-client.yaml rendered (CH3 profile enabled)"
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
 	render "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"
 	chmod 0600 "$PREFIX_ETC/naive-client.json"
-	log "  naive-client.json rendered"
+	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch5"
+	log "  naive-client.json rendered (CH5 profile enabled)"
 fi
 rm -rf "$stage"
 
@@ -1191,9 +1196,14 @@ fi
 # ---------- Step 6: start ----------
 log "[6/10] starting services"
 if [[ $DRY_RUN -eq 0 ]]; then
-	(cd "$PREFIX_ETC" && docker compose up -d)
+	# Pass extra profiles (ch3, ch5) when bypass channels were provisioned.
+	if [[ -n "${COMPOSE_PROFILES_EXTRA:-}" ]]; then
+		(cd "$PREFIX_ETC" && COMPOSE_PROFILES="$COMPOSE_PROFILES_EXTRA" docker compose --profile "$COMPOSE_PROFILES_EXTRA" up -d)
+	else
+		(cd "$PREFIX_ETC" && docker compose up -d)
+	fi
 else
-	warn "  [dry-run] would: docker compose up -d"
+	warn "  [dry-run] would: docker compose up -d (profiles: ${COMPOSE_PROFILES_EXTRA:-none})"
 fi
 
 # ---------- Step 7: healthcheck ----------
