@@ -79,12 +79,11 @@ pub(crate) fn fanout(p: &Propagated, clients: &mut [Client]) {
                     client.handle_keyframe_request(*req, *mid_in);
                 }
             }
-            // Phase 2b: chat-data + chat-ctrl fanout is wired in a later commit
-            // once `Client::handle_chat_{data,ctrl}_out` lands. Variants exist
-            // here so the registry compiles after the enum extension and so
-            // unit tests in `propagate.rs` can construct them without a
-            // dangling exhaustiveness gap.
-            Propagated::ChatData(..) | Propagated::ChatCtrl(..) => {}
+            // Phase 2b: chat-data + chat-ctrl per-peer relay. Skip-self is
+            // already handled by the `client.id == origin` guard above plus
+            // a defensive check inside `handle_chat_{data,ctrl}_out`.
+            Propagated::ChatData(_, payload) => client.handle_chat_data_out(origin, payload),
+            Propagated::ChatCtrl(_, payload) => client.handle_chat_ctrl_out(origin, payload),
             Propagated::Noop
             | Propagated::Timeout(_)
             | Propagated::ActiveSpeakerChanged { .. }

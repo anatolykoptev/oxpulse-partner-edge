@@ -181,6 +181,54 @@ mod tests {
     }
 
     #[test]
+    fn fanout_skips_origin_and_reaches_all_others() {
+        use crate::fanout::fanout_for_tests;
+        use crate::propagate::Propagated;
+
+        // Three unnegotiated clients — DC writes will land in `no_channel`
+        // (Rtc has no DTLS pipeline in this seam). `test_seed::new_client`
+        // gives each client its own `SfuMetrics` registry, so we sum the
+        // per-client `no_channel` counters instead of relying on a shared
+        // registry. Origin (id=10) is skipped by fanout's
+        // `client.id == origin` guard — exactly two drops should land
+        // across the three registries.
+        let mut clients = vec![
+            new_client(ClientId(10)),
+            new_client(ClientId(11)),
+            new_client(ClientId(12)),
+        ];
+        let snapshot = |cs: &[Client]| -> u64 {
+            cs.iter()
+                .map(|c| {
+                    c.metrics
+                        .chat_relay_dropped_total
+                        .with_label_values(&["data", "no_channel"])
+                        .get()
+                })
+                .sum()
+        };
+        let before = snapshot(&clients);
+        fanout_for_tests(
+            &Propagated::ChatData(ClientId(10), b"hello".to_vec()),
+            &mut clients,
+        );
+        let after = snapshot(&clients);
+        assert_eq!(
+            after - before,
+            2,
+            "fanout must reach exactly N-1 peers (origin skipped)"
+        );
+
+        // Origin (clients[0]) saw zero drops — confirms skip-self.
+        let origin_drops = clients[0]
+            .metrics
+            .chat_relay_dropped_total
+            .with_label_values(&["data", "no_channel"])
+            .get();
+        assert_eq!(origin_drops, 0, "origin must not attempt self-write");
+    }
+
+    #[test]
     fn unnegotiated_dc_increments_no_channel_drop() {
         // test_seed::new_client builds an Rtc that has not gone through DTLS,
         // so `rtc.channel(cid)` returns None — we exercise the no_channel arm.
