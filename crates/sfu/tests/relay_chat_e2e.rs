@@ -75,7 +75,10 @@ fn three_peer_chat_data_fanout_skips_origin() {
         .chat_relay_dropped_total
         .with_label_values(&["data", "no_channel"])
         .get();
-    assert_eq!(origin_drops, 0, "origin must not attempt self-write on chat-data");
+    assert_eq!(
+        origin_drops, 0,
+        "origin must not attempt self-write on chat-data"
+    );
 }
 
 #[test]
@@ -104,7 +107,10 @@ fn three_peer_chat_ctrl_fanout_skips_origin() {
         .chat_relay_dropped_total
         .with_label_values(&["ctrl", "no_channel"])
         .get();
-    assert_eq!(origin_drops, 0, "origin must not attempt self-write on chat-ctrl");
+    assert_eq!(
+        origin_drops, 0,
+        "origin must not attempt self-write on chat-ctrl"
+    );
 }
 
 #[test]
@@ -121,10 +127,7 @@ fn oversize_chat_frame_dropped_with_oversize_reason() {
 
     let big = vec![0u8; 256 * 1024 + 1];
     let oversize_before = sum_dropped(&clients, "data", "oversize");
-    fanout_for_tests(
-        &Propagated::ChatData(ClientId(21), big),
-        &mut clients,
-    );
+    fanout_for_tests(&Propagated::ChatData(ClientId(21), big), &mut clients);
     let oversize_after = sum_dropped(&clients, "data", "oversize");
 
     assert_eq!(

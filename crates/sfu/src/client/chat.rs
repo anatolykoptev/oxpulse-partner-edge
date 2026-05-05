@@ -192,7 +192,11 @@ mod tests {
             .chat_relay_dropped_total
             .with_label_values(&["data", "oversize"])
             .get();
-        assert_eq!(after, before + 1, "oversize chat-data must bump drop counter");
+        assert_eq!(
+            after,
+            before + 1,
+            "oversize chat-data must bump drop counter"
+        );
     }
 
     #[test]

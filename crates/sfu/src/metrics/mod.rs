@@ -323,8 +323,12 @@ impl SfuMetrics {
             &["dc"],
         )
         .context("chat_relay_active_channels")?);
-        let _ = chat_relay_active_channels.with_label_values(&["data"]).get();
-        let _ = chat_relay_active_channels.with_label_values(&["ctrl"]).get();
+        let _ = chat_relay_active_channels
+            .with_label_values(&["data"])
+            .get();
+        let _ = chat_relay_active_channels
+            .with_label_values(&["ctrl"])
+            .get();
 
         Ok(Self {
             registry: Arc::new(registry),
