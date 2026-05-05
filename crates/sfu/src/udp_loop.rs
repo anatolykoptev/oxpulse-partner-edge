@@ -221,6 +221,7 @@ where
                         let room_id = pending.room_id.clone();
                         let external_peer_id = pending.external_peer_id;
                         let client = crate::client::Client::new(pending.rtc, metrics_ref.clone())
+                            .with_chat_dcs()
                             .with_external_peer_id(external_peer_id)
                             .with_close_signal(pending.close_signal);
                         registry.insert(client);

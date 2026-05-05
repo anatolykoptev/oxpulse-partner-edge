@@ -112,6 +112,30 @@ pub struct SfuMetrics {
     /// = `relay | client`. Should stay 0 in healthy operation; any non-zero
     /// reading means a producer task panicked or exited.
     pub inject_channel_closed_total: IntCounterVec,
+    /// Phase 2b: bytes written to a peer's outbound chat-data / chat-ctrl
+    /// DC. Labels: `dc` ∈ `{data, ctrl}`, `client_id` (subscriber that
+    /// received the bytes). Source-of-truth for SFU chat-relay throughput
+    /// dashboards.
+    ///
+    /// Cardinality note: `client_id` is unbounded in the long run as peers
+    /// reconnect. `Registry::reap_dead` already scrubs the
+    /// `client_delivered_media_count` series on disconnect; the same scrub
+    /// hook should be extended to drop these series in a follow-up.
+    pub chat_relay_tx_bytes_total: IntCounterVec,
+    /// Phase 2b: bytes ingested on the SFU edge's inbound chat-data /
+    /// chat-ctrl DC. Labels: `dc` ∈ `{data, ctrl}`, `client_id` (origin).
+    /// Currently incremented from the chat-relay handler before fanout
+    /// (egress side); receive-path instrumentation lives at the str0m
+    /// dispatch layer and can be extended to call this counter.
+    pub chat_relay_rx_bytes_total: IntCounterVec,
+    /// Phase 2b: chat-relay frames dropped at the SFU edge. Labels:
+    /// `dc` ∈ `{data, ctrl}`, `reason` ∈
+    /// `{channel_closed, write_err, no_channel, oversize}`.
+    pub chat_relay_dropped_total: IntCounterVec,
+    /// Phase 2b: number of currently-open per-peer chat-relay channels by
+    /// `dc` ∈ `{data, ctrl}`. Bumped on Client::new, decremented on
+    /// disconnect (follow-up: hook into reap_dead).
+    pub chat_relay_active_channels: IntGaugeVec,
 }
 
 impl SfuMetrics {
@@ -254,6 +278,58 @@ impl SfuMetrics {
             .with_label_values(&["client"])
             .get();
 
+        // ── Phase 2b: chat-data + chat-ctrl relay metrics ─────────────────────
+        let chat_relay_tx_bytes_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "chat_relay_tx_bytes_total",
+                "Phase 2b: bytes written to a peer's outbound chat-data / chat-ctrl DC. Labels: dc ∈ {data, ctrl}, client_id (subscriber).",
+            ),
+            &["dc", "client_id"],
+        )
+        .context("chat_relay_tx_bytes_total")?);
+
+        let chat_relay_rx_bytes_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "chat_relay_rx_bytes_total",
+                "Phase 2b: bytes ingested on the SFU edge's inbound chat-data / chat-ctrl DC. Labels: dc ∈ {data, ctrl}, client_id (origin).",
+            ),
+            &["dc", "client_id"],
+        )
+        .context("chat_relay_rx_bytes_total")?);
+
+        let chat_relay_dropped_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "chat_relay_dropped_total",
+                "Phase 2b: chat-relay frames dropped at the SFU edge. Labels: dc ∈ {data, ctrl}, reason ∈ {channel_closed, write_err, no_channel, oversize}.",
+            ),
+            &["dc", "reason"],
+        )
+        .context("chat_relay_dropped_total")?);
+        // Pre-touch every (dc, reason) pair so the Prometheus alert rules
+        // see a baseline of 0 instead of an absent series.
+        for dc in ["data", "ctrl"] {
+            for reason in ["channel_closed", "write_err", "no_channel", "oversize"] {
+                let _ = chat_relay_dropped_total
+                    .with_label_values(&[dc, reason])
+                    .get();
+            }
+        }
+
+        let chat_relay_active_channels = reg!(IntGaugeVec::new(
+            Opts::new(
+                "chat_relay_active_channels",
+                "Phase 2b: per-edge gauge of open chat-relay channels. Labels: dc ∈ {data, ctrl}.",
+            ),
+            &["dc"],
+        )
+        .context("chat_relay_active_channels")?);
+        let _ = chat_relay_active_channels
+            .with_label_values(&["data"])
+            .get();
+        let _ = chat_relay_active_channels
+            .with_label_values(&["ctrl"])
+            .get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -283,6 +359,10 @@ impl SfuMetrics {
             client_delivered_media_count,
             udp_loop_iterations_total,
             inject_channel_closed_total,
+            chat_relay_tx_bytes_total,
+            chat_relay_rx_bytes_total,
+            chat_relay_dropped_total,
+            chat_relay_active_channels,
         })
     }
 

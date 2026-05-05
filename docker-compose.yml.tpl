@@ -143,26 +143,46 @@ services:
       start_period: 10s
 
   # ── CH3 Hysteria2 client (fallback) ─────────────────────────────────────
-  # Uncomment and set HYSTERIA2_* env vars when CH3 is provisioned by backend.
-  # hysteria2-client:
-  #   image: ghcr.io/apernet/hysteria:app-v2.8.1
-  #   container_name: oxpulse-partner-hysteria2
-  #   restart: unless-stopped
-  #   network_mode: host
-  #   volumes:
-  #     - ./hysteria2-client.yaml:/etc/hysteria/config.yaml:ro
-  #   command: ["client", "--config", "/etc/hysteria/config.yaml"]
+  # Started only when install.sh renders hysteria2-client.yaml (backend
+  # provisioned CH3). Activated via `docker compose --profile ch3 up -d`.
+  # Traffic: QUIC + salamander obfuscation → looks like random UDP noise.
+  # SOCKS5 listener on 127.0.0.1:HYSTERIA2_SOCKS_PORT for local proxying.
+  hysteria2-client:
+    image: ghcr.io/apernet/hysteria:app-v2.8.1
+    container_name: oxpulse-partner-hysteria2
+    profiles: [ch3]
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./hysteria2-client.yaml:/etc/hysteria/config.yaml:ro
+    command: ["client", "--config", "/etc/hysteria/config.yaml"]
+    healthcheck:
+      # Probe the local SOCKS5 listener that Hysteria2 exposes.
+      test: ["CMD-SHELL", "ss -tnlp | grep -q ':${HYSTERIA2_SOCKS_PORT:-18891}' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   # ── CH5 NaiveProxy client (fallback) ────────────────────────────────────
-  # Uncomment and set NAIVE_* env vars when CH5 is provisioned by backend.
-  # naive-client:
-  #   image: ghcr.io/klzgrad/naiveproxy:v130.0.6723.58-1
-  #   container_name: oxpulse-partner-naive
-  #   restart: unless-stopped
-  #   network_mode: host
-  #   volumes:
-  #     - ./naive-client.json:/config.json:ro
-  #   command: ["/config.json"]
+  # Started only when install.sh renders naive-client.json (backend
+  # provisioned CH5). Activated via `docker compose --profile ch5 up -d`.
+  # Traffic: HTTPS CONNECT tunnel → indistinguishable from browser HTTPS.
+  naive-client:
+    image: ghcr.io/klzgrad/naiveproxy:v130.0.6723.58-1
+    container_name: oxpulse-partner-naive
+    profiles: [ch5]
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./naive-client.json:/config.json:ro
+    command: ["/config.json"]
+    healthcheck:
+      test: ["CMD-SHELL", "ss -tnlp | grep -q ':${NAIVE_SOCKS_PORT:-18892}' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 volumes:
   caddy-data:

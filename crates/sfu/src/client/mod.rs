@@ -66,6 +66,7 @@ impl CloseReason {
     }
 }
 
+pub mod chat;
 pub mod construct;
 pub mod dc;
 pub mod dispatch;
@@ -131,6 +132,23 @@ pub struct Client {
     /// lines up. We push `{"type":"active_speaker","peerId":<u64>}` whenever
     /// the room-level `ActiveSpeakerChanged` fires.
     pub(crate) active_speaker_cid: str0m::channel::ChannelId,
+    /// Phase 2b: pre-negotiated DC id:4 (`chat-data`,
+    /// `negotiated: Some(4), ordered: true, reliability: Reliable`).
+    /// SFU terminates the SCTP association and re-emits per-peer; this
+    /// is the channel handle used by [`Client::handle_chat_data_out`] to
+    /// write fanned-out chat envelopes to *this* subscriber.
+    ///
+    /// `None` until [`Client::with_chat_dcs`] is called. Cascade relay
+    /// clients skip that step because `relay/client.rs` already pre-opens
+    /// SCTP stream id 5 as `sfu-relay-source` on the outbound rtc, so a
+    /// second create on id 5 would panic.
+    pub(crate) chat_data_cid: Option<str0m::channel::ChannelId>,
+    /// Phase 2b: pre-negotiated DC id:5 (`chat-ctrl`,
+    /// `negotiated: Some(5), ordered: false, reliability:
+    /// MaxRetransmits{0}`). Best-effort drop-on-loss leg for typing /
+    /// presence / BWE-hint frames; HOL-isolated from `chat-data`.
+    /// `None` until [`Client::with_chat_dcs`] is called.
+    pub(crate) chat_ctrl_cid: Option<str0m::channel::ChannelId>,
     /// For outbound relay clients: the DC message to send once Event::Connected fires.
     /// Tuple: (dc_id, upstream_url, room_token). Cleared after send in dispatch.rs.
     /// None for browser clients and inbound relay clients (they *receive* relay_source).
@@ -220,6 +238,15 @@ impl Client {
     /// Forwarded `MediaData` events delivered to *this* client.
     pub fn delivered_media_count(&self) -> u64 {
         self.delivered_media.load(Ordering::Relaxed)
+    }
+
+    /// Test-only accessor for this client's `SfuMetrics` registry.
+    /// Phase 2b integration tests sum per-client `chat_relay_*` series
+    /// across the in-process Registry to verify fanout shape without a
+    /// live DTLS / SCTP pipeline.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn metrics_for_tests(&self) -> &Arc<SfuMetrics> {
+        &self.metrics
     }
 
     /// `ActiveSpeakerChanged` events delivered to *this* client.
