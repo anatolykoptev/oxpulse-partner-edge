@@ -134,6 +134,24 @@ pub enum Propagated {
         publisher_relay_id: ClientId,
         max_rid: str0m::media::Rid,
     },
+
+    /// Phase 2b: payload received on the pre-negotiated `chat-data` DC
+    /// (id:4, ordered, reliable). Fanned out by [`crate::fanout::fanout`]
+    /// to every other client via `Client::handle_chat_data_out`. Server
+    /// terminates the SCTP association and re-emits per-peer (LiveKit /
+    /// Mediasoup pattern); raw chunk relay across associations is
+    /// architecturally impossible. The first tuple element is the origin
+    /// client (used for skip-self in fanout); the second is the opaque
+    /// AEAD-sealed envelope from the client wire codec.
+    ChatData(ClientId, Vec<u8>),
+
+    /// Phase 2b: payload received on the pre-negotiated `chat-ctrl` DC
+    /// (id:5, unordered, `MaxRetransmits{0}`). Same fanout shape as
+    /// [`Propagated::ChatData`] but routed via `handle_chat_ctrl_out`.
+    /// `MaxRetransmits{0}` semantics on str0m 0.18 (`src/sctp/mod.rs:187-200`)
+    /// — best-effort drop-on-loss on each leg, app-TTL drop is the
+    /// secondary safety net.
+    ChatCtrl(ClientId, Vec<u8>),
 }
 
 impl Propagated {
@@ -145,7 +163,9 @@ impl Propagated {
             | Propagated::MediaData(c, _)
             | Propagated::KeyframeRequest(c, _, _, _)
             | Propagated::BandwidthEstimate(c, _)
-            | Propagated::ClientBudgetHint(c, _) => Some(*c),
+            | Propagated::ClientBudgetHint(c, _)
+            | Propagated::ChatData(c, _)
+            | Propagated::ChatCtrl(c, _) => Some(*c),
             #[cfg(feature = "vfm")]
             Propagated::VfmLayerCap(c, _) => Some(*c),
             Propagated::PublisherLayerHint { publisher_id, .. } => Some(*publisher_id),
@@ -164,5 +184,24 @@ impl Propagated {
             | Propagated::UpstreamKeyframeRequest { .. }
             | Propagated::PublisherLayerHintForUpstream { .. } => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_data_client_id_returns_origin() {
+        let cid = ClientId(7);
+        let p = Propagated::ChatData(cid, b"hello".to_vec());
+        assert_eq!(p.client_id(), Some(cid));
+    }
+
+    #[test]
+    fn chat_ctrl_client_id_returns_origin() {
+        let cid = ClientId(11);
+        let p = Propagated::ChatCtrl(cid, b"typing".to_vec());
+        assert_eq!(p.client_id(), Some(cid));
     }
 }
