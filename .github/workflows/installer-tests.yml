@@ -1,0 +1,29 @@
+name: Installer tests
+
+on:
+  pull_request:
+    paths:
+      - 'install.sh'
+      - 'upgrade.sh'
+      - 'tests/test_install_die_on_empty_sfu_secret.sh'
+      - 'tests/test_upgrade_die_on_empty_sfu_secret.sh'
+      - '.github/workflows/installer-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+      - 'upgrade.sh'
+      - 'tests/test_install_die_on_empty_sfu_secret.sh'
+      - 'tests/test_upgrade_die_on_empty_sfu_secret.sh'
+      - '.github/workflows/installer-tests.yml'
+
+jobs:
+  installer-tests:
+    name: Installer regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh dies on empty signaling_sfu_secret
+        run: bash tests/test_install_die_on_empty_sfu_secret.sh
+      - name: upgrade.sh dies on empty signaling_sfu_secret
+        run: bash tests/test_upgrade_die_on_empty_sfu_secret.sh

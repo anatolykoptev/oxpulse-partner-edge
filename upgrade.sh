@@ -22,7 +22,7 @@ XRAY_CFG="$PREFIX_ETC/xray-client.json"
 
 log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
-die()  { printf '\033[31mERR\033[0m %s\n' "$*" >&2; exit 1; }
+die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
 
 # Source shared channel render functions (re_render_xray, future re_render_awg, etc.)
 # Prefer local checkout copy; fall back to installed sbin path.
@@ -42,6 +42,44 @@ unset _lib_local _lib_installed
 [[ $EUID -eq 0 ]] || die "must run as root"
 [[ -r "$COMPOSE_FILE" ]] || die "no installed bundle at $COMPOSE_FILE"
 [[ -r "$STATE_FILE" ]]   || die "missing $STATE_FILE — reinstall instead of upgrade"
+
+# Postcondition for pre-2026-05-06 deployments: install.sh used to render
+# docker-compose.yml with SIGNALING_SFU_SECRET="" when /api/partner/register
+# returned an empty signaling_sfu_secret (warn-and-continue). The SFU's
+# /sfu/ws/{room_id} stays disabled in that state and group calls silently
+# fail end-to-end. install.sh now dies in that case, but upgrade.sh runs
+# on already-installed edges where the broken compose is on disk — refuse
+# to upgrade those without operator intervention. /api/partner/register is
+# not re-fetched on upgrade, so we cannot self-heal in place.
+check_signaling_sfu_secret() {
+	local secret_line
+	secret_line=$(grep -E '^[[:space:]]*SIGNALING_SFU_SECRET:' "$COMPOSE_FILE" || true)
+	if [[ -z "$secret_line" ]]; then
+		die "$COMPOSE_FILE has no SIGNALING_SFU_SECRET line.
+The SFU's browser WebSocket API is disabled — group calls silently fail
+end-to-end. This installation pre-dates the 2026-05-06 fix. Resolve:
+  1. On the central (motherly), confirm SIGNALING_SFU_SECRET is set,
+     redeploy oxpulse-chat.
+  2. Wipe ${PREFIX_ETC} and re-run install.sh on this host to fetch
+     a fresh /api/partner/register response.
+upgrade.sh cannot heal this in place because /api/partner/register
+is not re-fetched on upgrade."
+	fi
+	# Match: SIGNALING_SFU_SECRET: ""  or  SIGNALING_SFU_SECRET:    (no value)
+	if grep -qE '^[[:space:]]*SIGNALING_SFU_SECRET:[[:space:]]*("")?[[:space:]]*$' "$COMPOSE_FILE"; then
+		die "$COMPOSE_FILE has empty SIGNALING_SFU_SECRET. The SFU's browser
+WebSocket API is disabled — group calls silently fail end-to-end.
+This installation pre-dates the 2026-05-06 fix. Resolve:
+  1. On the central (motherly), confirm SIGNALING_SFU_SECRET is set,
+     redeploy oxpulse-chat.
+  2. Wipe ${PREFIX_ETC} and re-run install.sh on this host to fetch
+     a fresh /api/partner/register response.
+upgrade.sh cannot heal this in place because /api/partner/register
+is not re-fetched on upgrade."
+	fi
+}
+
+check_signaling_sfu_secret
 
 # shellcheck disable=SC1090
 . "$STATE_FILE"

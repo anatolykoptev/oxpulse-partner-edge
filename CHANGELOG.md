@@ -5,6 +5,12 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **installer:** die on empty signaling_sfu_secret response (closes 2026-05-06 silent-fail class).
+
 ## [0.12.9](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.8...partner-edge-v0.12.9) (2026-05-02)
 
 
