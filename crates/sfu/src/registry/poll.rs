@@ -187,16 +187,18 @@ impl Registry {
         while let Some(p) = self.to_propagate.pop_front() {
             match &p {
                 Propagated::BandwidthEstimate(cid, bps) => {
-                    // SAFETY (newtype-cast): the local `crate::propagate::ClientId`
-                    // and the kit's `oxpulse_sfu_kit::propagate::ClientId` are
-                    // both `pub struct ClientId(u64)` newtypes around the same
-                    // monotonic per-process counter. They are deliberately
-                    // distinct types to keep crate boundaries explicit; the
-                    // numeric round-trip via `**cid` is correct so long as
-                    // both sides remain `u64`-backed. If a future kit bump
-                    // changes the underlying representation (e.g. to UUID),
-                    // this cast becomes a silent semantic mismatch — update
-                    // both sides together.
+                    // CAST INVARIANT (cross-crate newtype): the local
+                    // `crate::propagate::ClientId` and the kit's
+                    // `oxpulse_sfu_kit::propagate::ClientId` are both
+                    // `ClientId(u64)` newtypes wrapping the same monotonic
+                    // per-process counter. They are deliberately distinct
+                    // types to keep crate boundaries explicit; the numeric
+                    // round-trip via `**cid` (Deref to u64, then re-wrap) is
+                    // correct so long as both sides remain `u64`-backed.
+                    // If a future kit bump changes the underlying representation
+                    // (e.g. to UUID), this cast becomes a silent semantic
+                    // mismatch — update both sides together. (Not `// SAFETY:` —
+                    // no `unsafe` block; that label is reserved for soundness.)
                     self.bandwidth.record_native_estimate(
                         oxpulse_sfu_kit::propagate::ClientId(**cid),
                         *bps as f64,
@@ -207,7 +209,8 @@ impl Registry {
                     // M5.4.1: client-reported budget ceiling. Record into the
                     // shared BandwidthEstimator so the pacer sees it on the
                     // next update_pacer_layers pass.
-                    // SAFETY: same newtype-cast invariant as above.
+                    // CAST INVARIANT: same cross-crate newtype rule as the
+                    // BandwidthEstimate arm above.
                     self.bandwidth.record_client_hint(
                         oxpulse_sfu_kit::propagate::ClientId(**cid),
                         *bps,

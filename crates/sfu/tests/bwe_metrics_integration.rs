@@ -87,11 +87,23 @@ async fn layer_transitions_total_increments_on_layer_change() {
     // M6.1: verify sfu_layer_transitions_total fires when a subscriber's
     // chosen simulcast layer changes between pacer refresh calls.
     //
-    // Strategy: subscriber starts at LOW (default). Drive bandwidth high,
-    // refresh UPGRADE_CONSECUTIVE times. Pacer promotes ONE tier per streak
-    // (q → h on the first promotion, h → f only after another full streak),
-    // so the assertable transition for a single batch of UPGRADE_CONSECUTIVE
-    // refreshes is q → h.
+    // Strategy: subscriber starts at LOW (default). Drive native estimate to
+    // 2 Mbps and refresh UPGRADE_CONSECUTIVE times so the pacer accumulates a
+    // promotion streak.
+    //
+    // Why the asserted transition is q→h (not q→f):
+    //   The pacer alone WOULD jump directly to f after a streak — `tier_for_budget`
+    //   returns HIGH for budget ≥ F_FLOOR_BPS (1.5 Mbps), and after
+    //   UPGRADE_CONSECUTIVE matching observations the pacer sets `current = target`
+    //   directly (no stair-step in `pacer.rs::preferred_rid`).
+    //   BUT `update_pacer_layers` in `bwe.rs` then conservatively caps the
+    //   pacer's choice with GoogCC's `preferred_rid`. GoogCC's AimdController
+    //   starts at the kit-default initial rate (~500 kbps), which corresponds
+    //   to MEDIUM. The conservative-merge picks `min(pacer, googcc) = h`.
+    //   Hence the observable transition lands at h, not f.
+    //   If the kit's GoogCC initial rate is ever raised above F_FLOOR_BPS,
+    //   this test will need to be updated (the q→h assertion would silently
+    //   become q→f).
     let (port, _handle, metrics) = bind_metrics_server();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
