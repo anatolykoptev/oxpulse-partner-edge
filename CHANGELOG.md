@@ -5,6 +5,22 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.10](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.9...partner-edge-v0.12.10) (2026-05-06)
+
+
+### Features
+
+* **sfu:** chat-data + chat-ctrl DC routing through SFU (Phase 2b) ([#40](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/40)) ([484bb43](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/484bb43e4b0d61983f0230cacbf23366f0d1c422))
+
+
+### Bug Fixes
+
+* **installer:** die on empty signaling_sfu_secret response ([#49](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/49)) ([c8047e0](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c8047e078eee5601c5bb739793781070d9564ffe))
+* **sfu/pacer:** F6-9 SUSPEND_STREAK parity + bump oxpulse-sfu-kit 0.7→0.8 ([#44](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/44)) ([8fa2960](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/8fa2960b80377af22c3b3aba4d757cad1f8f9c54))
+* **sfu/pacer:** F7-5 symmetric exit hysteresis ([#45](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/45)) ([ce4a3fd](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ce4a3fdbdb1cc14268fd71fe57e2ef3080c91d86))
+* **sfu/registry:** F2b-2 reap chat_relay label series on disconnect ([#46](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/46)) ([e30d41c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e30d41c018cfc8fb1701ffd85abdbf67b9dbd71d))
+* **sfu:** observability bundle — gauge fix + degraded-state visibility + healthcheck ([#48](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/48)) ([54130e1](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/54130e1d65a0eba3f2ab827102d3b7ae18f61c01))
+
 ## [Unreleased]
 
 ### Bug Fixes
