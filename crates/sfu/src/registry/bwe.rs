@@ -124,6 +124,19 @@ impl Registry {
                         ]);
                     }
                 }
+                // F2b-2: drop chat_relay_{tx,rx}_bytes_total{dc, client_id}
+                // series for both dc values. `client_id` label equals the
+                // ClientId u64 stringified — same format as `peer_label`.
+                // `chat_relay_dropped_total` uses (dc, reason) only — no
+                // client_id — so it is not in scope.
+                for dc in ["data", "ctrl"] {
+                    let _ = metrics
+                        .chat_relay_tx_bytes_total
+                        .remove_label_values(&[dc, &peer_label]);
+                    let _ = metrics
+                        .chat_relay_rx_bytes_total
+                        .remove_label_values(&[dc, &peer_label]);
+                }
             }
             alive
         });
