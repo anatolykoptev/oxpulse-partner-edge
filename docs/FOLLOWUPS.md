@@ -1,0 +1,25 @@
+# Follow-ups
+
+Open issues / deferred TODOs noted during PR reviews. Each entry includes observable symptom, location in code, why it matters, and a concrete next step.
+
+---
+
+### 1. Legacy tests reference removed `deploy/partner-edge/` path
+
+**Where:** `tests/test_sfu_compose.sh`, `tests/test_install_ships_cover.sh`, `tests/test_install_wires_cert_watch.sh` (and possibly siblings) hardcode `REPO_ROOT=$(...)/deploy/partner-edge/` or similar legacy sub-path that no longer exists in this repo layout.
+
+**Symptom:** scripts exit immediately or read non-existent fixtures. Effectively dead tests.
+
+**Why it matters:** false sense of coverage. CI / shellcheck won't catch it because the scripts are not wired into automation; manual smoke runs would, but they're noted as broken in PR #49 and skipped.
+
+**Next step:** audit `tests/test_*.sh`. For each: either update `REPO_ROOT` to repo root + adjust path prefixes (matching PR #49's `tests/test_install_die_on_empty_sfu_secret.sh` pattern), or delete the test if its target was removed in a prior layout change. ~30 min of grep + path fixes.
+
+**Files:** `tests/test_*.sh` — count via `ls tests/test_*.sh | wc -l`.
+
+**Discovered:** PR #49 review (2026-05-06).
+
+---
+
+## How to use this file
+- Adding an entry: append below. Include observable symptom, where in code, why it matters, and a concrete next step.
+- Closing an entry: ~~strikethrough the title and body~~ with `(closed YYYY-MM-DD via SHA)` appended. Keep the entry — history matters.
