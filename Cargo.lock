@@ -1263,9 +1263,9 @@ dependencies = [
 
 [[package]]
 name = "oxpulse-sfu-kit"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4df7a3350bdf491a879a342b30289403013f8799e0ecdfbce03a32286b21e5d3"
+checksum = "099b66d4af63faa42088281f1029c8f72bbeb12340ffb137b3c66e1b76e95665"
 dependencies = [
  "anyhow",
  "prometheus",

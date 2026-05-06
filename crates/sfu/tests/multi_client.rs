@@ -101,6 +101,15 @@ fn m53_capped_receiver_sees_q_uncapped_sees_f() {
     // just "pin" C's estimate high, we have to actually feed samples.
     registry.drive_subscriber_bandwidth_for_tests(ClientId(42), 2_000_000);
 
+    // GoogCC v2 conservative merge: the per-registry GoogCC estimator caps
+    // the pacer choice at its own preferred_rid(). Without driving GoogCC
+    // above F_LAYER_BPS (1.2 Mbps) it stays at its initial 500 kbps →
+    // MEDIUM, which silently caps C at MEDIUM regardless of BWE estimate.
+    // Pin GoogCC above F_LAYER_BPS (1.2M) so the conservative merge allows
+    // the pacer's choice through. GoogCC is registry-wide; B's capped BWE
+    // alone ensures it stays at LOW — the GoogCC floor only bites HIGH.
+    registry.drive_googcc_for_tests(2_000_000);
+
     // Hysteresis: 3 consecutive observations needed to upgrade. B
     // starts at the default LOW and stays there (downgrades are
     // immediate, no hysteresis); C must upgrade LOW → MEDIUM → HIGH

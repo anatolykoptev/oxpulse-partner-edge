@@ -115,6 +115,15 @@ impl Registry {
         );
     }
 
+    /// Test-only: pin the GoogCC v2 estimator bitrate directly so integration
+    /// tests can avoid injecting real TWCC samples when verifying pacer behaviour
+    /// under the GoogCC conservative-merge path. The estimate is shared across
+    /// all subscribers (GoogCC is per-registry, not per-subscriber).
+    #[doc(hidden)]
+    pub fn drive_googcc_for_tests(&mut self, bps: u64) {
+        self.googcc.force_high_bps_for_tests(bps);
+    }
+
     /// Test-only: force the pacer + metrics refresh out-of-band
     /// (normally invoked from the `MediaData` fanout path). Also
     /// drains any queued BandwidthEstimate events through
