@@ -89,6 +89,10 @@ impl Registry {
             let alive = c.is_alive();
             if !alive {
                 detector.remove_peer(&c.id.0);
+                // SAFETY (newtype-cast): kit `ClientId` and crate `ClientId`
+                // are both `pub struct ClientId(u64)`. Numeric round-trip is
+                // valid while both sides stay u64-backed; revisit on kit
+                // representation change.
                 bandwidth.reap_dead(oxpulse_sfu_kit::propagate::ClientId(*c.id));
                 pacer.remove(&c.id);
                 metrics.client_disconnect_total.inc();
@@ -154,6 +158,9 @@ impl Registry {
         };
 
         for client in self.clients.iter_mut() {
+            // SAFETY (newtype-cast): same u64-backed `ClientId` invariant
+            // as in `reap_dead` above. Update both sides if kit changes
+            // the representation.
             let budget = self.bandwidth.estimate_bps(
                 oxpulse_sfu_kit::propagate::ClientId(*client.id),
                 std::time::Instant::now(),
