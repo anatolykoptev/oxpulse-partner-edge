@@ -64,3 +64,34 @@ fn active_rooms_tracks_registry_population() {
         "registry now empty → active_rooms must drop to 0"
     );
 }
+
+/// Round-2 review fix: `evict_for_steal` is the third mutation path
+/// (alongside `insert` / `reap_dead`) and was the only one missing the
+/// `active_rooms.set(0)` invariant. Today the bug is masked because
+/// every production caller of `evict_for_steal` chains a follow-up
+/// `insert` (which forces the gauge back to 1). A future panic-path or
+/// auth-revocation eviction without that chain would leave the gauge at
+/// 1 with zero clients — the exact silent-fail mode the post-mortem
+/// targeted. Pin the invariant directly.
+#[test]
+fn evict_for_steal_resets_active_rooms_when_clients_empty() {
+    let metrics = Arc::new(SfuMetrics::new().expect("metrics build"));
+    let mut registry = Registry::new(metrics.clone());
+
+    let only = new_client(ClientId(910));
+    registry.insert(only);
+    assert_eq!(metrics.active_rooms.get(), 1, "post-insert sanity");
+
+    // Evict without a follow-up insert. Mirrors the future code path
+    // where eviction is driven by something other than session steal
+    // (e.g. token revocation, panic recovery).
+    registry.evict_for_steal_for_tests(0);
+
+    assert_eq!(
+        metrics.active_rooms.get(),
+        0,
+        "evict_for_steal of the last client must reset active_rooms to 0 — \
+         mirrors the reap_dead invariant; without this, a non-steal eviction \
+         would leave active_rooms=1 with zero clients (silent-fail mode)."
+    );
+}

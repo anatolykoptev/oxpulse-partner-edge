@@ -250,6 +250,16 @@ impl Registry {
         self.metrics.active_participants.dec();
         self.metrics.session_replaced_total.inc();
 
+        // Round-2 review fix: mirror `reap_dead`'s active_rooms invariant.
+        // Today every production caller chains a follow-up `insert` that
+        // resets the gauge to 1; future eviction paths (panic recovery,
+        // auth revocation) might not, leaving active_rooms=1 with zero
+        // clients — the exact silent-fail mode the 2026-05-06 post-mortem
+        // targeted. Pin the invariant at the eviction site itself.
+        if self.clients.is_empty() {
+            self.metrics.active_rooms.set(0);
+        }
+
         tracing::warn!(
             target: "sfu::registry",
             peer_id = ?external_peer_id,

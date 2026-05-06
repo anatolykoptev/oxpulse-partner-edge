@@ -51,6 +51,11 @@ pub struct SfuMetrics {
     /// disabled feature gate was a `tracing::info!` line, lost in
     /// normal-operation log streams. This gauge gives Prometheus a
     /// direct alertable signal for degraded state.
+    ///
+    /// Init value is **1** (disabled-until-proven-enabled): the metrics
+    /// HTTP server is up before main.rs reaches the client_ws branch,
+    /// so a racing scrape sees safe-pessimistic. main.rs flips to 0
+    /// inside the `SIGNALING_SFU_SECRET` success arm.
     pub client_ws_disabled: IntGauge,
     /// Forwarded RTP packets, labelled by `kind` = audio | video | other.
     pub forwarded_packets_total: IntCounterVec,
@@ -192,9 +197,14 @@ impl SfuMetrics {
              (e.g. SIGNALING_SFU_SECRET unset), 0 if active",
         ))
         .context("client_ws_disabled")?);
-        // Default 0 (active). main.rs flips to 1 on the degraded path
-        // (SIGNALING_SFU_SECRET missing) and explicitly sets 0 when the
-        // client_ws task spawns successfully.
+        // Round-2 review fix: init to 1 (disabled-until-proven-enabled).
+        // The metrics HTTP server starts very early in main(); the
+        // client_ws bind happens dozens of awaits later (UDP bind, TLS,
+        // listener bind). A Prometheus scrape that races startup would
+        // otherwise see the false-clean default 0 for a deploy that's
+        // actually disabled. main.rs flips this to 0 only inside the
+        // `if let Some(secret_bytes)` success branch.
+        client_ws_disabled.set(1);
 
         let forwarded_packets_total = reg!(IntCounterVec::new(
             Opts::new(
@@ -436,15 +446,22 @@ mod tests {
     /// for 8 weeks; only signal was a `tracing::info!` line. New gauge
     /// `sfu_client_ws_disabled` (0 active / 1 disabled) lets Prometheus
     /// alert on degraded state directly.
+    ///
+    /// Round-2 review fix: default to **1 (disabled)** so any /metrics
+    /// scrape that races container startup before main.rs reaches the
+    /// `client_ws` branch sees the safe-pessimistic state, not a
+    /// false-clean 0. main.rs flips to 0 only inside the
+    /// `if let Some(secret_bytes)` success arm.
     #[test]
-    fn client_ws_disabled_gauge_defaults_to_zero_and_is_in_registry() {
+    fn client_ws_disabled_gauge_defaults_to_one_and_is_in_registry() {
         let m = SfuMetrics::new().expect("metrics build");
         assert_eq!(
             m.client_ws_disabled.get(),
-            0,
-            "client_ws_disabled must default to 0 (active) so the series \
-             exists from startup and main.rs can flip to 1 only on the \
-             degraded path."
+            1,
+            "client_ws_disabled must default to 1 (disabled-until-proven-enabled) \
+             so /metrics scrapes that race container startup observe the \
+             safe-pessimistic state. main.rs flips to 0 only inside the \
+             SIGNALING_SFU_SECRET success branch."
         );
 
         let text = m.encode_text().expect("encode metrics");

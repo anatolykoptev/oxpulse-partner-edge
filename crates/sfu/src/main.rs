@@ -186,8 +186,10 @@ async fn main() -> anyhow::Result<()> {
             host_candidate_addr,
             metrics.clone(),
         )?;
-        // Explicit 0 — gauge defaults to 0 in the registry but keep the
-        // active-path write so the relationship is grep-able.
+        // Round-2 review fix: gauge defaults to 1 (disabled) in
+        // SfuMetrics::new() so /metrics scrapes that race container
+        // startup see the safe-pessimistic state. Flip to 0 here, only
+        // after the client_ws listener has actually bound.
         metrics.client_ws_disabled.set(0);
         tracing::info!(addr = %client_ws_addr, "client_ws API listening (Phase 7 M4.A1+M4.A2)");
         (Some(client_inject_rx), Some(handle))

@@ -167,6 +167,15 @@ impl Registry {
         self.reap_dead();
     }
 
+    /// Test-only: invoke `evict_for_steal` out-of-band on the client at
+    /// `idx`, simulating a future panic-path or auth-revocation eviction
+    /// that does **not** chain a follow-up `insert`. Pins the
+    /// `active_rooms.set(0)` invariant added in the round-2 review fix.
+    #[doc(hidden)]
+    pub fn evict_for_steal_for_tests(&mut self, idx: usize) {
+        self.evict_for_steal(idx);
+    }
+
     /// Test-only: return the top-k peer IDs by medium-window activity score.
     /// Useful for asserting that a relay peer is absent from the ranking
     /// after `mark_relay_source` removes it from the detector.
