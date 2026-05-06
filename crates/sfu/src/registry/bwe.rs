@@ -140,6 +140,11 @@ impl Registry {
             }
             alive
         });
+        // 2026-05-06 post-mortem: keep `active_rooms` in lockstep with
+        // population. Single-room SFU → 0 if empty, else 1. Idempotent.
+        if self.clients.is_empty() {
+            self.metrics.active_rooms.set(0);
+        }
     }
 
     /// Consult the pacer for each subscriber's current tier and

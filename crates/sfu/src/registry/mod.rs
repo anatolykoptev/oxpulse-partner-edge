@@ -169,6 +169,10 @@ impl Registry {
         self.detector.add_peer(peer_id, now_ms);
         self.metrics.client_connect_total.inc();
         self.metrics.active_participants.inc();
+        // Single-room SFU: any client present means the room is active.
+        // Idempotent — `set(1)` on second insert is a no-op.
+        // (Post-mortem 2026-05-06: previously hardcoded at init.)
+        self.metrics.active_rooms.set(1);
         self.clients.push(client);
         // Emit a codec-capability hint so relay layers or application code can
         // inform the new peer that this SFU supports Opus RED / DRED.
@@ -245,6 +249,16 @@ impl Registry {
         self.metrics.client_disconnect_total.inc();
         self.metrics.active_participants.dec();
         self.metrics.session_replaced_total.inc();
+
+        // Round-2 review fix: mirror `reap_dead`'s active_rooms invariant.
+        // Today every production caller chains a follow-up `insert` that
+        // resets the gauge to 1; future eviction paths (panic recovery,
+        // auth revocation) might not, leaving active_rooms=1 with zero
+        // clients — the exact silent-fail mode the 2026-05-06 post-mortem
+        // targeted. Pin the invariant at the eviction site itself.
+        if self.clients.is_empty() {
+            self.metrics.active_rooms.set(0);
+        }
 
         tracing::warn!(
             target: "sfu::registry",

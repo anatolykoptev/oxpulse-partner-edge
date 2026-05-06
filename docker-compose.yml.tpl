@@ -135,8 +135,21 @@ services:
       # ipify → ifconfig.me). Operators may override at compose render
       # time via OXPULSE_PUBLIC_IP. Falls back to bind address when empty.
       SFU_PUBLIC_IP: "{{PUBLIC_IP}}"
+    # 2026-05-06 post-mortem: probe all three planes (metrics, client_ws,
+    # relay API). Previously only /metrics on {{SFU_METRICS_PORT}} was
+    # checked; that listener starts independently of feature gates so
+    # the container stayed green for 8 weeks while client_ws on :8920
+    # was silently disabled (SIGNALING_SFU_SECRET unset). The TCP probes
+    # use `nc -z` from netcat-openbsd, added to the runtime image in
+    # the same bundle (images/Dockerfile.sfu).
+    #
+    # Round-2 review fix: gate the client_ws / relay-API probes on the
+    # same env vars main.rs gates the listeners on, and honour
+    # SFU_CLIENT_WS_PORT / SFU_RELAY_API_PORT env overrides. CMD-SHELL
+    # is a /bin/sh -c context, so $VAR expands at container runtime
+    # against the service's environment block.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:{{SFU_METRICS_PORT}}/metrics >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:{{SFU_METRICS_PORT}}/metrics >/dev/null 2>&1 && { [ -z \"$SIGNALING_SFU_SECRET\" ] || nc -z 127.0.0.1 \"${SFU_CLIENT_WS_PORT:-8920}\"; } && { [ -z \"$RELAY_JWT_SECRET\" ] || nc -z 127.0.0.1 \"${SFU_RELAY_API_PORT:-8912}\"; } || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
