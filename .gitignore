@@ -3,3 +3,6 @@ target/
 .DS_Store
 install.env
 install.env.prev
+
+# Claude Code local state — agent worktrees, transcripts, ephemeral context
+.claude/
