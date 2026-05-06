@@ -7,7 +7,7 @@
 # bug as the cover/cover.html regression — operator-visible breakage hidden
 # by a warn-and-continue path.
 set -euo pipefail
-REPO_ROOT="${REPO_ROOT:-/home/krolik/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 INSTALL="$REPO_ROOT/install.sh"
 
 [[ -f "$INSTALL" ]] || { echo "FAIL: install.sh not found at $INSTALL"; exit 1; }

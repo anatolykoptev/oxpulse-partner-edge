@@ -25,7 +25,7 @@ BACKEND_API="${BACKEND_API%/}"
 
 log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
-die()  { printf '\033[31mERR\033[0m %s\n' "$*" >&2; exit 1; }
+die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
 
 # Best-effort install of `wg`/`wg-quick` for keygen and conf rendering. The
 # AmneziaWG userspace binary (`amneziawg-go` + `awg`/`awg-quick`) is built
