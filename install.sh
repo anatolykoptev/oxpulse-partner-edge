@@ -968,17 +968,22 @@ CHANNELS_JSON=$(json_get_raw channels "$tmp_cfg")
 # `<partner>1` to leave room for `<partner>2` if the partner ever runs
 # more than one edge (rvpn1, piter1, motherly1, cheburator1).
 [[ -z "$SFU_EDGE_ID" ]]        && SFU_EDGE_ID="${PARTNER_ID}1"
-# Spin-trap guard: SFU v0.12.5 and earlier had a bug where setting
-# RELAY_JWT_SECRET without SIGNALING_SFU_SECRET caused the udp_loop
-# select! to spin at 95% CPU (closed inject channel polled forever).
-# Fixed in v0.12.7 (Option<Receiver> arm guard), but warn here so new
-# installs notice the configuration is partial: with SIGNALING empty
-# the /sfu/ws/{room_id} endpoint is disabled and browsers cannot reach
-# this edge directly (only relay flows from another SFU work).
+# Hard-fail when the central did not return a signaling_sfu_secret. With it
+# empty, docker-compose renders SIGNALING_SFU_SECRET= empty, the SFU disables
+# /sfu/ws/{room_id} entirely, and browser group calls silently fail end-to-
+# end — exactly the motherly1 outage of 2026-05-06 (SIGNALING_SFU_SECRET
+# missing from chat compose for ~8 weeks). Operator must fix on the central
+# (set SIGNALING_SFU_SECRET on motherly + redeploy oxpulse-chat) before re-
+# running this installer; warn-and-continue here is what created the silent-
+# fail class in the first place.
 if [[ -z "${SIGNALING_SFU_SECRET:-}" ]]; then
-	warn "SIGNALING_SFU_SECRET is empty — /sfu/ws browser endpoint disabled."
-	warn "  Direct browser→edge calls will fail; only cascade-relay paths work."
-	warn "  Backend should provision signaling_sfu_secret in /api/partner/register."
+	die "Backend /api/partner/register did not return signaling_sfu_secret.
+  Without it, the SFU's browser WebSocket API stays disabled and group
+  calls silently fail end-to-end. Causes:
+    - oxpulse-chat backend SIGNALING_SFU_SECRET env unset (set on motherly,
+      redeploy chat service)
+    - oxpulse-chat backend version <2026-05-06 (predates field)
+  Resolve on the central, then re-run this installer."
 fi
 [[ -z "$BACKEND_ENDPOINT" ]]   && die "backend_endpoint missing from config"
 [[ -z "$TURN_SECRET" ]]        && die "turn_secret missing from config"
