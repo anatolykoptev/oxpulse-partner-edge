@@ -80,6 +80,13 @@ name = "bwe_metrics_integration"
 required-features = ["test-utils"]
 
 [[test]]
+name = "active_rooms_metric"
+# 2026-05-06 motherly1 outage post-mortem — pins active_rooms 0/1
+# semantics. Uses `disconnect_client_for_tests` + `reap_dead_for_tests`
+# seams from registry/test_seams.rs.
+required-features = ["test-utils"]
+
+[[test]]
 name = "hard_red_migration"
 required-features = ["test-utils"]
 
