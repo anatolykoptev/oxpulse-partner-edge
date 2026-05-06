@@ -229,6 +229,19 @@ impl Registry {
             }
         }
 
+        // F2b-2: drop chat_relay_{tx,rx}_bytes_total{dc, client_id} series
+        // for both dc values, mirroring `bwe::Registry::reap_dead` scrub path.
+        for dc in ["data", "ctrl"] {
+            let _ = self
+                .metrics
+                .chat_relay_tx_bytes_total
+                .remove_label_values(&[dc, &peer_label]);
+            let _ = self
+                .metrics
+                .chat_relay_rx_bytes_total
+                .remove_label_values(&[dc, &peer_label]);
+        }
+
         self.metrics.client_disconnect_total.inc();
         self.metrics.active_participants.dec();
         self.metrics.session_replaced_total.inc();
