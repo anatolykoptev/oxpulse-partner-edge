@@ -61,6 +61,14 @@ impl GoogCcEstimator {
     pub fn current_bps(&self) -> u64 {
         self.aimd.current()
     }
+
+    /// Test-only: pin the AIMD controller bitrate directly so integration
+    /// tests can assert GoogCC-conservative-merge behaviour without needing
+    /// to inject real TWCC packets. Does NOT touch the trendline state.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn force_high_bps_for_tests(&mut self, bps: u64) {
+        self.aimd = AimdController::new(bps, 100_000, 2_500_000);
+    }
 }
 
 impl Default for GoogCcEstimator {
