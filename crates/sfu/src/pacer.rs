@@ -21,10 +21,11 @@
 //!
 //! Below [`AUDIO_ONLY_THRESHOLD_BPS`] the pacer signals *audio-only* in the
 //! hot fanout path via [`Pacer::check_audio_only_stateful`] (Dynacast),
-//! which is debounced by [`SUSPEND_STREAK_EDGE`] to ignore single TWCC
-//! spikes. The stateless [`Pacer::should_forward_audio_only`] is kept
-//! for threshold-boundary unit tests only — do not call it from the hot
-//! path (F6-9 parity fix with kit's `SUSPEND_STREAK`).
+//! which is debounced by [`SUSPEND_STREAK_EDGE`] symmetrically on both
+//! entry and exit to ignore single TWCC spikes. The stateless
+//! [`Pacer::should_forward_audio_only`] is kept for threshold-boundary
+//! unit tests only — do not call it from the hot path (F6-9 entry parity
+//! fix with kit's `SUSPEND_STREAK`; F7-5 symmetric exit).
 //!
 //! Previously split across `pacer/mod.rs`, `pacer/ladder.rs`, and
 //! `pacer/tests.rs`; merged into a single file in Task 11 to remove
@@ -119,10 +120,21 @@ struct PerSubscriber {
     /// Cached "candidate higher tier" — `consecutive_up` is counted
     /// against this. Reset when it changes.
     candidate_up: Option<Rid>,
-    /// Consecutive ticks observed below [`AUDIO_ONLY_THRESHOLD_BPS`]. Reset to 0
-    /// when budget recovers above threshold. Used to debounce the audio-only
-    /// entry transition by [`SUSPEND_STREAK_EDGE`] (F6-9).
+    /// Consecutive ticks observed below [`AUDIO_ONLY_THRESHOLD_BPS`] while NOT
+    /// in suspended state. Only incremented on the entry path (`!suspended`).
+    /// Reset to 0 when budget recovers above threshold. Used to debounce the
+    /// audio-only entry transition by [`SUSPEND_STREAK_EDGE`] (F6-9).
     consecutive_below: u32,
+    /// Whether this subscriber is currently in audio-only (suspended) state.
+    /// Entry requires [`SUSPEND_STREAK_EDGE`] consecutive below-threshold ticks;
+    /// exit requires [`SUSPEND_STREAK_EDGE`] consecutive above-threshold ticks.
+    /// Symmetric hysteresis — F7-5.
+    suspended: bool,
+    /// Consecutive ticks observed at or above [`AUDIO_ONLY_THRESHOLD_BPS`] while
+    /// in suspended state. Only incremented on the exit path (`suspended`).
+    /// Reset to 0 on any below-threshold tick. Used to debounce the audio-only
+    /// exit transition by [`SUSPEND_STREAK_EDGE`] (F7-5).
+    consecutive_above: u32,
 }
 
 /// Per-subscriber rate shaper. One instance lives on [`crate::Registry`].
@@ -214,24 +226,48 @@ impl Pacer {
         budget_bps < AUDIO_ONLY_THRESHOLD_BPS
     }
 
-    /// Stateful audio-only gate with [`SUSPEND_STREAK_EDGE`] debounce (F6-9).
+    /// Stateful audio-only gate with symmetric [`SUSPEND_STREAK_EDGE`] debounce
+    /// on both entry and exit (F6-9 entry + F7-5 exit).
     ///
-    /// Requires [`SUSPEND_STREAK_EDGE`] *consecutive* ticks below
-    /// [`AUDIO_ONLY_THRESHOLD_BPS`] before returning `true`. A single TWCC
-    /// spike below threshold returns `false` and increments an internal
-    /// counter; recovery above threshold resets the counter to 0.
+    /// **Entry**: requires [`SUSPEND_STREAK_EDGE`] *consecutive* ticks below
+    /// [`AUDIO_ONLY_THRESHOLD_BPS`] before transitioning into audio-only. A
+    /// single TWCC spike below threshold increments an internal counter without
+    /// triggering suspension. Above-threshold tick resets the below-streak.
+    ///
+    /// **Exit**: requires [`SUSPEND_STREAK_EDGE`] *consecutive* ticks at or above
+    /// [`AUDIO_ONLY_THRESHOLD_BPS`] before clearing audio-only. A single TWCC
+    /// recovery burst does not exit — it increments the above-streak. A
+    /// below-threshold tick resets the above-streak without re-entering
+    /// (unless below-streak itself reaches [`SUSPEND_STREAK_EDGE`] again).
     ///
     /// Use this in the hot per-subscriber forwarding path
     /// ([`Client::pacer_select_layer`]) instead of [`should_forward_audio_only`].
     pub fn check_audio_only_stateful(&mut self, subscriber: ClientId, budget_bps: u64) -> bool {
         let state = self.subs.entry(subscriber).or_default();
+
         if budget_bps < AUDIO_ONLY_THRESHOLD_BPS {
-            state.consecutive_below = state.consecutive_below.saturating_add(1);
-            state.consecutive_below >= SUSPEND_STREAK_EDGE
+            // Below-threshold tick. Only the entry-direction streak is meaningful.
+            state.consecutive_above = 0;
+            if !state.suspended {
+                state.consecutive_below = state.consecutive_below.saturating_add(1);
+                if state.consecutive_below >= SUSPEND_STREAK_EDGE {
+                    state.suspended = true;
+                    state.consecutive_below = 0; // reset for clarity post-transition
+                }
+            }
         } else {
+            // Above-threshold tick. Only the exit-direction streak is meaningful.
             state.consecutive_below = 0;
-            false
+            if state.suspended {
+                state.consecutive_above = state.consecutive_above.saturating_add(1);
+                if state.consecutive_above >= SUSPEND_STREAK_EDGE {
+                    state.suspended = false;
+                    state.consecutive_above = 0;
+                }
+            }
         }
+
+        state.suspended
     }
 
     /// Drop subscriber state on disconnect.
@@ -416,5 +452,76 @@ mod tests {
             "single below-threshold tick after recovery must not suspend \
              (streak was reset by the above-threshold observation)",
         );
+    }
+
+    // ── F7-5 symmetric exit hysteresis tests ─────────────────────────────────
+
+    /// After entering audio-only via 2 sub-100k ticks, a single above-100k
+    /// tick must NOT exit suspended state. Second consecutive above-100k tick
+    /// must exit. Verifies symmetric exit debounce.
+    #[test]
+    fn exit_audio_only_requires_streak() {
+        use super::SUSPEND_STREAK_EDGE;
+        let mut pacer = Pacer::new();
+        let sub = client(20);
+
+        // Enter audio-only: 2 consecutive sub-100k ticks.
+        let suspended_after_first_below = pacer.check_audio_only_stateful(sub, 50_000);
+        assert!(
+            !suspended_after_first_below,
+            "single below tick must NOT enter (streak = 1 < SUSPEND_STREAK_EDGE={SUSPEND_STREAK_EDGE})",
+        );
+
+        let suspended_after_second_below = pacer.check_audio_only_stateful(sub, 50_000);
+        assert!(
+            suspended_after_second_below,
+            "two consecutive below ticks enter suspended (streak >= SUSPEND_STREAK_EDGE={SUSPEND_STREAK_EDGE})",
+        );
+
+        // Single tick above 100k must NOT exit (streak = 1 < SUSPEND_STREAK_EDGE).
+        let suspended_after_first_above = pacer.check_audio_only_stateful(sub, 200_000);
+        assert!(
+            suspended_after_first_above,
+            "single above-100k tick must NOT exit (streak = 1 < SUSPEND_STREAK_EDGE={SUSPEND_STREAK_EDGE})",
+        );
+
+        // Second consecutive tick above 100k exits.
+        let suspended_after_second_above = pacer.check_audio_only_stateful(sub, 200_000);
+        assert!(
+            !suspended_after_second_above,
+            "two consecutive above ticks exit suspended (streak >= SUSPEND_STREAK_EDGE={SUSPEND_STREAK_EDGE})",
+        );
+    }
+
+    /// Above-streak must reset when a below-threshold tick interrupts it.
+    /// After the reset a single above-tick must not exit suspended state.
+    #[test]
+    fn exit_streak_resets_on_below_tick() {
+        let mut pacer = Pacer::new();
+        let sub = client(21);
+
+        // Enter audio-only: 2 consecutive below ticks.
+        pacer.check_audio_only_stateful(sub, 50_000);
+        let entered = pacer.check_audio_only_stateful(sub, 50_000);
+        assert!(entered, "entered suspended");
+
+        // First above tick — above_streak = 1, still suspended.
+        let after_one_above = pacer.check_audio_only_stateful(sub, 200_000);
+        assert!(after_one_above, "above streak = 1, still suspended");
+
+        // Below tick — must reset above_streak. State remains suspended.
+        let after_below = pacer.check_audio_only_stateful(sub, 50_000);
+        assert!(
+            after_below,
+            "below tick: above-streak resets, still suspended"
+        );
+
+        // Above tick again — above_streak fresh = 1 (not 2), still suspended.
+        let after_recover_one = pacer.check_audio_only_stateful(sub, 200_000);
+        assert!(after_recover_one, "above streak fresh = 1, still suspended");
+
+        // Second consecutive above tick — exits suspended.
+        let after_recover_two = pacer.check_audio_only_stateful(sub, 200_000);
+        assert!(!after_recover_two, "above streak = 2, exits suspended");
     }
 }
