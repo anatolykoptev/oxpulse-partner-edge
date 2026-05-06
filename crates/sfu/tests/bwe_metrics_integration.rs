@@ -1,8 +1,9 @@
-//! M5.3 / M6.1 integration tests: per-peer BWE + pacer label cardinality.
+//! M5.3 / M6.1 / F2b-2 integration tests: per-peer BWE + pacer + chat-relay label cardinality.
 //!
 //! Concern: verifies that `reap_dead` scrubs `peer_id`-labelled series from
-//! `sfu_bandwidth_estimate_bps`, `sfu_pacer_layer_total`, and (M6.1)
-//! `sfu_layer_transitions_total` so reconnect churn doesn't grow cardinality.
+//! `sfu_bandwidth_estimate_bps`, `sfu_pacer_layer_total`, (M6.1)
+//! `sfu_layer_transitions_total`, and (F2b-2) `chat_relay_tx_bytes_total` /
+//! `chat_relay_rx_bytes_total` so reconnect churn doesn't grow cardinality.
 //!
 //! Split from `metrics_integration.rs` when that file exceeded 200 lines after
 //! M6.1 edge_id const-label additions.
@@ -79,6 +80,169 @@ async fn reap_dead_scrubs_per_peer_bwe_labels() {
     assert!(
         !after.contains(r#"peer_id="201""#),
         "dead subscriber per-peer labels must be scrubbed after reap:\n{after}",
+    );
+}
+
+/// F2b-2: `reap_dead` must drop `chat_relay_tx_bytes_total` and
+/// `chat_relay_rx_bytes_total` series keyed by `client_id` so reconnect
+/// churn doesn't grow label cardinality without bound.
+///
+/// Strategy: bump both counters for client 201 under the `data` and `ctrl` dc
+/// labels, force-disconnect the client, call `reap_dead`, then assert both
+/// series are absent from the scraped output.
+#[tokio::test]
+async fn reap_dead_drops_chat_relay_label_series() {
+    let (port, _handle, metrics) = bind_metrics_server();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Directly increment the counters — no real DC write needed.
+    metrics
+        .chat_relay_tx_bytes_total
+        .with_label_values(&["data", "201"])
+        .inc_by(100);
+    metrics
+        .chat_relay_tx_bytes_total
+        .with_label_values(&["ctrl", "201"])
+        .inc_by(50);
+    metrics
+        .chat_relay_rx_bytes_total
+        .with_label_values(&["data", "201"])
+        .inc_by(200);
+    metrics
+        .chat_relay_rx_bytes_total
+        .with_label_values(&["ctrl", "201"])
+        .inc_by(30);
+
+    // Pre-condition: client_id="201" series must be visible.
+    let before = timeout(Duration::from_secs(3), scrape(port))
+        .await
+        .expect("scrape timeout")
+        .expect("scrape ok");
+    assert!(
+        before.contains(r#"client_id="201""#),
+        "chat_relay tx/rx series must exist before reap:\n{before}",
+    );
+
+    // Build a registry with the same metrics, insert a client, kill it, reap.
+    let mut registry = Registry::new(metrics.clone());
+    let client = oxpulse_sfu::client::test_seed::new_client(ClientId(201));
+    registry.insert(client);
+    registry.disconnect_client_for_tests(ClientId(201));
+    registry.reap_dead_for_tests();
+
+    // Post-condition: client_id="201" series must be gone.
+    let after = timeout(Duration::from_secs(3), scrape(port))
+        .await
+        .expect("scrape timeout")
+        .expect("scrape ok");
+    // Stronger: assert each metric individually so a partial scrub regression
+    // (only tx or only rx removed) is caught rather than masked by a substring match.
+    let tx_lines: Vec<&str> = after
+        .lines()
+        .filter(|l| l.starts_with("sfu_chat_relay_tx_bytes_total"))
+        .collect();
+    let rx_lines: Vec<&str> = after
+        .lines()
+        .filter(|l| l.starts_with("sfu_chat_relay_rx_bytes_total"))
+        .collect();
+    assert!(
+        !tx_lines.iter().any(|l| l.contains(r#"client_id="201""#)),
+        "tx series should be scrubbed for client_id=201 after reap, got: {tx_lines:?}",
+    );
+    assert!(
+        !rx_lines.iter().any(|l| l.contains(r#"client_id="201""#)),
+        "rx series should be scrubbed for client_id=201 after reap, got: {rx_lines:?}",
+    );
+}
+
+/// F2b-2: `evict_for_steal` must drop `chat_relay_tx_bytes_total` and
+/// `chat_relay_rx_bytes_total` series keyed by `client_id` so session-
+/// replace churn doesn't grow label cardinality without bound.
+///
+/// Strategy: bump both counters for a first client under the `data` and `ctrl`
+/// dc labels, then insert a second client with the same `external_peer_id`,
+/// which triggers `evict_for_steal` of the first. Assert that both series are
+/// absent from the scraped output after the steal.
+///
+/// Mirrors `reap_dead_drops_chat_relay_label_series` but exercises the
+/// `evict_for_steal` path so future divergence between the two scrub branches
+/// is caught immediately.
+#[tokio::test]
+async fn evict_for_steal_drops_chat_relay_label_series() {
+    let (port, _handle, metrics) = bind_metrics_server();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Build registry with the shared metrics instance.
+    let mut registry = Registry::new(metrics.clone());
+
+    // Insert the first client tagged with external_peer_id=42.
+    // new_client assigns an internal ClientId; we need that id to bump metrics.
+    let first = new_client(ClientId(500)).with_external_peer_id(42);
+    let first_id = *first.id; // record before ownership moves into registry
+    registry.insert(first);
+
+    // Directly increment the chat_relay counters for the first client's
+    // internal id — mirrors the approach in reap_dead_drops_chat_relay_label_series.
+    let first_label = first_id.to_string();
+    metrics
+        .chat_relay_tx_bytes_total
+        .with_label_values(&["data", &first_label])
+        .inc_by(100);
+    metrics
+        .chat_relay_tx_bytes_total
+        .with_label_values(&["ctrl", &first_label])
+        .inc_by(50);
+    metrics
+        .chat_relay_rx_bytes_total
+        .with_label_values(&["data", &first_label])
+        .inc_by(200);
+    metrics
+        .chat_relay_rx_bytes_total
+        .with_label_values(&["ctrl", &first_label])
+        .inc_by(30);
+
+    // Pre-condition: first client's label series must be visible.
+    let before = timeout(Duration::from_secs(3), scrape(port))
+        .await
+        .expect("scrape timeout")
+        .expect("scrape ok");
+    assert!(
+        before.contains(&format!(r#"client_id="{first_label}""#)),
+        "chat_relay tx/rx series must exist before steal:\n{before}",
+    );
+
+    // Insert a second client with the same external_peer_id — this triggers
+    // evict_for_steal of the first client inside Registry::insert.
+    let second = new_client(ClientId(501)).with_external_peer_id(42);
+    registry.insert(second);
+
+    // Give the async scrub a moment to settle (mirrors reap test pattern).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Post-condition: first client's label series must be gone.
+    let after = timeout(Duration::from_secs(3), scrape(port))
+        .await
+        .expect("scrape timeout")
+        .expect("scrape ok");
+    let tx_lines: Vec<&str> = after
+        .lines()
+        .filter(|l| l.starts_with("sfu_chat_relay_tx_bytes_total"))
+        .collect();
+    let rx_lines: Vec<&str> = after
+        .lines()
+        .filter(|l| l.starts_with("sfu_chat_relay_rx_bytes_total"))
+        .collect();
+    assert!(
+        !tx_lines
+            .iter()
+            .any(|l| l.contains(&format!(r#"client_id="{first_label}""#))),
+        "tx series should be scrubbed for client_id={first_label} after steal, got: {tx_lines:?}",
+    );
+    assert!(
+        !rx_lines
+            .iter()
+            .any(|l| l.contains(&format!(r#"client_id="{first_label}""#))),
+        "rx series should be scrubbed for client_id={first_label} after steal, got: {rx_lines:?}",
     );
 }
 

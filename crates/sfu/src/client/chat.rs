@@ -102,8 +102,8 @@ impl Client {
 
         // Pre-format the client_id label once. Allocates per send — cheap
         // at the expected steady-state of <100 evt/s and avoids cardinality
-        // surprises (single number per client). Cleanup on disconnect is a
-        // follow-up wired through reap_dead.
+        // surprises (single number per client). Series scrubbed on disconnect
+        // in `Registry::reap_dead` (F2b-2).
         let client_id_label = self.id.0.to_string();
 
         let Some(mut ch) = self.rtc.channel(cid) else {

@@ -118,9 +118,8 @@ pub struct SfuMetrics {
     /// dashboards.
     ///
     /// Cardinality note: `client_id` is unbounded in the long run as peers
-    /// reconnect. `Registry::reap_dead` already scrubs the
-    /// `client_delivered_media_count` series on disconnect; the same scrub
-    /// hook should be extended to drop these series in a follow-up.
+    /// reconnect. `Registry::reap_dead` scrubs these series on disconnect
+    /// (F2b-2), mirroring the `client_delivered_media_count` scrub.
     pub chat_relay_tx_bytes_total: IntCounterVec,
     /// Phase 2b: bytes ingested on the SFU edge's inbound chat-data /
     /// chat-ctrl DC. Labels: `dc` ∈ `{data, ctrl}`, `client_id` (origin).
@@ -133,8 +132,9 @@ pub struct SfuMetrics {
     /// `{channel_closed, write_err, no_channel, oversize}`.
     pub chat_relay_dropped_total: IntCounterVec,
     /// Phase 2b: number of currently-open per-peer chat-relay channels by
-    /// `dc` ∈ `{data, ctrl}`. Bumped on Client::new, decremented on
-    /// disconnect (follow-up: hook into reap_dead).
+    /// `dc` ∈ `{data, ctrl}`. Bumped on `Client::with_chat_dcs`, decremented
+    /// on disconnect. Labels: `dc` only (no `client_id`) — no per-client
+    /// scrub required.
     pub chat_relay_active_channels: IntGaugeVec,
 }
 
