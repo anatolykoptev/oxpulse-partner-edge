@@ -36,10 +36,22 @@ use prometheus::{
 #[derive(Clone, Debug)]
 pub struct SfuMetrics {
     pub registry: Arc<Registry>,
-    /// Always 1 in M1.5 (single-room SFU). Reserved for M2+ multi-room.
+    /// 1 if the registry has at least one client, 0 otherwise. Single-room
+    /// SFU semantics — wired by `Registry::insert` (set 1) and the
+    /// eviction paths `reap_dead` / `evict_for_steal` (set 0 when empty).
+    /// 2026-05-06 motherly1 outage post-mortem: previously `set(1)` at
+    /// init and never updated, masking misconfigured deploys because no
+    /// alert on this gauge could ever fire.
     pub active_rooms: IntGauge,
     /// Current number of live clients.
     pub active_participants: IntGauge,
+    /// 1 if the browser-facing client_ws API is disabled at startup
+    /// (e.g. `SIGNALING_SFU_SECRET` unset), 0 if active. 2026-05-06
+    /// motherly1 outage post-mortem: previously the only signal of a
+    /// disabled feature gate was a `tracing::info!` line, lost in
+    /// normal-operation log streams. This gauge gives Prometheus a
+    /// direct alertable signal for degraded state.
+    pub client_ws_disabled: IntGauge,
     /// Forwarded RTP packets, labelled by `kind` = audio | video | other.
     pub forwarded_packets_total: IntCounterVec,
     /// Layer selection events per simulcast tier, `layer` = q | h | f.
@@ -158,16 +170,31 @@ impl SfuMetrics {
 
         let active_rooms = reg!(IntGauge::with_opts(Opts::new(
             "active_rooms",
-            "Currently active rooms (always 1 in M1.5)",
+            "1 if the SFU registry has at least one client, 0 otherwise. \
+             Single-room SFU; wired by Registry::insert / reap_dead / \
+             evict_for_steal. Defaults to 0 (registry starts empty).",
         ))
         .context("active_rooms")?);
-        active_rooms.set(1);
+        // Defaults to 0 (gauge zero-init). Do NOT set(1) here — the
+        // 2026-05-06 motherly1 outage post-mortem identified the
+        // hardcoded init value as a silent-fail trap that masked a
+        // misconfigured client_ws gate for 8 weeks.
 
         let active_participants = reg!(IntGauge::with_opts(Opts::new(
             "active_participants",
             "Live client count",
         ))
         .context("active_participants")?);
+
+        let client_ws_disabled = reg!(IntGauge::with_opts(Opts::new(
+            "client_ws_disabled",
+            "1 if browser WebSocket API is disabled at startup \
+             (e.g. SIGNALING_SFU_SECRET unset), 0 if active",
+        ))
+        .context("client_ws_disabled")?);
+        // Default 0 (active). main.rs flips to 1 on the degraded path
+        // (SIGNALING_SFU_SECRET missing) and explicitly sets 0 when the
+        // client_ws task spawns successfully.
 
         let forwarded_packets_total = reg!(IntCounterVec::new(
             Opts::new(
@@ -334,6 +361,7 @@ impl SfuMetrics {
             registry: Arc::new(registry),
             active_rooms,
             active_participants,
+            client_ws_disabled,
             forwarded_packets_total,
             layer_selection_total,
             dominant_speaker_changes_total,
@@ -379,5 +407,51 @@ impl SfuMetrics {
 impl Default for SfuMetrics {
     fn default() -> Self {
         Self::new().expect("SfuMetrics::new at startup")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Incident 2026-05-06: `active_rooms` was `set(1)` at registry init
+    /// and never updated. Reviewer surfaced the hardcoded-constant gauge
+    /// in the post-mortem bundle. Default must now be 0 — actual room
+    /// presence is wired by `Registry::insert` / `reap_dead` /
+    /// `evict_for_steal`.
+    #[test]
+    fn active_rooms_defaults_to_zero() {
+        let m = SfuMetrics::new().expect("metrics build");
+        assert_eq!(
+            m.active_rooms.get(),
+            0,
+            "active_rooms must default to 0 — single-room SFU sets it to 1 \
+             only when first client is inserted; the legacy hardcoded set(1) \
+             at init masked feature-gate misconfigurations (see 2026-05-06 \
+             motherly1 outage post-mortem)."
+        );
+    }
+
+    /// Incident 2026-05-06: `SIGNALING_SFU_SECRET` was missing in compose
+    /// for 8 weeks; only signal was a `tracing::info!` line. New gauge
+    /// `sfu_client_ws_disabled` (0 active / 1 disabled) lets Prometheus
+    /// alert on degraded state directly.
+    #[test]
+    fn client_ws_disabled_gauge_defaults_to_zero_and_is_in_registry() {
+        let m = SfuMetrics::new().expect("metrics build");
+        assert_eq!(
+            m.client_ws_disabled.get(),
+            0,
+            "client_ws_disabled must default to 0 (active) so the series \
+             exists from startup and main.rs can flip to 1 only on the \
+             degraded path."
+        );
+
+        let text = m.encode_text().expect("encode metrics");
+        assert!(
+            text.contains("sfu_client_ws_disabled"),
+            "sfu_client_ws_disabled must be reachable via /metrics scrape, \
+             got:\n{text}",
+        );
     }
 }

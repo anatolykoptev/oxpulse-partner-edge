@@ -186,12 +186,23 @@ async fn main() -> anyhow::Result<()> {
             host_candidate_addr,
             metrics.clone(),
         )?;
+        // Explicit 0 — gauge defaults to 0 in the registry but keep the
+        // active-path write so the relationship is grep-able.
+        metrics.client_ws_disabled.set(0);
         tracing::info!(addr = %client_ws_addr, "client_ws API listening (Phase 7 M4.A1+M4.A2)");
         (Some(client_inject_rx), Some(handle))
     } else {
-        tracing::info!(
+        // Bump the gauge BEFORE the warn log so any /metrics scrape that
+        // races the startup banner already sees the degraded state.
+        // 2026-05-06 motherly1 outage post-mortem — info! was lost in
+        // normal-operation log streams for 8 weeks; warn! plus gauge
+        // makes the misconfiguration alertable.
+        metrics.client_ws_disabled.set(1);
+        tracing::warn!(
             "SIGNALING_SFU_SECRET not set — client_ws API disabled \
-             (Phase 7 M4.A1 requires HS256 secret for browser auth)"
+             (Phase 7 M4.A1 requires HS256 secret for browser auth). \
+             Browser-side group calls will fail. Set the secret in \
+             docker-compose.yml.tpl under sfu service environment."
         );
         (None, None)
     };

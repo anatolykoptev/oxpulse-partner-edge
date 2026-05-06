@@ -40,8 +40,12 @@ LABEL oxpulse.version="${VERSION}"
 
 # ca-certificates for outbound TLS (backend liveness probes in M2.3);
 # wget for compose healthcheck against /metrics.
+# netcat-openbsd (`nc -z`) for TCP-connect probes against the client_ws
+# (:8920) and relay-API (:8912) listeners — added 2026-05-06 after the
+# motherly1 outage post-mortem found that probing only :METRICS_PORT
+# kept the container green for 8 weeks while client_ws was disabled.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates wget \
+ && apt-get install -y --no-install-recommends ca-certificates wget netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /binary /usr/local/bin/oxpulse-sfu
@@ -54,7 +58,14 @@ ENV RUST_LOG=info \
 # UDP media port + TCP metrics port (documented; actual bind happens at runtime).
 EXPOSE 7878/udp 8878/tcp
 
+# 2026-05-06 post-mortem: the bare /metrics probe stayed green even when
+# the client_ws (:8920) and relay-API (:8912) listeners failed to bind
+# because their feature-gate env vars were missing. Probe all three
+# planes so a misconfigured deploy fails healthcheck immediately.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD wget -qO- "http://127.0.0.1:${SFU_METRICS_PORT}/metrics" >/dev/null 2>&1 || exit 1
+  CMD wget -qO- "http://127.0.0.1:${SFU_METRICS_PORT}/metrics" >/dev/null 2>&1 \
+   && nc -z 127.0.0.1 8920 \
+   && nc -z 127.0.0.1 8912 \
+   || exit 1
 
 ENTRYPOINT ["/usr/local/bin/oxpulse-sfu"]

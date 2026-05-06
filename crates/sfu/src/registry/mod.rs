@@ -169,6 +169,10 @@ impl Registry {
         self.detector.add_peer(peer_id, now_ms);
         self.metrics.client_connect_total.inc();
         self.metrics.active_participants.inc();
+        // Single-room SFU: any client present means the room is active.
+        // Idempotent — `set(1)` on second insert is a no-op.
+        // (Post-mortem 2026-05-06: previously hardcoded at init.)
+        self.metrics.active_rooms.set(1);
         self.clients.push(client);
         // Emit a codec-capability hint so relay layers or application code can
         // inform the new peer that this SFU supports Opus RED / DRED.
