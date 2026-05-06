@@ -49,7 +49,7 @@ impl Client {
         let Some(budget) = budget_bps else {
             return Some(self.desired_layer);
         };
-        if pacer.should_forward_audio_only(budget) {
+        if pacer.check_audio_only_stateful(self.id, budget) {
             return None;
         }
         let chosen = pacer.preferred_rid(self.id, budget, available_rids)?;

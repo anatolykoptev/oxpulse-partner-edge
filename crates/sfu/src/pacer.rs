@@ -19,8 +19,12 @@
 //! bitrate floors and the budget→tier mapping are inlined in this file;
 //! this module owns the stateful hysteresis machine.
 //!
-//! Below [`AUDIO_ONLY_THRESHOLD_BPS`] the pacer signals *audio-only*
-//! via [`Pacer::should_forward_audio_only`] (Dynacast).
+//! Below [`AUDIO_ONLY_THRESHOLD_BPS`] the pacer signals *audio-only* in the
+//! hot fanout path via [`Pacer::check_audio_only_stateful`] (Dynacast),
+//! which is debounced by [`SUSPEND_STREAK_EDGE`] to ignore single TWCC
+//! spikes. The stateless [`Pacer::should_forward_audio_only`] is kept
+//! for threshold-boundary unit tests only — do not call it from the hot
+//! path (F6-9 parity fix with kit's `SUSPEND_STREAK`).
 //!
 //! Previously split across `pacer/mod.rs`, `pacer/ladder.rs`, and
 //! `pacer/tests.rs`; merged into a single file in Task 11 to remove
@@ -51,6 +55,12 @@ pub const AUDIO_ONLY_THRESHOLD_BPS: u64 = 100_000;
 /// Consecutive at-or-above-floor observations required before the
 /// pacer will upgrade to a higher tier. Downgrades are immediate.
 pub const UPGRADE_CONSECUTIVE: u32 = 3;
+
+/// Number of consecutive sub-[`AUDIO_ONLY_THRESHOLD_BPS`] ticks required to
+/// transition into audio-only state. Mirrors kit-side `SUSPEND_STREAK`
+/// (`oxpulse-sfu-kit/src/bwe/mod.rs`). Single TWCC spikes below threshold
+/// must not flap the FSM. F6-9 parity fix.
+pub const SUSPEND_STREAK_EDGE: u32 = 2;
 
 // ── ladder (pure functions) ───────────────────────────────────────────────────
 
@@ -109,6 +119,10 @@ struct PerSubscriber {
     /// Cached "candidate higher tier" — `consecutive_up` is counted
     /// against this. Reset when it changes.
     candidate_up: Option<Rid>,
+    /// Consecutive ticks observed below [`AUDIO_ONLY_THRESHOLD_BPS`]. Reset to 0
+    /// when budget recovers above threshold. Used to debounce the audio-only
+    /// entry transition by [`SUSPEND_STREAK_EDGE`] (F6-9).
+    consecutive_below: u32,
 }
 
 /// Per-subscriber rate shaper. One instance lives on [`crate::Registry`].
@@ -192,8 +206,32 @@ impl Pacer {
     /// True when the subscriber's budget is below the audio-only
     /// threshold. Callers drop video forwarding entirely for that
     /// subscriber and keep Opus audio flowing.
+    ///
+    /// **Stateless.** Does not debounce — use [`Pacer::check_audio_only_stateful`]
+    /// in the hot forwarding path; this variant is kept for threshold-boundary
+    /// tests that verify the constant itself (e.g. `hard_red_migration`).
     pub fn should_forward_audio_only(&self, budget_bps: u64) -> bool {
         budget_bps < AUDIO_ONLY_THRESHOLD_BPS
+    }
+
+    /// Stateful audio-only gate with [`SUSPEND_STREAK_EDGE`] debounce (F6-9).
+    ///
+    /// Requires [`SUSPEND_STREAK_EDGE`] *consecutive* ticks below
+    /// [`AUDIO_ONLY_THRESHOLD_BPS`] before returning `true`. A single TWCC
+    /// spike below threshold returns `false` and increments an internal
+    /// counter; recovery above threshold resets the counter to 0.
+    ///
+    /// Use this in the hot per-subscriber forwarding path
+    /// ([`Client::pacer_select_layer`]) instead of [`should_forward_audio_only`].
+    pub fn check_audio_only_stateful(&mut self, subscriber: ClientId, budget_bps: u64) -> bool {
+        let state = self.subs.entry(subscriber).or_default();
+        if budget_bps < AUDIO_ONLY_THRESHOLD_BPS {
+            state.consecutive_below = state.consecutive_below.saturating_add(1);
+            state.consecutive_below >= SUSPEND_STREAK_EDGE
+        } else {
+            state.consecutive_below = 0;
+            false
+        }
     }
 
     /// Drop subscriber state on disconnect.
@@ -330,5 +368,53 @@ mod tests {
         assert_eq!(pacer.len(), 1);
         pacer.remove(&client(1));
         assert_eq!(pacer.len(), 0);
+    }
+
+    // ── F6-9 SUSPEND_STREAK tests ─────────────────────────────────────────────
+
+    /// Single tick below threshold must NOT trigger audio-only.
+    /// Second consecutive tick below threshold MUST trigger audio-only.
+    /// Verifies SUSPEND_STREAK_EDGE = 2 debounce.
+    #[test]
+    fn single_spike_does_not_suspend() {
+        use super::SUSPEND_STREAK_EDGE;
+        let mut pacer = Pacer::new();
+        let sub = client(10);
+
+        // First tick below threshold — streak = 1, must NOT enter audio-only.
+        let first = pacer.check_audio_only_stateful(sub, 50_000);
+        assert!(
+            !first,
+            "single tick below threshold must not trigger audio-only \
+             (SUSPEND_STREAK_EDGE={SUSPEND_STREAK_EDGE} requires consecutive ticks)",
+        );
+
+        // Second consecutive tick below threshold — streak = 2 ≥ SUSPEND_STREAK_EDGE.
+        let second = pacer.check_audio_only_stateful(sub, 50_000);
+        assert!(
+            second,
+            "second consecutive tick below threshold must trigger audio-only \
+             (streak has reached SUSPEND_STREAK_EDGE={SUSPEND_STREAK_EDGE})",
+        );
+    }
+
+    /// Recovery tick (above threshold) must reset the streak counter.
+    /// After recovery, a single below-threshold tick must NOT suspend again.
+    #[test]
+    fn recovery_resets_streak() {
+        let mut pacer = Pacer::new();
+        let sub = client(11);
+
+        // streak = 1
+        pacer.check_audio_only_stateful(sub, 50_000);
+        // budget recovers above threshold — streak reset to 0
+        pacer.check_audio_only_stateful(sub, 200_000);
+        // streak = 1 again — NOT 2, so audio-only must NOT be entered
+        let after_recovery = pacer.check_audio_only_stateful(sub, 50_000);
+        assert!(
+            !after_recovery,
+            "single below-threshold tick after recovery must not suspend \
+             (streak was reset by the above-threshold observation)",
+        );
     }
 }
