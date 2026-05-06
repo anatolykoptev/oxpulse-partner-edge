@@ -85,11 +85,25 @@ async fn reap_dead_scrubs_per_peer_bwe_labels() {
 #[tokio::test]
 async fn layer_transitions_total_increments_on_layer_change() {
     // M6.1: verify sfu_layer_transitions_total fires when a subscriber's
-    // chosen simulcast layer changes between two pacer refresh calls.
+    // chosen simulcast layer changes between pacer refresh calls.
     //
-    // Strategy: subscriber starts at LOW (default). Drive bandwidth to
-    // F_FLOOR_BPS (1.5 Mbps) so the second pacer refresh picks HIGH.
-    // The transition (q → f) must appear in the scraped metrics body.
+    // Strategy: subscriber starts at LOW (default). Drive native estimate to
+    // 2 Mbps and refresh UPGRADE_CONSECUTIVE times so the pacer accumulates a
+    // promotion streak.
+    //
+    // Why the asserted transition is q→h (not q→f):
+    //   The pacer alone WOULD jump directly to f after a streak — `tier_for_budget`
+    //   returns HIGH for budget ≥ F_FLOOR_BPS (1.5 Mbps), and after
+    //   UPGRADE_CONSECUTIVE matching observations the pacer sets `current = target`
+    //   directly (no stair-step in `pacer.rs::preferred_rid`).
+    //   BUT `update_pacer_layers` in `bwe.rs` then conservatively caps the
+    //   pacer's choice with GoogCC's `preferred_rid`. GoogCC's AimdController
+    //   starts at the kit-default initial rate (~500 kbps), which corresponds
+    //   to MEDIUM. The conservative-merge picks `min(pacer, googcc) = h`.
+    //   Hence the observable transition lands at h, not f.
+    //   If the kit's GoogCC initial rate is ever raised above F_FLOOR_BPS,
+    //   this test will need to be updated (the q→h assertion would silently
+    //   become q→f).
     let (port, _handle, metrics) = bind_metrics_server();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -107,8 +121,12 @@ async fn layer_transitions_total_increments_on_layer_change() {
 
     // Drive B's bandwidth well above the HIGH tier floor (1.5 Mbps).
     registry.drive_subscriber_bandwidth_for_tests(ClientId(301), 2_000_000);
-    // Second refresh: chosen layer should now be HIGH (f), triggering q→f.
-    registry.force_pacer_refresh_for_tests(ClientId(300));
+
+    // Pacer requires UPGRADE_CONSECUTIVE consecutive observations of the same
+    // upgrade target before promoting; refresh that many times so q→h fires.
+    for _ in 0..oxpulse_sfu::pacer::UPGRADE_CONSECUTIVE {
+        registry.force_pacer_refresh_for_tests(ClientId(300));
+    }
 
     let body = timeout(Duration::from_secs(3), scrape(port))
         .await
@@ -118,7 +136,7 @@ async fn layer_transitions_total_increments_on_layer_change() {
     assert!(
         body.contains("sfu_layer_transitions_total")
             && body.contains(r#"from="q""#)
-            && body.contains(r#"to="f""#),
-        "layer transition q→f counter present:\n{body}",
+            && body.contains(r#"to="h""#),
+        "layer transition q→h counter present:\n{body}",
     );
 }
