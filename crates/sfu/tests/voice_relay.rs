@@ -360,6 +360,82 @@ fn voice_relay_active_channels_gauge_decremented() {
     );
 }
 
+// ── 10. buffered_amount_too_high drop ─────────────────────────────────────────
+
+/// Verify that when a subscriber's voice DC outbound buffer is above
+/// `VOICE_BUFFERED_AMOUNT_MAX` the frame is dropped with the
+/// `buffered_amount_too_high` reason and sibling subscribers still receive
+/// normally (selective drop, not blanket failure).
+///
+/// The test drives `buffered_amount` via the test-seam override
+/// (`set_buffered_amount_for_tests`) because str0m's SCTP association is not
+/// live in unit tests — `ch.buffered_amount()` always returns 0 without a
+/// real DTLS handshake.
+#[test]
+fn voice_relay_drops_when_subscriber_buffered_amount_too_high() {
+    // Client 40 = sender, Client 41 = overloaded subscriber, Client 42 = healthy subscriber.
+    let mut clients = vec![
+        new_client(ClientId(40)),
+        new_client(ClientId(41)),
+        new_client(ClientId(42)),
+    ];
+
+    // Drive client 41's buffered_amount above VOICE_BUFFERED_AMOUNT_MAX (64 KiB).
+    clients[1].set_buffered_amount_for_tests(70_000);
+
+    let before_high = clients[1]
+        .metrics_for_tests()
+        .voice_relay_dropped
+        .with_label_values(&["buffered_amount_too_high"])
+        .get();
+
+    // dc_closed counter for client 42 before fanout (baseline).
+    let before_dc_closed_sub2 = clients[2]
+        .metrics_for_tests()
+        .voice_relay_dropped
+        .with_label_values(&["dc_closed"])
+        .get();
+
+    let frame = vec![0u8; 12];
+    fanout_for_tests(&Propagated::VoiceData(ClientId(40), frame), &mut clients);
+
+    // Client 41 must emit exactly 1 buffered_amount_too_high drop.
+    let after_high = clients[1]
+        .metrics_for_tests()
+        .voice_relay_dropped
+        .with_label_values(&["buffered_amount_too_high"])
+        .get();
+    assert_eq!(
+        after_high,
+        before_high + 1,
+        "overloaded subscriber must emit buffered_amount_too_high drop"
+    );
+
+    // Client 42 (healthy) reaches the write path — no live DTLS so dc_closed fires,
+    // not buffered_amount_too_high. This confirms the fanout reached it normally.
+    let after_dc_closed_sub2 = clients[2]
+        .metrics_for_tests()
+        .voice_relay_dropped
+        .with_label_values(&["dc_closed"])
+        .get();
+    assert_eq!(
+        after_dc_closed_sub2,
+        before_dc_closed_sub2 + 1,
+        "healthy subscriber must still receive relay attempt (dc_closed, not buffered_too_high)"
+    );
+
+    // Sender (id=40) must not emit any drop.
+    let sender_buffered_drop = clients[0]
+        .metrics_for_tests()
+        .voice_relay_dropped
+        .with_label_values(&["buffered_amount_too_high"])
+        .get();
+    assert_eq!(
+        sender_buffered_drop, 0,
+        "sender must not emit buffered_amount_too_high (self-skip)"
+    );
+}
+
 // ── 9. cardinality scrub on disconnect ────────────────────────────────────────
 
 #[test]

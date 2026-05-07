@@ -58,6 +58,8 @@ impl Client {
             delivered_active_speaker: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-utils"))]
             last_active_speaker_payload: std::sync::Mutex::new(None),
+            #[cfg(any(test, feature = "test-utils"))]
+            buffered_amount_override: None,
             active_speaker_cid,
             chat_data_cid: None,
             chat_ctrl_cid: None,

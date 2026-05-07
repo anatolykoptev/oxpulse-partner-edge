@@ -178,6 +178,13 @@ pub struct Client {
     /// When set, EdDSA verification is preferred over HS256.
     /// Loaded from SFU_SIGNING_PUBLIC_KEY at startup.
     pub(crate) relay_signing_pubkey: Option<Arc<String>>,
+    /// Test-only: override the value returned by `ch.buffered_amount()` in
+    /// `handle_voice_data_out`. Necessary because str0m's SCTP association is
+    /// not live in unit tests — `buffered_amount()` always returns 0 without a
+    /// real DTLS handshake, so the backpressure branch can never be reached
+    /// via the real path. Set via [`Client::set_buffered_amount_for_tests`].
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) buffered_amount_override: Option<usize>,
     /// RFC 9626 VFM temporal-layer cap for this subscriber.
     /// Packets at a temporal layer higher than this are dropped before
     /// forwarding. `u8::MAX` means "no cap" (forward all layers).
