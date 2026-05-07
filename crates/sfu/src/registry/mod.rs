@@ -245,6 +245,23 @@ impl Registry {
                 .chat_relay_rx_bytes_total
                 .remove_label_values(&[dc, &peer_label]);
         }
+        // Phase 8 T10: drop voice_relay_{tx,rx}_bytes_total{client_id} series,
+        // mirroring the reap_dead scrub path for the same cardinality invariant.
+        let _ = self
+            .metrics
+            .voice_relay_tx_bytes_total
+            .remove_label_values(&[&peer_label]);
+        let _ = self
+            .metrics
+            .voice_relay_rx_bytes_total
+            .remove_label_values(&[&peer_label]);
+        // MAJOR-2: mirror the reap_dead gauge dec for the session-steal path.
+        if old.voice_data_cid.is_some() {
+            self.metrics
+                .voice_relay_active_channels
+                .with_label_values(&["voice"])
+                .dec();
+        }
 
         self.metrics.client_disconnect_total.inc();
         self.metrics.active_participants.dec();

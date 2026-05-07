@@ -282,6 +282,17 @@ impl Registry {
                 // pacer's `available_rids` input — pass the origin through
                 // so update_pacer_layers can look them up.
                 Propagated::MediaData(origin, _) => self.update_pacer_layers(*origin),
+                // Phase 8 T10: increment rx bytes for the sender before
+                // fan-out to subscribers. This is the authoritative
+                // receive-side counter — emitted once per frame regardless
+                // of how many subscribers receive it.
+                Propagated::VoiceData(sender_id, payload) => {
+                    let label = sender_id.0.to_string();
+                    self.metrics
+                        .voice_relay_rx_bytes_total
+                        .with_label_values(&[&label])
+                        .inc_by(payload.len() as u64);
+                }
                 _ => {}
             }
             fanout(&p, &mut self.clients);

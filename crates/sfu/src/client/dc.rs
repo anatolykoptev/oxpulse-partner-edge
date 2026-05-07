@@ -37,6 +37,21 @@ const CHAT_DATA_CHANNEL_LABEL: &str = "chat-data";
 /// Label of the pre-negotiated Phase 2b unreliable chat control channel.
 const CHAT_CTRL_CHANNEL_LABEL: &str = "chat-ctrl";
 
+/// Label of the pre-negotiated Phase 8 T10 voice DC.
+const VOICE_CHANNEL_LABEL: &str = "voice";
+
+/// Maximum accepted voice payload size in bytes.
+/// Mirrors [`super::voice::VOICE_FRAME_MAX_BYTES`] — replicated as a private
+/// constant for defence-in-depth at the inbound gate.
+const VOICE_FRAME_MAX_BYTES: usize = 64 * 1024;
+
+// NIT-2: compile-time guard — fail to compile if dc.rs and voice.rs drift.
+// If you change VOICE_FRAME_MAX_BYTES in either file, update both.
+const _: () = assert!(
+    VOICE_FRAME_MAX_BYTES == super::voice::VOICE_FRAME_MAX_BYTES,
+    "VOICE_FRAME_MAX_BYTES in dc.rs and voice.rs must stay in sync"
+);
+
 /// Maximum accepted chat-data / chat-ctrl payload size in bytes. Matches
 /// the client-side wire codec's hard cap (`web/src/lib/_kit/wire-codec.ts`
 /// 256 KB envelope bomb cap). Larger frames are dropped at the SFU edge
@@ -165,6 +180,21 @@ pub(super) fn handle_channel_data(
         return Propagated::ChatCtrl(client_id, data.to_vec());
     }
 
+    // Phase 8 T10: voice DC (id:6). Opaque binary payload — pass through
+    // without parsing (SFU never decodes voice frames). Size cap is
+    // defence-in-depth; well-formed codec frames are well under 64 KB.
+    if label == VOICE_CHANNEL_LABEL {
+        if data.len() > VOICE_FRAME_MAX_BYTES {
+            tracing::warn!(
+                client = *client_id,
+                len = data.len(),
+                "voice DC: frame exceeds size cap, dropping"
+            );
+            return Propagated::Noop;
+        }
+        return Propagated::VoiceData(client_id, data.to_vec());
+    }
+
     if label != BUDGET_CHANNEL_LABEL {
         return Propagated::Noop;
     }
@@ -182,7 +212,7 @@ pub(super) fn handle_channel_data(
 
     // VFM temporal-layer cap: `{ "type": "max_temporal_layer", "vfm": N }`.
     #[cfg(feature = "vfm")]
-    if extract_str_value(text, "type").as_deref() == Some("max_temporal_layer") {
+    if extract_str_value(text, "type") == Some("max_temporal_layer") {
         match extract_num_value(text, "vfm") {
             Some(max_tid) => return Propagated::VfmLayerCap(client_id, max_tid as u8),
             None => {

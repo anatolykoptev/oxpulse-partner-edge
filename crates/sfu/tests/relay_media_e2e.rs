@@ -8,9 +8,9 @@
 //!    two-hop fanout path through two independent Registry instances.  SFU-1
 //!    has peer A + an outbound relay client; SFU-2 has the inbound relay
 //!    client (receiving A's media) + peer B.  We verify:
-//!      a. A's media fans out to the relay client on SFU-1 (the relay picks it
-//!         up to forward upstream).
-//!      b. Media from the relay's inbound counterpart on SFU-2 fans out to B.
+//!
+//!    a. A's media fans out to the relay client on SFU-1.
+//!    b. Media from the relay's inbound counterpart on SFU-2 fans out to B.
 //!    NOTE: the two Registries are not wire-connected — what we test is the
 //!    correct subscription wiring on each SFU independently, which is the
 //!    part that the relay construction code (T2-T5) is responsible for.

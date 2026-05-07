@@ -98,13 +98,35 @@ impl Client {
                     .channel(id)
                     .and_then(|ch| ch.config().map(|c| c.label.clone()))
                     .unwrap_or_default();
-                dc::handle_channel_data(
+                let result = dc::handle_channel_data(
                     self.id,
                     &label,
                     &data,
                     self.relay_auth_secret.as_deref(),
                     self.relay_signing_pubkey.as_deref().map(|s| s.as_str()),
-                )
+                );
+                // MAJOR-1: inbound oversize voice frame — emit the
+                // `frame_malformed` drop counter at the dispatch callsite.
+                // `handle_channel_data` returns Noop for voice-channel
+                // oversize (defence-in-depth gate in dc.rs:~180) without
+                // touching metrics because that function is pure (no metrics
+                // param). The label is already resolved here, so this is the
+                // cheapest place to close the gap. Adversarial senders that
+                // flood > 64 KB frames are now visible to alerting.
+                if label == "voice" && matches!(result, Propagated::Noop) {
+                    // Only emit when data actually exceeds the cap — if
+                    // handle_channel_data returned Noop for a different reason
+                    // (e.g. the VoiceData payload was fine but some other branch
+                    // rejected it) we would over-count. Guard with the same
+                    // constant used inside dc.rs.
+                    if data.len() > super::voice::VOICE_FRAME_MAX_BYTES {
+                        self.metrics
+                            .voice_relay_dropped
+                            .with_label_values(&["frame_malformed"])
+                            .inc();
+                    }
+                }
+                result
             }
             _ => Propagated::Noop,
         }
