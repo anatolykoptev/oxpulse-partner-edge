@@ -45,6 +45,13 @@ const VOICE_CHANNEL_LABEL: &str = "voice";
 /// constant for defence-in-depth at the inbound gate.
 const VOICE_FRAME_MAX_BYTES: usize = 64 * 1024;
 
+// NIT-2: compile-time guard — fail to compile if dc.rs and voice.rs drift.
+// If you change VOICE_FRAME_MAX_BYTES in either file, update both.
+const _: () = assert!(
+    VOICE_FRAME_MAX_BYTES == super::voice::VOICE_FRAME_MAX_BYTES,
+    "VOICE_FRAME_MAX_BYTES in dc.rs and voice.rs must stay in sync"
+);
+
 /// Maximum accepted chat-data / chat-ctrl payload size in bytes. Matches
 /// the client-side wire codec's hard cap (`web/src/lib/_kit/wire-codec.ts`
 /// 256 KB envelope bomb cap). Larger frames are dropped at the SFU edge

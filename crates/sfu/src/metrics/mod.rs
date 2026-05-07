@@ -163,7 +163,8 @@ pub struct SfuMetrics {
     /// Label: `client_id` (sender/origin). Scrubbed on disconnect.
     pub voice_relay_rx_bytes_total: IntCounterVec,
     /// Phase 8 T10: voice DC relay frames dropped at the SFU edge.
-    /// Label: `reason` ∈ `{no_channel, oversize, write_err}`.
+    /// Label: `reason` ∈ `{subscriber_dc_not_open, buffered_amount_too_high,
+    /// frame_malformed, dc_closed, dc_send_failed}`.
     pub voice_relay_dropped: IntCounterVec,
     /// Phase 8 T10: gauge of currently-open voice DCs.
     /// Label: `dc=voice` (single value, matches chat-relay schema for
@@ -408,13 +409,24 @@ impl SfuMetrics {
             Opts::new(
                 "voice_relay_dropped_total",
                 "Phase 8 T10: voice DC relay frames dropped at the SFU edge. \
-                 Label: reason ∈ {no_channel, oversize, write_err}.",
+                 Label: reason ∈ {subscriber_dc_not_open, buffered_amount_too_high, \
+                 frame_malformed, dc_closed, dc_send_failed}.",
             ),
             &["reason"],
         )
         .context("voice_relay_dropped_total")?);
-        // Pre-touch every reason label so alert rules see a baseline of 0.
-        for reason in ["no_channel", "oversize", "write_err"] {
+        // Pre-touch every reason label so alert rules see a baseline of 0
+        // instead of an absent series. Label values are spec-mandated:
+        // subscriber_dc_not_open / buffered_amount_too_high / frame_malformed
+        // are from the original spec; dc_closed / dc_send_failed are
+        // partner-edge additions for operational observability.
+        for reason in [
+            "subscriber_dc_not_open",
+            "buffered_amount_too_high",
+            "frame_malformed",
+            "dc_closed",
+            "dc_send_failed",
+        ] {
             let _ = voice_relay_dropped.with_label_values(&[reason]).get();
         }
 

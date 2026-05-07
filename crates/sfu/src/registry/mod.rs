@@ -255,6 +255,13 @@ impl Registry {
             .metrics
             .voice_relay_rx_bytes_total
             .remove_label_values(&[&peer_label]);
+        // MAJOR-2: mirror the reap_dead gauge dec for the session-steal path.
+        if old.voice_data_cid.is_some() {
+            self.metrics
+                .voice_relay_active_channels
+                .with_label_values(&["voice"])
+                .dec();
+        }
 
         self.metrics.client_disconnect_total.inc();
         self.metrics.active_participants.dec();
