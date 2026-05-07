@@ -30,7 +30,7 @@ fn make_pending_relay(label: &str) -> PendingRelay {
     PendingRelay {
         rtc,
         room_id: "fanout-test".to_string(),
-        upstream_url: format!("wss://eu.oxpulse.chat/ws/sfu/fanout-test"),
+        upstream_url: "wss://eu.oxpulse.chat/ws/sfu/fanout-test".to_string(),
         upstream_room_token: "tok".to_string(),
         dc_id,
     }

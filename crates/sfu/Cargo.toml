@@ -17,7 +17,7 @@ path = "src/main.rs"
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
 dominant-speaker = { package = "rust-dominant-speaker", version = "0.3" }
-oxpulse-sfu-kit = { version = "0.9", features = [
+oxpulse-sfu-kit = { version = "0.10", features = [
     "active-speaker",
     "metrics-prometheus",
     "kalman-bwe",
@@ -123,4 +123,11 @@ name = "relay_chat_e2e"
 # Phase 2b — uses `client::test_seed::new_client` and the
 # `fanout::fanout_for_tests` seam to drive ChatData / ChatCtrl through
 # the per-peer relay path without a live DTLS pipeline.
+required-features = ["test-utils"]
+
+[[test]]
+name = "voice_relay"
+# Phase 8 T10 — uses `client::test_seed::new_client` and the
+# `fanout::fanout_for_tests` seam to drive VoiceData through the
+# per-peer voice relay path without a live DTLS pipeline.
 required-features = ["test-utils"]
