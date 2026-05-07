@@ -158,6 +158,23 @@ impl Registry {
                         .with_label_values(&["voice"])
                         .dec();
                 }
+                // chat gauge dec — mirror voice path (followup to T10 MAJOR-2).
+                // with_chat_dcs increments both {data} and {ctrl} on open;
+                // decrement both here on reap. Only decrement when the client
+                // called with_chat_dcs — relay-origin clients that skipped it
+                // have chat_data_cid == None and never inc'd the gauge.
+                if c.chat_data_cid.is_some() {
+                    metrics
+                        .chat_relay_active_channels
+                        .with_label_values(&["data"])
+                        .dec();
+                }
+                if c.chat_ctrl_cid.is_some() {
+                    metrics
+                        .chat_relay_active_channels
+                        .with_label_values(&["ctrl"])
+                        .dec();
+                }
             }
             alive
         });

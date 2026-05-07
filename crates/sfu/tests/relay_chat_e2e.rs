@@ -26,10 +26,18 @@
 //!     `chat_relay_dropped_total{reason=no_channel}`. That's the SAME
 //!     code path live traffic exercises during the DTLS handshake
 //!     window, just observed without a real wire.
+//!   * Gauge dec: `chat_relay_active_channels{dc}` returns to its
+//!     pre-open value after `reap_dead` and after `evict_for_steal`
+//!     (followup to T10 MAJOR-2 fix for voice gauge).
+
+use std::sync::Arc;
 
 use oxpulse_sfu::client::test_seed::new_client;
 use oxpulse_sfu::fanout::fanout_for_tests;
-use oxpulse_sfu::{client::Client, ClientId, Propagated};
+use oxpulse_sfu::metrics::SfuMetrics;
+use oxpulse_sfu::propagate::ClientId;
+use oxpulse_sfu::registry::Registry;
+use oxpulse_sfu::{client::Client, Propagated};
 
 /// Sum a `chat_relay_dropped_total{dc, reason}` series across every
 /// client's per-instance Prometheus registry. `test_seed::new_client`
@@ -159,4 +167,143 @@ fn each_client_opens_chat_dcs_at_construction() {
     // owns the pair. The fanout test above already proves the per-peer
     // write path picks them up.
     drop((c1, c2));
+}
+
+// ── chat_relay_active_channels gauge dec on disconnect ────────────────────────
+//
+// Mirrors `voice_relay_active_channels_gauge_decremented` in voice_relay.rs.
+// Tests the followup fix for the T10 MAJOR-2 pattern on the chat side:
+// `chat_relay_active_channels{dc="data"}` and `{dc="ctrl"}` must decrement
+// when a client is reaped or stolen so reconnect storms don't inflate gauges.
+
+#[test]
+fn chat_relay_active_channels_gauge_decremented_on_reap() {
+    let metrics = Arc::new(SfuMetrics::new().expect("metrics"));
+    let mut reg = Registry::new(metrics.clone());
+
+    let before_data = metrics
+        .chat_relay_active_channels
+        .with_label_values(&["data"])
+        .get();
+    let before_ctrl = metrics
+        .chat_relay_active_channels
+        .with_label_values(&["ctrl"])
+        .get();
+
+    // Insert a client with chat DCs — with_chat_dcs increments both gauges.
+    {
+        let rtc = str0m::Rtc::builder().build(std::time::Instant::now());
+        let c = oxpulse_sfu::client::Client::new(rtc, metrics.clone()).with_chat_dcs();
+        reg.insert(c);
+    }
+
+    let after_insert_data = metrics
+        .chat_relay_active_channels
+        .with_label_values(&["data"])
+        .get();
+    let after_insert_ctrl = metrics
+        .chat_relay_active_channels
+        .with_label_values(&["ctrl"])
+        .get();
+    assert_eq!(
+        after_insert_data,
+        before_data + 1,
+        "gauge{{data}} must increment on with_chat_dcs"
+    );
+    assert_eq!(
+        after_insert_ctrl,
+        before_ctrl + 1,
+        "gauge{{ctrl}} must increment on with_chat_dcs"
+    );
+
+    let client_id = reg.clients()[0].id;
+
+    // Disconnect and reap → both gauges must decrement back.
+    reg.disconnect_client_for_tests(client_id);
+    reg.reap_dead_for_tests();
+
+    let after_reap_data = metrics
+        .chat_relay_active_channels
+        .with_label_values(&["data"])
+        .get();
+    let after_reap_ctrl = metrics
+        .chat_relay_active_channels
+        .with_label_values(&["ctrl"])
+        .get();
+    assert_eq!(
+        after_reap_data, before_data,
+        "gauge{{data}} must decrement back to pre-insert value after reap_dead"
+    );
+    assert_eq!(
+        after_reap_ctrl, before_ctrl,
+        "gauge{{ctrl}} must decrement back to pre-insert value after reap_dead"
+    );
+}
+
+#[test]
+fn chat_relay_active_channels_gauge_decremented_on_steal() {
+    // evict_for_steal path: insert client A, then insert client B with the
+    // same external_peer_id so the registry steals the slot.
+    let metrics = Arc::new(SfuMetrics::new().expect("metrics"));
+    let mut reg = Registry::new(metrics.clone());
+
+    let before_data = metrics
+        .chat_relay_active_channels
+        .with_label_values(&["data"])
+        .get();
+    let before_ctrl = metrics
+        .chat_relay_active_channels
+        .with_label_values(&["ctrl"])
+        .get();
+
+    const EXT_PEER_ID: u64 = 9_999_001;
+
+    // Insert first client (will be evicted on the steal).
+    {
+        let rtc = str0m::Rtc::builder().build(std::time::Instant::now());
+        let c = oxpulse_sfu::client::Client::new(rtc, metrics.clone())
+            .with_chat_dcs()
+            .with_external_peer_id(EXT_PEER_ID);
+        reg.insert(c);
+    }
+
+    // Gauge must be +1 after first insert.
+    assert_eq!(
+        metrics
+            .chat_relay_active_channels
+            .with_label_values(&["data"])
+            .get(),
+        before_data + 1,
+        "gauge{{data}} must increment after first insert"
+    );
+
+    // Insert second client with same external_peer_id — triggers evict_for_steal.
+    {
+        let rtc = str0m::Rtc::builder().build(std::time::Instant::now());
+        let c = oxpulse_sfu::client::Client::new(rtc, metrics.clone())
+            .with_chat_dcs()
+            .with_external_peer_id(EXT_PEER_ID);
+        reg.insert(c);
+    }
+
+    // After steal: old client evicted (gauge -1 for old), new client inserted
+    // (gauge +1 for new). Net: still before+1.
+    let after_steal_data = metrics
+        .chat_relay_active_channels
+        .with_label_values(&["data"])
+        .get();
+    let after_steal_ctrl = metrics
+        .chat_relay_active_channels
+        .with_label_values(&["ctrl"])
+        .get();
+    assert_eq!(
+        after_steal_data,
+        before_data + 1,
+        "gauge{{data}} must be before+1 after steal (old dec + new inc = net 0 change)"
+    );
+    assert_eq!(
+        after_steal_ctrl,
+        before_ctrl + 1,
+        "gauge{{ctrl}} must be before+1 after steal (old dec + new inc = net 0 change)"
+    );
 }
