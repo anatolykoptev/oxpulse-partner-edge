@@ -191,6 +191,49 @@ possibility of future decryption.
   plaintext content persistently. Call content exists only in memory
   during active sessions.
 
+## Mesh underlay (AmneziaWG)
+
+Partner-edges optionally form a layer-3 mesh between themselves over
+AmneziaWG, an obfuscated WireGuard fork ([github.com/amnezia-vpn/amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go))
+that adds packet-shape randomization, junk-packet injection, and
+configurable handshake-magic obfuscation to defeat WireGuard
+fingerprinting at the DPI layer. The mesh is used for cascade-relay
+hand-off (Phase 7 SFU relay) and inter-partner control-plane
+heartbeats; it does **not** carry user media. SRTP frames remain
+end-to-end encrypted client-to-client and would not be decryptable by
+a compromised mesh peer.
+
+**Adversaries and properties:**
+
+- *Class A (network filtering).* AmneziaWG is the project's primary
+  defense against WireGuard-handshake fingerprint blocking observed in
+  Russian and Iranian DPI in 2024–2026. Each partner-edge derives
+  AmneziaWG `Jc/Jmin/Jmax/S1/S2/H1..H4` parameters per node from the
+  control-plane registration response, so no two partner-edges share
+  the same wire-shape signature.
+- *Class C (compromised partner operator).* A hostile partner that
+  joins the mesh sees only encrypted partner-to-partner control
+  packets and other partner-edges' source IPs. They do not see user
+  media (different cryptographic boundary) and they cannot inject
+  arbitrary peers (mesh peers are explicitly enumerated by the
+  control-plane registration; AmneziaWG enforces the static peer
+  set). The trust-scoring pipeline (Class C mitigations above) treats
+  AmneziaWG-layer anomalies (excessive heartbeat misses, peer-count
+  drift, unexpected cross-mesh traffic) as input signals.
+- *Class D (passive global observer).* AmneziaWG headers are
+  per-deployment-randomized, but a sufficiently capable global
+  observer with traffic-analysis capability can in principle correlate
+  encrypted flows by volume and timing. We do not claim resistance to
+  this class for the mesh layer; user media is end-to-end encrypted
+  independently of the mesh.
+
+**Out of scope for the mesh layer:** anonymizing the existence of the
+inter-partner connection itself. A peer in the mesh is a known
+operator with a registered public key; we do not attempt to hide the
+fact that two partner-edges are talking to each other. We do hide
+*what* they are saying (encrypted) and *what protocol the link runs*
+(AmneziaWG vs. plain WireGuard).
+
 ## Out of scope (residual risk)
 
 The following risks are acknowledged but are outside the protection
@@ -236,6 +279,7 @@ boundary of the partner-edge system:
 | Ratchet key exchange | X25519 + ChaCha20-Poly1305 | libsodium / ring |
 | Post-quantum tunnel layer | ML-KEM-768 | xray 26.x (NIST FIPS 203) |
 | Tunnel transport | VLESS + Reality + XHTTP | xray-core |
+| Mesh underlay (partner ↔ partner) | AmneziaWG (WireGuard + obfuscation params) | amnezia-vpn/amneziawg-go |
 | TLS / ACME | Caddy auto-TLS | TLS 1.3 (RFC 8446) |
 
 ## Assumptions
