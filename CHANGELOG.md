@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.11](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.10...partner-edge-v0.12.11) (2026-05-07)
+
+
+### Bug Fixes
+
+* **metrics:** chat_relay_active_channels gauge .dec() on disconnect ([#53](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/53)) ([eed61b9](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/eed61b9dcdda058dd40a068513364eb80186db4f))
+
 ## [0.12.10](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.9...partner-edge-v0.12.10) (2026-05-06)
 
 
