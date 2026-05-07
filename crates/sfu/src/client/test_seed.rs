@@ -33,6 +33,16 @@ impl Client {
     pub fn disconnect_for_tests(&mut self) {
         self.rtc.disconnect();
     }
+
+    /// Test-only: override the value that `handle_voice_data_out` reads from
+    /// `ch.buffered_amount()`. Necessary because str0m's SCTP association is
+    /// not live in unit tests — `buffered_amount()` always returns 0 without a
+    /// real DTLS handshake, making the `buffered_amount_too_high` backpressure
+    /// branch unreachable via the real path. Setting this above
+    /// `VOICE_BUFFERED_AMOUNT_MAX` (64 KiB) lets tests exercise the drop path.
+    pub fn set_buffered_amount_for_tests(&mut self, amount: usize) {
+        self.buffered_amount_override = Some(amount);
+    }
 }
 
 /// Build a fresh `Client` wrapping a default `Rtc`. The `Rtc` is

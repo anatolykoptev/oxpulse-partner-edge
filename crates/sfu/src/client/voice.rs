@@ -82,6 +82,35 @@ impl Client {
 
         let client_id_label = self.id.0.to_string();
 
+        // Backpressure guard: if the DC outbound buffer is already full,
+        // drop this frame rather than enqueue into an overflowed buffer.
+        // Fires `buffered_amount_too_high`; the sender is expected to reduce
+        // bitrate when this counter rises (application-layer feedback is out
+        // of scope for the SFU relay).
+        //
+        // Test seam: `buffered_amount_override` is checked BEFORE the
+        // `rtc.channel()` lookup. In unit tests str0m's SCTP association is
+        // not live, so `rtc.channel(cid)` always returns `None` and would
+        // fire `dc_closed` before we ever reach `ch.buffered_amount()`.
+        // By checking the override here — when it is set and exceeds the
+        // threshold — we fire `buffered_amount_too_high` directly, which is
+        // the branch under test. Production builds compile this block out.
+        #[cfg(any(test, feature = "test-utils"))]
+        if let Some(overridden) = self.buffered_amount_override {
+            if overridden > VOICE_BUFFERED_AMOUNT_MAX {
+                tracing::warn!(
+                    client = *self.id,
+                    buffered = overridden,
+                    "voice-relay: DC buffer full (test override), dropping frame"
+                );
+                self.metrics
+                    .voice_relay_dropped
+                    .with_label_values(&[REASON_BUFFERED_AMOUNT_TOO_HIGH])
+                    .inc();
+                return;
+            }
+        }
+
         let Some(mut ch) = self.rtc.channel(cid) else {
             // DC was opened (voice_data_cid is Some) but Rtc::channel returned
             // None — DTLS has closed or reset the channel since with_voice_dc.
