@@ -262,6 +262,21 @@ impl Registry {
                 .with_label_values(&["voice"])
                 .dec();
         }
+        // chat gauge dec — mirror voice path for session-steal (followup to T10 MAJOR-2).
+        // with_chat_dcs increments both {data} and {ctrl} on open; decrement here
+        // on steal so reconnect storms don't monotonically inflate the gauge.
+        if old.chat_data_cid.is_some() {
+            self.metrics
+                .chat_relay_active_channels
+                .with_label_values(&["data"])
+                .dec();
+        }
+        if old.chat_ctrl_cid.is_some() {
+            self.metrics
+                .chat_relay_active_channels
+                .with_label_values(&["ctrl"])
+                .dec();
+        }
 
         self.metrics.client_disconnect_total.inc();
         self.metrics.active_participants.dec();
