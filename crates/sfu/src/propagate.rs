@@ -152,6 +152,13 @@ pub enum Propagated {
     /// — best-effort drop-on-loss on each leg, app-TTL drop is the
     /// secondary safety net.
     ChatCtrl(ClientId, Vec<u8>),
+
+    /// Phase 8 T10: payload received on the pre-negotiated `voice` DC
+    /// (id:6, unordered, `MaxPacketLifetime{200ms}`). Mediasoup-pattern
+    /// relay: inbound voice frame from sender SCTP → broadcast to all
+    /// subscribers' outbound voice DCs. Skip-self and DC-not-open guards
+    /// mirror the chat-data relay path.
+    VoiceData(ClientId, Vec<u8>),
 }
 
 impl Propagated {
@@ -165,7 +172,8 @@ impl Propagated {
             | Propagated::BandwidthEstimate(c, _)
             | Propagated::ClientBudgetHint(c, _)
             | Propagated::ChatData(c, _)
-            | Propagated::ChatCtrl(c, _) => Some(*c),
+            | Propagated::ChatCtrl(c, _)
+            | Propagated::VoiceData(c, _) => Some(*c),
             #[cfg(feature = "vfm")]
             Propagated::VfmLayerCap(c, _) => Some(*c),
             Propagated::PublisherLayerHint { publisher_id, .. } => Some(*publisher_id),

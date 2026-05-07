@@ -183,4 +183,13 @@ impl Registry {
     pub fn top_speakers_for_tests(&self, k: usize) -> Vec<u64> {
         self.detector.current_top_k(k)
     }
+
+    /// Test-only: push a `Propagated` event into `to_propagate` directly
+    /// so integration tests can drive `fanout_pending` without spinning up
+    /// a live UDP / str0m pipeline. Used by Phase 8 T10 voice relay tests
+    /// to verify `voice_relay_rx_bytes_total` increment before fan-out.
+    #[doc(hidden)]
+    pub fn push_propagated_for_tests(&mut self, p: Propagated) {
+        self.to_propagate.push_back(p);
+    }
 }

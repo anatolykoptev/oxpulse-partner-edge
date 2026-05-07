@@ -84,6 +84,9 @@ pub(crate) fn fanout(p: &Propagated, clients: &mut [Client]) {
             // a defensive check inside `handle_chat_{data,ctrl}_out`.
             Propagated::ChatData(_, payload) => client.handle_chat_data_out(origin, payload),
             Propagated::ChatCtrl(_, payload) => client.handle_chat_ctrl_out(origin, payload),
+            // Phase 8 T10: voice DC relay. Same skip-self + dc-not-open
+            // guard pattern as chat-data / chat-ctrl above.
+            Propagated::VoiceData(_, payload) => client.handle_voice_data_out(origin, payload),
             Propagated::Noop
             | Propagated::Timeout(_)
             | Propagated::ActiveSpeakerChanged { .. }

@@ -137,6 +137,16 @@ impl Registry {
                         .chat_relay_rx_bytes_total
                         .remove_label_values(&[dc, &peer_label]);
                 }
+                // Phase 8 T10: drop voice_relay_{tx,rx}_bytes_total{client_id}
+                // series. Label schema: single `client_id` label (no `dc`).
+                // `voice_relay_dropped` uses (reason) only — no client_id —
+                // so it does not need scrubbing here.
+                let _ = metrics
+                    .voice_relay_tx_bytes_total
+                    .remove_label_values(&[&peer_label]);
+                let _ = metrics
+                    .voice_relay_rx_bytes_total
+                    .remove_label_values(&[&peer_label]);
             }
             alive
         });

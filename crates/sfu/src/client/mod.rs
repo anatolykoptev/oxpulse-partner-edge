@@ -76,6 +76,9 @@ pub mod layer;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_seed;
 pub mod tracks;
+pub mod voice;
+
+pub use voice::VOICE_FRAME_MAX_BYTES;
 
 pub use tracks::TrackIn;
 use tracks::{TrackInEntry, TrackOut, TrackOutState};
@@ -149,6 +152,14 @@ pub struct Client {
     /// presence / BWE-hint frames; HOL-isolated from `chat-data`.
     /// `None` until [`Client::with_chat_dcs`] is called.
     pub(crate) chat_ctrl_cid: Option<str0m::channel::ChannelId>,
+    /// Phase 8 T10: pre-negotiated DC id:6 (`voice`,
+    /// `negotiated: Some(6), ordered: false, reliability:
+    /// MaxPacketLifetime{200ms}`). Unordered unreliable leg for voice
+    /// relay frames (Mediasoup pattern). `None` until
+    /// [`Client::with_voice_dc`] is called. Browser construction sites
+    /// chain `Client::new(...).with_chat_dcs().with_voice_dc(200)`;
+    /// relay clients skip it (no voice relay on cascade edges).
+    pub(crate) voice_data_cid: Option<str0m::channel::ChannelId>,
     /// For outbound relay clients: the DC message to send once Event::Connected fires.
     /// Tuple: (dc_id, upstream_url, room_token). Cleared after send in dispatch.rs.
     /// None for browser clients and inbound relay clients (they *receive* relay_source).

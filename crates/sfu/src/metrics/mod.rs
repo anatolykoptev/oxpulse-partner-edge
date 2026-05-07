@@ -153,6 +153,22 @@ pub struct SfuMetrics {
     /// on disconnect. Labels: `dc` only (no `client_id`) — no per-client
     /// scrub required.
     pub chat_relay_active_channels: IntGaugeVec,
+
+    // ── Phase 8 T10: voice DC relay metrics ──────────────────────────────────
+    /// Phase 8 T10: bytes written to a subscriber's outbound voice DC.
+    /// Label: `client_id` (subscriber). Scrubbed in `reap_dead` /
+    /// `evict_for_steal` on disconnect (cardinality bound).
+    pub voice_relay_tx_bytes_total: IntCounterVec,
+    /// Phase 8 T10: bytes ingested on the SFU's inbound voice DC.
+    /// Label: `client_id` (sender/origin). Scrubbed on disconnect.
+    pub voice_relay_rx_bytes_total: IntCounterVec,
+    /// Phase 8 T10: voice DC relay frames dropped at the SFU edge.
+    /// Label: `reason` ∈ `{no_channel, oversize, write_err}`.
+    pub voice_relay_dropped: IntCounterVec,
+    /// Phase 8 T10: gauge of currently-open voice DCs.
+    /// Label: `dc=voice` (single value, matches chat-relay schema for
+    /// label-cardinality scrub alignment on disconnect).
+    pub voice_relay_active_channels: IntGaugeVec,
 }
 
 impl SfuMetrics {
@@ -367,6 +383,54 @@ impl SfuMetrics {
             .with_label_values(&["ctrl"])
             .get();
 
+        // ── Phase 8 T10: voice DC relay metrics ──────────────────────────────
+        let voice_relay_tx_bytes_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "voice_relay_tx_bytes_total",
+                "Phase 8 T10: bytes written to a subscriber's outbound voice DC. \
+                 Label: client_id (subscriber). Scrubbed on disconnect.",
+            ),
+            &["client_id"],
+        )
+        .context("voice_relay_tx_bytes_total")?);
+
+        let voice_relay_rx_bytes_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "voice_relay_rx_bytes_total",
+                "Phase 8 T10: bytes ingested on the SFU inbound voice DC. \
+                 Label: client_id (sender). Scrubbed on disconnect.",
+            ),
+            &["client_id"],
+        )
+        .context("voice_relay_rx_bytes_total")?);
+
+        let voice_relay_dropped = reg!(IntCounterVec::new(
+            Opts::new(
+                "voice_relay_dropped_total",
+                "Phase 8 T10: voice DC relay frames dropped at the SFU edge. \
+                 Label: reason ∈ {no_channel, oversize, write_err}.",
+            ),
+            &["reason"],
+        )
+        .context("voice_relay_dropped_total")?);
+        // Pre-touch every reason label so alert rules see a baseline of 0.
+        for reason in ["no_channel", "oversize", "write_err"] {
+            let _ = voice_relay_dropped.with_label_values(&[reason]).get();
+        }
+
+        let voice_relay_active_channels = reg!(IntGaugeVec::new(
+            Opts::new(
+                "voice_relay_active_channels",
+                "Phase 8 T10: per-edge gauge of currently-open voice DCs. \
+                 Label: dc=voice (single value, mirrors chat-relay schema).",
+            ),
+            &["dc"],
+        )
+        .context("voice_relay_active_channels")?);
+        let _ = voice_relay_active_channels
+            .with_label_values(&["voice"])
+            .get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -401,6 +465,10 @@ impl SfuMetrics {
             chat_relay_rx_bytes_total,
             chat_relay_dropped_total,
             chat_relay_active_channels,
+            voice_relay_tx_bytes_total,
+            voice_relay_rx_bytes_total,
+            voice_relay_dropped,
+            voice_relay_active_channels,
         })
     }
 

@@ -61,6 +61,7 @@ impl Client {
             active_speaker_cid,
             chat_data_cid: None,
             chat_ctrl_cid: None,
+            voice_data_cid: None,
             relay_source_pending: None,
             origin: oxpulse_sfu_kit::ClientOrigin::Local,
             relay_auth_secret: None,
@@ -113,6 +114,31 @@ impl Client {
         self.metrics
             .chat_relay_active_channels
             .with_label_values(&["ctrl"])
+            .inc();
+        self
+    }
+
+    /// Phase 8 T10: open the pre-negotiated voice DC (id:6, unordered,
+    /// `MaxPacketLifetime{max_pkt_lifetime_ms}`). Browser construction
+    /// sites in `udp_loop::serve` call this after [`Client::with_chat_dcs`];
+    /// cascade relay clients skip it because they have no UI voice path.
+    ///
+    /// `max_pkt_lifetime_ms` — recommended value 200 ms (voice frames
+    /// older than that are useless and should be discarded).
+    pub fn with_voice_dc(mut self, max_pkt_lifetime_ms: u16) -> Self {
+        let voice_data_cid = self.rtc.direct_api().create_data_channel(ChannelConfig {
+            label: "voice".to_string(),
+            ordered: false,
+            reliability: Reliability::MaxPacketLifetime {
+                lifetime: max_pkt_lifetime_ms,
+            },
+            negotiated: Some(6),
+            protocol: String::new(),
+        });
+        self.voice_data_cid = Some(voice_data_cid);
+        self.metrics
+            .voice_relay_active_channels
+            .with_label_values(&["voice"])
             .inc();
         self
     }
