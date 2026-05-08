@@ -29,6 +29,14 @@ impl Client {
         match self.rtc.poll_output() {
             Ok(output) => self.handle_output(output),
             Err(e) => {
+                // Error from str0m poll_output — bump the str0m output error
+                // counter so rate(sfu_str0m_output_total{kind="error"}[1m]) > 0
+                // alerts fire without requiring log monitoring.
+                let peer_label = (*self.id).to_string();
+                self.metrics
+                    .sfu_str0m_output_total
+                    .with_label_values(&[&peer_label, "error"])
+                    .inc();
                 tracing::warn!(client = *self.id, error = ?e, "poll_output failed");
                 self.rtc.disconnect();
                 Propagated::Noop
@@ -37,6 +45,35 @@ impl Client {
     }
 
     fn handle_output(&mut self, output: Output) -> Propagated {
+        // str0m output distribution tap. Labelled by peer_id and kind so
+        // operators can see per-peer transmit rates, event frequencies, and
+        // error counts without log mining.
+        //
+        // kind ∈ {transmit, timeout, event_ice, event_media_added,
+        //         event_media_data, event_keyframe_req, event_bwe,
+        //         event_channel, event_other}
+        //
+        // Note: we label Output::Event sub-variants individually so the
+        // "transmit rate drop" alert (kind=transmit → 0) is distinct from
+        // "media stream stopped" (kind=event_media_data → 0).
+        let peer_label = (*self.id).to_string();
+        let kind_label = match &output {
+            Output::Transmit(_) => "transmit",
+            Output::Timeout(_) => "timeout",
+            Output::Event(Event::IceConnectionStateChange(_)) => "event_ice",
+            Output::Event(Event::MediaAdded(_)) => "event_media_added",
+            Output::Event(Event::MediaData(_)) => "event_media_data",
+            Output::Event(Event::KeyframeRequest(_)) => "event_keyframe_req",
+            Output::Event(Event::EgressBitrateEstimate(_)) => "event_bwe",
+            Output::Event(Event::ChannelData(_)) => "event_channel",
+            Output::Event(Event::Connected) => "event_connected",
+            Output::Event(_) => "event_other",
+        };
+        self.metrics
+            .sfu_str0m_output_total
+            .with_label_values(&[&peer_label, kind_label])
+            .inc();
+
         match output {
             Output::Transmit(t) => {
                 self.pending_out.push_back(t);
