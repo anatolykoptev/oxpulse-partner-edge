@@ -288,6 +288,22 @@ where
                             .with_label_values(&[if has_peers { "true" } else { "false" }])
                             .inc();
 
+                        // Late-join detection: emit a counter so operators can
+                        // cross-reference with sfu_subscription_setup_total to
+                        // confirm the wiring path fired for each publisher.
+                        // If late_join fires but sfu_forward_decisions_total{dst=new_peer}
+                        // stays 0 → subscription wired but no packets delivered
+                        // (asymmetric forwarding bug, e.g. str0m subscription issue).
+                        let late_join_action = if has_peers {
+                            "tracks_map_sent"
+                        } else {
+                            "no_op_empty_room"
+                        };
+                        metrics_ref
+                            .sfu_late_join_resync_total
+                            .with_label_values(&["peer_joined_late", late_join_action])
+                            .inc();
+
                         let client = crate::client::Client::new(pending.rtc, metrics_ref.clone())
                             .with_chat_dcs()
                             .with_external_peer_id(external_peer_id)
