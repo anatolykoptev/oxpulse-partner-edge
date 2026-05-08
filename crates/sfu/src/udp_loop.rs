@@ -250,13 +250,51 @@ where
                     Some(pending) => {
                         let room_id = pending.room_id.clone();
                         let external_peer_id = pending.external_peer_id;
+                        let ws_msg_tx = pending.ws_msg_tx.clone();
+
+                        // Phase F2: build tracks_map from existing browser clients
+                        // BEFORE registry.insert so the newcomer gets the complete
+                        // picture of currently-publishing peers. Only browser clients
+                        // carry an `external_peer_id`; relay clients are excluded.
+                        // The JSON shape mirrors LiveKit's participantUpdate pattern:
+                        //   { "type": "tracks_map",
+                        //     "tracks": [ { "stream_id": "peer-7", "peer_id": "7" }, ... ] }
+                        //
+                        // `stream_id` matches the `a=msid:peer-N` value injected by
+                        // `sdp_msid::inject_msid` so `sfuStreamBindMap.get(stream.id)`
+                        // resolves on the first `pc.ontrack` call.
+                        let tracks: Vec<serde_json::Value> = registry
+                            .clients()
+                            .iter()
+                            .filter_map(|c| c.external_peer_id.map(|pid| {
+                                serde_json::json!({
+                                    "stream_id": format!("peer-{pid}"),
+                                    "peer_id": pid.to_string(),
+                                })
+                            }))
+                            .collect();
+                        let has_peers = !tracks.is_empty();
+                        let tracks_map_frame = serde_json::json!({
+                            "type": "tracks_map",
+                            "tracks": tracks,
+                        }).to_string();
+                        // try_send: non-blocking. The WS task may have already
+                        // exited (peer left between inject and this arm firing);
+                        // drop on full is safe — the client will fall back to
+                        // the `peer_joined` signaling event for mapping.
+                        let _ = ws_msg_tx.try_send(tracks_map_frame);
+                        metrics_ref
+                            .tracks_map_sent_total
+                            .with_label_values(&[if has_peers { "true" } else { "false" }])
+                            .inc();
+
                         let client = crate::client::Client::new(pending.rtc, metrics_ref.clone())
                             .with_chat_dcs()
                             .with_external_peer_id(external_peer_id)
                             .with_close_signal(pending.close_signal);
                         registry.insert(client);
-                        tracing::info!(%room_id, external_peer_id,
-                            "browser client injected into registry — ICE driven by main UDP loop");
+                        tracing::info!(%room_id, external_peer_id, has_peers,
+                            "browser client injected into registry — tracks_map sent, ICE driven by main UDP loop");
                     }
                     None => {
                         metrics_ref.inject_channel_closed_total.with_label_values(&["client"]).inc();
@@ -618,12 +656,14 @@ mod tests {
         // Build a fresh str0m Rtc as if the SDP exchange had completed.
         let rtc = str0m::Rtc::new(std::time::Instant::now());
         let (close_tx, _close_rx) = tokio::sync::oneshot::channel();
+        let (ws_msg_tx, _ws_msg_rx) = mpsc::channel::<String>(4);
         client_tx
             .send(PendingClient {
                 rtc,
                 room_id: "browser-inject-test".to_string(),
                 external_peer_id: 99,
                 close_signal: close_tx,
+                ws_msg_tx,
             })
             .await
             .unwrap();
