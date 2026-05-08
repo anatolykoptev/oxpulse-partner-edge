@@ -504,10 +504,13 @@ async fn client_ws_offer_processed_increments_with_outcome_label_ok() {
     );
 }
 
+/// `parse_err` was split into three sub-labels in the 2026-05-07 observability
+/// fix.  A frame with a wrong `kind` must now emit `json_err` (not `parse_err`).
 #[tokio::test]
-async fn client_ws_offer_processed_increments_with_outcome_label_parse_err() {
-    // Send a frame whose `kind` is missing — read_offer rejects, handler
-    // closes 4002 and emits offer_processed{outcome=parse_err}.
+async fn client_ws_offer_processed_increments_with_outcome_label_json_err() {
+    // Send a frame whose `kind` is wrong — read_offer rejects with
+    // OfferReadError::JsonErr and the handler emits
+    // offer_processed{outcome="json_err"}.
     let (base, _inject_rx, _handle, metrics) = start_handler_with_metrics().await;
     let token = make_token(ROOM_ID, 13, HS256_SECRET, 3600);
     let url = format!("{base}/sfu/ws/{ROOM_ID}");
@@ -527,7 +530,13 @@ async fn client_ws_offer_processed_increments_with_outcome_label_parse_err() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let n = metrics
         .client_ws_offer_processed_total
-        .with_label_values(&["parse_err"])
+        .with_label_values(&["json_err"])
         .get();
-    assert!(n >= 1, "parse_err outcome counter must be >= 1, got {n}");
+    assert!(
+        n >= 1,
+        "json_err outcome counter must be >= 1, got {n}. \
+         Note: 'parse_err' was split into timeout/ws_closed/json_err in the \
+         2026-05-07 observability fix — update any dashboards or alert rules \
+         that reference the old 'parse_err' label."
+    );
 }

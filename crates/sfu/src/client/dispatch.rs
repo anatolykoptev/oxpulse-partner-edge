@@ -49,8 +49,37 @@ impl Client {
 
     fn handle_event(&mut self, event: Event) -> Propagated {
         match event {
-            Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
-                self.rtc.disconnect();
+            // 2026-05-07 metric coverage audit: track ALL ICE state transitions,
+            // not only Disconnected.  The counter lets operators distinguish a
+            // peer that never reached Connected (checking → disconnect = NAT hole
+            // failure) from one that connected and then dropped (connected →
+            // disconnected = mid-call network loss).
+            //
+            // SAFETY: keep this as a full match on `s` rather than a wildcard
+            // arm on the original Disconnected-only pattern.  The IceConnectionState
+            // enum has no `Failed` / `Closed` variants in str0m 0.18; `other` here
+            // is a deliberate catch-all for future enum expansion — collapsing
+            // novel states into a single label preserves bounded cardinality.
+            Event::IceConnectionStateChange(s) => {
+                // `#[allow(unreachable_patterns)]`: str0m 0.18 exposes exactly
+                // New/Checking/Connected/Completed/Disconnected so the wildcard
+                // is unreachable today.  It is intentionally kept for forward
+                // compatibility — if a future str0m bump adds a new variant the
+                // counter continues to work with bounded cardinality rather than
+                // causing a compile error or an unhandled match.
+                #[allow(unreachable_patterns)]
+                let label = match s {
+                    IceConnectionState::New => "new",
+                    IceConnectionState::Checking => "checking",
+                    IceConnectionState::Connected => "connected",
+                    IceConnectionState::Completed => "completed",
+                    IceConnectionState::Disconnected => "disconnected",
+                    _ => "other",
+                };
+                self.metrics.ice_state_total.with_label_values(&[label]).inc();
+                if matches!(s, IceConnectionState::Disconnected) {
+                    self.rtc.disconnect();
+                }
                 Propagated::Noop
             }
             Event::Connected => {
@@ -168,6 +197,81 @@ mod tests {
     use super::*;
     use crate::relay::client::PendingRelay;
     use std::sync::Arc;
+
+    // ── ICE state metrics (2026-05-07 observability gap) ─────────────────────
+
+    /// Each known ICE state maps to the correct `sfu_ice_state_total` label
+    /// and increments by exactly 1.  Previously only `Disconnected` was
+    /// handled; `Checking` / `Connected` / `Completed` were silent.
+    #[test]
+    fn ice_state_counter_increments_for_each_variant() {
+        use crate::client::test_seed::new_client;
+        use crate::propagate::ClientId;
+
+        let metrics = Arc::new(crate::metrics::SfuMetrics::new().expect("metrics build"));
+        let mut client = new_client(ClientId(800));
+        // Override client's metrics with our observable instance.
+        client.metrics = metrics.clone();
+
+        let cases = [
+            (IceConnectionState::New, "new"),
+            (IceConnectionState::Checking, "checking"),
+            (IceConnectionState::Connected, "connected"),
+            (IceConnectionState::Completed, "completed"),
+            (IceConnectionState::Disconnected, "disconnected"),
+        ];
+        for (state, label) in cases {
+            let before = metrics.ice_state_total.with_label_values(&[label]).get();
+            client.handle_event(Event::IceConnectionStateChange(state));
+            let after = metrics.ice_state_total.with_label_values(&[label]).get();
+            assert_eq!(
+                after,
+                before + 1,
+                "ice_state_total{{state=\"{label}\"}} must increment by 1 for {:?}",
+                state,
+            );
+        }
+    }
+
+    /// Only `Disconnected` must call `rtc.disconnect()`; all other
+    /// transitions must leave the `Rtc` alive.
+    #[test]
+    fn only_disconnected_calls_rtc_disconnect() {
+        use crate::client::test_seed::new_client;
+        use crate::propagate::ClientId;
+
+        let metrics = Arc::new(crate::metrics::SfuMetrics::new().expect("metrics build"));
+
+        for state in [
+            IceConnectionState::New,
+            IceConnectionState::Checking,
+            IceConnectionState::Connected,
+            IceConnectionState::Completed,
+        ] {
+            let mut client = new_client(ClientId(801));
+            client.metrics = metrics.clone();
+            assert!(client.rtc.is_alive(), "rtc must be alive before transition");
+            client.handle_event(Event::IceConnectionStateChange(state));
+            assert!(
+                client.rtc.is_alive(),
+                "rtc must stay alive after {:?} — only Disconnected disconnects",
+                state,
+            );
+        }
+
+        let mut client = new_client(ClientId(802));
+        client.metrics = metrics.clone();
+        assert!(client.rtc.is_alive());
+        client.handle_event(Event::IceConnectionStateChange(
+            IceConnectionState::Disconnected,
+        ));
+        assert!(
+            !client.rtc.is_alive(),
+            "rtc must be dead after Disconnected — rtc.disconnect() must have been called"
+        );
+    }
+
+    // ── existing tests ────────────────────────────────────────────────────────
 
     #[test]
     fn relay_source_pending_cleared_on_connected() {

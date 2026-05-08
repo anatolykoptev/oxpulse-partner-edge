@@ -62,10 +62,45 @@ use super::handler::{close_with_code, CLOSE_DRAIN_TIMEOUT};
 use crate::client::CloseReason;
 use crate::metrics::{close_code_label, SfuMetrics};
 
+/// Discriminated failure reasons returned by [`read_offer`].
+///
+/// Each variant maps to a distinct `client_ws_offer_processed_total{outcome}`
+/// label so operators can tell browser bugs (`json_err`) from network
+/// slowness (`timeout`) from client abort (`ws_closed`) without log mining.
+///
+/// # Label stability
+/// Do **not** collapse these variants back into a single `parse_err` bucket.
+/// The 2026-05-07 group-call debugging session showed all three causes
+/// occurring simultaneously on the same edge; a merged bucket made it
+/// impossible to tell which fix to apply first.
+#[derive(Debug)]
+enum OfferReadError {
+    /// OFFER_TIMEOUT elapsed without a text frame arriving.
+    Timeout,
+    /// The WS was closed (or EOF / recv error) before an offer arrived.
+    WsClosed,
+    /// A text frame arrived but failed JSON decode, had the wrong `kind`,
+    /// or contained an empty `sdp` field.
+    JsonErr(anyhow::Error),
+}
+
+impl std::fmt::Display for OfferReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OfferReadError::Timeout => write!(f, "offer timeout ({OFFER_TIMEOUT:?})"),
+            OfferReadError::WsClosed => write!(f, "WS closed before offer"),
+            OfferReadError::JsonErr(e) => write!(f, "offer content error: {e}"),
+        }
+    }
+}
+
 /// Maximum time to wait for the browser's `offer` frame after the WS
-/// upgrade completes. Slightly longer than typical browser ICE-gathering
-/// time (~1–3s on a healthy network).
-const OFFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// upgrade completes. Budget breakdown: browser ICE-gather watchdog (8s,
+/// see oxpulse-chat PR #486) + trickle/network/parse headroom on slow
+/// TURN auth = 30s total. The old 15s value was too tight for
+/// high-latency TURN (8s gather + 7s round-trip margin), causing
+/// spurious `timeout` outcomes during TURN auth delays.
+const OFFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// WS application close codes used by this module. 4xxx is the
 /// RFC 6455 §7.4.2 "private use" range.
@@ -178,10 +213,22 @@ pub async fn run(
     let offer_sdp = match read_offer(&mut socket).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(target: "sfu::client_ws", peer_id, %room_id, error = %e, "client_ws: bad offer frame");
+            // Map the discriminated error to its metric outcome label.
+            // SAFETY: keep these three variants distinct — the 2026-05-07
+            // group-call debug session showed all three occurring together;
+            // a merged "parse_err" bucket prevented root-cause isolation.
+            let outcome = match &e {
+                OfferReadError::Timeout => "timeout",
+                OfferReadError::WsClosed => "ws_closed",
+                OfferReadError::JsonErr(_) => "json_err",
+            };
+            tracing::warn!(
+                target: "sfu::client_ws", peer_id, %room_id,
+                outcome, error = %e, "client_ws: offer not received"
+            );
             metrics
                 .client_ws_offer_processed_total
-                .with_label_values(&["parse_err"])
+                .with_label_values(&[outcome])
                 .inc();
             guard.set_close_code(close_code::BAD_OFFER);
             close_with_code(socket, close_code::BAD_OFFER, "bad offer").await;
@@ -359,8 +406,13 @@ pub async fn run(
 /// Read the first text frame and decode `{kind:"offer", sdp:"..."}`.
 /// Pings, pongs, and binary frames are skipped. Times out if no offer
 /// arrives within [`OFFER_TIMEOUT`].
-async fn read_offer(socket: &mut WebSocket) -> anyhow::Result<String> {
-    let frame = tokio::time::timeout(OFFER_TIMEOUT, async {
+///
+/// Returns a discriminated [`OfferReadError`] so the caller can emit a
+/// specific `client_ws_offer_processed_total` outcome label instead of
+/// collapsing all failures into one bucket (see 2026-05-07 gap).
+async fn read_offer(socket: &mut WebSocket) -> Result<String, OfferReadError> {
+    // `ws_closed` sentinel: inner loop returns None when WS closes/errors.
+    let frame_result = tokio::time::timeout(OFFER_TIMEOUT, async {
         loop {
             match socket.recv().await {
                 Some(Ok(Message::Text(t))) => break Some(t),
@@ -374,29 +426,37 @@ async fn read_offer(socket: &mut WebSocket) -> anyhow::Result<String> {
             }
         }
     })
-    .await
-    .map_err(|_| anyhow::anyhow!("offer not received within {:?}", OFFER_TIMEOUT))?;
+    .await;
 
-    let Some(text) = frame else {
-        anyhow::bail!("WS closed before offer");
+    // Distinguish timeout from ws_closed before inspecting the frame.
+    // SAFETY: keep Timeout and WsClosed as separate variants — they require
+    // different operator responses (network/TURN tuning vs browser abort).
+    let text = match frame_result {
+        Err(_elapsed) => return Err(OfferReadError::Timeout),
+        Ok(None) => return Err(OfferReadError::WsClosed),
+        Ok(Some(t)) => t,
     };
 
-    let v: Value = serde_json::from_str(text.as_str())?;
+    // Text frame arrived — any further failure is a JSON/content error.
+    // SAFETY: keep JsonErr distinct from Timeout/WsClosed — it points to
+    // a browser-side encoding bug, not a network or timing issue.
+    let v: Value = serde_json::from_str(text.as_str())
+        .map_err(|e| OfferReadError::JsonErr(anyhow::anyhow!("JSON parse: {e}")))?;
     if v.get("kind").and_then(|k| k.as_str()) != Some("offer") {
-        anyhow::bail!(
+        return Err(OfferReadError::JsonErr(anyhow::anyhow!(
             "expected first frame kind=\"offer\", got {}",
             v.get("kind")
                 .and_then(|k| k.as_str())
                 .unwrap_or("<missing>")
-        );
+        )));
     }
     let sdp = v
         .get("sdp")
         .and_then(|s| s.as_str())
-        .ok_or_else(|| anyhow::anyhow!("offer frame missing sdp field"))?
+        .ok_or_else(|| OfferReadError::JsonErr(anyhow::anyhow!("offer frame missing sdp field")))?
         .to_string();
     if sdp.is_empty() {
-        anyhow::bail!("offer.sdp is empty");
+        return Err(OfferReadError::JsonErr(anyhow::anyhow!("offer.sdp is empty")));
     }
     Ok(sdp)
 }
