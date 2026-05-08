@@ -76,7 +76,10 @@ impl Client {
                     IceConnectionState::Disconnected => "disconnected",
                     _ => "other",
                 };
-                self.metrics.ice_state_total.with_label_values(&[label]).inc();
+                self.metrics
+                    .ice_state_total
+                    .with_label_values(&[label])
+                    .inc();
                 if matches!(s, IceConnectionState::Disconnected) {
                     self.rtc.disconnect();
                 }

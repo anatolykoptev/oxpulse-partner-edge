@@ -456,7 +456,9 @@ async fn read_offer(socket: &mut WebSocket) -> Result<String, OfferReadError> {
         .ok_or_else(|| OfferReadError::JsonErr(anyhow::anyhow!("offer frame missing sdp field")))?
         .to_string();
     if sdp.is_empty() {
-        return Err(OfferReadError::JsonErr(anyhow::anyhow!("offer.sdp is empty")));
+        return Err(OfferReadError::JsonErr(anyhow::anyhow!(
+            "offer.sdp is empty"
+        )));
     }
     Ok(sdp)
 }

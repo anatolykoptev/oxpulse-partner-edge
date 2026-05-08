@@ -470,7 +470,14 @@ impl SfuMetrics {
         // Pre-touch all known label values so alert rules see a baseline of 0
         // from startup instead of an absent series.  `other` future-proofs
         // against new str0m variants without unbounded cardinality.
-        for state in ["new", "checking", "connected", "completed", "disconnected", "other"] {
+        for state in [
+            "new",
+            "checking",
+            "connected",
+            "completed",
+            "disconnected",
+            "other",
+        ] {
             let _ = ice_state_total.with_label_values(&[state]).get();
         }
 
