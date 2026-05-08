@@ -5,23 +5,18 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **sfu/ice:** pass `candidate_addr` to `udp_loop::serve` — fixes `iceState:failed` on group calls. str0m's ICE agent silently dropped STUN binding requests whose destination didn't match the installed host candidate (wildcard 0.0.0.0:7878 vs SFU_PUBLIC_IP:7878).
+
 ## [0.12.12](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.11...partner-edge-v0.12.12) (2026-05-08)
 
 
 ### Features
 
 * **sfu:** OFFER_TIMEOUT 30s + parse_err sub-labels + ice_state counter ([#56](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/56)) ([a2df998](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a2df9981489de971312226e374dbb245947f46f2))
-
-## [Unreleased]
-
-### Added
-
-- `sfu_ice_state_total{state}` counter capturing all ICE connection state transitions (was: only Disconnected handled).
-- `client_ws_offer_processed_total` outcome label split: `timeout` / `ws_closed` / `json_err` instead of single `parse_err`.
-
-### Changed
-
-- `OFFER_TIMEOUT` constant 15s → 30s. Aligns with browser ICE gather watchdog (8s) + trickle headroom.
 
 ## [0.12.11](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.10...partner-edge-v0.12.11) (2026-05-07)
 
@@ -45,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **sfu/pacer:** F7-5 symmetric exit hysteresis ([#45](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/45)) ([ce4a3fd](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ce4a3fdbdb1cc14268fd71fe57e2ef3080c91d86))
 * **sfu/registry:** F2b-2 reap chat_relay label series on disconnect ([#46](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/46)) ([e30d41c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e30d41c018cfc8fb1701ffd85abdbf67b9dbd71d))
 * **sfu:** observability bundle — gauge fix + degraded-state visibility + healthcheck ([#48](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/48)) ([54130e1](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/54130e1d65a0eba3f2ab827102d3b7ae18f61c01))
+
+## [0.12.12] (2026-05-08)
+
+### Bug Fixes
+
+* **sfu/ice:** pass candidate_addr to udp_loop::serve so str0m ICE agent can match STUN binding requests — fixes iceState:failed for group calls on wildcard-bound sockets (SFU_PUBLIC_IP != 0.0.0.0)
 
 ## [Unreleased]
 

@@ -279,6 +279,9 @@ async fn main() -> anyhow::Result<()> {
     // Run the UDP loop — blocks until shutdown fires.
     // Pass relay_inject_rx so serve() can inject relay clients into the Registry,
     // and client_inject_rx so serve() can inject browser clients post-SDP.
+    // Pass host_candidate_addr so the loop can correctly demux STUN binding
+    // requests — str0m's ICE agent matches incoming STUN on the destination
+    // address, which must equal the installed local candidate (M4.A6 fix).
     let result = udp_loop::serve(
         socket,
         metrics,
@@ -286,6 +289,7 @@ async fn main() -> anyhow::Result<()> {
         relay_signing_pubkey,
         relay_inject_rx,
         client_inject_rx,
+        host_candidate_addr,
         shutdown,
     )
     .await;

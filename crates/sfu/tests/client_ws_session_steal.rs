@@ -133,6 +133,7 @@ async fn start_full_pipeline() -> (
         None,
         Some(relay_rx),
         Some(client_inject_rx),
+        local_udp, // candidate_addr: loopback tests use actual local addr
         async {
             let _ = shutdown_rx.await;
         },
