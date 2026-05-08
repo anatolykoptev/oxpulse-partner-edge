@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.12](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.11...partner-edge-v0.12.12) (2026-05-08)
+
+
+### Features
+
+* **sfu:** OFFER_TIMEOUT 30s + parse_err sub-labels + ice_state counter ([#56](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/56)) ([a2df998](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a2df9981489de971312226e374dbb245947f46f2))
+
 ## [Unreleased]
 
 ### Added
