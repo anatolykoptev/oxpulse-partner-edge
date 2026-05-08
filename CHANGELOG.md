@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.16](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.15...partner-edge-v0.12.16) (2026-05-08)
+
+
+### Features
+
+* **sfu:** Phase F2 — tracks_map WS backchannel for signaling-first stream binding ([#65](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/65)) ([91f75f6](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/91f75f672b1536395bd4a14e7cc03f33e5bf55a5))
+
 ## [0.12.15](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.14...partner-edge-v0.12.15) (2026-05-08)
 
 
