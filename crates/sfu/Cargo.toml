@@ -91,6 +91,10 @@ name = "hard_red_migration"
 required-features = ["test-utils"]
 
 [[test]]
+name = "ice_stun_destination_mismatch"
+required-features = ["test-utils"]
+
+[[test]]
 name = "relay_api"
 required-features = []
 

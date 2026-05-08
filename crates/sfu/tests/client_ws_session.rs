@@ -416,6 +416,7 @@ async fn end_to_end_browser_client_lands_in_registry() {
         None,
         Some(relay_rx),
         Some(client_inject_rx),
+        local_udp, // candidate_addr: loopback tests use actual local addr
         async {
             let _ = shutdown_rx.await;
         },
