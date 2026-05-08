@@ -170,6 +170,18 @@ pub struct SfuMetrics {
     /// Label: `dc=voice` (single value, matches chat-relay schema for
     /// label-cardinality scrub alignment on disconnect).
     pub voice_relay_active_channels: IntGaugeVec,
+
+    // ── 2026-05-07 observability gap: ICE state coverage ─────────────────────
+    /// All ICE connection state transitions per edge.
+    ///
+    /// Labels: `state` ∈ `{new, checking, connected, completed, disconnected, other}`.
+    /// `other` collapses any future str0m variants so label cardinality stays
+    /// bounded. Previously only `Disconnected` was handled (implicit in the
+    /// `rtc.disconnect()` call); all other transitions were silent in Prometheus.
+    ///
+    /// Use `rate(sfu_ice_state_total{state="disconnected"}[5m]) > 0` for disconnect
+    /// alerting; `state="checking"` rate = connection attempt rate.
+    pub ice_state_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -443,6 +455,32 @@ impl SfuMetrics {
             .with_label_values(&["voice"])
             .get();
 
+        // ── 2026-05-07 observability gap: ICE state coverage ─────────────────
+        let ice_state_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "ice_state_total",
+                "ICE connection state transitions per edge. \
+                 Label: state ∈ {new, checking, connected, completed, disconnected, other}. \
+                 Previously only Disconnected was handled in dispatch; all other \
+                 transitions were silent in Prometheus (2026-05-07 metric coverage audit).",
+            ),
+            &["state"],
+        )
+        .context("ice_state_total")?);
+        // Pre-touch all known label values so alert rules see a baseline of 0
+        // from startup instead of an absent series.  `other` future-proofs
+        // against new str0m variants without unbounded cardinality.
+        for state in [
+            "new",
+            "checking",
+            "connected",
+            "completed",
+            "disconnected",
+            "other",
+        ] {
+            let _ = ice_state_total.with_label_values(&[state]).get();
+        }
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -481,6 +519,7 @@ impl SfuMetrics {
             voice_relay_rx_bytes_total,
             voice_relay_dropped,
             voice_relay_active_channels,
+            ice_state_total,
         })
     }
 
