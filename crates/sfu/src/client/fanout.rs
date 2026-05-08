@@ -62,6 +62,7 @@ impl Client {
     /// Forward a `MediaData` from `origin` out to this peer. Applies
     /// the simulcast layer filter; increments Prometheus counters for
     /// matched packets and layer selections.
+    #[tracing::instrument(level = "trace", skip(self, data), fields(dst_peer = *self.id, src_peer = *origin))]
     pub fn handle_media_data_out(&mut self, origin: ClientId, data: &MediaData) {
         // M1.3 / M5.3: drop packets that don't match desired layer.
         // The desired layer itself may have been updated by the pacer
@@ -69,6 +70,9 @@ impl Client {
         if !layer::matches(self.desired_layer, data) {
             return;
         }
+
+        let src_peer = origin.to_string();
+        let dst_peer = self.id.to_string();
 
         // Find the matching outbound track entry. Media kind lives on TrackIn.
         let matched = self.tracks_out.iter().find(|o| {
@@ -122,6 +126,15 @@ impl Client {
             })
             .and_then(|o| o.mid())
         else {
+            // No matching outbound mid — track not yet wired (e.g. late-join
+            // subscription is pending). Diagnose with:
+            //   sfu_sfu_forward_decisions_total{action="skipped_no_track"} > 0
+            // while sfu_sfu_subscription_setup_total shows no wired events for
+            // this (publisher, subscriber) pair → cross-advertisement loop broke.
+            self.metrics
+                .sfu_forward_decisions_total
+                .with_label_values(&[&src_peer, &dst_peer, kind_label, "skipped_no_track"])
+                .inc();
             return;
         };
 
@@ -136,14 +149,31 @@ impl Client {
         }
 
         let Some(writer) = self.rtc.writer(mid) else {
+            self.metrics
+                .sfu_forward_decisions_total
+                .with_label_values(&[&src_peer, &dst_peer, kind_label, "skipped_no_track"])
+                .inc();
             return;
         };
         let Some(pt) = writer.match_params(data.params) else {
+            self.metrics
+                .sfu_forward_decisions_total
+                .with_label_values(&[&src_peer, &dst_peer, kind_label, "skipped_no_track"])
+                .inc();
             return;
         };
         if let Err(e) = writer.write(pt, data.network_time, data.time, data.data.clone()) {
             tracing::warn!(client = *self.id, error = ?e, "writer.write failed");
+            self.metrics
+                .sfu_forward_decisions_total
+                .with_label_values(&[&src_peer, &dst_peer, kind_label, "write_err"])
+                .inc();
             self.rtc.disconnect();
+        } else {
+            self.metrics
+                .sfu_forward_decisions_total
+                .with_label_values(&[&src_peer, &dst_peer, kind_label, "forwarded"])
+                .inc();
         }
     }
 
