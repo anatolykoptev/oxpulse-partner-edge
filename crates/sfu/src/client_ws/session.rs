@@ -55,7 +55,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use serde_json::Value;
 use str0m::change::SdpOffer;
 use str0m::{Candidate, Rtc};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
 
 use super::handler::{close_with_code, CLOSE_DRAIN_TIMEOUT};
@@ -192,6 +192,15 @@ pub struct PendingClient {
     /// sender and fires it (delivers [`CloseReason::SessionReplaced`])
     /// when a duplicate upgrade evicts the older session.
     pub close_signal: oneshot::Sender<CloseReason>,
+    /// Phase F2: channel for the UDP loop to push WS frames back to this
+    /// session's parked task after the SDP answer is sent. Used to deliver
+    /// `{"type":"tracks_map",...}` before `pc.ontrack` fires on the browser.
+    /// The receiver lives in [`park_until_close_or_steal`]; the sender is
+    /// consumed by `udp_loop::serve` after `Registry::insert`.
+    /// Bounded 4: room cap is 6 peers — worst case is 5 back-to-back
+    /// joins sending a tracks_map each; 4 is more than enough with
+    /// the `try_send` / drop-on-full semantics.
+    pub ws_msg_tx: mpsc::Sender<String>,
 }
 
 /// Run a single WS session. Returns `Ok` on clean shutdown; `Err` on
@@ -324,13 +333,20 @@ pub async fn run(
     //    `close_signal` channel — the registry holds the sender and
     //    fires it when a newer upgrade for this `external_peer_id`
     //    arrives (session steal).
+    //
+    //    Phase F2: pair the inject with a bounded mpsc channel so the UDP
+    //    loop can push a `tracks_map` WS frame after Registry::insert,
+    //    before the browser's first RTP arrives. Capacity 4 — see
+    //    PendingClient::ws_msg_tx doc comment for rationale.
     let (close_signal_tx, mut close_signal_rx) = oneshot::channel::<CloseReason>();
+    let (ws_msg_tx, mut ws_msg_rx) = mpsc::channel::<String>(4);
     if inject_tx
         .send(PendingClient {
             rtc,
             room_id: room_id.clone(),
             external_peer_id: peer_id,
             close_signal: close_signal_tx,
+            ws_msg_tx,
         })
         .await
         .is_err()
@@ -370,6 +386,7 @@ pub async fn run(
     let stole = park_until_close_or_steal(
         &mut socket,
         &mut close_signal_rx,
+        &mut ws_msg_rx,
         &room_id,
         peer_id,
         &mut guard,
@@ -485,9 +502,18 @@ async fn read_offer(socket: &mut WebSocket) -> Result<String, OfferReadError> {
 /// fire, the `4031 session_replaced` close frame is written here (not
 /// in the caller) so `ActiveSessionGuard` can record the right
 /// `close_code` label without a second branch.
+///
+/// Phase F2: `ws_msg_rx` carries server-initiated text frames to push
+/// to the browser (currently only `tracks_map`). These are forwarded
+/// verbatim to the socket so the client can pre-populate
+/// `sfuStreamBindMap` before `pc.ontrack` fires. The arm is
+/// `not biased` — it has equal priority with the socket arm so a
+/// high-traffic WS cannot starve server-push messages, but steal
+/// still beats both via the `biased` first-arm ordering.
 async fn park_until_close_or_steal(
     socket: &mut WebSocket,
     close_signal_rx: &mut oneshot::Receiver<CloseReason>,
+    ws_msg_rx: &mut mpsc::Receiver<String>,
     room_id: &str,
     peer_id: u64,
     guard: &mut ActiveSessionGuard,
@@ -511,6 +537,14 @@ async fn park_until_close_or_steal(
                     })))
                     .await;
                 return true;
+            }
+            // Phase F2: forward server-push messages (tracks_map) to browser.
+            Some(frame) = ws_msg_rx.recv() => {
+                if socket.send(Message::Text(frame.into())).await.is_err() {
+                    tracing::debug!(target: "sfu::client_ws", peer_id, %room_id,
+                        "client_ws: server-push send failed; peer gone");
+                    return false;
+                }
             }
             msg = socket.recv() => {
                 let Some(msg) = msg else {
