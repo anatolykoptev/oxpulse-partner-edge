@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.14](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.13...partner-edge-v0.12.14) (2026-05-08)
+
+
+### Features
+
+* **sfu:** inject a=msid in answer SDP for browser stream attachment ([#60](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/60)) ([75fa812](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/75fa81216ca8b47d78416845c846769aa3015d39))
+
 ## [0.12.13](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.12...partner-edge-v0.12.13) (2026-05-08)
 
 
