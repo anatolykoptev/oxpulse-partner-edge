@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.13](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.12...partner-edge-v0.12.13) (2026-05-08)
+
+
+### Bug Fixes
+
+* **sfu:** pass real candidate_addr to handle_incoming — STUN destination match ([#58](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/58)) ([842f07a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/842f07a7aff18fd476ec319349d4c66dccfc7a5d))
+
 ## [Unreleased]
 
 ### Bug Fixes
