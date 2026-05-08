@@ -63,7 +63,10 @@ pub fn inject_msid(answer_sdp: &str, peer_id: u64) -> String {
             if self.kind == Kind::Other
                 || self.already_injected
                 || self.direction == Direction::RecvOnly
+                || self.direction == Direction::Inactive
             {
+                // RFC 8829 §5.3.2 — inactive/recvonly m-lines carry no
+                // outbound track; injecting a=msid is semantically wrong.
                 for l in &self.lines {
                     out.push_str(l);
                     out.push_str(eol);
@@ -287,6 +290,22 @@ mod tests {
         assert!(
             result.contains("a=msid:peer-7 peer-7-video"),
             "sendrecv video missing msid; got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn skips_inactive_mlines() {
+        // Per RFC 8829 §5.3.2 — inactive m-line carries no media in either
+        // direction; injecting a=msid is semantically wrong and rejected by
+        // some browsers.
+        let sdp = "v=0\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+a=mid:0\r\n\
+a=inactive\r\n";
+        let result = inject_msid(sdp, 7);
+        assert!(
+            !result.contains("a=msid:peer-7"),
+            "inactive m-line must not get a=msid; got:\n{result}"
         );
     }
 
