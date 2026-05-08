@@ -255,6 +255,11 @@ pub async fn run(
     //    Reordering inject-then-answer closes that race window. (See
     //    M4.A2 follow-up.)
     let answer_sdp = answer.to_sdp_string();
+    // Phase A1: inject a=msid so the browser's RTCPeerConnection.ontrack
+    // sets ev.streams correctly. Without this, str0m answer SDP has no
+    // msid lines and the browser fires ev.streams = [], causing
+    // gc_ontrack_drop_total{reason="empty_stream"} in oxpulse-chat.
+    let answer_sdp = super::sdp_msid::inject_msid(&answer_sdp, peer_id);
     let answer_frame = serde_json::json!({ "kind": "answer", "sdp": answer_sdp }).to_string();
 
     // 5. Hand the pre-ICE Rtc to the main UDP loop FIRST. From here on,

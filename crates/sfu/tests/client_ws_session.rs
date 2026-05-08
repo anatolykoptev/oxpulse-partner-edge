@@ -176,6 +176,17 @@ async fn offer_returns_answer_and_injects_pending_client() {
         answer_sdp.contains("a=rtcp-mux"),
         "answer SDP must include rtcp-mux"
     );
+    // Phase A1: msid injection — browser needs this to associate tracks
+    // with a MediaStream (ev.streams non-empty on RTCPeerConnection.ontrack).
+    // peer_id=7 comes from the JWT fixture (make_token(ROOM_ID, 7, ...)).
+    assert!(
+        answer_sdp.contains("a=msid:peer-7 peer-7-audio"),
+        "answer SDP must include audio msid for peer-7; got:\n{answer_sdp}"
+    );
+    assert!(
+        answer_sdp.contains("a=msid:peer-7 peer-7-video"),
+        "answer SDP must include video msid for peer-7; got:\n{answer_sdp}"
+    );
 
     // PendingClient must arrive on the inject channel.
     //
