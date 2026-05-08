@@ -83,6 +83,17 @@ where
         .map(|v| Arc::from(v.as_slice()));
     let relay_signing_pubkey = config.sfu_signing_public_key.clone().map(Arc::new);
     let socket = bind(&config).await?;
+    let local_addr = socket.local_addr().context("failed to read local_addr")?;
+    // Compute the candidate address — same logic as main.rs M4.A6.
+    // When the socket is bound to a wildcard address (0.0.0.0), str0m's ICE
+    // agent would receive `destination=0.0.0.0:N` on every datagram, which
+    // never matches the installed host candidate (`SFU_PUBLIC_IP:N`).  Pass
+    // the real routable address so the ICE agent can match STUN requests to
+    // the correct local candidate and generate binding responses.
+    let candidate_addr = match config.public_ip {
+        Some(ip) => std::net::SocketAddr::new(ip, local_addr.port()),
+        None => local_addr,
+    };
     serve(
         socket,
         metrics,
@@ -90,6 +101,7 @@ where
         relay_signing_pubkey,
         relay_rx,
         client_inject_rx,
+        candidate_addr,
         shutdown,
     )
     .await
@@ -109,6 +121,17 @@ pub async fn bind(config: &SfuConfig) -> anyhow::Result<UdpSocket> {
 
 /// Drive the receive loop on an already-bound socket. Returns once
 /// `shutdown` resolves or a fatal socket error occurs.
+///
+/// `candidate_addr` is the routable address that was installed as the SFU's
+/// host candidate via `Rtc::add_local_candidate`.  It is used as the
+/// `destination` field in every `Input::Receive` fed to str0m so that the
+/// ICE agent can match incoming STUN binding requests against the known
+/// local candidate.  When the socket is bound to a wildcard address
+/// (`0.0.0.0:N`), `socket.local_addr()` returns that wildcard, which would
+/// never equal the installed candidate (`SFU_PUBLIC_IP:N`), causing str0m to
+/// silently discard all STUN requests and leaving ICE in the `checking`
+/// state forever.  Callers must pass the same address that was given to
+/// `Candidate::host()` — typically `host_candidate_addr` from `main.rs`.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, name = "udp_loop.serve")]
 pub async fn serve<F>(
@@ -118,12 +141,12 @@ pub async fn serve<F>(
     relay_signing_pubkey: Option<Arc<String>>,
     mut relay_rx: Option<tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>>,
     mut client_inject_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::PendingClient>>,
+    candidate_addr: std::net::SocketAddr,
     shutdown: F,
 ) -> anyhow::Result<()>
 where
     F: Future<Output = ()>,
 {
-    let local = socket.local_addr().context("failed to read local_addr")?;
     // Clone metrics before moving into Registry so relay injection can use it too.
     let metrics_ref = metrics.clone();
     let mut registry = Registry::with_relay_auth(metrics, relay_auth_secret, relay_signing_pubkey);
@@ -184,7 +207,14 @@ where
             recv = socket.recv_from(&mut buf) => {
                 match recv {
                     Ok((n, src)) => {
-                        registry.handle_incoming(src, local, &buf[..n]);
+                        // Pass `candidate_addr` as destination so str0m's ICE
+                        // agent can match the incoming datagram against the
+                        // installed host candidate.  Using `local` (the
+                        // wildcard `0.0.0.0:N`) here causes str0m to discard
+                        // every STUN binding request with a debug-level
+                        // "Discarding STUN request on unknown interface" log —
+                        // ICE then stays in `checking` state until timeout.
+                        registry.handle_incoming(src, candidate_addr, &buf[..n]);
                     }
                     Err(e) => {
                         // Transient per-datagram errors shouldn't kill
@@ -307,11 +337,21 @@ mod tests {
             ..SfuConfig::default()
         };
         let socket = bind(&cfg).await.expect("bind");
+        let candidate_addr = socket.local_addr().expect("local_addr");
         let metrics = Arc::new(SfuMetrics::default());
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let handle = tokio::spawn(serve(socket, metrics, None, None, None, None, async {
-            let _ = rx.await;
-        }));
+        let handle = tokio::spawn(serve(
+            socket,
+            metrics,
+            None,
+            None,
+            None,
+            None,
+            candidate_addr,
+            async {
+                let _ = rx.await;
+            },
+        ));
         tx.send(()).unwrap();
         handle.await.unwrap().unwrap();
     }
@@ -337,6 +377,7 @@ mod tests {
             ..SfuConfig::default()
         };
         let socket = bind(&cfg).await.expect("bind");
+        let candidate_addr = socket.local_addr().expect("local_addr");
         let metrics = Arc::new(SfuMetrics::default());
         let counter = metrics.udp_loop_iterations_total.clone();
 
@@ -348,6 +389,7 @@ mod tests {
             None,
             None, // standalone — no relay channel
             None, // standalone — no client inject channel
+            candidate_addr,
             async {
                 let _ = shutdown_rx.await;
             },
@@ -381,6 +423,7 @@ mod tests {
             ..SfuConfig::default()
         };
         let socket = bind(&cfg).await.expect("bind");
+        let candidate_addr = socket.local_addr().expect("local_addr");
         let metrics = Arc::new(SfuMetrics::default());
         let iter_counter = metrics.udp_loop_iterations_total.clone();
         let close_counter = metrics
@@ -398,6 +441,7 @@ mod tests {
             None,
             Some(relay_rx),
             None,
+            candidate_addr,
             async {
                 let _ = shutdown_rx.await;
             },
@@ -440,6 +484,7 @@ mod tests {
             ..SfuConfig::default()
         };
         let socket = bind(&cfg).await.unwrap();
+        let candidate_addr = socket.local_addr().expect("local_addr");
         let metrics = Arc::new(crate::metrics::SfuMetrics::default());
         let (relay_tx, relay_rx) = mpsc::channel::<PendingRelay>(4);
         let (_client_tx, client_inject_rx) = mpsc::channel::<crate::client_ws::PendingClient>(4);
@@ -476,6 +521,7 @@ mod tests {
             None,
             Some(relay_rx),
             Some(client_inject_rx),
+            candidate_addr,
             async {
                 let _ = shutdown_rx.await;
             },
@@ -563,6 +609,7 @@ mod tests {
             ..SfuConfig::default()
         };
         let socket = bind(&cfg).await.unwrap();
+        let candidate_addr = socket.local_addr().expect("local_addr");
         let metrics = Arc::new(crate::metrics::SfuMetrics::default());
         let (_relay_tx, relay_rx) = mpsc::channel::<crate::relay::client::PendingRelay>(1);
         let (client_tx, client_inject_rx) = mpsc::channel::<PendingClient>(4);
@@ -590,6 +637,7 @@ mod tests {
             None,
             Some(relay_rx),
             Some(client_inject_rx),
+            candidate_addr,
             async {
                 let _ = shutdown_rx.await;
             },
