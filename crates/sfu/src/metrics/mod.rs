@@ -208,6 +208,57 @@ pub struct SfuMetrics {
     /// `has_peers="true"` = room had at least one active publisher when the
     /// newcomer joined; `has_peers="false"` = empty room (first joiner).
     pub tracks_map_sent_total: IntCounterVec,
+
+    // ── SFU forwarding observability ─────────────────────────────────────────
+
+    /// Per-RTP forward decision with per-peer breakdown.
+    ///
+    /// Labels:
+    /// * `src_peer` — internal numeric id of the publishing peer.
+    /// * `dst_peer` — internal numeric id of the subscribing peer.
+    /// * `kind`     — `audio | video | other`.
+    /// * `action`   — `forwarded | skipped_no_track | write_err`.
+    ///
+    /// Cardinality: peers × peers × 3 kinds × 3 actions. In a 6-peer room
+    /// that is at most 6×6×3×3 = 324 series — well within Prometheus limits.
+    /// Scrub `src_peer` / `dst_peer` series in `reap_dead` when peers disconnect
+    /// to keep the long-run set bounded.
+    pub sfu_forward_decisions_total: IntCounterVec,
+
+    /// Subscription wiring events — one event per (publisher, subscriber) pair.
+    ///
+    /// Emitted by `Registry::insert` when existing publisher tracks are
+    /// cross-advertised to a new peer via `handle_track_open`. A late joiner
+    /// MUST produce exactly N events (one per existing publisher's track).
+    ///
+    /// Labels:
+    /// * `publisher_peer` — internal id of the publisher.
+    /// * `subscriber_peer` — internal id of the newcomer.
+    /// * `result`          — `wired | no_track` (weak pointer upgrade outcome).
+    pub sfu_subscription_setup_total: IntCounterVec,
+
+    /// Late-join detection — emitted in `udp_loop::serve` when a new browser
+    /// peer enters a room that already has active publishers.
+    ///
+    /// `count > 0` confirms detection fired; if `sfu_forward_decisions_total`
+    /// still shows zero forwards for that subscriber → wiring bug elsewhere.
+    ///
+    /// Labels:
+    /// * `trigger`       — `peer_joined_late` (room had publishers on join).
+    /// * `action_taken`  — `tracks_map_sent | no_op_empty_room`.
+    pub sfu_late_join_resync_total: IntCounterVec,
+
+    /// str0m `poll_output` result distribution.
+    ///
+    /// Labels:
+    /// * `peer_id` — internal numeric id.
+    /// * `kind`    — `transmit | timeout | media_added | media_data |
+    ///               keyframe_request | bwe | channel_data | other | error`.
+    ///
+    /// `rate(sfu_str0m_output_total{kind="error"}[1m]) > 0` fires when str0m
+    /// rejects its own output — typically a misconfigured codec or lost ICE path.
+    /// `transmit` rate ≈ outbound packet rate; sudden drop = forwarding stalled.
+    pub sfu_str0m_output_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -538,6 +589,69 @@ impl SfuMetrics {
         let _ = tracks_map_sent_total.with_label_values(&["true"]).get();
         let _ = tracks_map_sent_total.with_label_values(&["false"]).get();
 
+        // ── SFU forwarding observability ─────────────────────────────────────
+        let sfu_forward_decisions_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_forward_decisions_total",
+                "Per-RTP forward decision with src/dst/kind/action breakdown. \
+                 action ∈ {forwarded, skipped_no_track, write_err}. \
+                 Use this counter to diagnose asymmetric forwarding: if \
+                 forwarded{dst=X}=0 while other dst peers are non-zero, the \
+                 subscription wiring for peer X is broken.",
+            ),
+            &["src_peer", "dst_peer", "kind", "action"],
+        )
+        .context("sfu_forward_decisions_total")?);
+        // No pre-touch: labels are dynamic (peer ids). Series materialize on
+        // first packet — the forward-decision counter is a diagnostic tool, not
+        // an alert-baseline counter.
+
+        let sfu_subscription_setup_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_subscription_setup_total",
+                "Subscription wiring events emitted by Registry::insert. \
+                 result ∈ {wired, no_track}. A late joiner must produce exactly \
+                 N events (one per existing publisher's track); zero events means \
+                 the cross-advertisement loop was skipped.",
+            ),
+            &["publisher_peer", "subscriber_peer", "result"],
+        )
+        .context("sfu_subscription_setup_total")?);
+
+        let sfu_late_join_resync_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_late_join_resync_total",
+                "Late-join detection events from udp_loop::serve. \
+                 trigger ∈ {peer_joined_late}. \
+                 action_taken ∈ {tracks_map_sent, no_op_empty_room}. \
+                 counter > 0 with zero sfu_forward_decisions_total{dst=peer} = \
+                 wiring bug (subscription fired but no packets forwarded).",
+            ),
+            &["trigger", "action_taken"],
+        )
+        .context("sfu_late_join_resync_total")?);
+        // Pre-touch the two expected combinations so alert rules see baseline 0.
+        let _ = sfu_late_join_resync_total
+            .with_label_values(&["peer_joined_late", "tracks_map_sent"])
+            .get();
+        let _ = sfu_late_join_resync_total
+            .with_label_values(&["peer_joined_late", "no_op_empty_room"])
+            .get();
+
+        let sfu_str0m_output_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_str0m_output_total",
+                "str0m poll_output result distribution per peer. \
+                 kind ∈ {transmit, timeout, media_added, media_data, \
+                 keyframe_request, bwe, channel_data, other, error}. \
+                 transmit rate ≈ outbound packet rate. \
+                 rate(sfu_str0m_output_total{kind=\"error\"}[1m]) > 0 = str0m internal error.",
+            ),
+            &["peer_id", "kind"],
+        )
+        .context("sfu_str0m_output_total")?);
+        // No pre-touch: peer_id labels are dynamic.
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -579,6 +693,10 @@ impl SfuMetrics {
             ice_state_total,
             sdp_msid_injected_total,
             tracks_map_sent_total,
+            sfu_forward_decisions_total,
+            sfu_subscription_setup_total,
+            sfu_late_join_resync_total,
+            sfu_str0m_output_total,
         })
     }
 
@@ -622,6 +740,88 @@ mod tests {
         assert!(
             text.contains("sfu_sdp_msid_injected_total"),
             "sfu_sdp_msid_injected_total must appear in /metrics output, got:\n{text}",
+        );
+    }
+
+    /// SFU forwarding observability counters are registered and the
+    /// late-join pre-touched label values start at 0.
+    ///
+    /// Dynamic-label counters (forward_decisions, subscription_setup,
+    /// str0m_output) have no pre-touch, so they are absent from /metrics
+    /// until first use. We verify them by inc-ing a test label pair and
+    /// confirming (a) the counter was accepted without panicking and
+    /// (b) the HELP line appears in the encoded text.
+    #[test]
+    fn sfu_forwarding_observability_counters_registered() {
+        let m = SfuMetrics::new().expect("metrics build");
+
+        // late_join pre-touch — static label combinations, must start at 0.
+        assert_eq!(
+            m.sfu_late_join_resync_total
+                .with_label_values(&["peer_joined_late", "tracks_map_sent"])
+                .get(),
+            0,
+            "late_join tracks_map_sent must start at 0"
+        );
+        assert_eq!(
+            m.sfu_late_join_resync_total
+                .with_label_values(&["peer_joined_late", "no_op_empty_room"])
+                .get(),
+            0,
+            "late_join no_op_empty_room must start at 0"
+        );
+
+        // Dynamic counters: touch once to materialise the series, then read back.
+        m.sfu_forward_decisions_total
+            .with_label_values(&["1", "2", "audio", "forwarded"])
+            .inc();
+        assert_eq!(
+            m.sfu_forward_decisions_total
+                .with_label_values(&["1", "2", "audio", "forwarded"])
+                .get(),
+            1,
+            "sfu_forward_decisions_total must accept labels and increment"
+        );
+
+        m.sfu_subscription_setup_total
+            .with_label_values(&["1", "2", "wired"])
+            .inc();
+        assert_eq!(
+            m.sfu_subscription_setup_total
+                .with_label_values(&["1", "2", "wired"])
+                .get(),
+            1,
+            "sfu_subscription_setup_total must accept labels and increment"
+        );
+
+        m.sfu_str0m_output_total
+            .with_label_values(&["1", "transmit"])
+            .inc();
+        assert_eq!(
+            m.sfu_str0m_output_total
+                .with_label_values(&["1", "transmit"])
+                .get(),
+            1,
+            "sfu_str0m_output_total must accept labels and increment"
+        );
+
+        // After materialisation, HELP lines must appear in encoded text.
+        let text = m.encode_text().expect("encode metrics");
+        assert!(
+            text.contains("sfu_sfu_forward_decisions_total"),
+            "sfu_forward_decisions_total must appear in /metrics after first inc, got:\n{text}",
+        );
+        assert!(
+            text.contains("sfu_sfu_subscription_setup_total"),
+            "sfu_subscription_setup_total must appear in /metrics after first inc, got:\n{text}",
+        );
+        assert!(
+            text.contains("sfu_sfu_late_join_resync_total"),
+            "sfu_late_join_resync_total must appear in /metrics (pre-touched), got:\n{text}",
+        );
+        assert!(
+            text.contains("sfu_sfu_str0m_output_total"),
+            "sfu_str0m_output_total must appear in /metrics after first inc, got:\n{text}",
         );
     }
 
