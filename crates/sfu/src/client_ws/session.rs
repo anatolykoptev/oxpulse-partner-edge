@@ -306,7 +306,14 @@ pub async fn run(
     // sets ev.streams correctly. Without this, str0m answer SDP has no
     // msid lines and the browser fires ev.streams = [], causing
     // gc_ontrack_drop_total{reason="empty_stream"} in oxpulse-chat.
-    let answer_sdp = super::sdp_msid::inject_msid(&answer_sdp, peer_id);
+    let (answer_sdp, msid_injected_count) = super::sdp_msid::inject_msid(&answer_sdp, peer_id);
+    // Phase C: emit regression-guard counter. has_msid=false with rate > 0
+    // means inject_msid found no eligible m-lines — either a recvonly-only
+    // offer (rare, benign) or a code regression (alert-worthy).
+    metrics
+        .sdp_msid_injected_total
+        .with_label_values(&[if msid_injected_count > 0 { "true" } else { "false" }])
+        .inc();
     let answer_frame = serde_json::json!({ "kind": "answer", "sdp": answer_sdp }).to_string();
 
     // 5. Hand the pre-ICE Rtc to the main UDP loop FIRST. From here on,

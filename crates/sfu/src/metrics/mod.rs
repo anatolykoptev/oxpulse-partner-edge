@@ -182,6 +182,19 @@ pub struct SfuMetrics {
     /// Use `rate(sfu_ice_state_total{state="disconnected"}[5m]) > 0` for disconnect
     /// alerting; `state="checking"` rate = connection attempt rate.
     pub ice_state_total: IntCounterVec,
+
+    // ── Phase C: SDP msid injection audit ────────────────────────────────────
+    /// SDP answer m-line msid injection audit counter.
+    ///
+    /// `has_msid="true"` = at least one eligible m-line in the answer received
+    /// `a=msid:peer-N` injection; `has_msid="false"` = no eligible m-lines were
+    /// found (recvonly-only offer, or regression of the A1 msid-injection fix).
+    ///
+    /// Regression alert: `rate(sfu_sdp_msid_injected_total{has_msid="false"}[5m]) > 0`
+    /// fires when someone reverts `inject_msid` or the SDP parser stops
+    /// recognising sendonly/sendrecv directions — the `empty_stream` drop counter
+    /// in oxpulse-chat would start rising within the same scrape window.
+    pub sdp_msid_injected_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -481,6 +494,23 @@ impl SfuMetrics {
             let _ = ice_state_total.with_label_values(&[state]).get();
         }
 
+        // ── Phase C: SDP msid injection audit ────────────────────────────────
+        let sdp_msid_injected_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sdp_msid_injected_total",
+                "SDP answer m-line msid injection audit. \
+                 has_msid=true = at least one eligible m-line got a=msid injected; \
+                 has_msid=false = no eligible m-lines found (regression guard A1). \
+                 Regression alert: rate(sfu_sdp_msid_injected_total{has_msid=\"false\"}[5m]) > 0.",
+            ),
+            &["has_msid"],
+        )
+        .context("sdp_msid_injected_total")?);
+        // Pre-touch both label values so alert rules see a baseline of 0 at startup
+        // and the series appear in /metrics before the first offer arrives.
+        let _ = sdp_msid_injected_total.with_label_values(&["true"]).get();
+        let _ = sdp_msid_injected_total.with_label_values(&["false"]).get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -520,6 +550,7 @@ impl SfuMetrics {
             voice_relay_dropped,
             voice_relay_active_channels,
             ice_state_total,
+            sdp_msid_injected_total,
         })
     }
 
@@ -542,6 +573,29 @@ impl Default for SfuMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase C: sdp_msid_injected_total is registered and both label values
+    /// start at 0. The pre-touch in `new()` materialises the series so alert
+    /// rules have a stable baseline before the first offer arrives.
+    #[test]
+    fn sdp_msid_injected_total_registered_and_baseline_zero() {
+        let m = SfuMetrics::new().expect("metrics build");
+        assert_eq!(
+            m.sdp_msid_injected_total.with_label_values(&["true"]).get(),
+            0,
+            "has_msid=true must start at 0"
+        );
+        assert_eq!(
+            m.sdp_msid_injected_total.with_label_values(&["false"]).get(),
+            0,
+            "has_msid=false must start at 0"
+        );
+        let text = m.encode_text().expect("encode metrics");
+        assert!(
+            text.contains("sfu_sdp_msid_injected_total"),
+            "sfu_sdp_msid_injected_total must appear in /metrics output, got:\n{text}",
+        );
+    }
 
     /// Incident 2026-05-06: `active_rooms` was `set(1)` at registry init
     /// and never updated. Reviewer surfaced the hardcoded-constant gauge

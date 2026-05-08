@@ -12,7 +12,12 @@
 /// RTCPeerConnection.ontrack fires with ev.streams = [] (random IDs are
 /// present but oxpulse-chat bindRemoteTrack can't find the stream), causing
 /// gc_ontrack_drop_total{reason="empty_stream"} in oxpulse-chat.
-pub fn inject_msid(answer_sdp: &str, peer_id: u64) -> String {
+/// Returns `(modified_sdp, injected_count)` where `injected_count` is the
+/// number of m-lines that received a new `a=msid:peer-N` line. A count of
+/// zero means no eligible (sendonly/sendrecv) audio/video m-lines were found,
+/// which is used by callers to emit `sfu_sdp_msid_injected_total{has_msid=false}`
+/// as a regression guard for the A1 fix.
+pub fn inject_msid(answer_sdp: &str, peer_id: u64) -> (String, usize) {
     // Detect line ending style (WebRTC SDP uses CRLF per RFC 4566, but
     // str0m may emit LF-only in tests; preserve whatever we received).
     let crlf = answer_sdp.contains("\r\n");
@@ -59,7 +64,11 @@ pub fn inject_msid(answer_sdp: &str, peer_id: u64) -> String {
         /// conditions are met. Any pre-existing `a=msid:` lines that are NOT
         /// the canonical `peer-<peer_id>` pattern are stripped so we don't
         /// accumulate both str0m's random UUID msids and our own.
-        fn flush(self, out: &mut String, peer_id: u64, eol: &str) {
+        ///
+        /// Returns `true` if an `a=msid:` line was newly injected into this
+        /// block, `false` if the block was ineligible or already had canonical
+        /// msid. Used by the caller to count total injected m-lines.
+        fn flush(self, out: &mut String, peer_id: u64, eol: &str) -> bool {
             if self.kind == Kind::Other
                 || self.already_injected
                 || self.direction == Direction::RecvOnly
@@ -71,7 +80,7 @@ pub fn inject_msid(answer_sdp: &str, peer_id: u64) -> String {
                     out.push_str(l);
                     out.push_str(eol);
                 }
-                return;
+                return false;
             }
 
             let kind_str = match self.kind {
@@ -113,7 +122,9 @@ pub fn inject_msid(answer_sdp: &str, peer_id: u64) -> String {
             if !injected {
                 out.push_str(&msid_line);
                 out.push_str(eol);
+                injected = true;
             }
+            injected
         }
     }
 
@@ -121,6 +132,7 @@ pub fn inject_msid(answer_sdp: &str, peer_id: u64) -> String {
     let mut session_lines: Vec<String> = Vec::new(); // lines before first m=
     let mut in_session = true;
     let mut current: Option<MBlock> = None;
+    let mut total_injected: usize = 0;
 
     let lines: Vec<&str> = if crlf {
         answer_sdp.split("\r\n").collect()
@@ -144,7 +156,9 @@ pub fn inject_msid(answer_sdp: &str, peer_id: u64) -> String {
                 }
                 in_session = false;
             } else if let Some(block) = current.take() {
-                block.flush(&mut out, peer_id, eol);
+                if block.flush(&mut out, peer_id, eol) {
+                    total_injected += 1;
+                }
             }
 
             let kind = if raw.starts_with("m=audio") {
@@ -186,10 +200,12 @@ pub fn inject_msid(answer_sdp: &str, peer_id: u64) -> String {
             out.push_str(eol);
         }
     } else if let Some(block) = current {
-        block.flush(&mut out, peer_id, eol);
+        if block.flush(&mut out, peer_id, eol) {
+            total_injected += 1;
+        }
     }
 
-    out
+    (out, total_injected)
 }
 
 #[cfg(test)]
@@ -213,7 +229,7 @@ mod tests {
 
     #[test]
     fn injects_msid_per_audio_video_mline() {
-        let result = inject_msid(audio_video_sdp(), 7);
+        let (result, _) = inject_msid(audio_video_sdp(), 7);
         assert!(
             result.contains("a=msid:peer-7 peer-7-audio"),
             "audio msid missing; got:\n{result}"
@@ -236,7 +252,7 @@ mod tests {
                    a=sendonly\r\n\
                    a=msid:peer-7 peer-7-audio\r\n\
                    a=rtpmap:111 opus/48000/2\r\n";
-        let result = inject_msid(sdp, 7);
+        let (result, _) = inject_msid(sdp, 7);
         let msid_count = result.matches("a=msid:").count();
         assert_eq!(msid_count, 1, "canonical msid duplicated; got:\n{result}");
         assert!(
@@ -257,7 +273,7 @@ mod tests {
                    a=sendonly\r\n\
                    a=msid:randomUUID trackUUID\r\n\
                    a=rtpmap:111 opus/48000/2\r\n";
-        let result = inject_msid(sdp, 7);
+        let (result, _) = inject_msid(sdp, 7);
         assert!(
             result.contains("a=msid:peer-7 peer-7-audio"),
             "peer-7 msid not injected; got:\n{result}"
@@ -282,7 +298,7 @@ mod tests {
                    a=mid:1\r\n\
                    a=sendrecv\r\n\
                    a=rtpmap:96 VP8/90000\r\n";
-        let result = inject_msid(sdp, 7);
+        let (result, _) = inject_msid(sdp, 7);
         assert!(
             !result.contains("a=msid:peer-7 peer-7-audio"),
             "recvonly audio got msid injected; got:\n{result}"
@@ -302,7 +318,7 @@ mod tests {
 m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
 a=mid:0\r\n\
 a=inactive\r\n";
-        let result = inject_msid(sdp, 7);
+        let (result, _) = inject_msid(sdp, 7);
         assert!(
             !result.contains("a=msid:peer-7"),
             "inactive m-line must not get a=msid; got:\n{result}"
@@ -318,7 +334,7 @@ a=inactive\r\n";
                    m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
                    a=mid:2\r\n\
                    a=sendrecv\r\n";
-        let result = inject_msid(sdp, 7);
+        let (result, _) = inject_msid(sdp, 7);
         assert!(
             !result.contains("a=msid:"),
             "datachannel m-line got msid injected; got:\n{result}"
@@ -327,7 +343,7 @@ a=inactive\r\n";
 
     #[test]
     fn peer_id_zero_works() {
-        let result = inject_msid(audio_video_sdp(), 0);
+        let (result, _) = inject_msid(audio_video_sdp(), 0);
         assert!(
             result.contains("a=msid:peer-0 peer-0-audio"),
             "peer_id=0 audio msid missing; got:\n{result}"
@@ -335,6 +351,56 @@ a=inactive\r\n";
         assert!(
             result.contains("a=msid:peer-0 peer-0-video"),
             "peer_id=0 video msid missing; got:\n{result}"
+        );
+    }
+
+    // ── Phase C: injected_count return value ─────────────────────────────────
+
+    #[test]
+    fn returns_injected_count_for_two_eligible_mlines() {
+        // audio_video_sdp() has two sendonly m-lines → count must be 2.
+        let (_, count) = inject_msid(audio_video_sdp(), 7);
+        assert_eq!(
+            count, 2,
+            "expected 2 injected m-lines (audio + video); got {count}"
+        );
+    }
+
+    #[test]
+    fn recvonly_only_returns_zero_count() {
+        // recvonly m-line is ineligible → inject_msid should inject nothing.
+        // A zero count signals `has_msid=false` — the regression guard fires.
+        let sdp = "v=0\r\n\
+                   o=- 0 0 IN IP4 127.0.0.1\r\n\
+                   s=-\r\n\
+                   t=0 0\r\n\
+                   m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+                   a=mid:0\r\n\
+                   a=recvonly\r\n\
+                   a=rtpmap:111 opus/48000/2\r\n";
+        let (_, count) = inject_msid(sdp, 7);
+        assert_eq!(
+            count, 0,
+            "recvonly-only SDP must return count=0 (regression guard path); got {count}"
+        );
+    }
+
+    #[test]
+    fn already_injected_does_not_double_count() {
+        // If canonical msid already present, flush returns early — not counted.
+        let sdp = "v=0\r\n\
+                   o=- 0 0 IN IP4 127.0.0.1\r\n\
+                   s=-\r\n\
+                   t=0 0\r\n\
+                   m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+                   a=mid:0\r\n\
+                   a=sendonly\r\n\
+                   a=msid:peer-7 peer-7-audio\r\n\
+                   a=rtpmap:111 opus/48000/2\r\n";
+        let (_, count) = inject_msid(sdp, 7);
+        assert_eq!(
+            count, 0,
+            "already-injected block must not be counted again; got {count}"
         );
     }
 }
