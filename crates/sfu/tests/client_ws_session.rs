@@ -516,6 +516,188 @@ async fn client_ws_offer_processed_increments_with_outcome_label_ok() {
     );
 }
 
+/// Phase F2: when a second browser peer joins a room that already has one
+/// active peer, the UDP loop must send a `tracks_map` WS message over the
+/// backchannel BEFORE (or shortly after) the answer, carrying the first
+/// peer's stream_id → peer_id mapping.
+///
+/// Topology: peer A joins first (injected directly, bypassing WS), then
+/// peer B connects via WS and completes the SDP exchange. After the answer,
+/// peer B's WS must receive a `tracks_map` frame whose `tracks` array
+/// contains peer A's entry (`stream_id:"peer-<A>", peer_id:"<A>"`).
+#[tokio::test]
+async fn second_joiner_receives_tracks_map_with_first_peer() {
+    use oxpulse_sfu::config::SfuConfig;
+    use oxpulse_sfu::udp_loop;
+
+    // 1. Bind UDP + wire channels.
+    let cfg = SfuConfig {
+        udp_port: 0,
+        bind_address: "127.0.0.1".to_string(),
+        ..SfuConfig::default()
+    };
+    let socket = udp_loop::bind(&cfg).await.unwrap();
+    let local_udp = socket.local_addr().unwrap();
+    let metrics = Arc::new(SfuMetrics::default());
+    let (relay_tx, relay_rx) = mpsc::channel::<oxpulse_sfu::relay::client::PendingRelay>(1);
+    drop(relay_tx);
+    let (client_inject_tx, client_inject_rx) = mpsc::channel::<PendingClient>(8);
+
+    // 2. Inject peer A directly into the channel — no WS exchange needed.
+    let rtc_a = str0m::Rtc::new(std::time::Instant::now());
+    let (close_a_tx, _close_a_rx) = tokio::sync::oneshot::channel();
+    let (ws_msg_a_tx, _ws_msg_a_rx) = mpsc::channel::<String>(4);
+    client_inject_tx
+        .send(PendingClient {
+            rtc: rtc_a,
+            room_id: "phase-f2-test".to_string(),
+            external_peer_id: 7,
+            close_signal: close_a_tx,
+            ws_msg_tx: ws_msg_a_tx,
+        })
+        .await
+        .unwrap();
+
+    // 3. Spawn the WS API for peer B.
+    let ws_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_addr = ws_listener.local_addr().unwrap();
+    let secret: Arc<[u8]> = Arc::from(HS256_SECRET);
+    let _ws_handle = spawn_client_ws_api(
+        ws_listener,
+        secret,
+        None,
+        client_inject_tx.clone(),
+        local_udp,
+        metrics.clone(),
+    )
+    .unwrap();
+    drop(client_inject_tx);
+
+    // 4. Spawn the UDP serve loop — processes the inject channel.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let serve_handle = tokio::spawn(udp_loop::serve(
+        socket,
+        metrics.clone(),
+        None,
+        None,
+        Some(relay_rx),
+        Some(client_inject_rx),
+        local_udp,
+        async {
+            let _ = shutdown_rx.await;
+        },
+    ));
+
+    // 5. Poll until peer A lands in registry (active_participants >= 1).
+    let mut found_a = false;
+    for _ in 0..40 {
+        if metrics.active_participants.get() >= 1 {
+            found_a = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(found_a, "peer A must land in registry before peer B connects");
+
+    // 6. Peer B connects via WS and completes SDP exchange.
+    let token_b = make_token("phase-f2-test", 8, HS256_SECRET, 3600);
+    let url_b = format!("ws://{ws_addr}/sfu/ws/phase-f2-test");
+
+    let mut req_b = url_b.into_client_request().expect("valid URL");
+    let proto_value = format!("{SUBPROTO}, Bearer {token_b}");
+    req_b.headers_mut().insert(
+        "sec-websocket-protocol",
+        tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&proto_value).unwrap(),
+    );
+    req_b.headers_mut().insert(
+        "sec-websocket-key",
+        tokio_tungstenite::tungstenite::http::HeaderValue::from_str(
+            &tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        ).unwrap(),
+    );
+    req_b.headers_mut()
+        .insert("sec-websocket-version", tokio_tungstenite::tungstenite::http::HeaderValue::from_static("13"));
+    req_b.headers_mut()
+        .insert("connection", tokio_tungstenite::tungstenite::http::HeaderValue::from_static("Upgrade"));
+    req_b.headers_mut()
+        .insert("upgrade", tokio_tungstenite::tungstenite::http::HeaderValue::from_static("websocket"));
+
+    let (mut ws_b, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio_tungstenite::connect_async(req_b),
+    )
+    .await
+    .expect("ws_b handshake within 2s")
+    .expect("ws_b handshake OK");
+
+    let (offer_sdp, _pending, _rtc) = build_browser_offer();
+    ws_b.send(Message::Text(
+        serde_json::json!({"kind":"offer","sdp":offer_sdp}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+
+    // 7. Collect frames until we see both the answer and the tracks_map.
+    let mut saw_answer = false;
+    let mut tracks_map_tracks: Option<Vec<serde_json::Value>> = None;
+    for _ in 0..10 {
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            ws_b.next(),
+        )
+        .await
+        .expect("frame within 500ms")
+        .expect("stream open")
+        .expect("frame OK");
+        let text = match frame {
+            Message::Text(t) => t,
+            _ => continue,
+        };
+        let v: serde_json::Value = serde_json::from_str(text.as_str()).expect("valid JSON");
+        match v.get("kind").and_then(|k| k.as_str()) {
+            Some("answer") => saw_answer = true,
+            _ => {}
+        }
+        if v.get("type").and_then(|t| t.as_str()) == Some("tracks_map") {
+            if let Some(arr) = v.get("tracks").and_then(|t| t.as_array()) {
+                tracks_map_tracks = Some(arr.clone());
+            }
+        }
+        if saw_answer && tracks_map_tracks.is_some() {
+            break;
+        }
+    }
+
+    assert!(saw_answer, "peer B must receive SDP answer");
+    let tracks = tracks_map_tracks.expect("peer B must receive tracks_map message");
+    assert_eq!(
+        tracks.len(),
+        1,
+        "tracks_map must contain exactly one entry (peer A); got {tracks:?}"
+    );
+    let entry = &tracks[0];
+    assert_eq!(
+        entry.get("stream_id").and_then(|v| v.as_str()),
+        Some("peer-7"),
+        "tracks[0].stream_id must be 'peer-7'; got {entry:?}"
+    );
+    assert_eq!(
+        entry.get("peer_id").and_then(|v| v.as_str()),
+        Some("7"),
+        "tracks[0].peer_id must be '7'; got {entry:?}"
+    );
+
+    // 8. Verify metric counter.
+    assert!(
+        metrics.tracks_map_sent_total.with_label_values(&["true"]).get() >= 1,
+        "tracks_map_sent_total{{has_peers=true}} must be >= 1 after second peer joined"
+    );
+
+    // 9. Clean shutdown.
+    let _ = shutdown_tx.send(());
+    let _ = serve_handle.await;
+}
+
 /// `parse_err` was split into three sub-labels in the 2026-05-07 observability
 /// fix.  A frame with a wrong `kind` must now emit `json_err` (not `parse_err`).
 #[tokio::test]

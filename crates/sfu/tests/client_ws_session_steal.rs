@@ -236,11 +236,26 @@ async fn duplicate_upgrade_replaces_older_session() {
 
     // 3. WS A must observe a Close(4031) frame ("session replaced").
     //    Allow up to 2s for the steal-signal → close-frame round-trip.
-    let close_a = tokio::time::timeout(Duration::from_secs(2), ws_a.next())
-        .await
-        .expect("WS A must receive Close within 2s")
-        .expect("WS A stream not ended before close")
-        .expect("WS A close frame deserialised OK");
+    //    Phase F2: a `tracks_map` server-push frame may arrive on WS A
+    //    before the steal close (WS A injected as first peer → empty
+    //    tracks_map; WS B then steals). Drain non-Close frames until we
+    //    see the Close or time out.
+    let close_a = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let frame = ws_a.next().await
+                .expect("WS A stream not ended before close")
+                .expect("WS A frame deserialised OK");
+            match frame {
+                Message::Close(_) => return frame,
+                // Server-push frames (tracks_map) may arrive first — skip.
+                Message::Text(_) | Message::Binary(_)
+                | Message::Ping(_) | Message::Pong(_)
+                | Message::Frame(_) => continue,
+            }
+        }
+    })
+    .await
+    .expect("WS A must receive Close within 2s");
     match close_a {
         Message::Close(Some(frame)) => {
             assert_eq!(

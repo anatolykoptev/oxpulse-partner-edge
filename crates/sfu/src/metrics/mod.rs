@@ -195,6 +195,19 @@ pub struct SfuMetrics {
     /// recognising sendonly/sendrecv directions — the `empty_stream` drop counter
     /// in oxpulse-chat would start rising within the same scrape window.
     pub sdp_msid_injected_total: IntCounterVec,
+
+    // ── Phase F: tracks_map signaling ────────────────────────────────────────
+    /// `tracks_map` WS messages sent to joining browser peers (Phase F2).
+    ///
+    /// A `tracks_map` message carries the stream_id→peer_id mapping for all
+    /// currently-active publishers and is sent over the existing WS connection
+    /// after the SDP answer. The client uses it to pre-populate `sfuStreamBindMap`
+    /// so `pc.ontrack` can route tracks to the correct peer entry without a
+    /// heuristic fallback.
+    ///
+    /// `has_peers="true"` = room had at least one active publisher when the
+    /// newcomer joined; `has_peers="false"` = empty room (first joiner).
+    pub tracks_map_sent_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -511,6 +524,20 @@ impl SfuMetrics {
         let _ = sdp_msid_injected_total.with_label_values(&["true"]).get();
         let _ = sdp_msid_injected_total.with_label_values(&["false"]).get();
 
+        // ── Phase F: tracks_map signaling ────────────────────────────────────
+        let tracks_map_sent_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "tracks_map_sent_total",
+                "Phase F2: tracks_map WS messages sent to joining browser peers. \
+                 has_peers=true = room had active publishers; has_peers=false = first joiner.",
+            ),
+            &["has_peers"],
+        )
+        .context("tracks_map_sent_total")?);
+        // Pre-touch both label values so alert rules see a baseline of 0 at startup.
+        let _ = tracks_map_sent_total.with_label_values(&["true"]).get();
+        let _ = tracks_map_sent_total.with_label_values(&["false"]).get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -551,6 +578,7 @@ impl SfuMetrics {
             voice_relay_active_channels,
             ice_state_total,
             sdp_msid_injected_total,
+            tracks_map_sent_total,
         })
     }
 
