@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.15](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.14...partner-edge-v0.12.15) (2026-05-08)
+
+
+### Features
+
+* **sfu:** Phase C sfu_sdp_msid_injected_total counter (A1 regression guard) ([#63](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/63)) ([bb934e3](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/bb934e3e1447d69150b4bdd38a3d2220b13835e7))
+
 ## [0.12.14](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.13...partner-edge-v0.12.14) (2026-05-08)
 
 
