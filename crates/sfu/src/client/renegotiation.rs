@@ -129,9 +129,9 @@ impl Client {
                 self.pending_offer = None;
                 self.pending_offer_at = None;
                 self.tracks_out.pop(); // remove the Negotiating(mid) entry we just pushed
-                // Re-enqueue the track_in so it is retried when the next answer
-                // drains (or when the next handle_track_open fires and the channel
-                // is no longer full).
+                                       // Re-enqueue the track_in so it is retried when the next answer
+                                       // drains (or when the next handle_track_open fires and the channel
+                                       // is no longer full).
                 self.renegotiation_queue.push_front(track_in);
                 let kind_label = match kind {
                     MediaKind::Audio => "audio",
@@ -141,8 +141,10 @@ impl Client {
                     .sfu_renegotiation_offers_dropped_total
                     .with_label_values(&[kind_label])
                     .inc();
-                tracing::warn!(client = *self.id,
-                    "M2: ws_msg_tx full — offer-renegotiate dropped; state rolled back");
+                tracing::warn!(
+                    client = *self.id,
+                    "M2: ws_msg_tx full — offer-renegotiate dropped; state rolled back"
+                );
             }
         }
     }
@@ -158,8 +160,10 @@ impl Client {
     pub fn accept_renegotiation_answer(&mut self, sdp: &str) {
         self.pending_offer_at = None;
         let Some(pending) = self.pending_offer.take() else {
-            tracing::warn!(client = *self.id,
-                "M2: accept_renegotiation_answer called with no pending offer — ignoring");
+            tracing::warn!(
+                client = *self.id,
+                "M2: accept_renegotiation_answer called with no pending offer — ignoring"
+            );
             return;
         };
 
@@ -190,7 +194,10 @@ impl Client {
             // so remove ALL Negotiating entries (there should be exactly one since
             // str0m enforces a single in-flight offer). Log a warning for each.
             self.tracks_out.retain(|o| {
-                if matches!(o.state, crate::client::tracks::TrackOutState::Negotiating(_)) {
+                if matches!(
+                    o.state,
+                    crate::client::tracks::TrackOutState::Negotiating(_)
+                ) {
                     tracing::warn!(
                         client = *self.id,
                         "M2: removing stuck Negotiating TrackOut after accept_answer failure"
@@ -227,8 +234,10 @@ impl Client {
         // Check no-answer timeout before processing new messages.
         if let Some(sent_at) = self.pending_offer_at {
             if sent_at.elapsed() > Duration::from_secs(10) {
-                tracing::warn!(client = *self.id,
-                    "M2: renegotiation offer timed out (>10s, no answer received) — clearing state");
+                tracing::warn!(
+                    client = *self.id,
+                    "M2: renegotiation offer timed out (>10s, no answer received) — clearing state"
+                );
                 self.pending_offer = None;
                 self.pending_offer_at = None;
                 self.renegotiation_queue.clear();
@@ -263,8 +272,10 @@ impl Client {
             // WS disconnect: clean up any in-flight renegotiation state to
             // avoid the queue stalling forever with no channel to drain it.
             if self.pending_offer_at.is_some() {
-                tracing::warn!(client = *self.id,
-                    "M2: ws_ctrl_rx disconnected with pending renegotiation — clearing state");
+                tracing::warn!(
+                    client = *self.id,
+                    "M2: ws_ctrl_rx disconnected with pending renegotiation — clearing state"
+                );
                 self.pending_offer = None;
                 self.pending_offer_at = None;
                 self.renegotiation_queue.clear();
@@ -340,17 +351,21 @@ mod tests {
         // Manually queue the second track (simulates in-flight renegotiation)
         client.renegotiation_queue.push_back(track_b_weak.clone());
         assert_eq!(
-            client.renegotiation_queue.len(), 1,
+            client.renegotiation_queue.len(),
+            1,
             "one item queued before accept_answer"
         );
 
         // accept_renegotiation_answer with no pending offer → warn + return early.
         // The queue must NOT drain in this case (no pending offer was taken).
-        client.accept_renegotiation_answer("v=0
+        client.accept_renegotiation_answer(
+            "v=0
 fake-sdp
-");
+",
+        );
         assert_eq!(
-            client.renegotiation_queue.len(), 1,
+            client.renegotiation_queue.len(),
+            1,
             "queue NOT drained when accept called with no pending offer"
         );
 
@@ -362,19 +377,24 @@ fake-sdp
             .build()
             .unwrap();
         rt.block_on(async {
-            ws_ctrl_tx.send(WsClientCtrl::AnswerRenegotiate {
-                sdp: "v=0
+            ws_ctrl_tx
+                .send(WsClientCtrl::AnswerRenegotiate {
+                    sdp: "v=0
 fake-sdp
-".to_string(),
-                mid: "m1".to_string(),
-            }).await.expect("send ctrl msg");
+"
+                    .to_string(),
+                    mid: "m1".to_string(),
+                })
+                .await
+                .expect("send ctrl msg");
         });
         client.drain_ws_ctrl();
         // drain_ws_ctrl consumed the channel message (verify by checking empty)
         // Queue still has 1 item since accept_renegotiation_answer returned early
         // (no pending offer).
         assert_eq!(
-            client.renegotiation_queue.len(), 1,
+            client.renegotiation_queue.len(),
+            1,
             "queue unchanged: accept returned early (no pending offer)"
         );
     }
@@ -405,7 +425,8 @@ fake-sdp
         client.handle_track_open(weak);
 
         assert_eq!(
-            client.tracks_out.len(), 1,
+            client.tracks_out.len(),
+            1,
             "relay path: ToOpen entry pushed"
         );
         assert!(

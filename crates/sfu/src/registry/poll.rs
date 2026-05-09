@@ -16,7 +16,6 @@ use crate::propagate::Propagated;
 use super::Registry;
 
 impl Registry {
-
     /// Phase J M2: drain WS control messages (answer-renegotiate) from every client.
     /// Called at the top of the UDP loop before `poll_all` so accepted answers are
     /// visible to str0m in the same iteration.

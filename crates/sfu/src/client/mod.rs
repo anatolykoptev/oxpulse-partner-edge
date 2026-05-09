@@ -73,16 +73,16 @@ pub mod dispatch;
 pub mod fanout;
 pub mod keyframe;
 pub mod layer;
+pub mod renegotiation;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_seed;
 pub mod tracks;
 pub mod voice;
-pub mod renegotiation;
 
 pub use voice::VOICE_FRAME_MAX_BYTES;
 
-pub use tracks::{TrackIn, TrackOut, TrackOutState};
 use tracks::TrackInEntry;
+pub use tracks::{TrackIn, TrackOut, TrackOutState};
 
 /// Outbound UDP datagram produced by a client's str0m state.
 pub type Transmit = str0m::net::Transmit;

@@ -178,7 +178,6 @@ impl Client {
         self
     }
 
-
     /// Phase J M2: attach the WS sender for outbound messages to the browser
     /// (currently: offer-renegotiate JSON frames). `None` for relay clients
     /// and test `new_client` — they have no WS channel.
@@ -189,7 +188,10 @@ impl Client {
 
     /// Phase J M2: attach the WS control receiver for inbound browser replies
     /// (currently: answer-renegotiate). Called by the UDP loop after inject.
-    pub fn with_ws_ctrl_rx(mut self, rx: tokio::sync::mpsc::Receiver<crate::client_ws::WsClientCtrl>) -> Self {
+    pub fn with_ws_ctrl_rx(
+        mut self,
+        rx: tokio::sync::mpsc::Receiver<crate::client_ws::WsClientCtrl>,
+    ) -> Self {
         self.ws_ctrl_rx = Some(rx);
         self
     }

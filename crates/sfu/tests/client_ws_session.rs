@@ -598,7 +598,10 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    assert!(found_a, "peer A must land in registry before peer B connects");
+    assert!(
+        found_a,
+        "peer A must land in registry before peer B connects"
+    );
 
     // 6. Peer B connects via WS and completes SDP exchange.
     let token_b = make_token("phase-f2-test", 8, HS256_SECRET, 3600);
@@ -614,14 +617,21 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
         "sec-websocket-key",
         tokio_tungstenite::tungstenite::http::HeaderValue::from_str(
             &tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        ).unwrap(),
+        )
+        .unwrap(),
     );
-    req_b.headers_mut()
-        .insert("sec-websocket-version", tokio_tungstenite::tungstenite::http::HeaderValue::from_static("13"));
-    req_b.headers_mut()
-        .insert("connection", tokio_tungstenite::tungstenite::http::HeaderValue::from_static("Upgrade"));
-    req_b.headers_mut()
-        .insert("upgrade", tokio_tungstenite::tungstenite::http::HeaderValue::from_static("websocket"));
+    req_b.headers_mut().insert(
+        "sec-websocket-version",
+        tokio_tungstenite::tungstenite::http::HeaderValue::from_static("13"),
+    );
+    req_b.headers_mut().insert(
+        "connection",
+        tokio_tungstenite::tungstenite::http::HeaderValue::from_static("Upgrade"),
+    );
+    req_b.headers_mut().insert(
+        "upgrade",
+        tokio_tungstenite::tungstenite::http::HeaderValue::from_static("websocket"),
+    );
 
     let (mut ws_b, _) = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -633,7 +643,9 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
 
     let (offer_sdp, _pending, _rtc) = build_browser_offer();
     ws_b.send(Message::Text(
-        serde_json::json!({"kind":"offer","sdp":offer_sdp}).to_string().into(),
+        serde_json::json!({"kind":"offer","sdp":offer_sdp})
+            .to_string()
+            .into(),
     ))
     .await
     .unwrap();
@@ -642,14 +654,11 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
     let mut saw_answer = false;
     let mut tracks_map_tracks: Option<Vec<serde_json::Value>> = None;
     for _ in 0..10 {
-        let frame = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            ws_b.next(),
-        )
-        .await
-        .expect("frame within 500ms")
-        .expect("stream open")
-        .expect("frame OK");
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(500), ws_b.next())
+            .await
+            .expect("frame within 500ms")
+            .expect("stream open")
+            .expect("frame OK");
         let text = match frame {
             Message::Text(t) => t,
             _ => continue,
@@ -689,7 +698,11 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
 
     // 8. Verify metric counter.
     assert!(
-        metrics.tracks_map_sent_total.with_label_values(&["true"]).get() >= 1,
+        metrics
+            .tracks_map_sent_total
+            .with_label_values(&["true"])
+            .get()
+            >= 1,
         "tracks_map_sent_total{{has_peers=true}} must be >= 1 after second peer joined"
     );
 

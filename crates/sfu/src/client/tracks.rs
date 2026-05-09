@@ -106,7 +106,10 @@ mod tests {
     fn mid_returns_none_for_negotiating() {
         let mid = make_mid(7);
         let o = make_track_out(TrackOutState::Negotiating(mid));
-        assert!(o.mid().is_none(), "Negotiating(mid) must return None from mid()");
+        assert!(
+            o.mid().is_none(),
+            "Negotiating(mid) must return None from mid()"
+        );
     }
 
     /// `mid()` returns the wrapped Mid for `Open`.

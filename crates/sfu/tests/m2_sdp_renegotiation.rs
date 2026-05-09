@@ -101,9 +101,10 @@ fn media_added_recv_only_creates_track_in_not_track_out() {
 
     // tracks_out state must be unchanged. mid() returns None for Negotiating
     // (per review fix: only Open returns Some), so search by state directly.
-    let out = client.tracks_out.iter().find(|o| {
-        matches!(o.state, TrackOutState::Negotiating(m) if m == mid)
-    });
+    let out = client
+        .tracks_out
+        .iter()
+        .find(|o| matches!(o.state, TrackOutState::Negotiating(m) if m == mid));
     assert!(out.is_some(), "tracks_out entry must still exist");
     assert_eq!(
         out.unwrap().state,
@@ -189,7 +190,10 @@ fn handle_track_open_legacy_path_when_no_ws_channel() {
 
     let mut subscriber = new_client(ClientId(2002));
     // new_client sets ws_msg_tx = None by design.
-    assert!(subscriber.ws_msg_tx.is_none(), "new_client must have no ws_msg_tx");
+    assert!(
+        subscriber.ws_msg_tx.is_none(),
+        "new_client must have no ws_msg_tx"
+    );
 
     subscriber.handle_track_open(Arc::downgrade(&track_arc));
 

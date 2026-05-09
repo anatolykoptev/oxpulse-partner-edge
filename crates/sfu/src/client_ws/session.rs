@@ -339,7 +339,11 @@ pub async fn run(
     // offer (rare, benign) or a code regression (alert-worthy).
     metrics
         .sdp_msid_injected_total
-        .with_label_values(&[if msid_injected_count > 0 { "true" } else { "false" }])
+        .with_label_values(&[if msid_injected_count > 0 {
+            "true"
+        } else {
+            "false"
+        }])
         .inc();
     let answer_frame = serde_json::json!({ "kind": "answer", "sdp": answer_sdp }).to_string();
 

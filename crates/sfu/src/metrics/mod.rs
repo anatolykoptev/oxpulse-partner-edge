@@ -210,7 +210,6 @@ pub struct SfuMetrics {
     pub tracks_map_sent_total: IntCounterVec,
 
     // ── SFU forwarding observability ─────────────────────────────────────────
-
     /// Per-RTP forward decision with per-peer breakdown.
     ///
     /// Labels:
@@ -288,7 +287,6 @@ pub struct SfuMetrics {
     /// Labels: kind in {audio, video}. Rising = browser peer lagging.
     /// The offer is rolled back; the track will retry on the next cycle.
     pub sfu_renegotiation_offers_dropped_total: IntCounterVec,
-
 }
 
 impl SfuMetrics {
@@ -682,7 +680,6 @@ impl SfuMetrics {
         .context("sfu_str0m_output_total")?);
         // No pre-touch: peer_id labels are dynamic.
 
-
         // ── Phase J: M2 SDP renegotiation metrics ────────────────────────────
         let sfu_track_out_state_transitions_total = reg!(IntCounterVec::new(
             Opts::new(
@@ -851,7 +848,9 @@ mod tests {
             "has_msid=true must start at 0"
         );
         assert_eq!(
-            m.sdp_msid_injected_total.with_label_values(&["false"]).get(),
+            m.sdp_msid_injected_total
+                .with_label_values(&["false"])
+                .get(),
             0,
             "has_msid=false must start at 0"
         );
