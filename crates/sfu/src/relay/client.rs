@@ -6,7 +6,7 @@
 //! identically to browser WebRTC peers.
 
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
@@ -81,12 +81,13 @@ fn is_allowed_upstream_host(url: &str) -> bool {
     })
 }
 
-#[tracing::instrument(skip(upstream_room_token), fields(otel.kind = "client"))]
+#[tracing::instrument(skip(upstream_room_token, stats_interval_secs), fields(otel.kind = "client"))]
 pub async fn connect_relay(
     upstream_ws_url: &str,
     upstream_room_token: &str,
     local_udp_addr: SocketAddr,
     room_id: String,
+    stats_interval_secs: u64,
 ) -> anyhow::Result<PendingRelay> {
     // Defense-in-depth: validate upstream host even though JWT is signed.
     if !is_allowed_upstream_host(upstream_ws_url) {
@@ -105,9 +106,13 @@ pub async fn connect_relay(
     // 2. Send join.
     ws.send(Message::Text(join_message().into())).await?;
 
-    // 3. Create str0m Rtc as offerer.
-    //    Rtc::new requires a start Instant.
-    let mut rtc = Rtc::new(Instant::now());
+    // 3. Create str0m Rtc as offerer with stats enabled.
+    //    stats_interval_secs == 0 disables stats (same as Rtc::new).
+    let stats_interval =
+        (stats_interval_secs > 0).then(|| Duration::from_secs(stats_interval_secs));
+    let mut rtc = Rtc::builder()
+        .set_stats_interval(stats_interval)
+        .build(Instant::now());
 
     // Pre-negotiate relay-source DataChannel at SCTP stream id 5
     // (ids 2 and 3 are already used by the normal peer path).

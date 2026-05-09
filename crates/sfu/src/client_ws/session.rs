@@ -49,7 +49,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use serde_json::Value;
@@ -234,6 +234,7 @@ pub async fn run(
     local_udp_addr: SocketAddr,
     inject_tx: Sender<PendingClient>,
     metrics: Arc<SfuMetrics>,
+    stats_interval_secs: u64,
 ) -> anyhow::Result<()> {
     let mut guard = ActiveSessionGuard::new(metrics.clone());
     // 1. Read the first text frame, expect a JSON offer.
@@ -263,10 +264,14 @@ pub async fn run(
         }
     };
 
-    // 2. Build str0m as answerer. Add the host candidate BEFORE
+    // 2. Build str0m as answerer with stats enabled. Add the host candidate BEFORE
     //    `accept_offer` so the answer SDP advertises the SFU's UDP
     //    socket — see spike line 173.
-    let mut rtc = Rtc::builder().build(Instant::now());
+    let stats_interval =
+        (stats_interval_secs > 0).then(|| Duration::from_secs(stats_interval_secs));
+    let mut rtc = Rtc::builder()
+        .set_stats_interval(stats_interval)
+        .build(Instant::now());
     match Candidate::host(local_udp_addr, "udp") {
         Ok(cand) => {
             rtc.add_local_candidate(cand);
