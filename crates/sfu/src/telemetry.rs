@@ -114,8 +114,30 @@ pub fn init(
 }
 
 /// Parse `RUST_LOG` env into an [`EnvFilter`], falling back to `log_level` on error.
+///
+/// If `RUST_LOG` is set but cannot be parsed, writes a diagnostic line to
+/// `err_out` so the systemd journal captures it before the tracing subscriber
+/// is installed. Silent on the common "RUST_LOG unset" case.
 fn parse_env_filter_or_fallback(log_level: &str) -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level))
+    parse_env_filter_or_fallback_into(log_level, &mut std::io::stderr())
+}
+
+fn parse_env_filter_or_fallback_into(
+    log_level: &str,
+    err_out: &mut dyn std::io::Write,
+) -> EnvFilter {
+    match EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(e) => {
+            if std::env::var("RUST_LOG").is_ok() {
+                let _ = writeln!(
+                    err_out,
+                    "RUST_LOG parse error: {e} — falling back to log_level={log_level}"
+                );
+            }
+            EnvFilter::new(log_level)
+        }
+    }
 }
 
 /// Pure logic for testability: returns `(warn_edge, warn_partner)` booleans
@@ -158,6 +180,11 @@ fn build_resource(edge_id: &str, partner_id: &str) -> Resource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serialise tests that mutate `RUST_LOG` so parallel test threads do not
+    /// interfere with each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn get_attr(resource: &Resource, key: &str) -> Option<String> {
         resource
@@ -214,6 +241,51 @@ mod tests {
             Some("local")
         );
         assert_eq!(get_attr(&r, PARTNER_ID_KEY).as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn rust_log_parse_error_emits_diagnostic() {
+        // "[invalid" triggers EnvFilter parse error (unclosed span bracket).
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("RUST_LOG").ok();
+        unsafe { std::env::set_var("RUST_LOG", "[invalid") };
+        let mut buf: Vec<u8> = Vec::new();
+        let _filter = parse_env_filter_or_fallback_into("info", &mut buf);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("RUST_LOG", v),
+                None => std::env::remove_var("RUST_LOG"),
+            }
+        }
+        let output = String::from_utf8(buf).expect("utf8");
+        assert!(
+            output.contains("RUST_LOG parse error"),
+            "expected 'RUST_LOG parse error' in stderr, got: {output:?}"
+        );
+        assert!(
+            output.contains("falling back to log_level=info"),
+            "expected 'falling back to log_level=info' in stderr, got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn rust_log_unset_no_diagnostic() {
+        // When RUST_LOG is not set, the Err arm should stay silent.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("RUST_LOG").ok();
+        unsafe { std::env::remove_var("RUST_LOG") };
+        let mut buf: Vec<u8> = Vec::new();
+        let _filter = parse_env_filter_or_fallback_into("info", &mut buf);
+        unsafe {
+            if let Some(v) = prev {
+                std::env::set_var("RUST_LOG", v);
+            }
+        }
+        assert!(
+            buf.is_empty(),
+            "no output expected when RUST_LOG is unset, got: {:?}",
+            String::from_utf8_lossy(&buf)
+        );
     }
 
     #[test]
