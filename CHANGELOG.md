@@ -5,6 +5,23 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.21](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.20...partner-edge-v0.12.21) (2026-05-09)
+
+
+### Features
+
+* **sfu:** adopt str0m built-in stats API for RTT/loss/jitter observability ([#87](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/87)) ([5ebe30a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/5ebe30a0a52dddbbaf7460373e3644e49a2e9d44))
+* **xray-update:** env-overridable CONTAINER and IMAGE for piter reuse ([#85](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/85)) ([4b5e646](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4b5e6467cad2d52f2f406e14e42e00aec69f88c4))
+
+
+### Bug Fixes
+
+* **refresh:** skip systemctl reload when unit absent on custom-stack nodes ([#84](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/84)) ([d77478e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d77478e96a916bc7ce9882bce0ff554d6715634b))
+* **sfu:** transition TrackOut Negotiating→Open in accept_renegotiation_answer ([#88](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/88)) ([1e4d265](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1e4d2656b227712de668ac9171328e39ca518f61))
+* **upgrade:** raise post-up sleep to 10s to survive xray Reality tunnel startup ([#81](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/81)) ([1fe251a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1fe251ac4dbffb6e176ff8f18c39766cf3cb3987))
+* **xray:** downgrade xray-core pin 26.5.3 → 26.4.25 ([#83](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/83)) ([0bcbc6b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0bcbc6bb43fa2ed95784e59e0054168abb549875))
+* **xray:** remove flow=xtls-rprx-vision from CH1 xhttp outbound template ([#86](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/86)) ([df83840](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/df8384011a806805dda31306f97aec1e3208cde1))
+
 ## [0.12.20](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.19...partner-edge-v0.12.20) (2026-05-09)
 
 
