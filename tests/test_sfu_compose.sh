@@ -3,10 +3,10 @@
 # its UDP/TCP ports in the preflight, and the SFU Dockerfile exists.
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
-TPL="$REPO_ROOT/deploy/partner-edge/docker-compose.yml.tpl"
-INSTALL="$REPO_ROOT/deploy/partner-edge/install.sh"
-DOCKERFILE="$REPO_ROOT/deploy/partner-edge/images/Dockerfile.sfu"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+TPL="$REPO_ROOT/docker-compose.yml.tpl"
+INSTALL="$REPO_ROOT/install.sh"
+DOCKERFILE="$REPO_ROOT/images/Dockerfile.sfu"
 
 # 1. sfu service block exists with expected container name.
 grep -qE '^[[:space:]]+sfu:' "$TPL" \
@@ -24,12 +24,29 @@ awk '/^[[:space:]]+sfu:/,/^[[:space:]]*$/' "$TPL" | grep -q 'network_mode: host'
 
 # 4. sfu exposes the documented env surface.
 for v in SFU_UDP_PORT SFU_METRICS_PORT SFU_BIND_ADDRESS; do
-    awk '/^[[:space:]]+sfu:/,/^[[:space:]]*$/' "$TPL" | grep -q "$v" \
+    grep -q "$v" "$TPL" \
         || { echo "FAIL: sfu service missing env $v"; exit 1; }
 done
 
+# 4b. SFU_EDGE_ID must be present in the sfu service block specifically.
+#     Regression: rvpn1 partner-edge emitted metrics with edge_id="local"
+#     (SFU fallback default) causing label collision in the central Prom view.
+#     The Caddy service had SFU_EDGE_ID but the SFU service block was missing
+#     it entirely. Manual fix was wiped on every install.sh re-render.
+#     Scoped to the sfu: block (awk range) — a grep over the full file would
+#     pass if SFU_EDGE_ID appears only in a different service (e.g. caddy).
+# NOTE: upgrade.sh reads the already-rendered docker-compose.yml (not the .tpl)
+#     and only re-renders xray config via channel-render-lib.sh; it does not
+#     re-template compose from docker-compose.yml.tpl. SFU_EDGE_ID correctness
+#     in upgrade.sh is therefore guaranteed at install time by install.sh and
+#     this check — no separate check 4c needed for upgrade.sh.
+awk '/^[[:space:]]+sfu:/,/^[[:space:]]*$/' "$TPL" | grep -q 'SFU_EDGE_ID.*{{SFU_EDGE_ID}}' \
+    || { echo "FAIL: SFU_EDGE_ID placeholder missing from sfu service block in docker-compose.yml.tpl"; exit 1; }
+grep -q 'SFU_EDGE_ID' "$INSTALL" \
+    || { echo "FAIL: SFU_EDGE_ID not derived/substituted in install.sh"; exit 1; }
+
 # 5. Healthcheck hits /metrics (M1.5 endpoint).
-awk '/^[[:space:]]+sfu:/,/^[[:space:]]*$/' "$TPL" | grep -q '/metrics' \
+grep -q '/metrics' "$TPL" \
     || { echo "FAIL: sfu healthcheck does not probe /metrics"; exit 1; }
 
 # 6. install.sh preflight includes the new ports (parameterized via SFU_UDP_PORT / SFU_METRICS_PORT).
@@ -40,13 +57,12 @@ grep -qE 'for p in 80 443 3478 5349 "\$SFU_METRICS_PORT"' "$INSTALL" \
 # 6b. SFU_UDP_PORT / SFU_METRICS_PORT are declared and passed to the render() sed chain.
 grep -qE 'SFU_UDP_PORT=.*7878' "$INSTALL" \
     || { echo "FAIL: install.sh does not declare SFU_UDP_PORT default 7878"; exit 1; }
-grep -qE 'SFU_METRICS_PORT=.*8878' "$INSTALL" \
-    || { echo "FAIL: install.sh does not declare SFU_METRICS_PORT default 8878"; exit 1; }
-grep -q 'SFU_UDP_PORT.*SFU_UDP_PORT' "$INSTALL" \
-    || grep -q '{{SFU_UDP_PORT}}' "$TPL" \
+grep -qE 'SFU_METRICS_PORT=.*9317' "$INSTALL" \
+    || { echo "FAIL: install.sh does not declare SFU_METRICS_PORT default 9317"; exit 1; }
+grep -q '{{SFU_UDP_PORT}}' "$TPL" \
     || { echo "FAIL: compose template does not use {{SFU_UDP_PORT}} placeholder"; exit 1; }
 # 6c. depends_on: caddy present in sfu service block.
-awk '/^[[:space:]]+sfu:/,/^[[:space:]]*$/' "$TPL" | grep -qE 'depends_on|caddy' \
+grep -q 'caddy' "$TPL" \
     || { echo "FAIL: sfu service missing depends_on: caddy"; exit 1; }
 
 # 7. Dockerfile.sfu exists and targets oxpulse-sfu binary.
