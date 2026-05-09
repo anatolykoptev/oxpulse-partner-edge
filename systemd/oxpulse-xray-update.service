@@ -5,4 +5,5 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
+EnvironmentFile=-/etc/oxpulse-partner-edge/xray-update.env
 ExecStart=/usr/local/bin/oxpulse-xray-update.sh
