@@ -143,7 +143,7 @@ if [[ "$MODE" == rollback ]]; then
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
 	(cd "$PREFIX_ETC" && docker compose pull)
 	(cd "$PREFIX_ETC" && docker compose up -d --force-recreate)
-	sleep 5
+	sleep 10
 	if "$HEALTHCHECK" --local; then
 		log "rollback complete"
 		exit 0
@@ -185,7 +185,13 @@ if ! (cd "$PREFIX_ETC" && docker compose up -d --force-recreate); then
 	die "upgrade rolled back"
 fi
 
-sleep 5
+# Wait for services to stabilize after container recreation.
+# 10s instead of the previous 5s: xray 26.5.3 Reality tunnel establishment
+# on first connection takes up to 8s, especially when the uTLS handshake
+# performs per-connection cipher randomisation. 5s was too short and caused
+# false-negative failures on check 10 (SPA GET /) during the v0.12.20 upgrade
+# on rvpn (2026-05-09 rollback incident).
+sleep 10
 if ! "$HEALTHCHECK" --local; then
 	warn "healthcheck red after upgrade — rolling back"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
