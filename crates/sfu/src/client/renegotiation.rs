@@ -237,12 +237,15 @@ impl Client {
         // be exactly one, since str0m enforces a single in-flight offer).
         let transitioned = self.flip_negotiating_to_open_all();
         if !transitioned {
-            tracing::warn!(
-                client = *self.id,
-                "M2: accept_answer Ok but no Negotiating TrackOut found — state inconsistency"
-            );
+            // Finding 4: state inconsistency — increment state_mismatch, clean up, and
+            // return early WITHOUT draining the queue. Draining on bad state would start
+            // the next renegotiation while the client is in an unknown state.
+            self.handle_zero_transition_after_accept();
+            return;
         }
 
+        // Finding 2: increment {ok} BEFORE flip so dashboards never see
+        // `transitions > answers` during the ~1-2µs window between calls.
         self.metrics
             .sfu_renegotiation_answers_total
             .with_label_values(&["ok"])
@@ -252,6 +255,25 @@ impl Client {
         if let Some(next) = self.renegotiation_queue.pop_front() {
             self.start_renegotiation(next);
         }
+    }
+
+    /// Handle the case where `flip_negotiating_to_open_all` returned `false` after
+    /// `accept_answer` Ok — state inconsistency (no `Negotiating` track found).
+    ///
+    /// Increments `sfu_renegotiation_answers_total{outcome="state_mismatch"}`, clears
+    /// `pending_offer` + `pending_offer_at`, and does NOT drain the queue (starting
+    /// the next renegotiation while in an unknown state would compound the problem).
+    pub(crate) fn handle_zero_transition_after_accept(&mut self) {
+        tracing::warn!(
+            client = *self.id,
+            "M2: accept_answer Ok but no Negotiating TrackOut found — state inconsistency"
+        );
+        self.metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["state_mismatch"])
+            .inc();
+        self.pending_offer = None;
+        self.pending_offer_at = None;
     }
 
     /// Flip all `TrackOutState::Negotiating(mid)` entries to `Open(mid)` and
@@ -545,17 +567,9 @@ fake-sdp
         assert_eq!(after - before, 1, "timeout metric must increment by 1");
     }
 
-    /// Core M2 bug fix — direct state transition without Event::MediaAdded.
-    ///
-    /// str0m v0.18.1 never emits `Event::MediaAdded { direction: SendOnly }` for
-    /// the offerer role (need_open_event is gated on `is_offer=false` in the
-    /// accept_answer branch). The transition must therefore happen directly in
-    /// `accept_renegotiation_answer` via `flip_negotiating_to_open_all()`,
-    /// without relying on `handle_event(Event::MediaAdded)`.
-    ///
-    /// This test calls `flip_negotiating_to_open_all()` directly and asserts the
-    /// state flips from `Negotiating(mid)` to `Open(mid)` and the metric increments.
-    /// On the current code, this fails because the method does not exist yet (RED).
+    /// Verifies flip_negotiating_to_open_all transitions all matching mid entries.
+    /// str0m doesn't emit MediaAdded for the offerer, so we don't have an
+    /// externally-supplied event mid to match against.
     #[test]
     fn accept_renegotiation_answer_transitions_negotiating_to_open() {
         use str0m::media::{MediaKind, Mid};
@@ -582,8 +596,6 @@ fake-sdp
             .with_label_values(&["negotiating", "open"])
             .get();
 
-        // Call the new helper that accept_renegotiation_answer will use directly.
-        // On current code this does not exist → compile error = RED.
         let transitioned = client.flip_negotiating_to_open_all();
 
         assert!(
@@ -607,6 +619,71 @@ fake-sdp
             after - before,
             1,
             "negotiating→open metric must increment by 1"
+        );
+    }
+
+    /// Finding 4: when `flip_negotiating_to_open_all` returns false (0 Negotiating
+    /// tracks found after accept_answer Ok — state inconsistency), the code must:
+    ///   - increment `sfu_renegotiation_answers_total{outcome="state_mismatch"}` (not "ok")
+    ///   - NOT drain renegotiation_queue
+    ///
+    /// Tests `handle_zero_transition_after_accept` — a pub(crate) helper that will be
+    /// extracted from the mismatch branch of `accept_renegotiation_answer`.
+    ///
+    /// RED: the helper doesn't exist yet; the counter label isn't wired.
+    #[test]
+    fn flip_state_mismatch_cleans_up_negotiating() {
+        let mut client = new_client(ClientId(900));
+
+        // Add a queued item — it must NOT be drained on mismatch.
+        let mut publisher = new_client(ClientId(901));
+        let arc = seed_track_in(&mut publisher, 9, str0m::media::MediaKind::Audio);
+        client.renegotiation_queue.push_back(Arc::downgrade(&arc));
+
+        let metrics = client.metrics_for_tests().clone();
+        let mismatch_before = metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["state_mismatch"])
+            .get();
+        let ok_before = metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["ok"])
+            .get();
+
+        // Call the new mismatch handler directly.
+        // RED: this method does not exist yet → compile error.
+        client.handle_zero_transition_after_accept();
+
+        let mismatch_after = metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["state_mismatch"])
+            .get();
+        let ok_after = metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["ok"])
+            .get();
+
+        assert_eq!(
+            mismatch_after,
+            mismatch_before + 1,
+            "state_mismatch counter must increment"
+        );
+        assert_eq!(
+            ok_after, ok_before,
+            "ok counter must NOT increment on state mismatch"
+        );
+        assert_eq!(
+            client.renegotiation_queue.len(),
+            1,
+            "queue must NOT drain on state mismatch"
+        );
+        assert!(
+            client.pending_offer.is_none(),
+            "pending_offer must be None after mismatch handler"
+        );
+        assert!(
+            client.pending_offer_at.is_none(),
+            "pending_offer_at must be None after mismatch handler"
         );
     }
 
