@@ -39,10 +39,10 @@ pub(crate) struct TrackInEntry {
 ///    └──────────────────────────────────── ◄──── Open(Mid) ◄┘
 /// ```
 ///
-/// `mid()` returns `None` for `ToOpen` (no m-line allocated yet) and
-/// `Some(mid)` for both `Negotiating` and `Open`. The `fanout.rs`
-/// `writer.write` path is gated on `o.mid()` — packets only reach the
-/// wire once the state is at least `Open`.
+/// `mid()` returns `None` for `ToOpen` (no m-line allocated yet) and for
+/// `Negotiating` (offer sent, awaiting browser answer — not safe to write SRTP).
+/// Returns `Some(mid)` only for `Open`. The `fanout.rs` `writer.write` path
+/// is gated on `o.mid()` — packets only reach the wire once the state is `Open`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackOutState {
     /// m-line not yet allocated. Default state for relay/test clients that
@@ -64,8 +64,8 @@ pub struct TrackOut {
 impl TrackOut {
     pub fn mid(&self) -> Option<Mid> {
         match self.state {
-            TrackOutState::ToOpen => None,
-            TrackOutState::Negotiating(m) | TrackOutState::Open(m) => Some(m),
+            TrackOutState::ToOpen | TrackOutState::Negotiating(_) => None,
+            TrackOutState::Open(m) => Some(m),
         }
     }
 }
@@ -99,12 +99,14 @@ mod tests {
         assert!(o.mid().is_none(), "ToOpen must return None from mid()");
     }
 
-    /// `mid()` returns the wrapped Mid for `Negotiating`.
+    /// `mid()` returns `None` for `Negotiating` — the m-line is allocated but
+    /// not yet confirmed by the browser's answer. Fanout gates on `mid()` so
+    /// un-answered tracks do not attempt SRTP writes.
     #[test]
-    fn mid_returns_some_for_negotiating() {
+    fn mid_returns_none_for_negotiating() {
         let mid = make_mid(7);
         let o = make_track_out(TrackOutState::Negotiating(mid));
-        assert_eq!(o.mid(), Some(mid), "Negotiating(mid) must return Some(mid)");
+        assert!(o.mid().is_none(), "Negotiating(mid) must return None from mid()");
     }
 
     /// `mid()` returns the wrapped Mid for `Open`.
