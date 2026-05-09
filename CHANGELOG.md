@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.18](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.17...partner-edge-v0.12.18) (2026-05-09)
+
+
+### Features
+
+* **sfu:** M2 SDP renegotiation — complete group call media delivery ([#70](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/70)) ([2d412b0](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/2d412b0bc0b61d6596ac1763048b4ab3b3744e73))
+
 ## [0.12.17](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.16...partner-edge-v0.12.17) (2026-05-08)
 
 
