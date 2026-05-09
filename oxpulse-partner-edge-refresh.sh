@@ -34,6 +34,14 @@ ts()   { date -Iseconds; }
 log()  { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG_FILE"; }
 die()  { log "ERR $*"; exit 1; }
 
+# Dependency check: jq is required for JSON parsing throughout this script.
+# On cheburator1 (2026-05-09 incident): jq was absent from the systemd unit
+# PATH, causing set -euo pipefail to exit at line 39 (NODE_ID extraction)
+# silently — the heartbeat POST was never reached, leaving last_seen_at stale
+# for 1 week. Die here with a clear message so systemd logs are actionable.
+command -v jq >/dev/null 2>&1 \
+    || die "jq required but not installed — fix: apt-get install -y jq"
+
 [[ -f "$NODE_CFG" ]] || die "node-config.json not found at $NODE_CFG"
 
 NODE_ID=$(jq -r '.node_id // .partner_id // empty' "$NODE_CFG")
