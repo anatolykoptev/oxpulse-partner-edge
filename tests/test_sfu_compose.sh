@@ -28,13 +28,20 @@ for v in SFU_UDP_PORT SFU_METRICS_PORT SFU_BIND_ADDRESS; do
         || { echo "FAIL: sfu service missing env $v"; exit 1; }
 done
 
-# 4b. SFU_EDGE_ID must be present in the template's sfu environment block.
+# 4b. SFU_EDGE_ID must be present in the sfu service block specifically.
 #     Regression: rvpn1 partner-edge emitted metrics with edge_id="local"
 #     (SFU fallback default) causing label collision in the central Prom view.
 #     The Caddy service had SFU_EDGE_ID but the SFU service block was missing
 #     it entirely. Manual fix was wiped on every install.sh re-render.
-grep -q 'SFU_EDGE_ID.*{{SFU_EDGE_ID}}' "$TPL" \
-    || { echo "FAIL: SFU_EDGE_ID placeholder missing from docker-compose.yml.tpl sfu service"; exit 1; }
+#     Scoped to the sfu: block (awk range) — a grep over the full file would
+#     pass if SFU_EDGE_ID appears only in a different service (e.g. caddy).
+# NOTE: upgrade.sh reads the already-rendered docker-compose.yml (not the .tpl)
+#     and only re-renders xray config via channel-render-lib.sh; it does not
+#     re-template compose from docker-compose.yml.tpl. SFU_EDGE_ID correctness
+#     in upgrade.sh is therefore guaranteed at install time by install.sh and
+#     this check — no separate check 4c needed for upgrade.sh.
+awk '/^[[:space:]]+sfu:/,/^[[:space:]]*$/' "$TPL" | grep -q 'SFU_EDGE_ID.*{{SFU_EDGE_ID}}' \
+    || { echo "FAIL: SFU_EDGE_ID placeholder missing from sfu service block in docker-compose.yml.tpl"; exit 1; }
 grep -q 'SFU_EDGE_ID' "$INSTALL" \
     || { echo "FAIL: SFU_EDGE_ID not derived/substituted in install.sh"; exit 1; }
 
