@@ -245,7 +245,21 @@ mod tests {
 
     #[test]
     fn rust_log_parse_error_emits_diagnostic() {
-        // "[invalid" triggers EnvFilter parse error (unclosed span bracket).
+        // Empirical fact (tracing-subscriber 0.3.x): EnvFilter::try_from_default_env
+        // accepts a SURPRISINGLY wide range of strings as valid `target=level` directives.
+        // Anything matching `[A-Za-z0-9_!]+` (with no `=`, no special chars) parses as a
+        // bare `target=trace` directive — including stuff like "invalid_filter_garbage_!!"
+        // that intuitively looks malformed but is just a target name.
+        //
+        // To reliably trigger Err, use a directive with broken syntax that the parser
+        // CANNOT salvage. Confirmed Err triggers as of 0.3.23:
+        //   - "[invalid"  (unclosed span bracket — used here)
+        //   - "foo=bogus" (invalid level name on RHS of =)
+        //   - "=info"     (empty target)
+        //
+        // If this test ever flakes after a tracing-subscriber upgrade, re-verify via
+        // `cargo test rust_log_parse_error_emits_diagnostic -- --nocapture` and pick
+        // a new directive that empirically returns Err on the upgraded version.
         let _guard = ENV_LOCK.lock().unwrap();
         let prev = std::env::var("RUST_LOG").ok();
         unsafe { std::env::set_var("RUST_LOG", "[invalid") };
