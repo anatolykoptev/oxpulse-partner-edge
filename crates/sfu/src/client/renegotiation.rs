@@ -396,11 +396,32 @@ impl Client {
                 );
                 self.pending_offer = None;
                 self.pending_offer_at = None;
-                self.renegotiation_queue.clear();
+                // Remove stuck Negotiating(mid) entries — mirrors the error path
+                // (lines 245-258). Without this, a timed-out offer leaves a
+                // Negotiating entry whose o.mid() returns None forever, causing
+                // fanout to emit skipped_no_track for that subscriber indefinitely.
+                self.tracks_out.retain(|o| {
+                    if matches!(o.state, TrackOutState::Negotiating(_)) {
+                        tracing::warn!(
+                            client = *self.id,
+                            "M2: removing stuck Negotiating TrackOut after offer timeout"
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                });
                 self.metrics
                     .sfu_renegotiation_answers_total
                     .with_label_values(&["timeout"])
                     .inc();
+                // Re-attempt renegotiation for queued items instead of silently
+                // dropping them. mem::take releases the borrow before iteration
+                // (Rust borrow checker: start_renegotiation takes &mut self).
+                let pending = std::mem::take(&mut self.renegotiation_queue);
+                for track_in_weak in pending {
+                    self.start_renegotiation(track_in_weak);
+                }
                 return;
             }
         }
@@ -434,11 +455,33 @@ impl Client {
                 );
                 self.pending_offer = None;
                 self.pending_offer_at = None;
-                self.renegotiation_queue.clear();
+                // Remove stuck Negotiating(mid) entries — mirrors the timeout
+                // path and the error path (lines 245-258). Without this, a
+                // ws-disconnect leaves a Negotiating entry whose o.mid() returns
+                // None forever, causing fanout to emit skipped_no_track for that
+                // subscriber indefinitely.
+                self.tracks_out.retain(|o| {
+                    if matches!(o.state, TrackOutState::Negotiating(_)) {
+                        tracing::warn!(
+                            client = *self.id,
+                            "M2: removing stuck Negotiating TrackOut after ws_ctrl_rx disconnect"
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                });
                 self.metrics
                     .sfu_renegotiation_answers_total
                     .with_label_values(&["ws_closed"])
                     .inc();
+                // Drop queued items: ws_ctrl_rx is gone so there is no channel
+                // to receive renegotiation answers. Re-sending offers via
+                // ws_msg_tx would produce unanswerable in-flight state that just
+                // hits the timeout path again. Clearing is safe — these tracks
+                // will be re-offered when the client reconnects and a new
+                // ws_ctrl_rx is established.
+                self.renegotiation_queue.clear();
             }
         }
         for msg in messages {
@@ -592,8 +635,14 @@ fake-sdp
     }
 
     /// Timeout: if pending_offer_at is set and elapsed > 10 s, drain_ws_ctrl
-    /// must clear pending_offer + pending_offer_at, drain the queue, and bump
+    /// must clear the timed-out pending state, drain the queue (by attempting
+    /// start_renegotiation for each item), and bump
     /// sfu_renegotiation_answers_total{outcome="timeout"}.
+    ///
+    /// After the fix, queued items are retried via start_renegotiation rather
+    /// than silently dropped. A live queued track may cause pending_offer_at to
+    /// be re-set (new offer in flight) — so we only assert the metric and that
+    /// the queue itself is empty (items were consumed).
     #[test]
     fn timeout_clears_pending_and_drains_queue() {
         let (ws_msg_tx, _ws_msg_rx) = tokio::sync::mpsc::channel::<String>(8);
@@ -603,12 +652,9 @@ fake-sdp
         client.ws_msg_tx = Some(ws_msg_tx);
         client.ws_ctrl_rx = Some(ws_ctrl_rx);
 
-        // Simulate an expired pending offer: set pending_offer_at to > 10 s ago.
-        // pending_offer itself stays None (can't construct SdpPendingOffer in tests).
-        // The implementation must check elapsed on pending_offer_at regardless of
-        // pending_offer being Some — or only when it is Some. Since we can't set
-        // pending_offer to Some, we verify the queue drain + metric happen when
-        // pending_offer_at indicates expiry and there is a queued item.
+        // Queue a live track — start_renegotiation will be called for it.
+        // With a real str0m Rtc, apply() may return Some (new offer generated),
+        // which re-sets pending_offer_at. That is correct new behavior.
         let mut publisher = new_client(ClientId(601));
         let arc = seed_track_in(&mut publisher, 3, str0m::media::MediaKind::Video);
         client.renegotiation_queue.push_back(Arc::downgrade(&arc));
@@ -624,15 +670,10 @@ fake-sdp
 
         client.drain_ws_ctrl();
 
-        // pending_offer_at must be cleared.
-        assert!(
-            client.pending_offer_at.is_none(),
-            "pending_offer_at must be cleared after timeout"
-        );
-        // Queue must be drained.
+        // Queue must be consumed (items attempted via start_renegotiation).
         assert!(
             client.renegotiation_queue.is_empty(),
-            "renegotiation_queue must be drained after timeout"
+            "renegotiation_queue must be empty after timeout (items processed)"
         );
         // Metric must have incremented by 1.
         let after = metrics
@@ -999,6 +1040,169 @@ fake-sdp
         assert!(
             !found_tracks_map_update,
             "tracks_map_update must NOT be emitted for relay publisher (no external_peer_id)"
+        );
+    }
+
+    /// RED — timeout path must remove stuck Negotiating(mid) entries from tracks_out.
+    ///
+    /// Currently the timeout branch only clears pending_offer + queue; it does NOT
+    /// call tracks_out.retain(). This test fails until the retain() is added.
+    #[test]
+    fn timeout_clears_negotiating_tracks_out_entries() {
+        use str0m::media::{MediaKind, Mid};
+
+        let (ws_msg_tx, _ws_msg_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let (_ws_ctrl_tx, ws_ctrl_rx) = tokio::sync::mpsc::channel::<WsClientCtrl>(8);
+
+        let mut client = new_client(ClientId(1100));
+        client.ws_msg_tx = Some(ws_msg_tx);
+        client.ws_ctrl_rx = Some(ws_ctrl_rx);
+
+        let mut publisher = new_client(ClientId(1101));
+        let arc = seed_track_in(&mut publisher, 10, MediaKind::Video);
+
+        // Seed a stuck Negotiating(mid) entry in tracks_out.
+        let stuck_mid: Mid = Mid::from("m10");
+        client.tracks_out.push(crate::client::tracks::TrackOut {
+            track_in: Arc::downgrade(&arc),
+            state: TrackOutState::Negotiating(stuck_mid),
+        });
+        assert_eq!(client.tracks_out.len(), 1, "pre: one Negotiating entry");
+
+        // Expire the pending offer timer.
+        client.pending_offer_at = Some(Instant::now() - Duration::from_secs(11));
+
+        client.drain_ws_ctrl();
+
+        // After timeout, no Negotiating entries must remain.
+        let stuck_count = client
+            .tracks_out
+            .iter()
+            .filter(|o| matches!(o.state, TrackOutState::Negotiating(_)))
+            .count();
+        assert_eq!(
+            stuck_count, 0,
+            "timeout must remove all Negotiating entries from tracks_out (mirror error path)"
+        );
+    }
+
+    /// Timeout path must process queued items via start_renegotiation (retry
+    /// semantics) rather than silently dropping them via queue.clear().
+    ///
+    /// Uses only dead (dropped) Weak references to avoid triggering the full
+    /// SDP negotiation path (which would set pending_offer_at again on a fresh
+    /// Rtc). Dead weaks cause start_renegotiation to return early (upgrade fails),
+    /// so the observable effect is: queue empties without panic.
+    ///
+    /// This test documents the retry semantics. The Negotiating-cleanup assertion
+    /// is covered by timeout_clears_negotiating_tracks_out_entries.
+    #[test]
+    fn timeout_retries_queue_items_instead_of_dropping() {
+        let (ws_msg_tx, _ws_msg_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let (_ws_ctrl_tx, ws_ctrl_rx) = tokio::sync::mpsc::channel::<WsClientCtrl>(8);
+
+        let mut client = new_client(ClientId(1200));
+        client.ws_msg_tx = Some(ws_msg_tx);
+        client.ws_ctrl_rx = Some(ws_ctrl_rx);
+
+        // Queue two dead weaks — upgrade fails → start_renegotiation returns early.
+        let dead_weak1: std::sync::Weak<crate::client::tracks::TrackIn> = {
+            let mut pub1 = new_client(ClientId(1201));
+            let arc = seed_track_in(&mut pub1, 11, str0m::media::MediaKind::Audio);
+            Arc::downgrade(&arc)
+            // arc dropped → weak is dead
+        };
+        let dead_weak2: std::sync::Weak<crate::client::tracks::TrackIn> = {
+            let mut pub2 = new_client(ClientId(1202));
+            let arc = seed_track_in(&mut pub2, 12, str0m::media::MediaKind::Video);
+            Arc::downgrade(&arc)
+        };
+
+        client.renegotiation_queue.push_back(dead_weak1);
+        client.renegotiation_queue.push_back(dead_weak2);
+        assert_eq!(client.renegotiation_queue.len(), 2, "two items queued");
+
+        // Expire the pending offer timer.
+        client.pending_offer_at = Some(Instant::now() - Duration::from_secs(11));
+
+        // Must not panic on dead weaks; must process both items.
+        client.drain_ws_ctrl();
+
+        assert!(
+            client.renegotiation_queue.is_empty(),
+            "queue must be empty after timeout (items iterated via start_renegotiation, not silently dropped)"
+        );
+        assert!(
+            client.pending_offer_at.is_none(),
+            "pending_offer_at must remain None (dead weaks → start_renegotiation early-returns)"
+        );
+    }
+
+    /// RED — ws_closed path must remove stuck Negotiating entries from tracks_out.
+    ///
+    /// Mirrors timeout_clears_negotiating_tracks_out_entries but for the
+    /// ws_ctrl_rx disconnected branch. Currently the ws_closed branch has the
+    /// same missing retain() bug. Queue items are correctly cleared (no answer
+    /// channel available), but Negotiating entries must be removed.
+    /// This test fails until retain() is added to the ws_closed branch.
+    #[test]
+    fn ws_closed_also_cleans_negotiating_and_no_clear() {
+        use str0m::media::{MediaKind, Mid};
+
+        let (ws_msg_tx, _ws_msg_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let (ws_ctrl_tx, ws_ctrl_rx) = tokio::sync::mpsc::channel::<WsClientCtrl>(8);
+
+        let mut client = new_client(ClientId(1300));
+        client.ws_msg_tx = Some(ws_msg_tx);
+        client.ws_ctrl_rx = Some(ws_ctrl_rx);
+
+        let mut publisher = new_client(ClientId(1301));
+        let arc = seed_track_in(&mut publisher, 13, MediaKind::Audio);
+
+        // Seed a stuck Negotiating(mid) entry.
+        let stuck_mid: Mid = Mid::from("m13");
+        client.tracks_out.push(crate::client::tracks::TrackOut {
+            track_in: Arc::downgrade(&arc),
+            state: TrackOutState::Negotiating(stuck_mid),
+        });
+        assert_eq!(client.tracks_out.len(), 1, "pre: one Negotiating entry");
+
+        // Mark pending so the ws_closed branch triggers.
+        client.pending_offer_at = Some(Instant::now());
+
+        let metrics = client.metrics_for_tests().clone();
+        let before = metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["ws_closed"])
+            .get();
+
+        // Drop the sender to trigger Disconnected on try_recv.
+        drop(ws_ctrl_tx);
+        client.drain_ws_ctrl();
+
+        // ws_ctrl_rx must be cleared.
+        assert!(client.ws_ctrl_rx.is_none(), "ws_ctrl_rx cleared");
+        // pending_offer_at must be cleared.
+        assert!(
+            client.pending_offer_at.is_none(),
+            "pending_offer_at cleared"
+        );
+        // ws_closed metric must increment.
+        let after = metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["ws_closed"])
+            .get();
+        assert_eq!(after - before, 1, "ws_closed metric must increment");
+
+        // Negotiating entries must be removed (the critical fix).
+        let stuck_count = client
+            .tracks_out
+            .iter()
+            .filter(|o| matches!(o.state, TrackOutState::Negotiating(_)))
+            .count();
+        assert_eq!(
+            stuck_count, 0,
+            "ws_closed must remove all Negotiating entries from tracks_out"
         );
     }
 }
