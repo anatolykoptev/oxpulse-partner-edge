@@ -7,12 +7,24 @@
 #
 # Pattern: clone of oxpulse-sfu-update.sh. Same alert/log/recovery shape so
 # operators read both the same way.
+#
+# OVERRIDES (for nodes that run a differently-named xray container, e.g. piter):
+#   Create /etc/oxpulse-partner-edge/xray-update.env with:
+#     OXPULSE_XRAY_CONTAINER=xray-reality
+#     OXPULSE_XRAY_IMAGE=teddysun/xray:26.4.25
+#   The file is optional; bundle nodes don't need it (defaults are correct).
 set -euo pipefail
 
-LOG=/var/log/oxpulse-xray-update.log
-CONTAINER=oxpulse-partner-xray
-IMAGE=ghcr.io/anatolykoptev/partner-edge-xray:stable
-ENV_FILE=/etc/oxpulse-partner-edge/xray.env
+# Load container/image overrides from env file if present.
+# XRAY_UPDATE_ENV_FILE can be set in tests; production default is the standard path.
+_XRAY_UPDATE_ENV="${XRAY_UPDATE_ENV_FILE:-/etc/oxpulse-partner-edge/xray-update.env}"
+# shellcheck source=/dev/null
+[ -f "$_XRAY_UPDATE_ENV" ] && source "$_XRAY_UPDATE_ENV"
+
+LOG="${LOG:-/var/log/oxpulse-xray-update.log}"
+CONTAINER="${OXPULSE_XRAY_CONTAINER:-oxpulse-partner-xray}"
+IMAGE="${OXPULSE_XRAY_IMAGE:-ghcr.io/anatolykoptev/partner-edge-xray:stable}"
+ENV_FILE="${ENV_FILE:-/etc/oxpulse-partner-edge/xray.env}"
 source /etc/piter-monitor.env 2>/dev/null || true
 
 ts()    { date -Iseconds; }
