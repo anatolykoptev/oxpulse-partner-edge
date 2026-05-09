@@ -688,6 +688,7 @@ mod tests {
                 external_peer_id: 99,
                 close_signal: close_tx,
                 ws_msg_tx,
+                ws_ctrl_rx: tokio::sync::mpsc::channel(8).1,
             })
             .await
             .unwrap();

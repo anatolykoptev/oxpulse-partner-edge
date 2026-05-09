@@ -554,6 +554,7 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
             external_peer_id: 7,
             close_signal: close_a_tx,
             ws_msg_tx: ws_msg_a_tx,
+            ws_ctrl_rx: tokio::sync::mpsc::channel(8).1,
         })
         .await
         .unwrap();

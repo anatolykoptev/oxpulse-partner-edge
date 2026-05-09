@@ -135,3 +135,7 @@ name = "voice_relay"
 # `fanout::fanout_for_tests` seam to drive VoiceData through the
 # per-peer voice relay path without a live DTLS pipeline.
 required-features = ["test-utils"]
+
+[[test]]
+name = "m2_sdp_renegotiation"
+required-features = ["test-utils"]

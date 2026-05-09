@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use str0m::bwe::BweKind;
 use str0m::channel::ChannelData;
-use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind, Mid};
+use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, Mid};
 use str0m::{Event, IceConnectionState, Output};
 
 use super::dc;
@@ -84,7 +84,7 @@ impl Client {
         }
     }
 
-    fn handle_event(&mut self, event: Event) -> Propagated {
+    pub fn handle_event(&mut self, event: Event) -> Propagated {
         match event {
             // 2026-05-07 metric coverage audit: track ALL ICE state transitions,
             // not only Disconnected.  The counter lets operators distinguish a

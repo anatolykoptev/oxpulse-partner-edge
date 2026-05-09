@@ -81,8 +81,8 @@ pub mod renegotiation;
 
 pub use voice::VOICE_FRAME_MAX_BYTES;
 
-pub use tracks::TrackIn;
-use tracks::{TrackInEntry, TrackOut};
+pub use tracks::{TrackIn, TrackOut, TrackOutState};
+use tracks::TrackInEntry;
 
 /// Outbound UDP datagram produced by a client's str0m state.
 pub type Transmit = str0m::net::Transmit;
@@ -92,7 +92,7 @@ pub struct Client {
     pub id: ClientId,
     pub(crate) rtc: Rtc,
     pub(crate) tracks_in: Vec<TrackInEntry>,
-    pub(crate) tracks_out: Vec<TrackOut>,
+    pub tracks_out: Vec<TrackOut>,
     /// Last rid actually forwarded to this peer. `None` = no simulcast yet.
     pub(crate) chosen_rid: Option<Rid>,
     /// Preferred simulcast layer (default [`layer::LOW`]).
@@ -193,16 +193,16 @@ pub struct Client {
     pub(crate) max_vfm_temporal_layer: u8,
     /// Phase J M2: WS outbound channel for sending offer-renegotiate JSON to browser.
     /// `None` for relay/test clients (no WS session).
-    pub(crate) ws_msg_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    pub ws_msg_tx: Option<tokio::sync::mpsc::Sender<String>>,
     /// Phase J M2: WS inbound channel for receiving answer-renegotiate from browser.
     /// `None` for relay/test clients.
-    pub(crate) ws_ctrl_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::WsClientCtrl>>,
+    pub ws_ctrl_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::WsClientCtrl>>,
     /// Phase J M2: in-flight SDP renegotiation offer. Single-slot — str0m allows
     /// only one pending offer per Rtc. A second `handle_track_open` while this is
     /// `Some` enqueues into `renegotiation_queue` instead.
-    pub(crate) pending_offer: Option<str0m::change::SdpPendingOffer>,
+    pub pending_offer: Option<str0m::change::SdpPendingOffer>,
     /// Phase J M2: queued track opens deferred while a renegotiation is in-flight.
-    pub(crate) renegotiation_queue: std::collections::VecDeque<std::sync::Weak<TrackIn>>,
+    pub renegotiation_queue: std::collections::VecDeque<std::sync::Weak<TrackIn>>,
         /// External peer identifier from the room JWT's `sub` claim. Used by
     /// [`crate::registry::Registry::insert`] to detect duplicate upgrades
     /// for the same `(room_id, peer_id)` and trigger a session steal

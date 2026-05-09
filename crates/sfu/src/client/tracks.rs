@@ -44,7 +44,7 @@ pub(crate) struct TrackInEntry {
 /// `writer.write` path is gated on `o.mid()` — packets only reach the
 /// wire once the state is at least `Open`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TrackOutState {
+pub enum TrackOutState {
     /// m-line not yet allocated. Default state for relay/test clients that
     /// have no WS channel to drive renegotiation, or while waiting for a
     /// prior renegotiation to complete (queued).
@@ -56,13 +56,13 @@ pub(crate) enum TrackOutState {
 }
 
 #[derive(Debug)]
-pub(crate) struct TrackOut {
+pub struct TrackOut {
     pub track_in: Weak<TrackIn>,
     pub state: TrackOutState,
 }
 
 impl TrackOut {
-    pub(crate) fn mid(&self) -> Option<Mid> {
+    pub fn mid(&self) -> Option<Mid> {
         match self.state {
             TrackOutState::ToOpen => None,
             TrackOutState::Negotiating(m) | TrackOutState::Open(m) => Some(m),
