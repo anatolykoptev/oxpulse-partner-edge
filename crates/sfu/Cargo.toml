@@ -146,3 +146,11 @@ name = "solo_kick"
 # `reap_dead_for_tests`, `disconnect_client_for_tests` seams from
 # registry/test_seams.rs (all gated behind test-utils).
 required-features = ["test-utils"]
+
+[[test]]
+name = "bwe_hint_test"
+# Phase 2c review fix: scrub tests use `new_client`, `disconnect_client_for_tests`,
+# `reap_dead_for_tests`, `evict_for_steal_for_tests` from registry/test_seams.rs.
+# Counter + WS tests do not need test-utils but the feature gate is harmless
+# (test-utils adds no overhead to integration tests).
+required-features = ["test-utils"]

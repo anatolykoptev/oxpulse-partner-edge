@@ -287,6 +287,16 @@ impl Registry {
             .metrics
             .voice_relay_rx_bytes_total
             .remove_label_values(&[&peer_label]);
+        // Phase 2c review fix (MAJOR 1): mirror reap_dead scrub for bwe-hint
+        // counters on session-steal eviction path.
+        let _ = self
+            .metrics
+            .sfu_bwe_hint_received_total
+            .remove_label_values(&[&peer_label]);
+        let _ = self
+            .metrics
+            .sfu_bwe_hint_throttled_total
+            .remove_label_values(&[&peer_label]);
         // MAJOR-2: mirror the reap_dead gauge dec for the session-steal path.
         if old.voice_data_cid.is_some() {
             self.metrics

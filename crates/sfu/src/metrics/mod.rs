@@ -353,6 +353,12 @@ pub struct SfuMetrics {
     /// switching. Rising rate confirms client-side hint emission is wired;
     /// zero rate after feature flag enabled = hint not being sent.
     pub sfu_bwe_hint_received_total: IntCounterVec,
+
+    // ── Phase 2c review fix: per-peer rate-gate throttle counter ────────────
+    /// Counts bwe-hint frames that were silently dropped by the per-peer
+    /// rate gate (10 hints/s cap). Labels: `peer_id`.
+    /// Rising rate indicates a misbehaving or malicious client.
+    pub sfu_bwe_hint_throttled_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -979,6 +985,17 @@ impl SfuMetrics {
         // No pre-touch: peer_id labels are dynamic (one per active client).
         // Series materialise on first reception, mirroring client_delivered_media_count.
 
+        let sfu_bwe_hint_throttled_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_bwe_hint_throttled_total",
+                "bwe-hint frames silently dropped by the per-peer rate gate \
+                 (10 hints/s cap). Label: peer_id. Rising rate = misbehaving client. \
+                 Scrubbed on disconnect alongside sfu_bwe_hint_received_total.",
+            ),
+            &["peer_id"],
+        )
+        .context("sfu_bwe_hint_throttled_total")?);
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1042,6 +1059,7 @@ impl SfuMetrics {
             sfu_writer_write_errors_total,
             sfu_solo_room_kicked_total,
             sfu_bwe_hint_received_total,
+            sfu_bwe_hint_throttled_total,
         })
     }
 

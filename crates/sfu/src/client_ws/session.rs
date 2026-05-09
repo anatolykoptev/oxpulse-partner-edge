@@ -555,6 +555,11 @@ async fn park_until_close_or_steal(
     guard: &mut ActiveSessionGuard,
     metrics: &Arc<SfuMetrics>,
 ) -> bool {
+    // Phase 2c review fix (MAJOR 2): per-peer rate gate — at most 10 hints/s.
+    // `last_hint` tracks when the most recent valid hint was accepted.
+    let mut last_hint: Option<Instant> = None;
+    const HINT_MIN_INTERVAL: Duration = Duration::from_millis(100);
+
     loop {
         tokio::select! {
             biased;
@@ -628,22 +633,40 @@ async fn park_until_close_or_steal(
                             // Wire format: {"kind":"bwe-hint","from":"<peer_uuid>",
                             //               "ts":<unix_ms>,"bps":<u64>}
                             // No fail-OPEN: missing fields → warn + drop (no WS close).
+                            //
+                            // Review fix (MAJOR 2): per-peer rate gate — 10 hints/s cap.
+                            // Excess frames increment sfu_bwe_hint_throttled_total and
+                            // are silently dropped. info! → debug! (hot path).
+                            // Review fix (MINOR 3): `from` truncated to 64 chars before log.
                             if msg_kind == Some("bwe-hint") {
                                 let from = v.get("from").and_then(|f| f.as_str());
                                 let ts   = v.get("ts").and_then(|t| t.as_i64());
                                 let bps  = v.get("bps").and_then(|b| b.as_u64());
                                 match (from, ts, bps) {
-                                    (Some(from), Some(ts), Some(bps)) => {
-                                        tracing::info!(
-                                            target: "sfu::client_ws",
-                                            peer_id, %room_id,
-                                            from, ts, bps,
-                                            "client bwe-hint received"
-                                        );
-                                        metrics
-                                            .sfu_bwe_hint_received_total
-                                            .with_label_values(&[&peer_id.to_string()])
-                                            .inc();
+                                    (Some(from), Some(_ts), Some(_bps)) => {
+                                        let now = Instant::now();
+                                        let peer_label = peer_id.to_string();
+                                        if last_hint.is_some_and(|t| now.duration_since(t) < HINT_MIN_INTERVAL) {
+                                            // Rate-limited: drop and count.
+                                            metrics
+                                                .sfu_bwe_hint_throttled_total
+                                                .with_label_values(&[&peer_label])
+                                                .inc();
+                                        } else {
+                                            last_hint = Some(now);
+                                            // MINOR 3: truncate `from` to 64 chars before logging.
+                                            let from_safe: String = from.chars().take(64).collect();
+                                            tracing::debug!(
+                                                target: "sfu::client_ws",
+                                                peer_id, %room_id,
+                                                from = %from_safe,
+                                                "client bwe-hint received"
+                                            );
+                                            metrics
+                                                .sfu_bwe_hint_received_total
+                                                .with_label_values(&[&peer_label])
+                                                .inc();
+                                        }
                                     }
                                     _ => {
                                         tracing::warn!(

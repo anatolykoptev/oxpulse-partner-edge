@@ -2,6 +2,12 @@
 //!
 //! Phase 2c — observability-only: the message is parsed, logged, and counted.
 //! No SVC layer switching in v1.
+//!
+//! Review fix batch (round 2):
+//! - MAJOR 1: `sfu_bwe_hint_received_total` scrubbed on reap_dead + evict_for_steal.
+//! - MAJOR 2: per-peer rate gate (10 hints/s cap) + `sfu_bwe_hint_throttled_total`.
+//! - MINOR 3: `from` field truncated to 64 chars before log.
+//! - MINOR 4: flaky sleep(50ms) replaced with poll-loop.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -187,8 +193,18 @@ async fn bwe_hint_increments_counter() {
         .await
         .expect("send bwe-hint");
 
-    // Give the server a moment to process the frame.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Poll until counter advances or 500 ms elapses (replaces flaky sleep(50ms)).
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let v = metrics
+            .sfu_bwe_hint_received_total
+            .with_label_values(&[&peer_id.to_string()])
+            .get();
+        if v > counter_before || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     let counter_after = metrics
         .sfu_bwe_hint_received_total
@@ -237,7 +253,8 @@ async fn bwe_hint_malformed_dropped_no_counter_no_close() {
         .await
         .expect("send malformed bwe-hint");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Brief poll — counter must stay 0 for 100 ms before we check.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let counter = metrics
         .sfu_bwe_hint_received_total
@@ -260,7 +277,18 @@ async fn bwe_hint_malformed_dropped_no_counter_no_close() {
         .await
         .expect("WS still open after malformed frame");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Poll until counter reaches 1 or 500 ms elapses.
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let v = metrics
+            .sfu_bwe_hint_received_total
+            .with_label_values(&[&peer_id.to_string()])
+            .get();
+        if v >= 1 || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     let counter_after = metrics
         .sfu_bwe_hint_received_total
@@ -268,3 +296,159 @@ async fn bwe_hint_malformed_dropped_no_counter_no_close() {
         .get();
     assert_eq!(counter_after, 1, "valid follow-up bwe-hint must be counted");
 }
+
+// ─── MAJOR 1: counter series scrubbed on reap_dead ──────────────────────────
+
+/// After a peer disconnects and `reap_dead` runs, the
+/// `sfu_bwe_hint_received_total{peer_id=X}` series must be removed so
+/// reconnect churn does not grow label cardinality without bound.
+///
+/// Uses the unit-test-level seam (`Registry + disconnect_client_for_tests +
+/// reap_dead_for_tests`) to avoid spinning up a WS/UDP pipeline.
+#[tokio::test]
+async fn bwe_hint_counter_scrubbed_on_reap_dead() {
+    use oxpulse_sfu::client::test_seed::new_client;
+    use oxpulse_sfu::{ClientId, Registry};
+    use std::sync::Arc;
+
+    let metrics = Arc::new(SfuMetrics::default());
+    let mut registry = Registry::new(metrics.clone());
+
+    let peer_id = ClientId(777u64);
+    let client = new_client(peer_id);
+    registry.insert(client);
+
+    // Materialise the series — simulate a bwe-hint having been received.
+    metrics
+        .sfu_bwe_hint_received_total
+        .with_label_values(&[&(*peer_id).to_string()])
+        .inc();
+
+    // Confirm the series is present before disconnect.
+    assert_eq!(
+        metrics
+            .sfu_bwe_hint_received_total
+            .with_label_values(&[&(*peer_id).to_string()])
+            .get(),
+        1,
+        "series must be present before reap"
+    );
+
+    // Disconnect + reap.
+    registry.disconnect_client_for_tests(peer_id);
+    registry.reap_dead_for_tests();
+
+    // After reap the series must be gone (get() on a removed series re-creates
+    // with 0, which is fine — we verify via encode_text that the label is absent).
+    let encoded = metrics.encode_text().expect("encode ok");
+    assert!(
+        !encoded.contains(r#"peer_id="777""#),
+        "bwe_hint_received_total{{peer_id=\"777\"}} must be scrubbed after reap_dead:\n{encoded}"
+    );
+}
+
+// ─── MAJOR 1: counter series scrubbed on evict_for_steal ────────────────────
+
+/// Same cardinality invariant for the session-steal eviction path.
+#[tokio::test]
+async fn bwe_hint_counter_scrubbed_on_evict_for_steal() {
+    use oxpulse_sfu::client::test_seed::new_client;
+    use oxpulse_sfu::{ClientId, Registry};
+    use std::sync::Arc;
+
+    let metrics = Arc::new(SfuMetrics::default());
+    let mut registry = Registry::new(metrics.clone());
+
+    let peer_id = ClientId(888u64);
+    let client = new_client(peer_id);
+    registry.insert(client);
+
+    metrics
+        .sfu_bwe_hint_received_total
+        .with_label_values(&[&(*peer_id).to_string()])
+        .inc();
+
+    // evict_for_steal at index 0 (only client in registry).
+    registry.evict_for_steal_for_tests(0);
+
+    let encoded = metrics.encode_text().expect("encode ok");
+    assert!(
+        !encoded.contains(r#"peer_id="888""#),
+        "bwe_hint_received_total{{peer_id=\"888\"}} must be scrubbed after evict_for_steal:\n{encoded}"
+    );
+}
+
+// ─── MAJOR 2: per-peer rate gate ────────────────────────────────────────────
+
+/// Sending 20 bwe-hint frames in rapid succession must result in at most
+/// a small number being counted (≤3), with the rest throttled and
+/// `sfu_bwe_hint_throttled_total` reflecting the gap.
+#[tokio::test]
+async fn bwe_hint_rate_gate_throttles_flood() {
+    let (base, _inject_rx, _handle, metrics) = start_handler_with_metrics().await;
+    let peer_id: u64 = 99;
+    let token = make_token(ROOM_ID, peer_id, HS256_SECRET, 3600);
+    let url = format!("{base}/sfu/ws/{ROOM_ID}");
+    let req = build_request(&url, &token);
+
+    let (mut ws, _resp) = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio_tungstenite::connect_async(req),
+    )
+    .await
+    .expect("ws handshake within 2s")
+    .expect("ws OK");
+
+    do_handshake(&mut ws).await;
+
+    // Flood: 20 hints with no delay.
+    for i in 0..20u64 {
+        let hint = serde_json::json!({
+            "kind": "bwe-hint",
+            "from": "550e8400-e29b-41d4-a716-446655440099",
+            "ts": 1_700_000_000_000i64 + i as i64,
+            "bps": 1_000_000u64
+        })
+        .to_string();
+        ws.send(Message::Text(hint.into()))
+            .await
+            .expect("send hint");
+    }
+
+    // Poll up to 500 ms for processing to settle.
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let received = metrics
+            .sfu_bwe_hint_received_total
+            .with_label_values(&[&peer_id.to_string()])
+            .get();
+        let throttled = metrics
+            .sfu_bwe_hint_throttled_total
+            .with_label_values(&[&peer_id.to_string()])
+            .get();
+        if received + throttled >= 20 || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let received = metrics
+        .sfu_bwe_hint_received_total
+        .with_label_values(&[&peer_id.to_string()])
+        .get();
+    let throttled = metrics
+        .sfu_bwe_hint_throttled_total
+        .with_label_values(&[&peer_id.to_string()])
+        .get();
+
+    assert!(
+        received <= 3,
+        "rate gate must cap received at ≤3 for a 20-frame flood; got {received}"
+    );
+    assert!(
+        throttled >= 17,
+        "throttle counter must capture ≥17 dropped hints; got {throttled}"
+    );
+}
+
+// MINOR 4: existing sleep(50ms) calls replaced with inline poll-loops above.
