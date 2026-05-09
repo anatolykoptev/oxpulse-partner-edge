@@ -157,26 +157,34 @@ jq \
     '.reality_public_key = $pub | .reality_encryption = $enc | .reality_server_names = $names' \
     "$BACKUP" > "$NODE_CFG"
 
-# Reload services so xray-client picks up new keys
-log "reloading oxpulse-partner-edge.service"
-if systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE"; then
-    log "reload OK"
-else
-    log "reload FAILED — restoring $BACKUP"
-    mv "$BACKUP" "$NODE_CFG"
-    systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE" || true
-    die "rollback complete; new keys NOT applied"
-fi
+# Reload services so xray-client picks up new keys.
+# Custom-stack nodes (e.g. piter: own xray-reality + coturn + SFU compose)
+# do NOT install oxpulse-partner-edge.service — skip gracefully so the
+# script exits 0 and rotation is still committed to VERSION_FILE.
+if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/null \
+        | grep -q oxpulse-partner-edge; then
+    log "reloading oxpulse-partner-edge.service"
+    if systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE"; then
+        log "reload OK"
+    else
+        log "reload FAILED — restoring $BACKUP"
+        mv "$BACKUP" "$NODE_CFG"
+        systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE" || true
+        die "rollback complete; new keys NOT applied"
+    fi
 
-# Verify xray-client + caddy are healthy after reload
-sleep 5
-if systemctl is-active --quiet oxpulse-partner-edge.service; then
-    log "post-reload: oxpulse-partner-edge active"
+    # Verify xray-client + caddy are healthy after reload
+    sleep 5
+    if systemctl is-active --quiet oxpulse-partner-edge.service; then
+        log "post-reload: oxpulse-partner-edge active"
+    else
+        log "post-reload: service NOT active — restoring backup"
+        mv "$BACKUP" "$NODE_CFG"
+        systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE" || true
+        die "rollback complete after failed verify"
+    fi
 else
-    log "post-reload: service NOT active — restoring backup"
-    mv "$BACKUP" "$NODE_CFG"
-    systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE" || true
-    die "rollback complete after failed verify"
+    log "rotation: oxpulse-partner-edge.service not installed — skipping reload (custom stack node)"
 fi
 
 # Persist new version
