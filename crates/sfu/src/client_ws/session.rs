@@ -405,6 +405,7 @@ pub async fn run(
     //    normal traffic (`biased`) so the new session's WS B doesn't
     //    have to wait through queued frames before the older WS A
     //    receives its 4031 close.
+    let metrics_ref = guard.metrics.clone();
     let stole = park_until_close_or_steal(
         &mut socket,
         &mut close_signal_rx,
@@ -413,6 +414,7 @@ pub async fn run(
         &room_id,
         peer_id,
         &mut guard,
+        &metrics_ref,
     )
     .await;
 
@@ -533,6 +535,7 @@ async fn read_offer(socket: &mut WebSocket) -> Result<String, OfferReadError> {
 /// `not biased` — it has equal priority with the socket arm so a
 /// high-traffic WS cannot starve server-push messages, but steal
 /// still beats both via the `biased` first-arm ordering.
+#[allow(clippy::too_many_arguments)]
 async fn park_until_close_or_steal(
     socket: &mut WebSocket,
     close_signal_rx: &mut oneshot::Receiver<CloseReason>,
@@ -541,6 +544,7 @@ async fn park_until_close_or_steal(
     room_id: &str,
     peer_id: u64,
     guard: &mut ActiveSessionGuard,
+    metrics: &Arc<SfuMetrics>,
 ) -> bool {
     loop {
         tokio::select! {
@@ -600,6 +604,10 @@ async fn park_until_close_or_steal(
                                     if ws_ctrl_tx.try_send(ctrl).is_err() {
                                         tracing::warn!(target: "sfu::client_ws", peer_id,
                                             %room_id, "ws_ctrl_tx full — answer-renegotiate dropped");
+                                        metrics
+                                            .sfu_renegotiation_answers_total
+                                            .with_label_values(&["ctrl_tx_full"])
+                                            .inc();
                                     }
                                 } else {
                                     tracing::warn!(target: "sfu::client_ws", peer_id,
