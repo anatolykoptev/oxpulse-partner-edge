@@ -18,6 +18,12 @@ pub struct TrackIn {
     pub origin: ClientId,
     pub mid: Mid,
     pub kind: MediaKind,
+    /// External peer identifier (from the room JWT `sub` claim) of the
+    /// publishing client. Populated in `dispatch.rs::track_in_added` from
+    /// `Client::external_peer_id`. `None` for relay/test clients that have
+    /// no external identity. Used by `start_renegotiation` to emit
+    /// `tracks_map_update` with the correct publisher peer_id.
+    pub external_peer_id: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -90,6 +96,7 @@ mod tests {
             origin,
             mid: make_mid(1),
             kind: MediaKind::Video,
+            external_peer_id: None,
         });
         TrackOut {
             track_in: Arc::downgrade(&track_in),
