@@ -23,9 +23,19 @@ impl Registry {
         fanout(p, &mut self.clients);
     }
 
-    /// Test-only: read a client's delivered-media counter by index.
+    /// Test-only: read a client's layer-passed counter by index.
+    /// Counts packets that passed the layer filter before writer.write.
+    /// For tests on unnegotiated Rtc — writer never fires so `delivered_media`
+    /// stays 0. Use this to verify fanout dispatch semantics.
     #[doc(hidden)]
     pub fn delivered_media_count(&self, idx: usize) -> u64 {
+        self.clients[idx].layer_passed_count()
+    }
+
+    /// Test-only: read a client's wire-delivery counter by index.
+    /// Only non-zero when writer.write succeeds (negotiated Rtc with SDP exchange).
+    #[doc(hidden)]
+    pub fn delivered_media_wire_count(&self, idx: usize) -> u64 {
         self.clients[idx].delivered_media_count()
     }
 

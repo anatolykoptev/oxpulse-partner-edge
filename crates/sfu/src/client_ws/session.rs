@@ -170,6 +170,21 @@ impl Drop for ActiveSessionGuard {
 /// no upstream URL, no pre-allocated relay-source DC. The registry calls
 /// `Client::new(rtc, metrics)` which leaves `origin = ClientOrigin::Local`
 /// and creates the negotiated `sfu-active-speaker` DC at SCTP id 3.
+/// Server-to-client control messages for M2 SDP renegotiation.
+///
+/// Produced by the WS task (session.rs) when the browser sends an
+/// `answer-renegotiate` frame; consumed by the UDP loop via `Client::drain_ws_ctrl`.
+#[derive(Debug)]
+pub enum WsClientCtrl {
+    /// Browser replied to SFU offer-renegotiate with its SDP answer.
+    AnswerRenegotiate {
+        /// Raw SDP answer string from the browser.
+        sdp: String,
+        /// Mid string echoed from our offer — used for correlation.
+        mid: String,
+    },
+}
+
 #[derive(Debug)]
 pub struct PendingClient {
     /// str0m instance with the SDP exchange completed and the host
@@ -201,6 +216,9 @@ pub struct PendingClient {
     /// joins sending a tracks_map each; 4 is more than enough with
     /// the `try_send` / drop-on-full semantics.
     pub ws_msg_tx: mpsc::Sender<String>,
+    /// Phase J M2: receiver half of the WS-control channel. WS task owns tx;
+    /// UDP loop attaches this to the Client for draining answer-renegotiate msgs.
+    pub ws_ctrl_rx: mpsc::Receiver<WsClientCtrl>,
 }
 
 /// Run a single WS session. Returns `Ok` on clean shutdown; `Err` on
@@ -321,7 +339,11 @@ pub async fn run(
     // offer (rare, benign) or a code regression (alert-worthy).
     metrics
         .sdp_msid_injected_total
-        .with_label_values(&[if msid_injected_count > 0 { "true" } else { "false" }])
+        .with_label_values(&[if msid_injected_count > 0 {
+            "true"
+        } else {
+            "false"
+        }])
         .inc();
     let answer_frame = serde_json::json!({ "kind": "answer", "sdp": answer_sdp }).to_string();
 
@@ -339,7 +361,10 @@ pub async fn run(
     //    before the browser's first RTP arrives. Capacity 4 — see
     //    PendingClient::ws_msg_tx doc comment for rationale.
     let (close_signal_tx, mut close_signal_rx) = oneshot::channel::<CloseReason>();
-    let (ws_msg_tx, mut ws_msg_rx) = mpsc::channel::<String>(4);
+    // Capacity 8: room cap 6; worst case 5 offer-renegotiates + 1 tracks_map = 6; 8 is headroom.
+    let (ws_msg_tx, mut ws_msg_rx) = mpsc::channel::<String>(8);
+    // Phase J M2: WS control channel — session.rs keeps tx; UDP loop (Client) keeps rx.
+    let (ws_ctrl_tx, ws_ctrl_rx) = mpsc::channel::<WsClientCtrl>(8);
     if inject_tx
         .send(PendingClient {
             rtc,
@@ -347,6 +372,7 @@ pub async fn run(
             external_peer_id: peer_id,
             close_signal: close_signal_tx,
             ws_msg_tx,
+            ws_ctrl_rx,
         })
         .await
         .is_err()
@@ -383,13 +409,16 @@ pub async fn run(
     //    normal traffic (`biased`) so the new session's WS B doesn't
     //    have to wait through queued frames before the older WS A
     //    receives its 4031 close.
+    let metrics_ref = guard.metrics.clone();
     let stole = park_until_close_or_steal(
         &mut socket,
         &mut close_signal_rx,
         &mut ws_msg_rx,
+        ws_ctrl_tx,
         &room_id,
         peer_id,
         &mut guard,
+        &metrics_ref,
     )
     .await;
 
@@ -510,13 +539,16 @@ async fn read_offer(socket: &mut WebSocket) -> Result<String, OfferReadError> {
 /// `not biased` — it has equal priority with the socket arm so a
 /// high-traffic WS cannot starve server-push messages, but steal
 /// still beats both via the `biased` first-arm ordering.
+#[allow(clippy::too_many_arguments)]
 async fn park_until_close_or_steal(
     socket: &mut WebSocket,
     close_signal_rx: &mut oneshot::Receiver<CloseReason>,
     ws_msg_rx: &mut mpsc::Receiver<String>,
+    ws_ctrl_tx: mpsc::Sender<WsClientCtrl>,
     room_id: &str,
     peer_id: u64,
     guard: &mut ActiveSessionGuard,
+    metrics: &Arc<SfuMetrics>,
 ) -> bool {
     loop {
         tokio::select! {
@@ -553,9 +585,38 @@ async fn park_until_close_or_steal(
                 match msg {
                     Ok(Message::Text(t)) => {
                         if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
-                            if v.get("kind").and_then(|k| k.as_str()) == Some("ice") {
+                            let msg_type = v.get("type").and_then(|k| k.as_str());
+                            let msg_kind = v.get("kind").and_then(|k| k.as_str());
+                            if msg_kind == Some("ice") {
                                 tracing::debug!(target: "sfu::client_ws", peer_id, %room_id,
                                     "client_ws: ignoring trickle-ice frame (M4.A2 is non-trickle)");
+                                continue;
+                            }
+                            // Phase J M2: browser answered our renegotiation offer.
+                            if msg_type == Some("answer-renegotiate") {
+                                // M5: sdp is required; mid is optional (default "") for
+                                // forward-compat with clients that omit mid. Malformed
+                                // (missing sdp) frames are counted and skipped.
+                                if let Some(sdp) = v.get("sdp").and_then(|s| s.as_str()) {
+                                    let mid = v.get("mid")
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("");
+                                    let ctrl = WsClientCtrl::AnswerRenegotiate {
+                                        sdp: sdp.to_string(),
+                                        mid: mid.to_string(),
+                                    };
+                                    if ws_ctrl_tx.try_send(ctrl).is_err() {
+                                        tracing::warn!(target: "sfu::client_ws", peer_id,
+                                            %room_id, "ws_ctrl_tx full — answer-renegotiate dropped");
+                                        metrics
+                                            .sfu_renegotiation_answers_total
+                                            .with_label_values(&["ctrl_tx_full"])
+                                            .inc();
+                                    }
+                                } else {
+                                    tracing::warn!(target: "sfu::client_ws", peer_id,
+                                        %room_id, "answer-renegotiate missing sdp — malformed frame dropped");
+                                }
                                 continue;
                             }
                         }

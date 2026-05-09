@@ -163,6 +163,9 @@ where
     loop {
         metrics_ref.udp_loop_iterations_total.inc();
         registry.reap_dead();
+        // Phase J M2: drain WS control messages (answer-renegotiate) from each client.
+        // Must happen before poll_all so accepted answers are visible in the same iteration.
+        registry.pump_ws_ctrl();
 
         // Drain whatever str0m has ready to emit *before* waiting for
         // the next packet, so outbound bytes don't sit on clients
@@ -304,10 +307,15 @@ where
                             .with_label_values(&["peer_joined_late", late_join_action])
                             .inc();
 
+                        let ws_ctrl_rx = pending.ws_ctrl_rx;
                         let client = crate::client::Client::new(pending.rtc, metrics_ref.clone())
                             .with_chat_dcs()
                             .with_external_peer_id(external_peer_id)
-                            .with_close_signal(pending.close_signal);
+                            .with_close_signal(pending.close_signal)
+                            // Phase J M2: wire WS channels so the client can push
+                            // offer-renegotiate frames and drain answer-renegotiate replies.
+                            .with_ws_msg_tx(ws_msg_tx.clone())
+                            .with_ws_ctrl_rx(ws_ctrl_rx);
                         registry.insert(client);
                         tracing::info!(%room_id, external_peer_id, has_peers,
                             "browser client injected into registry — tracks_map sent, ICE driven by main UDP loop");
@@ -680,6 +688,7 @@ mod tests {
                 external_peer_id: 99,
                 close_signal: close_tx,
                 ws_msg_tx,
+                ws_ctrl_rx: tokio::sync::mpsc::channel(8).1,
             })
             .await
             .unwrap();

@@ -55,6 +55,8 @@ impl Client {
             metrics,
             delivered_media: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-utils"))]
+            layer_passed: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-utils"))]
             delivered_active_speaker: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-utils"))]
             last_active_speaker_payload: std::sync::Mutex::new(None),
@@ -70,6 +72,13 @@ impl Client {
             relay_signing_pubkey: None,
             #[cfg(feature = "vfm")]
             max_vfm_temporal_layer: u8::MAX,
+            // Phase J M2 — all None/empty at construction; populated by
+            // with_ws_msg_tx / with_ws_ctrl_rx in the browser inject arm.
+            ws_msg_tx: None,
+            ws_ctrl_rx: None,
+            pending_offer: None,
+            pending_offer_at: None,
+            renegotiation_queue: std::collections::VecDeque::new(),
             // Phase A Task A1 — defaults are `None`. The browser
             // injection path (`udp_loop::serve` `client_inject_rx` arm)
             // calls `with_external_peer_id` and `with_close_signal`
@@ -166,6 +175,24 @@ impl Client {
     /// back to its normal close path.
     pub fn with_close_signal(mut self, tx: oneshot::Sender<CloseReason>) -> Self {
         self.close_signal = Some(tx);
+        self
+    }
+
+    /// Phase J M2: attach the WS sender for outbound messages to the browser
+    /// (currently: offer-renegotiate JSON frames). `None` for relay clients
+    /// and test `new_client` — they have no WS channel.
+    pub fn with_ws_msg_tx(mut self, tx: tokio::sync::mpsc::Sender<String>) -> Self {
+        self.ws_msg_tx = Some(tx);
+        self
+    }
+
+    /// Phase J M2: attach the WS control receiver for inbound browser replies
+    /// (currently: answer-renegotiate). Called by the UDP loop after inject.
+    pub fn with_ws_ctrl_rx(
+        mut self,
+        rx: tokio::sync::mpsc::Receiver<crate::client_ws::WsClientCtrl>,
+    ) -> Self {
+        self.ws_ctrl_rx = Some(rx);
         self
     }
 
