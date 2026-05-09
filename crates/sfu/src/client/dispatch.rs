@@ -357,6 +357,9 @@ impl Client {
                 origin: self.id,
                 mid,
                 kind,
+                // Carry the publisher's external_peer_id so that subscribers can
+                // emit `tracks_map_update` with the correct peer_id in start_renegotiation.
+                external_peer_id: self.external_peer_id,
             }),
             last_keyframe_request: None,
         };
