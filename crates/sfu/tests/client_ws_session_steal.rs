@@ -242,14 +242,18 @@ async fn duplicate_upgrade_replaces_older_session() {
     //    see the Close or time out.
     let close_a = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let frame = ws_a.next().await
+            let frame = ws_a
+                .next()
+                .await
                 .expect("WS A stream not ended before close")
                 .expect("WS A frame deserialised OK");
             match frame {
                 Message::Close(_) => return frame,
                 // Server-push frames (tracks_map) may arrive first — skip.
-                Message::Text(_) | Message::Binary(_)
-                | Message::Ping(_) | Message::Pong(_)
+                Message::Text(_)
+                | Message::Binary(_)
+                | Message::Ping(_)
+                | Message::Pong(_)
                 | Message::Frame(_) => continue,
             }
         }

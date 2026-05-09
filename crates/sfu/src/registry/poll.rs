@@ -16,6 +16,15 @@ use crate::propagate::Propagated;
 use super::Registry;
 
 impl Registry {
+    /// Phase J M2: drain WS control messages (answer-renegotiate) from every client.
+    /// Called at the top of the UDP loop before `poll_all` so accepted answers are
+    /// visible to str0m in the same iteration.
+    pub fn pump_ws_ctrl(&mut self) {
+        for client in self.clients.iter_mut() {
+            client.drain_ws_ctrl();
+        }
+    }
+
     /// Poll every client until each returns a `Timeout`, queuing
     /// propagated events. Returns the earliest wake-up deadline.
     pub fn poll_all(&mut self, now: Instant) -> Instant {

@@ -82,7 +82,7 @@ impl Client {
                 .is_some()
         });
 
-        // Prometheus: forwarded_packets_total{kind} — derive kind from TrackIn.
+        // Derive kind_label from TrackIn for metric labels.
         let kind_label = matched
             .and_then(|o| o.track_in.upgrade())
             .map(|t| match t.kind {
@@ -90,10 +90,6 @@ impl Client {
                 MediaKind::Video => "video",
             })
             .unwrap_or("other");
-        self.metrics
-            .forwarded_packets_total
-            .with_label_values(&[kind_label])
-            .inc();
 
         // Prometheus: layer_selection_total{layer} — simulcast packets only.
         if let Some(rid) = data.rid {
@@ -112,8 +108,13 @@ impl Client {
                 .inc();
         }
 
-        // Count *after* the filter, *before* writer early-returns.
-        self.delivered_media.fetch_add(1, Ordering::Relaxed);
+        // Test-only: track packets that passed the layer filter and reached
+        // the mid-gate check. Fires BEFORE writer.write — used by integration
+        // tests on unnegotiated Rtc where writer.write never fires.
+        // Production telemetry uses sfu_wire_written_total and
+        // forwarded_packets_total (both below, after writer.write).
+        #[cfg(any(test, feature = "test-utils"))]
+        self.layer_passed.fetch_add(1, Ordering::Relaxed);
 
         let Some(mid) = self
             .tracks_out
@@ -173,6 +174,21 @@ impl Client {
             self.metrics
                 .sfu_forward_decisions_total
                 .with_label_values(&[&src_peer, &dst_peer, kind_label, "forwarded"])
+                .inc();
+            // forwarded_packets_total: only increments on successful SRTP write.
+            // Previously fired before the mid() gate (inflated counts during
+            // Negotiating window); now moved here so it reflects actual delivery.
+            self.metrics
+                .forwarded_packets_total
+                .with_label_values(&[kind_label])
+                .inc();
+            // delivered_media: post-write counter for per-client delivery tracking.
+            // Downstream: bwe.rs reads via delivered_media_count() for GCC convergence.
+            self.delivered_media.fetch_add(1, Ordering::Relaxed);
+            // sfu_wire_written_total: M2 SRTP delivery confirmation counter.
+            self.metrics
+                .sfu_wire_written_total
+                .with_label_values(&[kind_label])
                 .inc();
         }
     }

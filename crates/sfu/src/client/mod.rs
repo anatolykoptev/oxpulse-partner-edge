@@ -11,7 +11,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use str0m::media::Rid;
 use str0m::{Input, Rtc};
@@ -73,6 +73,7 @@ pub mod dispatch;
 pub mod fanout;
 pub mod keyframe;
 pub mod layer;
+pub mod renegotiation;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_seed;
 pub mod tracks;
@@ -80,8 +81,8 @@ pub mod voice;
 
 pub use voice::VOICE_FRAME_MAX_BYTES;
 
-pub use tracks::TrackIn;
-use tracks::{TrackInEntry, TrackOut, TrackOutState};
+use tracks::TrackInEntry;
+pub use tracks::{TrackIn, TrackOut, TrackOutState};
 
 /// Outbound UDP datagram produced by a client's str0m state.
 pub type Transmit = str0m::net::Transmit;
@@ -91,7 +92,7 @@ pub struct Client {
     pub id: ClientId,
     pub(crate) rtc: Rtc,
     pub(crate) tracks_in: Vec<TrackInEntry>,
-    pub(crate) tracks_out: Vec<TrackOut>,
+    pub tracks_out: Vec<TrackOut>,
     /// Last rid actually forwarded to this peer. `None` = no simulcast yet.
     pub(crate) chosen_rid: Option<Rid>,
     /// Preferred simulcast layer (default [`layer::LOW`]).
@@ -111,8 +112,17 @@ pub struct Client {
     pub(crate) pending_out: VecDeque<Transmit>,
     /// Prometheus handles (M1.5). Shared with Registry.
     pub(crate) metrics: Arc<SfuMetrics>,
-    /// Post-layer-filter forwarded-media counter (read by integration tests).
+    /// Post-layer-filter forwarded-media counter.
+    /// Increments only when `writer.write` succeeds (SRTP actually sent on wire).
+    /// See also: `layer_passed` for tests that verify fanout dispatch pre-write.
     pub(crate) delivered_media: AtomicU64,
+    /// Test-only: count of packets that passed the M1.3/M5.3 layer filter
+    /// and reached the mid-gate check (before writer.write). Distinct from
+    /// `delivered_media` which only increments on successful wire delivery.
+    /// Used by fanout integration tests that run on unnegotiated Rtc instances
+    /// where writer.write never fires — they verify dispatch semantics, not wire.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) layer_passed: AtomicU64,
     /// Test-only: count of `ActiveSpeakerChanged` deliveries (skip-self check).
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) delivered_active_speaker: AtomicU64,
@@ -190,6 +200,21 @@ pub struct Client {
     /// forwarding. `u8::MAX` means "no cap" (forward all layers).
     #[cfg(feature = "vfm")]
     pub(crate) max_vfm_temporal_layer: u8,
+    /// Phase J M2: WS outbound channel for sending offer-renegotiate JSON to browser.
+    /// `None` for relay/test clients (no WS session).
+    pub(crate) ws_msg_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    /// Phase J M2: WS inbound channel for receiving answer-renegotiate from browser.
+    /// `None` for relay/test clients.
+    pub(crate) ws_ctrl_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::WsClientCtrl>>,
+    /// Phase J M2: in-flight SDP renegotiation offer. Single-slot — str0m allows
+    /// only one pending offer per Rtc. A second `handle_track_open` while this is
+    /// `Some` enqueues into `renegotiation_queue` instead.
+    pub(crate) pending_offer: Option<str0m::change::SdpPendingOffer>,
+    /// Phase J M2: queued track opens deferred while a renegotiation is in-flight.
+    pub(crate) renegotiation_queue: std::collections::VecDeque<std::sync::Weak<TrackIn>>,
+    /// Phase J M2: when the current renegotiation offer was sent. Used to
+    /// detect no-answer timeouts (>10 s). Cleared on `accept_renegotiation_answer`.
+    pub(crate) pending_offer_at: Option<std::time::Instant>,
     /// External peer identifier from the room JWT's `sub` claim. Used by
     /// [`crate::registry::Registry::insert`] to detect duplicate upgrades
     /// for the same `(room_id, peer_id)` and trigger a session steal
@@ -253,9 +278,17 @@ impl Client {
         self.active_rids.iter().copied().collect()
     }
 
-    /// Forwarded `MediaData` events delivered to *this* client.
+    /// Packets that reached wire delivery (writer.write returned Ok).
+    /// Zero for test clients on unnegotiated Rtc — use `layer_passed_count` in tests.
     pub fn delivered_media_count(&self) -> u64 {
         self.delivered_media.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: packets that passed the M1.3/M5.3 layer filter (before writer.write).
+    /// Use instead of `delivered_media_count` in tests that run on unnegotiated Rtc.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn layer_passed_count(&self) -> u64 {
+        self.layer_passed.load(Ordering::Relaxed)
     }
 
     /// Test-only accessor for this client's `SfuMetrics` registry.
@@ -306,15 +339,6 @@ impl Client {
             tracing::warn!(client = *self.id, error = ?e, "client disconnected on handle_input");
             self.rtc.disconnect();
         }
-    }
-
-    /// Register that another client opened a track we should mirror
-    /// out to this peer.
-    pub fn handle_track_open(&mut self, track_in: Weak<TrackIn>) {
-        self.tracks_out.push(TrackOut {
-            track_in,
-            state: TrackOutState::ToOpen,
-        });
     }
 
     /// Drain queued outbound datagrams. Registry calls this after each

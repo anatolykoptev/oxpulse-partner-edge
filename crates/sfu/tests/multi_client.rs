@@ -38,9 +38,9 @@ fn fanout_every_to_every_excludes_origin() {
     let mut peers = vec![a, b, c];
     oxpulse_sfu::fanout::fanout_for_tests(&prop, &mut peers);
 
-    assert_eq!(peers[0].delivered_media_count(), 0, "A is origin — skipped");
-    assert_eq!(peers[1].delivered_media_count(), 1, "B receives fanout");
-    assert_eq!(peers[2].delivered_media_count(), 1, "C receives fanout");
+    assert_eq!(peers[0].layer_passed_count(), 0, "A is origin — skipped");
+    assert_eq!(peers[1].layer_passed_count(), 1, "B receives fanout");
+    assert_eq!(peers[2].layer_passed_count(), 1, "C receives fanout");
 }
 
 #[test]

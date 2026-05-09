@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use str0m::bwe::BweKind;
 use str0m::channel::ChannelData;
-use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, Mid};
+use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind, Mid};
 use str0m::{Event, IceConnectionState, Output};
 
 use super::dc;
@@ -84,7 +84,7 @@ impl Client {
         }
     }
 
-    fn handle_event(&mut self, event: Event) -> Propagated {
+    pub fn handle_event(&mut self, event: Event) -> Propagated {
         match event {
             // 2026-05-07 metric coverage audit: track ALL ICE state transitions,
             // not only Disconnected.  The counter lets operators distinguish a
@@ -150,7 +150,56 @@ impl Client {
                 }
                 Propagated::Noop
             }
-            Event::MediaAdded(m) => self.track_in_added(m.mid, m.kind),
+            Event::MediaAdded(m) => {
+                // B2: explicit match on direction instead of is_sending().
+                // is_sending() returns true for BOTH SendOnly AND SendRecv,
+                // which would silently swallow a SendRecv event that should
+                // also create a TrackIn. Explicit match eliminates the ambiguity.
+                match m.direction {
+                    Direction::SendOnly => {
+                        // This is one of OUR send-only m-lines that just completed
+                        // negotiation (renegotiation answer accepted by str0m).
+                        // Walk tracks_out, find the Negotiating(mid) entry, flip to Open.
+                        let mut transitioned = false;
+                        for track_out in &mut self.tracks_out {
+                            if let crate::client::tracks::TrackOutState::Negotiating(neg_mid) =
+                                track_out.state
+                            {
+                                if neg_mid == m.mid {
+                                    track_out.state =
+                                        crate::client::tracks::TrackOutState::Open(neg_mid);
+                                    self.metrics
+                                        .sfu_track_out_state_transitions_total
+                                        .with_label_values(&["negotiating", "open"])
+                                        .inc();
+                                    tracing::debug!(
+                                        client = *self.id,
+                                        mid = ?m.mid,
+                                        "M2: TrackOut Negotiating → Open"
+                                    );
+                                    transitioned = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !transitioned {
+                            tracing::warn!(
+                                client = *self.id,
+                                mid = ?m.mid,
+                                "M2: Event::MediaAdded SendOnly but no Negotiating(mid) track found"
+                            );
+                        }
+                        Propagated::Noop
+                    }
+                    // RecvOnly / SendRecv / Inactive — a remote peer started sending;
+                    // add TrackIn. SendRecv must also create a TrackIn so the
+                    // subscriber side is wired even when str0m emits SendRecv
+                    // for a newly added m-line.
+                    Direction::RecvOnly | Direction::SendRecv | Direction::Inactive => {
+                        self.track_in_added(m.mid, m.kind)
+                    }
+                }
+            }
             Event::MediaData(data) => self.track_in_media(data),
             Event::KeyframeRequest(req) => self.incoming_keyframe_req(req),
             // M5.3: forward str0m's own GCC estimate to the registry so
@@ -347,6 +396,92 @@ mod tests {
         assert!(
             client.relay_source_pending.is_none(),
             "must be cleared after Connected"
+        );
+    }
+
+    // ── M2 B2: MediaAdded direction dispatch ─────────────────────────────────
+
+    /// B2 regression: `Event::MediaAdded { direction: SendRecv }` must create
+    /// a `tracks_in` entry (not silently swallow the event as a state flip).
+    /// Previously `is_sending()` returned true for SendRecv, causing the else
+    /// branch (track_in_added) to be skipped.
+    #[test]
+    fn media_added_send_recv_creates_track_in() {
+        use crate::client::test_seed::new_client;
+        use crate::propagate::ClientId;
+        use str0m::media::{Direction, MediaAdded, MediaKind, Mid};
+
+        let mut client = new_client(ClientId(900));
+        let mid = Mid::from("m1");
+
+        // Simulate Event::MediaAdded { direction: SendRecv }
+        let event = Event::MediaAdded(MediaAdded {
+            mid,
+            kind: MediaKind::Video,
+            direction: Direction::SendRecv,
+            simulcast: None,
+        });
+        client.handle_event(event);
+
+        // Must have created a TrackIn entry — NOT treated as a state flip.
+        assert_eq!(
+            client.tracks_in.len(),
+            1,
+            "SendRecv MediaAdded must call track_in_added (creates a TrackIn)"
+        );
+    }
+
+    /// B2 regression: `Event::MediaAdded { direction: RecvOnly }` must create
+    /// a `tracks_in` entry (baseline: existing behaviour must stay correct).
+    #[test]
+    fn media_added_recv_only_creates_track_in() {
+        use crate::client::test_seed::new_client;
+        use crate::propagate::ClientId;
+        use str0m::media::{Direction, MediaAdded, MediaKind, Mid};
+
+        let mut client = new_client(ClientId(901));
+        let mid = Mid::from("m2");
+
+        let event = Event::MediaAdded(MediaAdded {
+            mid,
+            kind: MediaKind::Audio,
+            direction: Direction::RecvOnly,
+            simulcast: None,
+        });
+        client.handle_event(event);
+
+        assert_eq!(
+            client.tracks_in.len(),
+            1,
+            "RecvOnly MediaAdded must call track_in_added"
+        );
+    }
+
+    /// B2 regression: `Event::MediaAdded { direction: SendOnly }` must NOT
+    /// create a `tracks_in` entry — it's our outbound track completing negotiation.
+    /// With an empty `tracks_out`, the transitioned flag stays false and a warn
+    /// is logged (observable via tracing subscriber in integration), but no panic.
+    #[test]
+    fn media_added_send_only_does_not_create_track_in() {
+        use crate::client::test_seed::new_client;
+        use crate::propagate::ClientId;
+        use str0m::media::{Direction, MediaAdded, MediaKind, Mid};
+
+        let mut client = new_client(ClientId(902));
+        let mid = Mid::from("m3");
+
+        let event = Event::MediaAdded(MediaAdded {
+            mid,
+            kind: MediaKind::Video,
+            direction: Direction::SendOnly,
+            simulcast: None,
+        });
+        client.handle_event(event);
+
+        assert_eq!(
+            client.tracks_in.len(),
+            0,
+            "SendOnly MediaAdded must NOT call track_in_added (not a remote track)"
         );
     }
 }
