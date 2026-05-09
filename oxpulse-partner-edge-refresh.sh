@@ -26,7 +26,7 @@ NODE_CFG="$PREFIX_ETC/node-config.json"
 VERSION_FILE="$PREFIX_LIB/keys-version"
 CHANNELS_VERSION_FILE="$PREFIX_LIB/channels-version"
 SFU_KEYS_ENV="$PREFIX_LIB/sfu-keys.env"
-LOG_FILE=/var/log/oxpulse-partner-edge-refresh.log
+LOG_FILE="${LOG_FILE:-/var/log/oxpulse-partner-edge-refresh.log}"
 BACKEND_URL="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
 BACKEND_URL="${BACKEND_URL%/}"
 
@@ -41,6 +41,8 @@ die()  { log "ERR $*"; exit 1; }
 # for 1 week. Die here with a clear message so systemd logs are actionable.
 command -v jq >/dev/null 2>&1 \
     || die "jq required but not installed — fix: apt-get install -y jq"
+command -v curl >/dev/null 2>&1 \
+    || die "curl required but not installed — fix: apt-get install -y curl"
 
 [[ -f "$NODE_CFG" ]] || die "node-config.json not found at $NODE_CFG"
 
