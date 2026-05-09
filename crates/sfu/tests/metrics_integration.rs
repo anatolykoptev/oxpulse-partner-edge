@@ -74,6 +74,7 @@ async fn udp_loop_serves_with_registry_and_shuts_down() {
             Some(relay_rx),
             Some(client_inject_rx),
             local, // candidate_addr: loopback tests use actual local addr
+            None,  // solo_kick_timeout: disabled in test
             async {
                 let _ = rx.await;
             },
