@@ -637,10 +637,11 @@ mod tests {
     /// `accept_renegotiation_answer`), the handler must:
     ///   - NOT change state (stays Open)
     ///   - NOT panic
-    ///   - log at DEBUG level (not WARN) — verified via the `warn_fired` counter
+    ///   - log at DEBUG level (not WARN) — verified via the transition counter
     ///
-    /// The counter is a new `sfu_track_out_state_transitions_total{warn_no_negotiating}`
-    /// label that would be bumped on warn. After fix it must NOT increment.
+    /// The relevant counter is `sfu_track_out_state_transitions_total["negotiating","open"]`
+    /// — bumped only on a real Negotiating→Open flip. After fix it must NOT increment
+    /// when the track is already Open.
     ///
     /// RED: currently logs warn! which is noisy on the normal accept_answer path.
     /// After fix: debug! only; no counter bump.

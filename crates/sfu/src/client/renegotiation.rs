@@ -245,8 +245,10 @@ impl Client {
             return;
         }
 
-        // Finding 2: increment {ok} BEFORE flip so dashboards never see
-        // `transitions > answers` during the ~1-2µs window between calls.
+        // Finding 2: increment {ok} AFTER flip — let flip_negotiating_to_open_all
+        // run first so that handle_zero_transition_after_accept can early-return
+        // to {state_mismatch} without contaminating {ok}. Invariant:
+        // transitions ≥ answers{ok} (transitions fire first).
         self.metrics
             .sfu_renegotiation_answers_total
             .with_label_values(&["ok"])
@@ -264,6 +266,9 @@ impl Client {
     /// Increments `sfu_renegotiation_answers_total{outcome="state_mismatch"}`, clears
     /// `pending_offer` + `pending_offer_at`, and does NOT drain the queue (starting
     /// the next renegotiation while in an unknown state would compound the problem).
+    ///
+    /// No `tracks_out.retain` needed — flip returning false means no Negotiating entry
+    /// was present, so there is nothing to roll back.
     pub(crate) fn handle_zero_transition_after_accept(&mut self) {
         tracing::warn!(
             client = *self.id,
