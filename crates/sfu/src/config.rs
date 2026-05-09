@@ -3,6 +3,7 @@
 //! and panics only on obviously malformed numeric input at startup.
 
 use std::net::IpAddr;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SfuConfig {
@@ -57,6 +58,10 @@ pub struct SfuConfig {
     /// public IPv4 in production (rendered by install.sh / docker-compose
     /// from the `$PUBLIC_IP` autodetect).
     pub public_ip: Option<IpAddr>,
+    /// Interval in seconds for str0m built-in peer/media stats events
+    /// (`Event::PeerStats`, `Event::MediaEgressStats`, `Event::MediaIngressStats`).
+    /// Set to 0 to disable. Env: `STR0M_STATS_INTERVAL_SECS`. Default: 2.
+    pub stats_interval_secs: u64,
 }
 
 impl Default for SfuConfig {
@@ -72,6 +77,7 @@ impl Default for SfuConfig {
             fips_mode: false,
             sfu_signing_public_key: None,
             public_ip: None,
+            stats_interval_secs: 2,
         }
     }
 }
@@ -101,7 +107,30 @@ impl SfuConfig {
             fips_mode: std::env::var("SFU_FIPS").as_deref() == Ok("1"),
             sfu_signing_public_key: std::env::var("SFU_SIGNING_PUBLIC_KEY").ok(),
             public_ip: parse_public_ip_env(),
+            stats_interval_secs: std::env::var("STR0M_STATS_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2),
         }
+    }
+}
+
+impl SfuConfig {
+    /// Build a fresh `str0m::Rtc` with the stats interval from config.
+    ///
+    /// Use this instead of bare `Rtc::new(Instant::now())` in all production
+    /// paths so `Event::PeerStats` / `Event::MediaEgressStats` /
+    /// `Event::MediaIngressStats` flow through the dispatch loop.
+    /// A `stats_interval_secs` of 0 disables stats (same as `Rtc::new`).
+    pub fn build_rtc(&self) -> str0m::Rtc {
+        let interval = if self.stats_interval_secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(self.stats_interval_secs))
+        };
+        str0m::Rtc::builder()
+            .set_stats_interval(interval)
+            .build(Instant::now())
     }
 }
 

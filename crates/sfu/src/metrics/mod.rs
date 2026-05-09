@@ -287,6 +287,29 @@ pub struct SfuMetrics {
     /// Labels: kind in {audio, video}. Rising = browser peer lagging.
     /// The offer is rolled back; the track will retry on the next cycle.
     pub sfu_renegotiation_offers_dropped_total: IntCounterVec,
+
+    // ── str0m built-in stats (Finding 5: set_stats_interval) ─────────────────
+    /// RTT per peer from `Event::PeerStats`. Labels: `peer_id`.
+    /// Alert: sfu_peer_rtt_seconds > 0.2 → page on-call.
+    pub peer_rtt_seconds: GaugeVec,
+    /// Egress/ingress loss fraction per peer. Labels: `peer_id, direction` ∈ {egress, ingress}.
+    pub peer_loss_fraction: GaugeVec,
+    /// Bandwidth estimate (bps) per peer from `Event::PeerStats`. Labels: `peer_id`.
+    pub peer_bandwidth_estimate_bps: GaugeVec,
+    /// Jitter (RTP timestamp ticks) from remote receiver reports, per egress stream.
+    /// Labels: `peer_id, mid`. Not converted to seconds: clock rate varies per codec
+    /// and is not available at the dispatch layer without extra codec lookup.
+    pub media_egress_jitter_ticks: GaugeVec,
+    /// NAKs received by this egress stream (cumulative counter reset on reconnect).
+    /// Labels: `peer_id, mid`.
+    pub media_egress_nacks_received_total: IntCounterVec,
+    /// FIR requests received by this egress stream. Labels: `peer_id, mid`.
+    pub media_egress_firs_received_total: IntCounterVec,
+    /// PLI requests received by this egress stream. Labels: `peer_id, mid`.
+    pub media_egress_plis_received_total: IntCounterVec,
+    /// Jitter (RTP timestamp ticks) reported by our RTCP RRs for each ingress stream.
+    /// Labels: `peer_id, mid`.
+    pub media_ingress_jitter_ticks: GaugeVec,
 }
 
 impl SfuMetrics {
@@ -763,6 +786,90 @@ impl SfuMetrics {
             .with_label_values(&["video"])
             .get();
 
+        // ── str0m built-in stats (Finding 5: set_stats_interval) ─────────────
+        let peer_rtt_seconds = reg!(GaugeVec::new(
+            Opts::new(
+                "peer_rtt_seconds",
+                "RTT per peer from Event::PeerStats. \
+                 Alert: sfu_peer_rtt_seconds > 0.2 → page on-call.",
+            ),
+            &["peer_id"],
+        )
+        .context("peer_rtt_seconds")?);
+
+        let peer_loss_fraction = reg!(GaugeVec::new(
+            Opts::new(
+                "peer_loss_fraction",
+                "Packet loss fraction per peer and direction \
+                 (direction ∈ {egress, ingress}) from Event::PeerStats.",
+            ),
+            &["peer_id", "direction"],
+        )
+        .context("peer_loss_fraction")?);
+
+        let peer_bandwidth_estimate_bps = reg!(GaugeVec::new(
+            Opts::new(
+                "peer_bandwidth_estimate_bps_str0m",
+                "Bandwidth estimate (bps) from str0m Event::PeerStats bwe_tx field. \
+                 Complements the GCC BWE gauge (bandwidth_estimate_bps). \
+                 Labels: peer_id.",
+            ),
+            &["peer_id"],
+        )
+        .context("peer_bandwidth_estimate_bps_str0m")?);
+
+        let media_egress_jitter_ticks = reg!(GaugeVec::new(
+            Opts::new(
+                "media_egress_jitter_ticks",
+                "Jitter in RTP timestamp ticks from remote receiver reports \
+                 (Event::MediaEgressStats.remote.jitter). Not converted to seconds \
+                 because clock rate varies per codec and is not available at dispatch. \
+                 Labels: peer_id, mid.",
+            ),
+            &["peer_id", "mid"],
+        )
+        .context("media_egress_jitter_ticks")?);
+
+        let media_egress_nacks_received_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "media_egress_nacks_received_total",
+                "NAKs received by this egress stream from Event::MediaEgressStats. \
+                 Labels: peer_id, mid.",
+            ),
+            &["peer_id", "mid"],
+        )
+        .context("media_egress_nacks_received_total")?);
+
+        let media_egress_firs_received_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "media_egress_firs_received_total",
+                "FIR requests received per egress stream from Event::MediaEgressStats. \
+                 Labels: peer_id, mid.",
+            ),
+            &["peer_id", "mid"],
+        )
+        .context("media_egress_firs_received_total")?);
+
+        let media_egress_plis_received_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "media_egress_plis_received_total",
+                "PLI requests received per egress stream from Event::MediaEgressStats. \
+                 Labels: peer_id, mid.",
+            ),
+            &["peer_id", "mid"],
+        )
+        .context("media_egress_plis_received_total")?);
+
+        let media_ingress_jitter_ticks = reg!(GaugeVec::new(
+            Opts::new(
+                "media_ingress_jitter_ticks",
+                "Jitter (RTP timestamp ticks) from our RTCP RRs per ingress stream \
+                 (Event::MediaIngressStats). Labels: peer_id, mid.",
+            ),
+            &["peer_id", "mid"],
+        )
+        .context("media_ingress_jitter_ticks")?);
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -813,6 +920,14 @@ impl SfuMetrics {
             sfu_renegotiation_answers_total,
             sfu_wire_written_total,
             sfu_renegotiation_offers_dropped_total,
+            peer_rtt_seconds,
+            peer_loss_fraction,
+            peer_bandwidth_estimate_bps,
+            media_egress_jitter_ticks,
+            media_egress_nacks_received_total,
+            media_egress_firs_received_total,
+            media_egress_plis_received_total,
+            media_ingress_jitter_ticks,
         })
     }
 
