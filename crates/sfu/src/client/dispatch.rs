@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use str0m::bwe::BweKind;
 use str0m::channel::ChannelData;
-use str0m::media::{KeyframeRequestKind, MediaData, MediaKind, Mid};
+use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind, Mid};
 use str0m::{Event, IceConnectionState, Output};
 
 use super::dc;
@@ -150,7 +150,46 @@ impl Client {
                 }
                 Propagated::Noop
             }
-            Event::MediaAdded(m) => self.track_in_added(m.mid, m.kind),
+            Event::MediaAdded(m) => {
+                if m.direction.is_sending() {
+                    // This is one of OUR send-only m-lines that just completed
+                    // negotiation (renegotiation answer accepted by str0m).
+                    // Walk tracks_out, find the Negotiating(mid) entry, flip to Open.
+                    let mut transitioned = false;
+                    for track_out in &mut self.tracks_out {
+                        if let crate::client::tracks::TrackOutState::Negotiating(neg_mid) =
+                            track_out.state
+                        {
+                            if neg_mid == m.mid {
+                                track_out.state =
+                                    crate::client::tracks::TrackOutState::Open(neg_mid);
+                                self.metrics
+                                    .sfu_track_out_state_transitions_total
+                                    .with_label_values(&["negotiating", "open"])
+                                    .inc();
+                                tracing::debug!(
+                                    client = *self.id,
+                                    mid = ?m.mid,
+                                    "M2: TrackOut Negotiating → Open"
+                                );
+                                transitioned = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !transitioned {
+                        tracing::warn!(
+                            client = *self.id,
+                            mid = ?m.mid,
+                            "M2: Event::MediaAdded SendOnly but no Negotiating(mid) track found"
+                        );
+                    }
+                    Propagated::Noop
+                } else {
+                    // RecvOnly / SendRecv — a remote peer started sending; add TrackIn.
+                    self.track_in_added(m.mid, m.kind)
+                }
+            }
             Event::MediaData(data) => self.track_in_media(data),
             Event::KeyframeRequest(req) => self.incoming_keyframe_req(req),
             // M5.3: forward str0m's own GCC estimate to the registry so

@@ -174,6 +174,15 @@ impl Client {
                 .sfu_forward_decisions_total
                 .with_label_values(&[&src_peer, &dst_peer, kind_label, "forwarded"])
                 .inc();
+            // Phase J M2: wire-write success counter. Only increments when
+            // TrackOutState::Open(mid) reached and writer.write returns Ok.
+            // sfu_forwarded_packets_total increments before the mid() gate
+            // (measures fanout dispatch, not wire delivery); this counter
+            // measures actual SRTP delivery. Non-zero confirms M2 is working.
+            self.metrics
+                .sfu_wire_written_total
+                .with_label_values(&[kind_label])
+                .inc();
         }
     }
 
