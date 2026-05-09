@@ -5,6 +5,19 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.20](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.19...partner-edge-v0.12.20) (2026-05-09)
+
+
+### Features
+
+* **xray:** pin xray-core to v26.5.3 + weekly auto-update timer ([#80](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/80)) ([1bd7656](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1bd7656a01842eb3d3b835463ca978c2732a76b4))
+
+
+### Bug Fixes
+
+* **refresh:** OS-aware dep error messages + add jq to install.sh deps ([#77](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/77)) ([3ef9d56](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3ef9d568d0fcd41d8242b9fa6d50537a02f2ba11))
+* **xray:** switch uTLS fingerprint from chrome to randomized ([#79](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/79)) ([3599f0f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3599f0fac6f5d834abd72e2ef9e19b290ec39e74))
+
 ## [0.12.19](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.18...partner-edge-v0.12.19) (2026-05-09)
 
 
