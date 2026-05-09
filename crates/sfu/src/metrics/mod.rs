@@ -259,6 +259,31 @@ pub struct SfuMetrics {
     /// rejects its own output — typically a misconfigured codec or lost ICE path.
     /// `transmit` rate ≈ outbound packet rate; sudden drop = forwarding stalled.
     pub sfu_str0m_output_total: IntCounterVec,
+    // ── Phase J: M2 SDP renegotiation state-machine metrics ─────────────────
+    /// State machine transitions for outbound track negotiation.
+    ///
+    /// Labels:  ∈ ,  ∈ .
+    /// Pre-touched:  so alert baseline=0 fires on deploy.
+    /// Alert: 
+    /// after a group call with 2+ peers = M2 renegotiation stalled.
+    pub sfu_track_out_state_transitions_total: IntCounterVec,
+    /// Renegotiation offers sent from SFU to browser (new m-line per cross-advertised track).
+    ///
+    /// Labels:  ∈ .
+    /// Used to verify SFU actually triggers renegotiation for each publisher track.
+    pub sfu_renegotiation_offers_sent_total: IntCounterVec,
+    /// Renegotiation answer processing outcomes.
+    ///
+    /// Labels:  ∈ .
+    ///  rising = browser sent malformed answer or str0m rejected it.
+    pub sfu_renegotiation_answers_total: IntCounterVec,
+    /// Successful SRTP wire writes after M2 renegotiation.
+    ///
+    /// Labels:  ∈ .
+    /// Pre-touched at startup. Distinct from forwarded_packets_total which increments
+    /// before the mid() gate; this only fires when writer.write succeeds post-negotiation.
+    pub sfu_wire_written_total: IntCounterVec,
+
 }
 
 impl SfuMetrics {
@@ -652,6 +677,66 @@ impl SfuMetrics {
         .context("sfu_str0m_output_total")?);
         // No pre-touch: peer_id labels are dynamic.
 
+
+        // ── Phase J: M2 SDP renegotiation metrics ────────────────────────────
+        let sfu_track_out_state_transitions_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_track_out_state_transitions_total",
+                "M2 renegotiation state-machine transitions. Labels: from, to. Alert on zero rate.",
+            ),
+            &["from", "to"],
+        )
+        .context("sfu_track_out_state_transitions_total")?);
+        // Pre-touch the (negotiating, open) path so the alert baseline=0 fires immediately.
+        let _ = sfu_track_out_state_transitions_total
+            .with_label_values(&["negotiating", "open"])
+            .get();
+        let _ = sfu_track_out_state_transitions_total
+            .with_label_values(&["to_open", "negotiating"])
+            .get();
+
+        let sfu_renegotiation_offers_sent_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_renegotiation_offers_sent_total",
+                "M2: renegotiation offers pushed from SFU to browser (per cross-advertised track).                  kind ∈ {audio, video}.",
+            ),
+            &["kind"],
+        )
+        .context("sfu_renegotiation_offers_sent_total")?);
+        let _ = sfu_renegotiation_offers_sent_total
+            .with_label_values(&["audio"])
+            .get();
+        let _ = sfu_renegotiation_offers_sent_total
+            .with_label_values(&["video"])
+            .get();
+
+        let sfu_renegotiation_answers_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_renegotiation_answers_total",
+                "M2: renegotiation answer processing outcomes.                  outcome ∈ {ok, err}. err rising = malformed browser answer or str0m rejection.",
+            ),
+            &["outcome"],
+        )
+        .context("sfu_renegotiation_answers_total")?);
+        let _ = sfu_renegotiation_answers_total
+            .with_label_values(&["ok"])
+            .get();
+        let _ = sfu_renegotiation_answers_total
+            .with_label_values(&["err"])
+            .get();
+
+        let sfu_wire_written_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_wire_written_total",
+                "M2: successful SRTP writer.write() calls after renegotiation.                  kind ∈ {audio, video, other}. Non-zero only when TrackOutState::Open(mid) reached.                  Distinct from forwarded_packets_total which increments before the mid() gate.",
+            ),
+            &["kind"],
+        )
+        .context("sfu_wire_written_total")?);
+        let _ = sfu_wire_written_total.with_label_values(&["audio"]).get();
+        let _ = sfu_wire_written_total.with_label_values(&["video"]).get();
+        let _ = sfu_wire_written_total.with_label_values(&["other"]).get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -697,6 +782,10 @@ impl SfuMetrics {
             sfu_subscription_setup_total,
             sfu_late_join_resync_total,
             sfu_str0m_output_total,
+            sfu_track_out_state_transitions_total,
+            sfu_renegotiation_offers_sent_total,
+            sfu_renegotiation_answers_total,
+            sfu_wire_written_total,
         })
     }
 

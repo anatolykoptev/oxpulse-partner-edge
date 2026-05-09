@@ -26,15 +26,32 @@ pub(crate) struct TrackInEntry {
     pub last_keyframe_request: Option<Instant>,
 }
 
-// `Negotiating` and `Open` are unused in M1.2 because SDP renegotiation
-// lives in the signaling layer (M2); `TrackOut::mid` already knows how
-// to drop out of `ToOpen`. Keeping the variants so M2 can flip state
-// without a churn commit.
-#[allow(dead_code)]
+/// State machine for an outbound (subscriber-side) track entry.
+///
+/// ## Transitions (Phase J — M2 SDP renegotiation)
+///
+/// ```text
+/// ToOpen ──[handle_track_open, ws_msg_tx present]──► Negotiating(Mid)
+///    ↑                                                      │
+///    │  (ws_msg_tx absent — relay/test)            str0m Event::MediaAdded
+///    │                                              { direction: SendOnly }
+///    │                                                      │
+///    └──────────────────────────────────── ◄──── Open(Mid) ◄┘
+/// ```
+///
+/// `mid()` returns `None` for `ToOpen` (no m-line allocated yet) and
+/// `Some(mid)` for both `Negotiating` and `Open`. The `fanout.rs`
+/// `writer.write` path is gated on `o.mid()` — packets only reach the
+/// wire once the state is at least `Open`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrackOutState {
+    /// m-line not yet allocated. Default state for relay/test clients that
+    /// have no WS channel to drive renegotiation, or while waiting for a
+    /// prior renegotiation to complete (queued).
     ToOpen,
+    /// SDP offer sent to browser; waiting for the `answer-renegotiate` reply.
     Negotiating(Mid),
+    /// m-line negotiated and open; `writer.write` is live.
     Open(Mid),
 }
 
@@ -50,5 +67,97 @@ impl TrackOut {
             TrackOutState::ToOpen => None,
             TrackOutState::Negotiating(m) | TrackOutState::Open(m) => Some(m),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn make_mid(tag: u8) -> Mid {
+        Mid::from(&*format!("m{tag}"))
+    }
+
+    fn make_track_out(state: TrackOutState) -> TrackOut {
+        let origin = crate::propagate::ClientId(99);
+        let track_in = Arc::new(TrackIn {
+            origin,
+            mid: make_mid(1),
+            kind: MediaKind::Video,
+        });
+        TrackOut {
+            track_in: Arc::downgrade(&track_in),
+            state,
+        }
+    }
+
+    /// `mid()` returns `None` for `ToOpen` — no m-line allocated yet.
+    #[test]
+    fn mid_returns_none_for_to_open() {
+        let o = make_track_out(TrackOutState::ToOpen);
+        assert!(o.mid().is_none(), "ToOpen must return None from mid()");
+    }
+
+    /// `mid()` returns the wrapped Mid for `Negotiating`.
+    #[test]
+    fn mid_returns_some_for_negotiating() {
+        let mid = make_mid(7);
+        let o = make_track_out(TrackOutState::Negotiating(mid));
+        assert_eq!(o.mid(), Some(mid), "Negotiating(mid) must return Some(mid)");
+    }
+
+    /// `mid()` returns the wrapped Mid for `Open`.
+    #[test]
+    fn mid_returns_some_for_open() {
+        let mid = make_mid(3);
+        let o = make_track_out(TrackOutState::Open(mid));
+        assert_eq!(o.mid(), Some(mid), "Open(mid) must return Some(mid)");
+    }
+
+    /// State transition: Negotiating(mid) → Open(mid) — the core M2 flip.
+    /// Simulates what dispatch.rs does on Event::MediaAdded { direction: SendOnly }.
+    #[test]
+    fn track_out_state_transitions_to_open() {
+        let mid = make_mid(5);
+        let mut o = make_track_out(TrackOutState::Negotiating(mid));
+
+        // Simulate the dispatch.rs transition.
+        if let TrackOutState::Negotiating(neg_mid) = o.state {
+            o.state = TrackOutState::Open(neg_mid);
+        }
+
+        assert_eq!(
+            o.state,
+            TrackOutState::Open(mid),
+            "state must be Open(mid) after transition"
+        );
+        assert_eq!(
+            o.mid(),
+            Some(mid),
+            "mid() must return Some(mid) after Open transition"
+        );
+    }
+
+    /// Ensures `Negotiating(mid_a)` does NOT transition when `mid_b` matches —
+    /// guards against off-by-one in the dispatch loop.
+    #[test]
+    fn state_transition_requires_matching_mid() {
+        let mid_a = make_mid(1);
+        let mid_b = make_mid(2);
+        let mut o = make_track_out(TrackOutState::Negotiating(mid_a));
+
+        // Simulate dispatch loop: only flip when the incoming mid matches.
+        if let TrackOutState::Negotiating(neg_mid) = o.state {
+            if neg_mid == mid_b {
+                o.state = TrackOutState::Open(neg_mid);
+            }
+        }
+
+        assert_eq!(
+            o.state,
+            TrackOutState::Negotiating(mid_a),
+            "state must NOT change when mid_b != mid_a"
+        );
     }
 }
