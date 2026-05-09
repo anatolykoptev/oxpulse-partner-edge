@@ -310,6 +310,20 @@ pub struct SfuMetrics {
     /// Jitter (RTP timestamp ticks) reported by our RTCP RRs for each ingress stream.
     /// Labels: `peer_id, mid`.
     pub media_ingress_jitter_ticks: GaugeVec,
+
+    // ── str0m issue #952: writer.write error discrimination ──────────────────
+    /// Per-variant breakdown of `writer.write()` failures during RTP fanout.
+    ///
+    /// Labels: `kind` ∈ `{write_without_poll, other}`.
+    ///
+    /// `write_without_poll` matches `RtcError::WriteWithoutPoll` — consecutive
+    /// calls to `write()` without an intervening `poll_output()`. Per str0m
+    /// issue #952 (2026-05-05) this is the known cause of frozen video at
+    /// ≥10 peers under load.
+    ///
+    /// Alert rule: `rate(sfu_writer_write_errors_total{kind="write_without_poll"}[5m]) > 0`
+    /// → page on-call.
+    pub sfu_writer_write_errors_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -870,6 +884,28 @@ impl SfuMetrics {
         )
         .context("media_ingress_jitter_ticks")?);
 
+        // ── str0m issue #952: writer.write error discrimination ──────────────
+        let sfu_writer_write_errors_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_writer_write_errors_total",
+                "writer.write() failures during RTP fanout, broken down by error variant. \
+                 kind ∈ {write_without_poll, other}. \
+                 write_without_poll = consecutive write() calls without poll_output() — \
+                 known cause of frozen video at ≥10 peers (str0m issue #952, 2026-05-05). \
+                 Alert: rate(sfu_writer_write_errors_total{kind=\"write_without_poll\"}[5m]) > 0.",
+            ),
+            &["kind"],
+        )
+        .context("sfu_writer_write_errors_total")?);
+        // Pre-touch both label values so alert rules see a stable baseline of 0
+        // from startup instead of an absent series.
+        let _ = sfu_writer_write_errors_total
+            .with_label_values(&["write_without_poll"])
+            .get();
+        let _ = sfu_writer_write_errors_total
+            .with_label_values(&["other"])
+            .get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -928,6 +964,8 @@ impl SfuMetrics {
             media_egress_firs_received_total,
             media_egress_plis_received_total,
             media_ingress_jitter_ticks,
+
+            sfu_writer_write_errors_total,
         })
     }
 
@@ -1055,6 +1093,61 @@ mod tests {
         assert!(
             text.contains("sfu_sfu_str0m_output_total"),
             "sfu_str0m_output_total must appear in /metrics after first inc, got:\n{text}",
+        );
+    }
+
+    /// str0m issue #952: `sfu_writer_write_errors_total` is registered with
+    /// both expected label values at 0 from startup (pre-touch).
+    ///
+    /// Validates Fix B: the metric is reachable in /metrics before any write
+    /// error occurs so alert rules have a stable baseline.
+    #[test]
+    fn sfu_writer_write_errors_registered_and_baseline_zero() {
+        let m = SfuMetrics::new().expect("metrics build");
+
+        assert_eq!(
+            m.sfu_writer_write_errors_total
+                .with_label_values(&["write_without_poll"])
+                .get(),
+            0,
+            "write_without_poll must start at 0"
+        );
+        assert_eq!(
+            m.sfu_writer_write_errors_total
+                .with_label_values(&["other"])
+                .get(),
+            0,
+            "other must start at 0"
+        );
+
+        // Simulate WriteWithoutPoll dispatch: increment write_without_poll.
+        m.sfu_writer_write_errors_total
+            .with_label_values(&["write_without_poll"])
+            .inc();
+        assert_eq!(
+            m.sfu_writer_write_errors_total
+                .with_label_values(&["write_without_poll"])
+                .get(),
+            1,
+            "write_without_poll must be 1 after one inc"
+        );
+
+        // Simulate other error: increment other.
+        m.sfu_writer_write_errors_total
+            .with_label_values(&["other"])
+            .inc();
+        assert_eq!(
+            m.sfu_writer_write_errors_total
+                .with_label_values(&["other"])
+                .get(),
+            1,
+            "other must be 1 after one inc"
+        );
+
+        let text = m.encode_text().expect("encode metrics");
+        assert!(
+            text.contains("sfu_sfu_writer_write_errors_total"),
+            "sfu_writer_write_errors_total must appear in /metrics output, got:\n{text}",
         );
     }
 
