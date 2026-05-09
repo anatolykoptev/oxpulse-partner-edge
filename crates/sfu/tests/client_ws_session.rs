@@ -694,9 +694,9 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
         "tracks[0].stream_id must be 'peer-7'; got {entry:?}"
     );
     assert_eq!(
-        entry.get("peer_id").and_then(|v| v.as_str()),
-        Some("7"),
-        "tracks[0].peer_id must be '7'; got {entry:?}"
+        entry.get("peer_id").and_then(|v| v.as_u64()),
+        Some(7u64),
+        "tracks[0].peer_id must be integer 7; got {entry:?}"
     );
 
     // 8. Verify metric counter.

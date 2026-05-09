@@ -287,6 +287,12 @@ pub struct SfuMetrics {
     /// Labels: kind in {audio, video}. Rising = browser peer lagging.
     /// The offer is rolled back; the track will retry on the next cycle.
     pub sfu_renegotiation_offers_dropped_total: IntCounterVec,
+    /// M2: tracks_map_update frames dropped after a successful offer-renegotiate send.
+    ///
+    /// Labels: `reason` ∈ {ws_tx_full, channel_closed}.
+    /// Non-zero = browser WS queue full at the time of emission; browser falls back
+    /// to stream-id heuristic. Does NOT affect SRTP delivery.
+    pub sfu_renegotiation_tracks_map_update_dropped_total: IntCounterVec,
 
     // ── str0m built-in stats (Finding 5: set_stats_interval) ─────────────────
     /// RTT per peer from `Event::PeerStats`. Labels: `peer_id`.
@@ -803,6 +809,23 @@ impl SfuMetrics {
             .with_label_values(&["video"])
             .get();
 
+        let sfu_renegotiation_tracks_map_update_dropped_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_renegotiation_tracks_map_update_dropped_total",
+                "M2: tracks_map_update frames dropped after offer-renegotiate. \
+                 reason in {ws_tx_full, channel_closed}. Non-zero = browser WS queue congested; \
+                 browser falls back to stream-id heuristic.",
+            ),
+            &["reason"],
+        )
+        .context("sfu_renegotiation_tracks_map_update_dropped_total")?);
+        let _ = sfu_renegotiation_tracks_map_update_dropped_total
+            .with_label_values(&["ws_tx_full"])
+            .get();
+        let _ = sfu_renegotiation_tracks_map_update_dropped_total
+            .with_label_values(&["channel_closed"])
+            .get();
+
         // ── str0m built-in stats (Finding 5: set_stats_interval) ─────────────
         let peer_rtt_seconds = reg!(GaugeVec::new(
             Opts::new(
@@ -959,6 +982,7 @@ impl SfuMetrics {
             sfu_renegotiation_answers_total,
             sfu_wire_written_total,
             sfu_renegotiation_offers_dropped_total,
+            sfu_renegotiation_tracks_map_update_dropped_total,
             peer_rtt_seconds,
             peer_loss_fraction,
             peer_bandwidth_estimate_bps,
