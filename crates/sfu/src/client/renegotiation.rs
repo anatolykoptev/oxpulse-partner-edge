@@ -8,8 +8,10 @@
 //! 1. `handle_track_open` → `start_renegotiation`: call `sdp_api().add_media`
 //!    → get `(SdpOffer, SdpPendingOffer)` → send `offer-renegotiate` WS frame.
 //! 2. Browser `answer-renegotiate` drains via `drain_ws_ctrl`.
-//! 3. `accept_renegotiation_answer` calls `sdp_api().accept_answer` → str0m emits
-//!    `Event::MediaAdded { direction: SendOnly }` → `dispatch.rs` flips to `Open(mid)`.
+//! 3. `accept_renegotiation_answer` calls `sdp_api().accept_answer` → on Ok, directly
+//!    calls `flip_negotiating_to_open_all()` to flip `Negotiating(mid)` → `Open(mid)`.
+//!    str0m v0.18.1 never emits `Event::MediaAdded { direction: SendOnly }` for the
+//!    offerer role (`need_open_event` is gated on `is_offer=false` in accept_answer).
 //! 4. `fanout.rs` `o.mid()` returns `Some(mid)` → `writer.write` fires → SRTP on wire.
 
 use std::sync::Weak;
@@ -152,8 +154,14 @@ impl Client {
     /// Process a `answer-renegotiate` reply from the browser.
     ///
     /// Passes the answer to str0m via `sdp_api().accept_answer`. On success,
-    /// str0m will emit `Event::MediaAdded { direction: SendOnly }` which
-    /// `dispatch.rs` picks up to flip the `TrackOutState` to `Open(mid)`.
+    /// directly transitions any `TrackOutState::Negotiating(mid)` entry to `Open(mid)`
+    /// via `flip_negotiating_to_open_all()`.
+    ///
+    /// **Why not wait for `Event::MediaAdded`?** str0m v0.18.1 never emits
+    /// `Event::MediaAdded { direction: SendOnly }` for the offerer role — the
+    /// `need_open_event` flag in str0m is gated on `is_offer=true`, but
+    /// `accept_answer` runs the `is_offer=false` branch.  The `dispatch.rs` handler
+    /// for that event is kept as a harmless safety net only.
     ///
     /// After processing, drains one entry from `renegotiation_queue` (sequential
     /// offer pipeline — only one in-flight at a time per str0m contract).
@@ -214,6 +222,27 @@ impl Client {
             return;
         }
 
+        // Transition Negotiating → Open directly here.
+        //
+        // str0m v0.18.1 never emits `Event::MediaAdded { direction: SendOnly }` for
+        // the offerer role: `need_open_event` in str0m src/lib.rs is set only when
+        // `is_offer=true`, but the `accept_answer` code path enters the `is_offer=false`
+        // branch.  str0m's own docs state: "For locally added media, this event never
+        // fires."  Waiting for that event — as the original M2 design did — means state
+        // stays `Negotiating(mid)` forever, `o.mid()` returns `None`, fanout skips
+        // SRTP writes, and the 10 s watchdog fires "clearing state".
+        //
+        // The mid is already in-hand: it was stored as `TrackOutState::Negotiating(mid)`
+        // in `start_renegotiation`. We flip ALL `Negotiating` entries here (there should
+        // be exactly one, since str0m enforces a single in-flight offer).
+        let transitioned = self.flip_negotiating_to_open_all();
+        if !transitioned {
+            tracing::warn!(
+                client = *self.id,
+                "M2: accept_answer Ok but no Negotiating TrackOut found — state inconsistency"
+            );
+        }
+
         self.metrics
             .sfu_renegotiation_answers_total
             .with_label_values(&["ok"])
@@ -223,6 +252,36 @@ impl Client {
         if let Some(next) = self.renegotiation_queue.pop_front() {
             self.start_renegotiation(next);
         }
+    }
+
+    /// Flip all `TrackOutState::Negotiating(mid)` entries to `Open(mid)` and
+    /// increment the transition metric for each.
+    ///
+    /// Returns `true` if at least one entry was transitioned, `false` if none were
+    /// found (caller should log a warning in that case).
+    ///
+    /// Called directly from `accept_renegotiation_answer` after `accept_answer` Ok,
+    /// because str0m v0.18.1 never emits `Event::MediaAdded { direction: SendOnly }`
+    /// for the offerer role.  The `dispatch.rs` handler for that event is intentionally
+    /// kept as a no-op safety net but is not relied upon for production state transitions.
+    pub(crate) fn flip_negotiating_to_open_all(&mut self) -> bool {
+        let mut transitioned = false;
+        for track_out in &mut self.tracks_out {
+            if let TrackOutState::Negotiating(mid) = track_out.state {
+                track_out.state = TrackOutState::Open(mid);
+                self.metrics
+                    .sfu_track_out_state_transitions_total
+                    .with_label_values(&["negotiating", "open"])
+                    .inc();
+                tracing::debug!(
+                    client = *self.id,
+                    ?mid,
+                    "M2: TrackOut Negotiating → Open (direct transition, no Event::MediaAdded)"
+                );
+                transitioned = true;
+            }
+        }
+        transitioned
     }
 
     /// Drain all pending WS control messages from `ws_ctrl_rx`.
@@ -484,6 +543,71 @@ fake-sdp
             .with_label_values(&["timeout"])
             .get();
         assert_eq!(after - before, 1, "timeout metric must increment by 1");
+    }
+
+    /// Core M2 bug fix — direct state transition without Event::MediaAdded.
+    ///
+    /// str0m v0.18.1 never emits `Event::MediaAdded { direction: SendOnly }` for
+    /// the offerer role (need_open_event is gated on `is_offer=false` in the
+    /// accept_answer branch). The transition must therefore happen directly in
+    /// `accept_renegotiation_answer` via `flip_negotiating_to_open_all()`,
+    /// without relying on `handle_event(Event::MediaAdded)`.
+    ///
+    /// This test calls `flip_negotiating_to_open_all()` directly and asserts the
+    /// state flips from `Negotiating(mid)` to `Open(mid)` and the metric increments.
+    /// On the current code, this fails because the method does not exist yet (RED).
+    #[test]
+    fn accept_renegotiation_answer_transitions_negotiating_to_open() {
+        use str0m::media::{MediaKind, Mid};
+
+        let mut publisher = new_client(ClientId(800));
+        let arc = seed_track_in(&mut publisher, 7, MediaKind::Audio);
+
+        let mut client = new_client(ClientId(801));
+        let mid: Mid = Mid::from("m7");
+
+        // Manually seed Negotiating(mid) — simulates state after start_renegotiation.
+        client.tracks_out.push(crate::client::tracks::TrackOut {
+            track_in: Arc::downgrade(&arc),
+            state: TrackOutState::Negotiating(mid),
+        });
+        assert!(
+            matches!(client.tracks_out[0].state, TrackOutState::Negotiating(m) if m == mid),
+            "pre-condition: state must be Negotiating(mid)"
+        );
+
+        let metrics = client.metrics_for_tests().clone();
+        let before = metrics
+            .sfu_track_out_state_transitions_total
+            .with_label_values(&["negotiating", "open"])
+            .get();
+
+        // Call the new helper that accept_renegotiation_answer will use directly.
+        // On current code this does not exist → compile error = RED.
+        let transitioned = client.flip_negotiating_to_open_all();
+
+        assert!(
+            transitioned,
+            "flip_negotiating_to_open_all must return true when entry found"
+        );
+        assert_eq!(
+            client.tracks_out[0].state,
+            TrackOutState::Open(mid),
+            "state must be Open(mid) after flip_negotiating_to_open_all"
+        );
+        assert!(
+            client.tracks_out[0].mid() == Some(mid),
+            "mid() must return Some(mid) after Open transition"
+        );
+        let after = metrics
+            .sfu_track_out_state_transitions_total
+            .with_label_values(&["negotiating", "open"])
+            .get();
+        assert_eq!(
+            after - before,
+            1,
+            "negotiating→open metric must increment by 1"
+        );
     }
 
     /// WS disconnect: when ws_ctrl_rx disconnects, drain_ws_ctrl must clear

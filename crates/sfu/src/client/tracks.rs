@@ -33,11 +33,16 @@ pub(crate) struct TrackInEntry {
 /// ```text
 /// ToOpen ──[handle_track_open, ws_msg_tx present]──► Negotiating(Mid)
 ///    ↑                                                      │
-///    │  (ws_msg_tx absent — relay/test)            str0m Event::MediaAdded
-///    │                                              { direction: SendOnly }
+///    │  (ws_msg_tx absent — relay/test)         accept_renegotiation_answer Ok
+///    │                                          → flip_negotiating_to_open_all()
 ///    │                                                      │
 ///    └──────────────────────────────────── ◄──── Open(Mid) ◄┘
 /// ```
+///
+/// Note: `dispatch.rs` also handles `Event::MediaAdded { direction: SendOnly }` with
+/// the same flip logic, but str0m v0.18.1 never emits that event for the offerer role.
+/// The handler is kept as a harmless safety net. Production transitions happen via
+/// `accept_renegotiation_answer` directly.
 ///
 /// `mid()` returns `None` for `ToOpen` (no m-line allocated yet) and for
 /// `Negotiating` (offer sent, awaiting browser answer — not safe to write SRTP).
