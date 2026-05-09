@@ -11,7 +11,6 @@ use str0m::Event;
 
 use oxpulse_sfu::client::test_seed::{new_client, seed_track_in};
 use oxpulse_sfu::client::{TrackIn, TrackOut, TrackOutState};
-use oxpulse_sfu::metrics::SfuMetrics;
 use oxpulse_sfu::ClientId;
 
 /// Build a synthetic `Event::MediaAdded` for a `SendOnly` mid.
