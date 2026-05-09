@@ -23,6 +23,8 @@
 use anyhow::Context;
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
+#[cfg(test)]
+use opentelemetry::Key;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -32,6 +34,15 @@ use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+
+/// OTEL semantic convention key for instance discrimination.
+/// `opentelemetry_semantic_conventions::resource::SERVICE_INSTANCE_ID` requires
+/// the `semconv_experimental` feature; we pin the string directly to avoid a
+/// non-stable feature dependency.
+const SERVICE_INSTANCE_ID_KEY: &str = "service.instance.id";
+
+/// Custom resource attribute key for partner discrimination.
+const PARTNER_ID_KEY: &str = "partner.id";
 
 /// Initialise tracing-subscriber with the stdout layer plus, when configured,
 /// the OTLP layer that ships spans to Jaeger / OTel Collector.
@@ -61,14 +72,7 @@ pub fn init(
         return Ok(None);
     }
 
-    let resource = Resource::builder()
-        .with_attributes([
-            KeyValue::new(semconv::SERVICE_NAME, "partner-edge-sfu"),
-            KeyValue::new(semconv::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-            KeyValue::new("edge_id", edge_id.to_string()),
-            KeyValue::new("partner_id", partner_id.to_string()),
-        ])
-        .build();
+    let resource = build_resource(edge_id, partner_id);
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
@@ -103,5 +107,84 @@ pub fn shutdown(provider: Option<SdkTracerProvider>) {
         if let Err(e) = p.shutdown() {
             tracing::warn!(error = %e, "OTLP trace provider shutdown failed");
         }
+    }
+}
+
+/// Build the OTel [`Resource`] that identifies this edge node.
+///
+/// - `service.name`        — always `"partner-edge-sfu"` (groups all edges in Jaeger)
+/// - `service.instance.id` — `edge_id` (OTEL standard; lets Jaeger filter/group per node)
+/// - `service.version`     — crate version from Cargo
+/// - `partner.id`          — `partner_id` (custom; convenience filter for multi-tenant deployments)
+fn build_resource(edge_id: &str, partner_id: &str) -> Resource {
+    Resource::builder()
+        .with_attributes([
+            KeyValue::new(semconv::SERVICE_NAME, "partner-edge-sfu"),
+            KeyValue::new(semconv::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+            KeyValue::new(SERVICE_INSTANCE_ID_KEY, edge_id.to_string()),
+            KeyValue::new(PARTNER_ID_KEY, partner_id.to_string()),
+        ])
+        .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_attr(resource: &Resource, key: &str) -> Option<String> {
+        resource
+            .get(&Key::from(key.to_string()))
+            .map(|v| v.to_string())
+    }
+
+    #[test]
+    fn resource_has_service_instance_id() {
+        let r = build_resource("motherly1", "acme");
+        let val = get_attr(&r, SERVICE_INSTANCE_ID_KEY);
+        assert_eq!(
+            val.as_deref(),
+            Some("motherly1"),
+            "service.instance.id must match edge_id"
+        );
+    }
+
+    #[test]
+    fn resource_has_partner_id() {
+        let r = build_resource("motherly1", "acme");
+        let val = get_attr(&r, PARTNER_ID_KEY);
+        assert_eq!(
+            val.as_deref(),
+            Some("acme"),
+            "partner.id must match partner_id"
+        );
+    }
+
+    #[test]
+    fn resource_has_service_name() {
+        let r = build_resource("local", "unknown");
+        let val = get_attr(&r, semconv::SERVICE_NAME);
+        assert_eq!(
+            val.as_deref(),
+            Some("partner-edge-sfu"),
+            "service.name must be fixed"
+        );
+    }
+
+    #[test]
+    fn resource_has_service_version() {
+        let r = build_resource("local", "unknown");
+        let val = get_attr(&r, semconv::SERVICE_VERSION);
+        assert!(val.is_some(), "service.version must be present");
+    }
+
+    #[test]
+    fn resource_fallback_defaults() {
+        // Mirrors main.rs fallback: SFU_EDGE_ID unset → "local", PARTNER_ID unset → "unknown"
+        let r = build_resource("local", "unknown");
+        assert_eq!(
+            get_attr(&r, SERVICE_INSTANCE_ID_KEY).as_deref(),
+            Some("local")
+        );
+        assert_eq!(get_attr(&r, PARTNER_ID_KEY).as_deref(), Some("unknown"));
     }
 }
