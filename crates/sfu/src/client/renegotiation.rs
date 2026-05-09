@@ -13,6 +13,7 @@
 //! 4. `fanout.rs` `o.mid()` returns `Some(mid)` → `writer.write` fires → SRTP on wire.
 
 use std::sync::Weak;
+use std::time::{Duration, Instant};
 
 use str0m::change::SdpAnswer;
 use str0m::media::{Direction, MediaKind};
@@ -104,6 +105,7 @@ impl Client {
         };
 
         self.pending_offer = Some(pending);
+        self.pending_offer_at = Some(Instant::now());
 
         // Send offer to browser WS. try_send: non-blocking; if channel full the peer
         // is lagging — drop the offer and roll back state (see below).
@@ -119,7 +121,13 @@ impl Client {
                 // Channel full: roll back all state so the next handle_track_open
                 // can retry cleanly. The browser never saw this offer, so there is
                 // no in-flight renegotiation to cancel.
+                //
+                // SdpPendingOffer's Drop in str0m 0.18 releases internal
+                // pending-offer state — see str0m src/change/sdp.rs SdpApi
+                // handling. Setting pending_offer = None triggers Drop here,
+                // which correctly resets str0m's internal offer slot.
                 self.pending_offer = None;
+                self.pending_offer_at = None;
                 self.tracks_out.pop(); // remove the Negotiating(mid) entry we just pushed
                 // Re-enqueue the track_in so it is retried when the next answer
                 // drains (or when the next handle_track_open fires and the channel
@@ -148,6 +156,7 @@ impl Client {
     /// After processing, drains one entry from `renegotiation_queue` (sequential
     /// offer pipeline — only one in-flight at a time per str0m contract).
     pub fn accept_renegotiation_answer(&mut self, sdp: &str) {
+        self.pending_offer_at = None;
         let Some(pending) = self.pending_offer.take() else {
             tracing::warn!(client = *self.id,
                 "M2: accept_renegotiation_answer called with no pending offer — ignoring");
@@ -215,6 +224,22 @@ impl Client {
     /// try_recv-based: never blocks. Processes `AnswerRenegotiate` by delegating
     /// to `accept_renegotiation_answer`.
     pub fn drain_ws_ctrl(&mut self) {
+        // Check no-answer timeout before processing new messages.
+        if let Some(sent_at) = self.pending_offer_at {
+            if sent_at.elapsed() > Duration::from_secs(10) {
+                tracing::warn!(client = *self.id,
+                    "M2: renegotiation offer timed out (>10s, no answer received) — clearing state");
+                self.pending_offer = None;
+                self.pending_offer_at = None;
+                self.renegotiation_queue.clear();
+                self.metrics
+                    .sfu_renegotiation_answers_total
+                    .with_label_values(&["timeout"])
+                    .inc();
+                return;
+            }
+        }
+
         // Collect messages first to avoid simultaneous mut borrow of self.ws_ctrl_rx
         // and self (via accept_renegotiation_answer).
         let mut messages: Vec<WsClientCtrl> = Vec::new();
@@ -235,12 +260,26 @@ impl Client {
         }
         if channel_closed {
             self.ws_ctrl_rx = None;
+            // WS disconnect: clean up any in-flight renegotiation state to
+            // avoid the queue stalling forever with no channel to drain it.
+            if self.pending_offer_at.is_some() {
+                tracing::warn!(client = *self.id,
+                    "M2: ws_ctrl_rx disconnected with pending renegotiation — clearing state");
+                self.pending_offer = None;
+                self.pending_offer_at = None;
+                self.renegotiation_queue.clear();
+                self.metrics
+                    .sfu_renegotiation_answers_total
+                    .with_label_values(&["ws_closed"])
+                    .inc();
+            }
         }
         for msg in messages {
             match msg {
-                WsClientCtrl::AnswerRenegotiate { sdp, mid: _ } => {
+                WsClientCtrl::AnswerRenegotiate { sdp, mid } => {
                     // `mid` is for correlation logging only; str0m matches the answer
                     // against the single pending offer internally.
+                    tracing::debug!(client = *self.id, %mid, "M2: received answer-renegotiate");
                     self.accept_renegotiation_answer(&sdp);
                 }
             }
@@ -251,6 +290,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use crate::client::test_seed::{new_client, seed_track_in};
     use crate::client::tracks::TrackOutState;
@@ -372,5 +412,102 @@ fake-sdp
             matches!(client.tracks_out[0].state, TrackOutState::ToOpen),
             "relay path: state must be ToOpen"
         );
+    }
+
+    /// Timeout: if pending_offer_at is set and elapsed > 10 s, drain_ws_ctrl
+    /// must clear pending_offer + pending_offer_at, drain the queue, and bump
+    /// sfu_renegotiation_answers_total{outcome="timeout"}.
+    #[test]
+    fn timeout_clears_pending_and_drains_queue() {
+        let (ws_msg_tx, _ws_msg_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let (_ws_ctrl_tx, ws_ctrl_rx) = tokio::sync::mpsc::channel::<WsClientCtrl>(8);
+
+        let mut client = new_client(ClientId(600));
+        client.ws_msg_tx = Some(ws_msg_tx);
+        client.ws_ctrl_rx = Some(ws_ctrl_rx);
+
+        // Simulate an expired pending offer: set pending_offer_at to > 10 s ago.
+        // pending_offer itself stays None (can't construct SdpPendingOffer in tests).
+        // The implementation must check elapsed on pending_offer_at regardless of
+        // pending_offer being Some — or only when it is Some. Since we can't set
+        // pending_offer to Some, we verify the queue drain + metric happen when
+        // pending_offer_at indicates expiry and there is a queued item.
+        let mut publisher = new_client(ClientId(601));
+        let arc = seed_track_in(&mut publisher, 3, str0m::media::MediaKind::Video);
+        client.renegotiation_queue.push_back(Arc::downgrade(&arc));
+
+        // Set pending_offer_at to a time 11 s ago (expired).
+        client.pending_offer_at = Some(Instant::now() - Duration::from_secs(11));
+
+        let metrics = client.metrics_for_tests().clone();
+        let before = metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["timeout"])
+            .get();
+
+        client.drain_ws_ctrl();
+
+        // pending_offer_at must be cleared.
+        assert!(
+            client.pending_offer_at.is_none(),
+            "pending_offer_at must be cleared after timeout"
+        );
+        // Queue must be drained.
+        assert!(
+            client.renegotiation_queue.is_empty(),
+            "renegotiation_queue must be drained after timeout"
+        );
+        // Metric must have incremented by 1.
+        let after = metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["timeout"])
+            .get();
+        assert_eq!(after - before, 1, "timeout metric must increment by 1");
+    }
+
+    /// WS disconnect: when ws_ctrl_rx disconnects, drain_ws_ctrl must clear
+    /// pending_offer_at, drain the queue, and bump
+    /// sfu_renegotiation_answers_total{outcome="ws_closed"}.
+    #[test]
+    fn ws_disconnect_clears_pending_and_drains_queue() {
+        let (ws_msg_tx, _ws_msg_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let (ws_ctrl_tx, ws_ctrl_rx) = tokio::sync::mpsc::channel::<WsClientCtrl>(8);
+
+        let mut client = new_client(ClientId(700));
+        client.ws_msg_tx = Some(ws_msg_tx);
+        client.ws_ctrl_rx = Some(ws_ctrl_rx);
+
+        let mut publisher = new_client(ClientId(701));
+        let arc = seed_track_in(&mut publisher, 4, str0m::media::MediaKind::Audio);
+        client.renegotiation_queue.push_back(Arc::downgrade(&arc));
+        client.pending_offer_at = Some(Instant::now());
+
+        let metrics = client.metrics_for_tests().clone();
+        let before = metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["ws_closed"])
+            .get();
+
+        // Drop the sender to trigger Disconnected on try_recv.
+        drop(ws_ctrl_tx);
+        client.drain_ws_ctrl();
+
+        assert!(
+            client.ws_ctrl_rx.is_none(),
+            "ws_ctrl_rx must be None after disconnect"
+        );
+        assert!(
+            client.pending_offer_at.is_none(),
+            "pending_offer_at must be cleared on ws disconnect"
+        );
+        assert!(
+            client.renegotiation_queue.is_empty(),
+            "renegotiation_queue must be drained on ws disconnect"
+        );
+        let after = metrics
+            .sfu_renegotiation_answers_total
+            .with_label_values(&["ws_closed"])
+            .get();
+        assert_eq!(after - before, 1, "ws_closed metric must increment by 1");
     }
 }

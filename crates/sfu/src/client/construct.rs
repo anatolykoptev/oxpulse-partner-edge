@@ -77,6 +77,7 @@ impl Client {
             ws_msg_tx: None,
             ws_ctrl_rx: None,
             pending_offer: None,
+            pending_offer_at: None,
             renegotiation_queue: std::collections::VecDeque::new(),
             // Phase A Task A1 — defaults are `None`. The browser
             // injection path (`udp_loop::serve` `client_inject_rx` arm)

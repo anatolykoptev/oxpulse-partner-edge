@@ -212,6 +212,9 @@ pub struct Client {
     pub(crate) pending_offer: Option<str0m::change::SdpPendingOffer>,
     /// Phase J M2: queued track opens deferred while a renegotiation is in-flight.
     pub(crate) renegotiation_queue: std::collections::VecDeque<std::sync::Weak<TrackIn>>,
+    /// Phase J M2: when the current renegotiation offer was sent. Used to
+    /// detect no-answer timeouts (>10 s). Cleared on `accept_renegotiation_answer`.
+    pub(crate) pending_offer_at: Option<std::time::Instant>,
     /// External peer identifier from the room JWT's `sub` claim. Used by
     /// [`crate::registry::Registry::insert`] to detect duplicate upgrades
     /// for the same `(room_id, peer_id)` and trigger a session steal

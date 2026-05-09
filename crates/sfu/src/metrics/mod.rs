@@ -729,6 +729,15 @@ impl SfuMetrics {
         let _ = sfu_renegotiation_answers_total
             .with_label_values(&["err"])
             .get();
+        let _ = sfu_renegotiation_answers_total
+            .with_label_values(&["timeout"])
+            .get();
+        let _ = sfu_renegotiation_answers_total
+            .with_label_values(&["ws_closed"])
+            .get();
+        let _ = sfu_renegotiation_answers_total
+            .with_label_values(&["ctrl_tx_full"])
+            .get();
 
         let sfu_wire_written_total = reg!(IntCounterVec::new(
             Opts::new(
