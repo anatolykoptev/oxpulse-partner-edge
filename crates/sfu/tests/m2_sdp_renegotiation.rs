@@ -48,6 +48,7 @@ fn media_added_send_only_transitions_negotiating_to_open() {
         origin,
         mid,
         kind: MediaKind::Video,
+        external_peer_id: None,
     });
 
     // Pre-seed a Negotiating track.
@@ -88,6 +89,7 @@ fn media_added_recv_only_creates_track_in_not_track_out() {
         origin,
         mid,
         kind: MediaKind::Audio,
+        external_peer_id: None,
     });
 
     // Pre-seed a Negotiating entry for a different purpose.

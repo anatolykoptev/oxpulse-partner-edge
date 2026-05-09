@@ -18,11 +18,42 @@ use std::sync::Weak;
 use std::time::{Duration, Instant};
 
 use str0m::change::SdpAnswer;
-use str0m::media::{Direction, MediaKind};
+use str0m::media::{Direction, MediaKind, Mid};
 
 use super::tracks::{TrackIn, TrackOut, TrackOutState};
 use super::Client;
 use crate::client_ws::WsClientCtrl;
+
+/// Build a `tracks_map_update` JSON frame for a single newly-negotiated track.
+///
+/// Emitted by `start_renegotiation` AFTER the `offer-renegotiate` frame so the
+/// browser can resolve `ev.transceiver.mid` → publisher `peer_id` without
+/// relying on the stream-id heuristic.
+///
+/// Schema (frozen — must match `useGroupCall-sfu-ws.ts` handler):
+/// ```json
+/// { "type": "tracks_map_update",
+///   "tracks": [{ "mid": "0", "peer_id": 4, "kind": "audio", "stream_id": "peer-4" }] }
+/// ```
+///
+/// `stream_id` retained for backward-compat / debug; client uses `mid` as
+/// the primary lookup key.
+pub(crate) fn build_tracks_map_update_frame(mid: Mid, peer_id: u64, kind: MediaKind) -> String {
+    let kind_str = match kind {
+        MediaKind::Audio => "audio",
+        MediaKind::Video => "video",
+    };
+    serde_json::json!({
+        "type": "tracks_map_update",
+        "tracks": [{
+            "mid": mid.to_string(),
+            "peer_id": peer_id,
+            "kind": kind_str,
+            "stream_id": format!("peer-{peer_id}"),
+        }]
+    })
+    .to_string()
+}
 
 impl Client {
     /// Register that another client opened a track we should mirror to this peer.
@@ -148,6 +179,15 @@ impl Client {
                     client = *self.id,
                     "M2: ws_msg_tx full — offer-renegotiate dropped; state rolled back"
                 );
+            } else {
+                // Offer frame accepted — also push tracks_map_update so the browser
+                // can resolve ev.transceiver.mid → publisher peer_id without fallback.
+                // Drop-on-full is safe: the browser will land on the stream-id
+                // heuristic as a backward-compat fallback if this frame is lost.
+                if let Some(publisher_peer_id) = track_arc.external_peer_id {
+                    let map_frame = build_tracks_map_update_frame(mid, publisher_peer_id, kind);
+                    let _ = tx.try_send(map_frame);
+                }
             }
         }
     }
@@ -655,5 +695,69 @@ fake-sdp
             .with_label_values(&["ws_closed"])
             .get();
         assert_eq!(after - before, 1, "ws_closed metric must increment by 1");
+    }
+
+    /// RED — tracks_map_update emission after offer-renegotiate.
+    ///
+    /// When start_renegotiation successfully sends an offer-renegotiate frame,
+    /// it must ALSO push a `tracks_map_update` JSON frame via the SAME ws_msg_tx
+    /// channel. The frame encodes the new mid + publisher's external_peer_id + kind,
+    /// so the browser can map `ev.transceiver.mid` → peer_id without stream-id heuristics.
+    ///
+    /// This test verifies that ws_msg_rx receives exactly two frames after
+    /// handle_track_open on an unnegotiated Rtc (which no-ops sdp_api().apply()
+    /// returning None — so we use a client with external_peer_id set and a
+    /// publisher with external_peer_id set on the TrackIn).
+    ///
+    /// Since unnegotiated Rtc → sdp_api().apply() returns None → start_renegotiation
+    /// no-ops without sending either frame. We can't exercise the happy path without
+    /// a full SDP exchange. Instead, we verify the frame structure is correct
+    /// by directly testing the JSON emission logic via a simulated scenario.
+    ///
+    /// ACTUAL RED TEST: verifies TrackIn carries external_peer_id field.
+    /// This fails until we add the field to TrackIn.
+    #[test]
+    fn track_in_carries_external_peer_id() {
+        let mut publisher = new_client(ClientId(900));
+        publisher.external_peer_id = Some(42);
+        let arc = seed_track_in(&mut publisher, 5, str0m::media::MediaKind::Audio);
+        // TrackIn must expose the publisher's external_peer_id so subscribers can
+        // emit tracks_map_update with the correct peer_id.
+        assert_eq!(
+            arc.external_peer_id,
+            Some(42),
+            "TrackIn must carry publisher's external_peer_id (Some(42))"
+        );
+    }
+
+    /// RED — tracks_map_update JSON frame structure validation.
+    ///
+    /// Verifies the tracks_map_update JSON frame that start_renegotiation emits
+    /// after a successful offer-renegotiate send has the correct schema:
+    ///   { "type": "tracks_map_update", "tracks": [{ "mid": "...", "peer_id": N, "kind": "audio"|"video", "stream_id": "peer-N" }] }
+    ///
+    /// Since start_renegotiation no-ops on unnegotiated Rtc (apply() → None),
+    /// we test the emission logic indirectly: after seeding a publisher with
+    /// external_peer_id and calling a direct helper that constructs the frame,
+    /// the frame must round-trip through JSON correctly.
+    ///
+    /// This test fails until build_tracks_map_update_frame() is introduced.
+    #[test]
+    fn build_tracks_map_update_frame_correct_schema() {
+        use str0m::media::{MediaKind, Mid};
+        let mid: Mid = Mid::from("2");
+        let frame = crate::client::renegotiation::build_tracks_map_update_frame(
+            mid,
+            7u64,
+            MediaKind::Audio,
+        );
+        let v: serde_json::Value = serde_json::from_str(&frame).expect("valid JSON");
+        assert_eq!(v["type"], "tracks_map_update", "type field");
+        let tracks = v["tracks"].as_array().expect("tracks is array");
+        assert_eq!(tracks.len(), 1, "one track entry");
+        assert_eq!(tracks[0]["mid"], "2", "mid matches");
+        assert_eq!(tracks[0]["peer_id"], 7u64, "peer_id matches");
+        assert_eq!(tracks[0]["kind"], "audio", "kind is audio");
+        assert_eq!(tracks[0]["stream_id"], "peer-7", "stream_id matches");
     }
 }
