@@ -624,6 +624,38 @@ async fn park_until_close_or_steal(
                                 }
                                 continue;
                             }
+                            // Phase 2c: client bandwidth hint (observability-only, v1).
+                            // Wire format: {"kind":"bwe-hint","from":"<peer_uuid>",
+                            //               "ts":<unix_ms>,"bps":<u64>}
+                            // No fail-OPEN: missing fields → warn + drop (no WS close).
+                            if msg_kind == Some("bwe-hint") {
+                                let from = v.get("from").and_then(|f| f.as_str());
+                                let ts   = v.get("ts").and_then(|t| t.as_i64());
+                                let bps  = v.get("bps").and_then(|b| b.as_u64());
+                                match (from, ts, bps) {
+                                    (Some(from), Some(ts), Some(bps)) => {
+                                        tracing::info!(
+                                            target: "sfu::client_ws",
+                                            peer_id, %room_id,
+                                            from, ts, bps,
+                                            "client bwe-hint received"
+                                        );
+                                        metrics
+                                            .sfu_bwe_hint_received_total
+                                            .with_label_values(&[&peer_id.to_string()])
+                                            .inc();
+                                    }
+                                    _ => {
+                                        tracing::warn!(
+                                            target: "sfu::client_ws",
+                                            peer_id, %room_id,
+                                            "bwe-hint missing required field (from|ts|bps) \
+                                             — malformed frame dropped"
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
                         }
                         tracing::debug!(target: "sfu::client_ws", peer_id, %room_id,
                             bytes = t.len(), "client_ws: ignoring post-handshake text frame");

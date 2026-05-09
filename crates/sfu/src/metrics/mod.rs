@@ -339,6 +339,20 @@ pub struct SfuMetrics {
     /// Alert: `rate(sfu_solo_room_kicked_total[5m]) > 0` → lone-peer sessions
     /// are being cleaned up (informational) or possibly thrashing (if high).
     pub sfu_solo_room_kicked_total: IntCounter,
+
+    // ── Phase 2c: client-to-SFU bandwidth hint ───────────────────────────────
+    /// `{"kind":"bwe-hint","from":"<peer_uuid>","ts":<unix_ms>,"bps":<u64>}`
+    /// frames received from browser clients over the WS control channel.
+    ///
+    /// Labels: `peer_id` — server-side numeric peer id (JWT `sub` claim).
+    /// Cardinality is bounded to active peers; series materialise on first
+    /// reception and are scrubbed via `reap_dead` / `evict_for_steal` on
+    /// disconnect.
+    ///
+    /// v1 is observability-only: log INFO + bump counter. No SVC layer
+    /// switching. Rising rate confirms client-side hint emission is wired;
+    /// zero rate after feature flag enabled = hint not being sent.
+    pub sfu_bwe_hint_received_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -950,6 +964,21 @@ impl SfuMetrics {
         ))
         .context("sfu_solo_room_kicked_total")?);
 
+        // ── Phase 2c: client-to-SFU bandwidth hint ───────────────────────────
+        let sfu_bwe_hint_received_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_bwe_hint_received_total",
+                "bwe-hint frames received from browser clients over the WS control channel \
+                 (Phase 2c). Label: peer_id (server-side numeric id, JWT sub claim). \
+                 Cardinality bounded to active peers; scrubbed on disconnect. \
+                 v1 observability-only — no SVC layer switching.",
+            ),
+            &["peer_id"],
+        )
+        .context("sfu_bwe_hint_received_total")?);
+        // No pre-touch: peer_id labels are dynamic (one per active client).
+        // Series materialise on first reception, mirroring client_delivered_media_count.
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1012,6 +1041,7 @@ impl SfuMetrics {
 
             sfu_writer_write_errors_total,
             sfu_solo_room_kicked_total,
+            sfu_bwe_hint_received_total,
         })
     }
 
