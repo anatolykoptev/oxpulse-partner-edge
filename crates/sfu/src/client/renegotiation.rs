@@ -278,7 +278,7 @@ mod tests {
         // Publisher A: seed a TrackIn and get a Weak for handle_track_open
         let mut publisher_a = new_client(ClientId(501));
         let track_a_arc = seed_track_in(&mut publisher_a, 1, str0m::media::MediaKind::Video);
-        let track_a_weak = Arc::downgrade(&track_a_arc);
+        let _track_a_weak = Arc::downgrade(&track_a_arc);
 
         // Publisher B: a second track (will be queued)
         let mut publisher_b = new_client(ClientId(502));

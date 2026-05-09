@@ -655,9 +655,8 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
             _ => continue,
         };
         let v: serde_json::Value = serde_json::from_str(text.as_str()).expect("valid JSON");
-        match v.get("kind").and_then(|k| k.as_str()) {
-            Some("answer") => saw_answer = true,
-            _ => {}
+        if let Some("answer") = v.get("kind").and_then(|k| k.as_str()) {
+            saw_answer = true;
         }
         if v.get("type").and_then(|t| t.as_str()) == Some("tracks_map") {
             if let Some(arr) = v.get("tracks").and_then(|t| t.as_array()) {
