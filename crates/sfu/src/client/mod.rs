@@ -11,7 +11,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use str0m::media::Rid;
 use str0m::{Input, Rtc};
@@ -77,11 +77,12 @@ pub mod layer;
 pub mod test_seed;
 pub mod tracks;
 pub mod voice;
+pub mod renegotiation;
 
 pub use voice::VOICE_FRAME_MAX_BYTES;
 
 pub use tracks::TrackIn;
-use tracks::{TrackInEntry, TrackOut, TrackOutState};
+use tracks::{TrackInEntry, TrackOut};
 
 /// Outbound UDP datagram produced by a client's str0m state.
 pub type Transmit = str0m::net::Transmit;
@@ -190,7 +191,19 @@ pub struct Client {
     /// forwarding. `u8::MAX` means "no cap" (forward all layers).
     #[cfg(feature = "vfm")]
     pub(crate) max_vfm_temporal_layer: u8,
-    /// External peer identifier from the room JWT's `sub` claim. Used by
+    /// Phase J M2: WS outbound channel for sending offer-renegotiate JSON to browser.
+    /// `None` for relay/test clients (no WS session).
+    pub(crate) ws_msg_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    /// Phase J M2: WS inbound channel for receiving answer-renegotiate from browser.
+    /// `None` for relay/test clients.
+    pub(crate) ws_ctrl_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::WsClientCtrl>>,
+    /// Phase J M2: in-flight SDP renegotiation offer. Single-slot — str0m allows
+    /// only one pending offer per Rtc. A second `handle_track_open` while this is
+    /// `Some` enqueues into `renegotiation_queue` instead.
+    pub(crate) pending_offer: Option<str0m::change::SdpPendingOffer>,
+    /// Phase J M2: queued track opens deferred while a renegotiation is in-flight.
+    pub(crate) renegotiation_queue: std::collections::VecDeque<std::sync::Weak<TrackIn>>,
+        /// External peer identifier from the room JWT's `sub` claim. Used by
     /// [`crate::registry::Registry::insert`] to detect duplicate upgrades
     /// for the same `(room_id, peer_id)` and trigger a session steal
     /// (Phase A Task A1). `None` for relay-origin clients — they live in a
@@ -306,15 +319,6 @@ impl Client {
             tracing::warn!(client = *self.id, error = ?e, "client disconnected on handle_input");
             self.rtc.disconnect();
         }
-    }
-
-    /// Register that another client opened a track we should mirror
-    /// out to this peer.
-    pub fn handle_track_open(&mut self, track_in: Weak<TrackIn>) {
-        self.tracks_out.push(TrackOut {
-            track_in,
-            state: TrackOutState::ToOpen,
-        });
     }
 
     /// Drain queued outbound datagrams. Registry calls this after each
