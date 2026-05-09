@@ -227,7 +227,6 @@ pub struct PendingClient {
     skip(socket, inject_tx, metrics),
     fields(otel.kind = "server", room_id = %room_id, peer_id = peer_id)
 )]
-
 pub async fn run(
     mut socket: WebSocket,
     room_id: String,
@@ -587,10 +586,13 @@ async fn park_until_close_or_steal(
                             }
                             // Phase J M2: browser answered our renegotiation offer.
                             if msg_type == Some("answer-renegotiate") {
-                                if let (Some(sdp), Some(mid)) = (
-                                    v.get("sdp").and_then(|s| s.as_str()),
-                                    v.get("mid").and_then(|m| m.as_str()),
-                                ) {
+                                // M5: sdp is required; mid is optional (default "") for
+                                // forward-compat with clients that omit mid. Malformed
+                                // (missing sdp) frames are counted and skipped.
+                                if let Some(sdp) = v.get("sdp").and_then(|s| s.as_str()) {
+                                    let mid = v.get("mid")
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("");
                                     let ctrl = WsClientCtrl::AnswerRenegotiate {
                                         sdp: sdp.to_string(),
                                         mid: mid.to_string(),
@@ -599,8 +601,11 @@ async fn park_until_close_or_steal(
                                         tracing::warn!(target: "sfu::client_ws", peer_id,
                                             %room_id, "ws_ctrl_tx full — answer-renegotiate dropped");
                                     }
-                                    continue;
+                                } else {
+                                    tracing::warn!(target: "sfu::client_ws", peer_id,
+                                        %room_id, "answer-renegotiate missing sdp — malformed frame dropped");
                                 }
+                                continue;
                             }
                         }
                         tracing::debug!(target: "sfu::client_ws", peer_id, %room_id,

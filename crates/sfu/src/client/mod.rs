@@ -112,8 +112,17 @@ pub struct Client {
     pub(crate) pending_out: VecDeque<Transmit>,
     /// Prometheus handles (M1.5). Shared with Registry.
     pub(crate) metrics: Arc<SfuMetrics>,
-    /// Post-layer-filter forwarded-media counter (read by integration tests).
+    /// Post-layer-filter forwarded-media counter.
+    /// Increments only when `writer.write` succeeds (SRTP actually sent on wire).
+    /// See also: `layer_passed` for tests that verify fanout dispatch pre-write.
     pub(crate) delivered_media: AtomicU64,
+    /// Test-only: count of packets that passed the M1.3/M5.3 layer filter
+    /// and reached the mid-gate check (before writer.write). Distinct from
+    /// `delivered_media` which only increments on successful wire delivery.
+    /// Used by fanout integration tests that run on unnegotiated Rtc instances
+    /// where writer.write never fires — they verify dispatch semantics, not wire.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) layer_passed: AtomicU64,
     /// Test-only: count of `ActiveSpeakerChanged` deliveries (skip-self check).
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) delivered_active_speaker: AtomicU64,
@@ -193,17 +202,17 @@ pub struct Client {
     pub(crate) max_vfm_temporal_layer: u8,
     /// Phase J M2: WS outbound channel for sending offer-renegotiate JSON to browser.
     /// `None` for relay/test clients (no WS session).
-    pub ws_msg_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    pub(crate) ws_msg_tx: Option<tokio::sync::mpsc::Sender<String>>,
     /// Phase J M2: WS inbound channel for receiving answer-renegotiate from browser.
     /// `None` for relay/test clients.
-    pub ws_ctrl_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::WsClientCtrl>>,
+    pub(crate) ws_ctrl_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::WsClientCtrl>>,
     /// Phase J M2: in-flight SDP renegotiation offer. Single-slot — str0m allows
     /// only one pending offer per Rtc. A second `handle_track_open` while this is
     /// `Some` enqueues into `renegotiation_queue` instead.
-    pub pending_offer: Option<str0m::change::SdpPendingOffer>,
+    pub(crate) pending_offer: Option<str0m::change::SdpPendingOffer>,
     /// Phase J M2: queued track opens deferred while a renegotiation is in-flight.
-    pub renegotiation_queue: std::collections::VecDeque<std::sync::Weak<TrackIn>>,
-        /// External peer identifier from the room JWT's `sub` claim. Used by
+    pub(crate) renegotiation_queue: std::collections::VecDeque<std::sync::Weak<TrackIn>>,
+    /// External peer identifier from the room JWT's `sub` claim. Used by
     /// [`crate::registry::Registry::insert`] to detect duplicate upgrades
     /// for the same `(room_id, peer_id)` and trigger a session steal
     /// (Phase A Task A1). `None` for relay-origin clients — they live in a
@@ -266,9 +275,17 @@ impl Client {
         self.active_rids.iter().copied().collect()
     }
 
-    /// Forwarded `MediaData` events delivered to *this* client.
+    /// Packets that reached wire delivery (writer.write returned Ok).
+    /// Zero for test clients on unnegotiated Rtc — use `layer_passed_count` in tests.
     pub fn delivered_media_count(&self) -> u64 {
         self.delivered_media.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: packets that passed the M1.3/M5.3 layer filter (before writer.write).
+    /// Use instead of `delivered_media_count` in tests that run on unnegotiated Rtc.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn layer_passed_count(&self) -> u64 {
+        self.layer_passed.load(Ordering::Relaxed)
     }
 
     /// Test-only accessor for this client's `SfuMetrics` registry.

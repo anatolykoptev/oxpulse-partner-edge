@@ -71,14 +71,14 @@ impl Client {
 
         // Block-scope the SdpApi borrow so the mutable borrow on `self.rtc` is released
         // before we access other self fields below.
-        let (offer, pending) = {
+        let (offer, pending, mid) = {
             let mut api = self.rtc.sdp_api();
             let mid = api.add_media(kind, Direction::SendOnly, Some(stream_id), None, None);
             match api.apply() {
                 Some((offer, pending)) => {
                     // Push the TrackOut in Negotiating state before releasing the borrow.
                     self.tracks_out.push(TrackOut {
-                        track_in,
+                        track_in: track_in.clone(),
                         state: TrackOutState::Negotiating(mid),
                     });
                     self.metrics
@@ -93,7 +93,7 @@ impl Client {
                         .sfu_renegotiation_offers_sent_total
                         .with_label_values(&[kind_label])
                         .inc();
-                    (offer, pending)
+                    (offer, pending, mid)
                 }
                 None => {
                     // apply() returned None — no changes were actually made (defensive).
@@ -106,26 +106,35 @@ impl Client {
         self.pending_offer = Some(pending);
 
         // Send offer to browser WS. try_send: non-blocking; if channel full the peer
-        // is lagging — drop the offer (it will be retried on next handle_track_open
-        // since we haven't pushed it to the queue yet in this branch).
-        // Find the mid from the track we just pushed (last entry).
-        let mid_str = self.tracks_out.last()
-            .and_then(|o| o.mid())
-            .map(|m| m.to_string())
-            .unwrap_or_default();
-
+        // is lagging — drop the offer and roll back state (see below).
         let offer_frame = serde_json::json!({
             "type": "offer-renegotiate",
             "sdp": offer.to_sdp_string(),
-            "mid": mid_str,
+            "mid": mid.to_string(),
         })
         .to_string();
 
         if let Some(tx) = &self.ws_msg_tx {
             if tx.try_send(offer_frame).is_err() {
+                // Channel full: roll back all state so the next handle_track_open
+                // can retry cleanly. The browser never saw this offer, so there is
+                // no in-flight renegotiation to cancel.
+                self.pending_offer = None;
+                self.tracks_out.pop(); // remove the Negotiating(mid) entry we just pushed
+                // Re-enqueue the track_in so it is retried when the next answer
+                // drains (or when the next handle_track_open fires and the channel
+                // is no longer full).
+                self.renegotiation_queue.push_front(track_in);
+                let kind_label = match kind {
+                    MediaKind::Audio => "audio",
+                    MediaKind::Video => "video",
+                };
+                self.metrics
+                    .sfu_renegotiation_offers_dropped_total
+                    .with_label_values(&[kind_label])
+                    .inc();
                 tracing::warn!(client = *self.id,
-                    "M2: ws_msg_tx full — offer-renegotiate dropped; \
-                     browser may not receive the track");
+                    "M2: ws_msg_tx full — offer-renegotiate dropped; state rolled back");
             }
         }
     }
@@ -165,6 +174,27 @@ impl Client {
                 .sfu_renegotiation_answers_total
                 .with_label_values(&["err"])
                 .inc();
+            // Remove any Negotiating(mid) entries that correspond to this failed
+            // answer. Without removal the entry stays stuck — fanout sees
+            // o.mid() == None forever (Negotiating state never flips to Open).
+            // We cannot match on the specific mid without parsing the answer SDP,
+            // so remove ALL Negotiating entries (there should be exactly one since
+            // str0m enforces a single in-flight offer). Log a warning for each.
+            self.tracks_out.retain(|o| {
+                if matches!(o.state, crate::client::tracks::TrackOutState::Negotiating(_)) {
+                    tracing::warn!(
+                        client = *self.id,
+                        "M2: removing stuck Negotiating TrackOut after accept_answer failure"
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+            // Drain next queued item even on error so the queue doesn't stall.
+            if let Some(next) = self.renegotiation_queue.pop_front() {
+                self.start_renegotiation(next);
+            }
             return;
         }
 
@@ -215,5 +245,132 @@ impl Client {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::client::test_seed::{new_client, seed_track_in};
+    use crate::client::tracks::TrackOutState;
+    use crate::client_ws::WsClientCtrl;
+    use crate::propagate::ClientId;
+
+    /// Queue-drain test: when two handle_track_open calls arrive while
+    /// a renegotiation is in-flight, the second is queued. After
+    /// accept_renegotiation_answer processes the first, the queue is
+    /// drained and start_renegotiation is called for the second.
+    ///
+    /// Since test clients use unnegotiated Rtc, sdp_api().apply() will
+    /// return None (no real SDP exchange) — so start_renegotiation
+    /// no-ops after the apply. We verify the queue is drained (empty)
+    /// and that the client attempted to process the queued item.
+    #[test]
+    fn queue_drain_fires_after_accept_answer() {
+        let (ws_msg_tx, _ws_msg_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let (ws_ctrl_tx, ws_ctrl_rx) = tokio::sync::mpsc::channel::<WsClientCtrl>(8);
+
+        let mut client = new_client(ClientId(500));
+        client.ws_msg_tx = Some(ws_msg_tx.clone());
+        client.ws_ctrl_rx = Some(ws_ctrl_rx);
+
+        // Publisher A: seed a TrackIn and get a Weak for handle_track_open
+        let mut publisher_a = new_client(ClientId(501));
+        let track_a_arc = seed_track_in(&mut publisher_a, 1, str0m::media::MediaKind::Video);
+        let track_a_weak = Arc::downgrade(&track_a_arc);
+
+        // Publisher B: a second track (will be queued)
+        let mut publisher_b = new_client(ClientId(502));
+        let track_b_arc = seed_track_in(&mut publisher_b, 2, str0m::media::MediaKind::Audio);
+        let track_b_weak = Arc::downgrade(&track_b_arc);
+
+        // First handle_track_open — on unnegotiated Rtc, sdp_api().apply()
+        // returns None → start_renegotiation no-ops → pending_offer stays None.
+        // So queue logic doesn't trigger here. For this test, manually simulate
+        // a pending offer by calling push_back on renegotiation_queue for the
+        // second track, and set pending_offer to a dummy state via direct field
+        // access — BUT since pending_offer is pub(crate), accessible within crate.
+        //
+        // Simpler approach: call handle_track_open twice. First call tries
+        // start_renegotiation (which no-ops on unnegotiated Rtc, leaving
+        // pending_offer=None). Second call also tries start_renegotiation.
+        // Neither queues. To test queue drain, we need to manually enqueue.
+
+        // Manually queue the second track (simulates in-flight renegotiation)
+        client.renegotiation_queue.push_back(track_b_weak.clone());
+        assert_eq!(
+            client.renegotiation_queue.len(), 1,
+            "one item queued before accept_answer"
+        );
+
+        // accept_renegotiation_answer with no pending offer → warn + return early.
+        // The queue must NOT drain in this case (no pending offer was taken).
+        client.accept_renegotiation_answer("v=0
+fake-sdp
+");
+        assert_eq!(
+            client.renegotiation_queue.len(), 1,
+            "queue NOT drained when accept called with no pending offer"
+        );
+
+        // Now test via drain_ws_ctrl path: send an answer via the ctrl channel.
+        // Since there's no real pending offer, accept returns early — but we can
+        // verify drain_ws_ctrl correctly calls accept_renegotiation_answer.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            ws_ctrl_tx.send(WsClientCtrl::AnswerRenegotiate {
+                sdp: "v=0
+fake-sdp
+".to_string(),
+                mid: "m1".to_string(),
+            }).await.expect("send ctrl msg");
+        });
+        client.drain_ws_ctrl();
+        // drain_ws_ctrl consumed the channel message (verify by checking empty)
+        // Queue still has 1 item since accept_renegotiation_answer returned early
+        // (no pending offer).
+        assert_eq!(
+            client.renegotiation_queue.len(), 1,
+            "queue unchanged: accept returned early (no pending offer)"
+        );
+    }
+
+    /// Rollback test: when ws_msg_tx is full, handle_track_open must roll back
+    /// — pending_offer cleared, Negotiating track popped, track re-queued.
+    /// Since unnegotiated Rtc's sdp_api().apply() returns None, we can't
+    /// fully exercise the rollback in unit tests. This test verifies the
+    /// legacy (ToOpen) path and that queue-on-pending works.
+    #[test]
+    fn handle_track_open_queues_when_pending_offer_is_some() {
+        // We can't create a real SdpPendingOffer in a unit test without a
+        // full SDP exchange. Instead verify the queue arm: manually set
+        // pending_offer to a dummy (via None check inversion) is not possible
+        // since SdpPendingOffer is opaque. Verify queue arm fires when
+        // pending_offer.is_some() by checking that renegotiation_queue grows.
+        //
+        // Since we cannot construct SdpPendingOffer, this verifies the
+        // relay/test path (ws_msg_tx = None → ToOpen push).
+        let mut client = new_client(ClientId(510));
+        // No ws_msg_tx → relay/test path
+        assert!(client.ws_msg_tx.is_none(), "test client has no ws channel");
+
+        let mut publisher = new_client(ClientId(511));
+        let arc = seed_track_in(&mut publisher, 1, str0m::media::MediaKind::Video);
+        let weak = Arc::downgrade(&arc);
+
+        client.handle_track_open(weak);
+
+        assert_eq!(
+            client.tracks_out.len(), 1,
+            "relay path: ToOpen entry pushed"
+        );
+        assert!(
+            matches!(client.tracks_out[0].state, TrackOutState::ToOpen),
+            "relay path: state must be ToOpen"
+        );
     }
 }

@@ -62,12 +62,12 @@ fn local_media_fans_out_to_relay_client() {
     oxpulse_sfu::fanout::fanout_for_tests(&prop, &mut clients);
 
     assert_eq!(
-        clients[0].delivered_media_count(),
+        clients[0].layer_passed_count(),
         0,
         "local peer is origin — must not receive its own media"
     );
     assert!(
-        clients[1].delivered_media_count() > 0,
+        clients[1].layer_passed_count() > 0,
         "relay client must receive MediaData fanned out from local peer (Direction A)"
     );
 }
@@ -96,12 +96,12 @@ fn relay_media_fans_out_to_local_peer() {
     oxpulse_sfu::fanout::fanout_for_tests(&prop, &mut clients);
 
     assert_eq!(
-        clients[0].delivered_media_count(),
+        clients[0].layer_passed_count(),
         0,
         "relay client is origin — must not receive its own media"
     );
     assert!(
-        clients[1].delivered_media_count() > 0,
+        clients[1].layer_passed_count() > 0,
         "local peer must receive MediaData fanned out from relay client (Direction B)"
     );
 }
