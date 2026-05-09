@@ -1,0 +1,14 @@
+[Unit]
+Description=Weekly oxpulse partner-edge xray update check
+
+# Tue 05:33 + ≤2h jitter — offset 2h from SFU timer (Tue 03:33) to spread
+# image-pull load on nodes that run both xray and SFU containers.
+# Motherly canary runs Mon 03:00 +30min → operators have all of Monday to
+# retag :stable back to last-known-good before any edge picks it up.
+[Timer]
+OnCalendar=Tue *-*-* 05:33:00
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

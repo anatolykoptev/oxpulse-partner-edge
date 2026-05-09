@@ -1,6 +1,11 @@
 # syntax=docker/dockerfile:1.7
 # Partner-agnostic xray-core client image. config.json is bind-mounted.
-FROM teddysun/xray:latest
+#
+# xray-core pin: teddysun/xray:<tag> maps 1:1 to XTLS/Xray-core releases.
+# Current pin: 26.5.3 (prerelease 2026-05-03) — ML-KEM + Reality fixes.
+# To bump: edit the FROM tag below AND open a bundle release (bump VERSION in
+# release-please or tag manually) so partner-edge-xray image rebuilds.
+FROM teddysun/xray:26.5.3
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.source="https://github.com/anatolykoptev/oxpulse-partner-edge"
