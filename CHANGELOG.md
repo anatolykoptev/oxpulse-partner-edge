@@ -5,6 +5,18 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.19](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.18...partner-edge-v0.12.19) (2026-05-09)
+
+
+### Features
+
+* **telemetry:** add service.instance.id / partner.id resource attrs for per-edge Jaeger filtering ([#74](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/74)) ([81cfb53](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/81cfb5321dda754bae827aa2cf5927b5cbf7b457))
+
+
+### Bug Fixes
+
+* **refresh:** die early when jq missing so heartbeat is never silently skipped ([#73](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/73)) ([47cf0a8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/47cf0a8450a88a4d21de41f213792296ec65de3c))
+
 ## [0.12.18](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.17...partner-edge-v0.12.18) (2026-05-09)
 
 
