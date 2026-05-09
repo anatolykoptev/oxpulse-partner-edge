@@ -261,7 +261,10 @@ where
                         // carry an `external_peer_id`; relay clients are excluded.
                         // The JSON shape mirrors LiveKit's participantUpdate pattern:
                         //   { "type": "tracks_map",
-                        //     "tracks": [ { "stream_id": "peer-7", "peer_id": "7" }, ... ] }
+                        //     "tracks": [ { "stream_id": "peer-7", "peer_id": 7 }, ... ] }
+                        //
+                        // peer_id is a JSON integer (u64) — matches tracks_map_update schema
+                        // in renegotiation.rs so the browser handler can use the same lookup.
                         //
                         // `stream_id` matches the `a=msid:peer-N` value injected by
                         // `sdp_msid::inject_msid` so `sfuStreamBindMap.get(stream.id)`
@@ -272,7 +275,7 @@ where
                             .filter_map(|c| c.external_peer_id.map(|pid| {
                                 serde_json::json!({
                                     "stream_id": format!("peer-{pid}"),
-                                    "peer_id": pid.to_string(),
+                                    "peer_id": pid,
                                 })
                             }))
                             .collect();
