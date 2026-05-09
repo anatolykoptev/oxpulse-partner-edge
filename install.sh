@@ -1377,18 +1377,36 @@ if [[ $DRY_RUN -eq 0 ]]; then
 			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
 		fi
 	done
+	# xray auto-update timer (mirrors SFU pattern; script lives in /usr/local/bin/)
+	if [[ -n "$src_dir" && -f "$src_dir/scripts/oxpulse-xray-update.sh" ]]; then
+		install -m 0755 "$src_dir/scripts/oxpulse-xray-update.sh" \
+			"/usr/local/bin/oxpulse-xray-update.sh"
+	else
+		curl -fsSL "$REPO_RAW/scripts/oxpulse-xray-update.sh" \
+			-o "/usr/local/bin/oxpulse-xray-update.sh"
+		chmod 0755 "/usr/local/bin/oxpulse-xray-update.sh"
+	fi
+	for unit in oxpulse-xray-update.service oxpulse-xray-update.timer; do
+		if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
+			install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
+		else
+			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+		fi
+	done
 	systemctl daemon-reload
 	if [ "$BAKE_MODE" = "0" ]; then
 		systemctl enable --now oxpulse-partner-edge.service
 		systemctl enable --now oxpulse-partner-cert-watch.path
 		systemctl enable --now oxpulse-partner-edge-refresh.timer
 		systemctl enable --now oxpulse-partner-edge-sni-rotate.timer
+		systemctl enable --now oxpulse-xray-update.timer
 	else
 		# Bake mode: enable hydrate so it fires on first boot after snapshot→clone.
 		# Do NOT start it now — secrets aren't present yet.
 		systemctl enable oxpulse-partner-edge-hydrate.service
 		systemctl enable oxpulse-partner-edge-refresh.timer
 		systemctl enable oxpulse-partner-edge-sni-rotate.timer
+		systemctl enable oxpulse-xray-update.timer
 		log "  [bake] units installed, daemon-reloaded; hydrate + refresh enabled for first boot"
 	fi
 else

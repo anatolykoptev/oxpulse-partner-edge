@@ -1,0 +1,8 @@
+[Unit]
+Description=oxpulse partner-edge xray container auto-update (single-container watchtower)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/oxpulse-xray-update.sh
