@@ -67,6 +67,7 @@ async fn start_test_handler_with_metrics() -> (String, Arc<SfuMetrics>) {
         inject_tx,
         local_udp,
         metrics.clone(),
+        0, // stats disabled in tests
     )
     .unwrap();
     Box::leak(Box::new(_inject_rx));

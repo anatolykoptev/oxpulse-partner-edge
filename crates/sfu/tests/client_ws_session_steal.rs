@@ -121,6 +121,7 @@ async fn start_full_pipeline() -> (
         client_inject_tx.clone(),
         local_udp,
         metrics.clone(),
+        0, // stats disabled in tests
     )
     .unwrap();
     drop(client_inject_tx);

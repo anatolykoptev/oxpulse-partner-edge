@@ -185,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
             client_inject_tx,
             host_candidate_addr,
             metrics.clone(),
+            config.stats_interval_secs,
         )?;
         // Round-2 review fix: gauge defaults to 1 (disabled) in
         // SfuMetrics::new() so /metrics scrapes that race container
@@ -228,6 +229,7 @@ async fn main() -> anyhow::Result<()> {
         // to relay_inject_tx so the main UDP loop registers it in the Registry.
         // relay_inject_tx is moved into the spawn task and lives as long as it does;
         // serve() observes a runtime close (None on recv) only if the spawn panics.
+        let stats_interval_secs = config.stats_interval_secs;
         tokio::spawn(async move {
             while let Some(task) = relay_rx.recv().await {
                 let url = task.upstream_url.clone();
@@ -235,7 +237,15 @@ async fn main() -> anyhow::Result<()> {
                 let room = task.room_id.clone();
                 let tx = relay_inject_tx.clone();
                 tokio::spawn(async move {
-                    match connect_relay(&url, &token, host_candidate_addr, room.clone()).await {
+                    match connect_relay(
+                        &url,
+                        &token,
+                        host_candidate_addr,
+                        room.clone(),
+                        stats_interval_secs,
+                    )
+                    .await
+                    {
                         Ok(pending) => {
                             if let Err(e) = tx.send(pending).await {
                                 tracing::warn!(

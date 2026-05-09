@@ -78,6 +78,10 @@ pub struct ClientWsState {
     /// happen at handshake-accept, handshake-reject (per reason), and
     /// session-end inside [`crate::client_ws::session::run`].
     pub metrics: Arc<SfuMetrics>,
+    /// Interval in seconds for str0m built-in stats events.
+    /// 0 = disabled. Forwarded to `session::run` so each new `Rtc` is
+    /// built with `RtcConfig::set_stats_interval(Some(Duration))`.
+    pub stats_interval_secs: u64,
 }
 
 /// Spawn the client WS API on the given listener. Returns the join handle
@@ -89,6 +93,7 @@ pub fn spawn_client_ws_api(
     client_inject_tx: Sender<PendingClient>,
     local_udp_addr: SocketAddr,
     metrics: Arc<SfuMetrics>,
+    stats_interval_secs: u64,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let state = ClientWsState {
         secret,
@@ -96,6 +101,7 @@ pub fn spawn_client_ws_api(
         client_inject_tx,
         local_udp_addr,
         metrics,
+        stats_interval_secs,
     };
     let app = Router::new()
         // axum 0.8 routes WS upgrades through `any` (the upgrade is GET
@@ -237,6 +243,7 @@ pub async fn client_ws_upgrade(
     let inject_tx = state.client_inject_tx.clone();
     let local_udp_addr = state.local_udp_addr;
     let metrics = state.metrics.clone();
+    let stats_interval_secs = state.stats_interval_secs;
     tracing::info!(
         target: "sfu::client_ws",
         peer_id, %room_id,
@@ -252,6 +259,7 @@ pub async fn client_ws_upgrade(
                 local_udp_addr,
                 inject_tx,
                 metrics.clone(),
+                stats_interval_secs,
             )
             .await
             {
