@@ -52,7 +52,7 @@
           "serverName": "{{REALITY_SERVER_NAME}}",
           "publicKey": "{{REALITY_PUBLIC_KEY}}",
           "shortId": "{{REALITY_SHORT_ID}}",
-          "fingerprint": "chrome"
+          "fingerprint": "randomized"
         }
       }
     }
