@@ -32,7 +32,7 @@
               {
                 "id": "{{REALITY_UUID}}",
                 "encryption": "{{REALITY_ENCRYPTION}}",
-                "flow": "xtls-rprx-vision"
+                "flow": ""
               }
             ]
           }
