@@ -183,6 +183,23 @@ impl Registry {
         if self.clients.is_empty() {
             self.metrics.active_rooms.set(0);
         }
+        // Update solo_since after reap:
+        // * 0 clients → room empty, clear.
+        // * 1 client  → start solo clock if not already running.
+        // * ≥2 clients → multiple peers, clear.
+        match self.clients.len() {
+            0 => {
+                self.solo_since = None;
+            }
+            1 => {
+                if self.solo_since.is_none() {
+                    self.solo_since = Some(std::time::Instant::now());
+                }
+            }
+            _ => {
+                self.solo_since = None;
+            }
+        }
     }
 
     /// Consult the pacer for each subscriber's current tier and

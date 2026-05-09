@@ -139,3 +139,10 @@ required-features = ["test-utils"]
 [[test]]
 name = "m2_sdp_renegotiation"
 required-features = ["test-utils"]
+
+[[test]]
+name = "solo_kick"
+# Solo-peer auto-kick — uses `new_client`, `set_solo_since_for_tests`,
+# `reap_dead_for_tests`, `disconnect_client_for_tests` seams from
+# registry/test_seams.rs (all gated behind test-utils).
+required-features = ["test-utils"]

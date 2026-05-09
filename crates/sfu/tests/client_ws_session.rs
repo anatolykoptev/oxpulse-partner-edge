@@ -430,6 +430,7 @@ async fn end_to_end_browser_client_lands_in_registry() {
         Some(relay_rx),
         Some(client_inject_rx),
         local_udp, // candidate_addr: loopback tests use actual local addr
+        None,      // solo_kick_timeout: disabled in test
         async {
             let _ = shutdown_rx.await;
         },
@@ -587,6 +588,7 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
         Some(relay_rx),
         Some(client_inject_rx),
         local_udp,
+        None, // solo_kick_timeout: disabled in test
         async {
             let _ = shutdown_rx.await;
         },

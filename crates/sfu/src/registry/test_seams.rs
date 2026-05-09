@@ -202,4 +202,12 @@ impl Registry {
     pub fn push_propagated_for_tests(&mut self, p: Propagated) {
         self.to_propagate.push_back(p);
     }
+
+    /// Test-only: override `solo_since` so time-controlled tests can set an
+    /// exact start instant without relying on `Instant::now()` inside `insert`
+    /// or `reap_dead`. Pass `None` to clear the solo clock.
+    #[doc(hidden)]
+    pub fn set_solo_since_for_tests(&mut self, since: Option<Instant>) {
+        self.solo_since = since;
+    }
 }

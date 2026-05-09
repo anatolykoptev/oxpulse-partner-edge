@@ -50,6 +50,12 @@ pub struct Registry {
     pub(super) pacer: Pacer,
     /// GoogCC v2 estimator — trendline delay + AIMD (additive alongside kit BWE).
     pub(super) googcc: crate::bwe::estimator::GoogCcEstimator,
+    /// Instant at which the room first became a solo-peer room (exactly 1 client).
+    /// `None` when the room has 0 or ≥2 clients.
+    /// Set on `insert` / `reap_dead` when the count drops to 1;
+    /// cleared when count becomes 0 or ≥2.
+    /// Used by `check_solo_timeout` to evict lone peers after the configured hold.
+    pub(super) solo_since: Option<Instant>,
     /// Shared secret for relay_source roomToken verification. Copied into each
     /// client at insert() time so DC messages can be verified in-place.
     pub(super) relay_auth_secret: Option<Arc<[u8]>>,
@@ -96,6 +102,7 @@ impl Registry {
             googcc: crate::bwe::estimator::GoogCcEstimator::new(),
             relay_auth_secret,
             relay_signing_pubkey,
+            solo_since: None,
         }
     }
 
@@ -186,6 +193,19 @@ impl Registry {
         // (Post-mortem 2026-05-06: previously hardcoded at init.)
         self.metrics.active_rooms.set(1);
         self.clients.push(client);
+        // Update solo_since:
+        // * 1 client after insert (first joiner) → start solo clock.
+        // * ≥2 clients after insert → clear solo clock (second+ joiner joined).
+        match self.clients.len() {
+            1 => {
+                // First joiner — room is now solo. Start clock.
+                self.solo_since = Some(Instant::now());
+            }
+            _ => {
+                // Second or later joiner — room has company. Clear clock.
+                self.solo_since = None;
+            }
+        }
         // Emit a codec-capability hint so relay layers or application code can
         // inform the new peer that this SFU supports Opus RED / DRED.
         self.to_propagate.push_back(Propagated::AudioCodecHint {
@@ -334,6 +354,42 @@ impl Registry {
             // detector. Removing here corrects that without requiring a full
             // teardown/re-insert cycle.
             self.detector.remove_peer(&client_id.0);
+        }
+    }
+
+    /// Check whether the lone remaining peer has been solo for longer than
+    /// `timeout`. If so, disconnect it so the next `reap_dead` pass removes it.
+    ///
+    /// `now` is passed in (rather than reading `Instant::now()` internally)
+    /// so tests can control time without spinning up a real clock.
+    ///
+    /// No-op when the room has 0 or ≥2 participants.
+    pub fn check_solo_timeout(&mut self, timeout: std::time::Duration, now: std::time::Instant) {
+        // Only act when exactly 1 client is present.
+        if self.clients.len() != 1 {
+            return;
+        }
+        let Some(since) = self.solo_since else {
+            return;
+        };
+        // Saturating sub: if clock goes backwards (e.g. test harness), elapsed = 0.
+        let elapsed = now.saturating_duration_since(since);
+        if elapsed < timeout {
+            return;
+        }
+        // Exactly 1 client present — safe to index.
+        if let Some(client) = self.clients.first_mut() {
+            tracing::info!(
+                target: "sfu::registry",
+                peer_id = *client.id,
+                elapsed_secs = elapsed.as_secs(),
+                "solo peer exceeded hold timeout — disconnecting",
+            );
+            client.rtc.disconnect();
+            self.metrics.sfu_solo_room_kicked_total.inc();
+            // Clear so a subsequent (stale) check_solo_timeout call is a no-op
+            // until reap_dead refreshes the state.
+            self.solo_since = None;
         }
     }
 

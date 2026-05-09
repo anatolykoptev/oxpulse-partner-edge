@@ -49,6 +49,7 @@ async fn udp_loop_binds_receives_and_shuts_down() {
             Some(relay_rx),
             Some(client_inject_rx),
             local, // candidate_addr: same as local in loopback tests
+            None,  // solo_kick_timeout: disabled in test
             async {
                 let _ = rx.await;
             },

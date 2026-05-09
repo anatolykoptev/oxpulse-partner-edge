@@ -324,6 +324,15 @@ pub struct SfuMetrics {
     /// Alert rule: `rate(sfu_writer_write_errors_total{kind="write_without_poll"}[5m]) > 0`
     /// → page on-call.
     pub sfu_writer_write_errors_total: IntCounterVec,
+
+    // ── Solo-peer auto-kick ───────────────────────────────────────────────────
+    /// Rooms closed because a lone peer was the only participant for longer
+    /// than `SFU_SOLO_KICK_AFTER_SECS` (default 120 s). The peer's str0m
+    /// connection is marked dead so the next `reap_dead` pass evicts it.
+    ///
+    /// Alert: `rate(sfu_solo_room_kicked_total[5m]) > 0` → lone-peer sessions
+    /// are being cleaned up (informational) or possibly thrashing (if high).
+    pub sfu_solo_room_kicked_total: IntCounter,
 }
 
 impl SfuMetrics {
@@ -909,6 +918,15 @@ impl SfuMetrics {
             .with_label_values(&["other"])
             .get();
 
+        // ── Solo-peer auto-kick ───────────────────────────────────────────────
+        let sfu_solo_room_kicked_total = reg!(IntCounter::with_opts(Opts::new(
+            "sfu_solo_room_kicked_total",
+            "Rooms closed because the lone remaining peer exceeded the solo-hold timeout \
+             (SFU_SOLO_KICK_AFTER_SECS, default 120 s). Peer is marked dead; \
+             reap_dead evicts it on the next registry tick.",
+        ))
+        .context("sfu_solo_room_kicked_total")?);
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -969,6 +987,7 @@ impl SfuMetrics {
             media_ingress_jitter_ticks,
 
             sfu_writer_write_errors_total,
+            sfu_solo_room_kicked_total,
         })
     }
 
