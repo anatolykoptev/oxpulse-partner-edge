@@ -5,6 +5,22 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.22](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.21...partner-edge-v0.12.22) (2026-05-09)
+
+
+### Features
+
+* **sfu:** auto-kick solo peer after configurable hold timeout ([#96](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/96)) ([01d90ae](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/01d90aedbd5db02a996144d4dc0f4a48605900e4))
+* **sfu:** mid-based tracks_map_update emission for Bug [#5](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/5) ([#93](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/93)) ([8093e6a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/8093e6a213cf4d5ffe03919d9ece398fb9109ba3))
+
+
+### Bug Fixes
+
+* **sfu/renegotiation:** address code-quality reviewer findings 1-4 ([#88](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/88) follow-ups) ([#91](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/91)) ([1297131](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1297131fe4d200d0d52b147205858464ca6889c9))
+* **sfu:** Bug [#7](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/7) — timeout+ws_closed paths leave stuck Negotiating tracks and drop queued offers ([#95](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/95)) ([c45b704](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c45b7045cf1ce7e8906fef777ff183c16b3b4021))
+* **sfu:** PR [#93](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/93) followups — tracks_map_update silent drop, peer_id type, relay debug ([#94](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/94)) ([278ef3b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/278ef3b87f1fef5c74291f251bf13026c5d167ef))
+* **sfu:** str0m findings — correct SdpPendingOffer comment + write error metric ([#89](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/89)) ([2a2d981](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/2a2d9811cb8bba3da826fd2ad34334f04fbfcf81))
+
 ## [0.12.21](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.20...partner-edge-v0.12.21) (2026-05-09)
 
 
