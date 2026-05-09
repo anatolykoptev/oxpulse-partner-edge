@@ -186,10 +186,15 @@ impl Client {
                             }
                         }
                         if !transitioned {
-                            tracing::warn!(
+                            // No-op when already transitioned to Open by accept_renegotiation_answer's
+                            // direct flip (str0m v0.18 doesn't emit MediaAdded for offerer; transition
+                            // happens immediately on accept_answer Ok). Safety net for future str0m
+                            // versions that may emit the event.
+                            tracing::debug!(
                                 client = *self.id,
                                 mid = ?m.mid,
-                                "M2: Event::MediaAdded SendOnly but no Negotiating(mid) track found"
+                                "M2: Event::MediaAdded SendOnly but no Negotiating(mid) track found \
+                                 (expected: already transitioned to Open via accept_renegotiation_answer)"
                             );
                         }
                         Propagated::Noop
@@ -624,6 +629,75 @@ mod tests {
             client.tracks_in.len(),
             0,
             "SendOnly MediaAdded must NOT call track_in_added (not a remote track)"
+        );
+    }
+
+    /// Finding 1: when `Event::MediaAdded { direction: SendOnly, mid }` arrives for
+    /// a mid that already transitioned to `Open(mid)` (direct flip in
+    /// `accept_renegotiation_answer`), the handler must:
+    ///   - NOT change state (stays Open)
+    ///   - NOT panic
+    ///   - log at DEBUG level (not WARN) — verified via the `warn_fired` counter
+    ///
+    /// The counter is a new `sfu_track_out_state_transitions_total{warn_no_negotiating}`
+    /// label that would be bumped on warn. After fix it must NOT increment.
+    ///
+    /// RED: currently logs warn! which is noisy on the normal accept_answer path.
+    /// After fix: debug! only; no counter bump.
+    #[test]
+    fn media_added_send_only_handler_when_already_open() {
+        use crate::client::test_seed::{new_client, seed_track_in};
+        use crate::client::tracks::TrackOutState;
+        use crate::propagate::ClientId;
+        use std::sync::Arc;
+        use str0m::media::{Direction, MediaAdded, MediaKind, Mid};
+
+        let mut client = new_client(ClientId(910));
+        let mid = Mid::from("m10");
+
+        // Pre-seed a track in Open(mid) state — the normal post-accept state.
+        let mut publisher = new_client(ClientId(911));
+        let arc = seed_track_in(&mut publisher, 10, MediaKind::Video);
+        client.tracks_out.push(crate::client::tracks::TrackOut {
+            track_in: Arc::downgrade(&arc),
+            state: TrackOutState::Open(mid),
+        });
+
+        let metrics = client.metrics_for_tests().clone();
+        // Capture transition counter before — must not increment (no state change).
+        let transitions_before = metrics
+            .sfu_track_out_state_transitions_total
+            .with_label_values(&["negotiating", "open"])
+            .get();
+
+        // Inject MediaAdded SendOnly for the same mid — safety-net handler.
+        let event = Event::MediaAdded(MediaAdded {
+            mid,
+            kind: MediaKind::Video,
+            direction: Direction::SendOnly,
+            simulcast: None,
+        });
+        client.handle_event(event);
+
+        // State must remain Open — no double-flip.
+        assert!(
+            matches!(client.tracks_out[0].state, TrackOutState::Open(m) if m == mid),
+            "state must remain Open(mid) — no double-flip from safety-net handler"
+        );
+        // No new transition metric fired.
+        let transitions_after = metrics
+            .sfu_track_out_state_transitions_total
+            .with_label_values(&["negotiating", "open"])
+            .get();
+        assert_eq!(
+            transitions_after, transitions_before,
+            "no transition metric must fire for Open→Open no-op (Finding 1)"
+        );
+        // tracks_in must NOT have grown (SendOnly never creates TrackIn).
+        assert_eq!(
+            client.tracks_in.len(),
+            0,
+            "SendOnly MediaAdded must never create a TrackIn"
         );
     }
 }
