@@ -5,16 +5,20 @@ on:
     paths:
       - 'install.sh'
       - 'upgrade.sh'
+      - 'docker-compose.yml.tpl'
       - 'tests/test_install_die_on_empty_sfu_secret.sh'
       - 'tests/test_upgrade_die_on_empty_sfu_secret.sh'
+      - 'tests/test_sfu_compose.sh'
       - '.github/workflows/installer-tests.yml'
   push:
     branches: [main]
     paths:
       - 'install.sh'
       - 'upgrade.sh'
+      - 'docker-compose.yml.tpl'
       - 'tests/test_install_die_on_empty_sfu_secret.sh'
       - 'tests/test_upgrade_die_on_empty_sfu_secret.sh'
+      - 'tests/test_sfu_compose.sh'
       - '.github/workflows/installer-tests.yml'
 
 jobs:
@@ -27,3 +31,5 @@ jobs:
         run: bash tests/test_install_die_on_empty_sfu_secret.sh
       - name: upgrade.sh dies on empty signaling_sfu_secret
         run: bash tests/test_upgrade_die_on_empty_sfu_secret.sh
+      - name: SFU compose template wiring (SFU_EDGE_ID regression)
+        run: bash tests/test_sfu_compose.sh
