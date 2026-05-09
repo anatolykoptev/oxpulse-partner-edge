@@ -16,6 +16,7 @@
 use std::sync::atomic::Ordering;
 
 use str0m::media::{MediaData, MediaKind, Rid};
+use str0m::RtcError;
 
 use super::{layer, Client};
 use crate::pacer::Pacer;
@@ -165,6 +166,18 @@ impl Client {
         };
         if let Err(e) = writer.write(pt, data.network_time, data.time, data.data.clone()) {
             tracing::warn!(client = *self.id, error = ?e, "writer.write failed");
+            // Discriminate by RtcError variant for alertable observability.
+            // WriteWithoutPoll is the known cause of frozen video at ≥10 peers
+            // (str0m issue #952, 2026-05-05). All other variants collapse to "other"
+            // to keep label cardinality bounded.
+            let error_kind = match &e {
+                RtcError::WriteWithoutPoll => "write_without_poll",
+                _ => "other",
+            };
+            self.metrics
+                .sfu_writer_write_errors_total
+                .with_label_values(&[error_kind])
+                .inc();
             self.metrics
                 .sfu_forward_decisions_total
                 .with_label_values(&[&src_peer, &dst_peer, kind_label, "write_err"])

@@ -124,10 +124,11 @@ impl Client {
                 // can retry cleanly. The browser never saw this offer, so there is
                 // no in-flight renegotiation to cancel.
                 //
-                // SdpPendingOffer's Drop in str0m 0.18 releases internal
-                // pending-offer state — see str0m src/change/sdp.rs SdpApi
-                // handling. Setting pending_offer = None triggers Drop here,
-                // which correctly resets str0m's internal offer slot.
+                // NOTE: dropping `SdpPendingOffer` does NOT clean up str0m's
+                // internal change_id. However, the next `sdp_api()` call
+                // generates a fresh change_id via `next_change_id()`, so a
+                // subsequent renegotiation attempt will work correctly.
+                // Confirmed by inspection of str0m 0.18.1 src/change/sdp.rs.
                 self.pending_offer = None;
                 self.pending_offer_at = None;
                 self.tracks_out.pop(); // remove the Negotiating(mid) entry we just pushed
