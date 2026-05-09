@@ -292,6 +292,11 @@ async fn main() -> anyhow::Result<()> {
     // Pass host_candidate_addr so the loop can correctly demux STUN binding
     // requests — str0m's ICE agent matches incoming STUN on the destination
     // address, which must equal the installed local candidate (M4.A6 fix).
+    let solo_kick_timeout = if config.solo_kick_after_secs == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_secs(config.solo_kick_after_secs))
+    };
     let result = udp_loop::serve(
         socket,
         metrics,
@@ -300,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
         relay_inject_rx,
         client_inject_rx,
         host_candidate_addr,
+        solo_kick_timeout,
         shutdown,
     )
     .await;

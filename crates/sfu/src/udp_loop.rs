@@ -77,6 +77,11 @@ pub async fn run_udp_loop<F>(
 where
     F: Future<Output = ()>,
 {
+    let solo_kick_timeout = if config.solo_kick_after_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(config.solo_kick_after_secs))
+    };
     let relay_auth_secret = config
         .relay_auth_secret
         .clone()
@@ -102,6 +107,7 @@ where
         relay_rx,
         client_inject_rx,
         candidate_addr,
+        solo_kick_timeout,
         shutdown,
     )
     .await
@@ -142,6 +148,7 @@ pub async fn serve<F>(
     mut relay_rx: Option<tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>>,
     mut client_inject_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::PendingClient>>,
     candidate_addr: std::net::SocketAddr,
+    solo_kick_timeout: Option<Duration>,
     shutdown: F,
 ) -> anyhow::Result<()>
 where
@@ -163,6 +170,13 @@ where
     loop {
         metrics_ref.udp_loop_iterations_total.inc();
         registry.reap_dead();
+        // Solo-peer auto-kick: if configured, check whether the lone remaining
+        // peer has exceeded the hold timeout. Runs after reap_dead so we never
+        // kick a peer whose `is_alive` state is already false (they'd be reaped
+        // on the very next iteration anyway).
+        if let Some(timeout) = solo_kick_timeout {
+            registry.check_solo_timeout(timeout, Instant::now());
+        }
         // Phase J M2: drain WS control messages (answer-renegotiate) from each client.
         // Must happen before poll_all so accepted answers are visible in the same iteration.
         registry.pump_ws_ctrl();
@@ -413,6 +427,7 @@ mod tests {
             None,
             None,
             candidate_addr,
+            None, // solo_kick_timeout: disabled in test
             async {
                 let _ = rx.await;
             },
@@ -455,6 +470,7 @@ mod tests {
             None, // standalone — no relay channel
             None, // standalone — no client inject channel
             candidate_addr,
+            None, // solo_kick_timeout: disabled in test
             async {
                 let _ = shutdown_rx.await;
             },
@@ -507,6 +523,7 @@ mod tests {
             Some(relay_rx),
             None,
             candidate_addr,
+            None, // solo_kick_timeout: disabled in test
             async {
                 let _ = shutdown_rx.await;
             },
@@ -587,6 +604,7 @@ mod tests {
             Some(relay_rx),
             Some(client_inject_rx),
             candidate_addr,
+            None, // solo_kick_timeout: disabled in test
             async {
                 let _ = shutdown_rx.await;
             },
@@ -706,6 +724,7 @@ mod tests {
             Some(relay_rx),
             Some(client_inject_rx),
             candidate_addr,
+            None, // solo_kick_timeout: disabled in test
             async {
                 let _ = shutdown_rx.await;
             },

@@ -220,6 +220,7 @@ async fn serve_with_explicit_candidate_addr_starts_cleanly() {
         None,
         None,
         candidate_addr,
+        None, // solo_kick_timeout: disabled in test
         async {
             let _ = shutdown_rx.await;
         },

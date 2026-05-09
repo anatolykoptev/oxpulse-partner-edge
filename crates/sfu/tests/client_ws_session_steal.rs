@@ -135,6 +135,7 @@ async fn start_full_pipeline() -> (
         Some(relay_rx),
         Some(client_inject_rx),
         local_udp, // candidate_addr: loopback tests use actual local addr
+        None,      // solo_kick_timeout: disabled in test
         async {
             let _ = shutdown_rx.await;
         },

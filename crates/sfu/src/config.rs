@@ -62,6 +62,10 @@ pub struct SfuConfig {
     /// (`Event::PeerStats`, `Event::MediaEgressStats`, `Event::MediaIngressStats`).
     /// Set to 0 to disable. Env: `STR0M_STATS_INTERVAL_SECS`. Default: 2.
     pub stats_interval_secs: u64,
+    /// How long (in seconds) a room with exactly one participant is allowed to
+    /// persist before the SFU disconnects the lone peer. Set to 0 to disable
+    /// the feature. Env: `SFU_SOLO_KICK_AFTER_SECS`. Default: 120.
+    pub solo_kick_after_secs: u64,
 }
 
 impl Default for SfuConfig {
@@ -78,6 +82,7 @@ impl Default for SfuConfig {
             sfu_signing_public_key: None,
             public_ip: None,
             stats_interval_secs: 2,
+            solo_kick_after_secs: 120,
         }
     }
 }
@@ -111,6 +116,10 @@ impl SfuConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(2),
+            solo_kick_after_secs: std::env::var("SFU_SOLO_KICK_AFTER_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(120),
         }
     }
 }
