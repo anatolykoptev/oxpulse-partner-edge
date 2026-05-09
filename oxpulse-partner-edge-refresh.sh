@@ -34,15 +34,29 @@ ts()   { date -Iseconds; }
 log()  { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG_FILE"; }
 die()  { log "ERR $*"; exit 1; }
 
+# OS-aware install hint: returns the appropriate install command for the host PM.
+suggest_install() {
+    local pkg="$1"
+    if command -v dnf >/dev/null 2>&1; then
+        echo "dnf install -y $pkg"
+    elif command -v apt-get >/dev/null 2>&1; then
+        echo "apt-get install -y $pkg"
+    elif command -v apk >/dev/null 2>&1; then
+        echo "apk add $pkg"
+    else
+        echo "install via your package manager"
+    fi
+}
+
 # Dependency check: jq is required for JSON parsing throughout this script.
 # On cheburator1 (2026-05-09 incident): jq was absent from the systemd unit
 # PATH, causing set -euo pipefail to exit at line 39 (NODE_ID extraction)
 # silently — the heartbeat POST was never reached, leaving last_seen_at stale
 # for 1 week. Die here with a clear message so systemd logs are actionable.
 command -v jq >/dev/null 2>&1 \
-    || die "jq required but not installed — fix: apt-get install -y jq"
+    || die "jq required but not installed — fix: $(suggest_install jq)"
 command -v curl >/dev/null 2>&1 \
-    || die "curl required but not installed — fix: apt-get install -y curl"
+    || die "curl required but not installed — fix: $(suggest_install curl)"
 
 [[ -f "$NODE_CFG" ]] || die "node-config.json not found at $NODE_CFG"
 

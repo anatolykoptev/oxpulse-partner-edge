@@ -510,6 +510,27 @@ if [[ $DRY_RUN -eq 0 && $OS_FAMILY == rhel ]] && command -v dnf >/dev/null 2>&1;
 	fi
 fi
 
+# ---------- Step 1b: runtime deps (jq, curl) ----------
+# jq is required by oxpulse-partner-edge-refresh.sh for JSON parsing.
+# curl is required by install.sh itself and the refresh script.
+# Install both unconditionally so systemd-managed refresh runs succeed even
+# on minimal OS images (e.g. CentOS Stream 9 / AlmaLinux without extras).
+if [[ $DRY_RUN -eq 0 ]]; then
+	for _pkg in jq curl; do
+		if ! command -v "$_pkg" >/dev/null 2>&1; then
+			log "  installing missing runtime dep: $_pkg"
+			if [[ $OS_FAMILY == rhel ]]; then
+				dnf install -y "$_pkg" >/dev/null 2>&1 \
+					|| die "dnf install $_pkg failed — install manually then re-run"
+			else
+				apt-get install -y -q "$_pkg" >/dev/null 2>&1 \
+					|| die "apt-get install $_pkg failed"
+			fi
+		fi
+	done
+	unset _pkg
+fi
+
 # ---------- Step 2: Docker ----------
 log "[2/10] ensuring docker + compose plugin"
 if [[ $DRY_RUN -eq 0 ]]; then

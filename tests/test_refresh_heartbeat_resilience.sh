@@ -98,6 +98,62 @@ pass "test2: curl missing → exit $curl_exit, output contains 'curl required'"
 trap - EXIT
 rm -rf "$T2"
 
+# ── Test 3: dnf-only host → die message suggests "dnf install -y jq" ─────────
+T3=$(mktemp -d)
+trap 'rm -rf "$T3"' EXIT
+
+make_bin "$T3"
+# provide dnf stub, no apt-get, no curl (jq check fires first)
+cat > "$T3/dnf" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$T3/dnf"
+# jq and curl intentionally absent so jq preflight fires
+
+set +e
+PATH="$T3" LOG_FILE="$T3/refresh.log" bash "$SCRIPT" >"$T3/out_dnf.txt" 2>&1
+dnf_exit=$?
+set -e
+
+[[ $dnf_exit -ne 0 ]] \
+    || fail "test3: script must exit nonzero when jq is missing"
+grep -q "dnf install -y jq" "$T3/out_dnf.txt" \
+    || fail "test3: die message must contain 'dnf install -y jq' when dnf is the only PM; got: $(cat "$T3/out_dnf.txt")"
+grep -v "apt-get" "$T3/out_dnf.txt" >/dev/null \
+    || fail "test3: die message must NOT contain 'apt-get' on dnf-only host; got: $(cat "$T3/out_dnf.txt")"
+pass "test3: dnf-only host → die message contains 'dnf install -y jq'"
+
+trap - EXIT
+rm -rf "$T3"
+
+# ── Test 4: apt-get-only host → die message suggests "apt-get install -y jq" ─
+T4=$(mktemp -d)
+trap 'rm -rf "$T4"' EXIT
+
+make_bin "$T4"
+# provide apt-get stub, no dnf, no curl (jq check fires first)
+cat > "$T4/apt-get" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$T4/apt-get"
+# jq and curl intentionally absent so jq preflight fires
+
+set +e
+PATH="$T4" LOG_FILE="$T4/refresh.log" bash "$SCRIPT" >"$T4/out_apt.txt" 2>&1
+apt_exit=$?
+set -e
+
+[[ $apt_exit -ne 0 ]] \
+    || fail "test4: script must exit nonzero when jq is missing"
+grep -q "apt-get install -y jq" "$T4/out_apt.txt" \
+    || fail "test4: die message must contain 'apt-get install -y jq' when apt-get is the only PM; got: $(cat "$T4/out_apt.txt")"
+pass "test4: apt-get-only host → die message contains 'apt-get install -y jq'"
+
+trap - EXIT
+rm -rf "$T4"
+
 # ── Syntax check ──────────────────────────────────────────────────────────────
 bash -n "$SCRIPT" \
     || fail "refresh script has syntax errors"
