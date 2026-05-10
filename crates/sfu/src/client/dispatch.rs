@@ -66,6 +66,7 @@ impl Client {
             Output::Event(Event::KeyframeRequest(_)) => "event_keyframe_req",
             Output::Event(Event::EgressBitrateEstimate(_)) => "event_bwe",
             Output::Event(Event::ChannelData(_)) => "event_channel",
+            Output::Event(Event::ChannelOpen(..)) => "event_channel_open",
             Output::Event(Event::Connected) => "event_connected",
             Output::Event(Event::PeerStats(_)) => "event_peer_stats",
             Output::Event(Event::MediaEgressStats(_)) => "event_media_egress_stats",
@@ -122,6 +123,26 @@ impl Client {
                     .inc();
                 if matches!(s, IceConnectionState::Disconnected) {
                     self.rtc.disconnect();
+                }
+                Propagated::Noop
+            }
+            // MAJOR 2: increment the reactions gauge on actual SCTP DCEP completion
+            // rather than at construction. str0m emits ChannelOpen once the
+            // DATA_CHANNEL_ACK handshake completes — at that point both ends have
+            // agreed the stream is live and the browser will actually start sending.
+            // This prevents phantom gauge inflation for v0.12.22 clients that set up
+            // the local DC but never complete SCTP negotiation before disconnecting.
+            Event::ChannelOpen(id, _label) => {
+                if Some(id) == self.reactions_dc_cid && !self.reactions_dc_opened {
+                    self.reactions_dc_opened = true;
+                    self.metrics
+                        .chat_relay_active_channels
+                        .with_label_values(&["reactions"])
+                        .inc();
+                    tracing::debug!(
+                        client = *self.id,
+                        "reactions DC id:7 open — gauge incremented"
+                    );
                 }
                 Propagated::Noop
             }
