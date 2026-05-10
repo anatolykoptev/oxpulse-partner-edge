@@ -70,6 +70,7 @@ pub mod chat;
 pub mod construct;
 pub mod dc;
 pub mod dispatch;
+pub mod keys;
 pub mod fanout;
 pub mod keyframe;
 pub mod layer;
@@ -145,6 +146,12 @@ pub struct Client {
     /// lines up. We push `{"type":"active_speaker","peerId":<u64>}` whenever
     /// the room-level `ActiveSpeakerChanged` fires.
     pub(crate) active_speaker_cid: str0m::channel::ChannelId,
+    /// KX fix: pre-negotiated DC id:1 (`sframe-keys`, ordered, reliable).
+    /// SFrame key-exchange identity frames from one peer are relayed to
+    /// every other peer so their `peerIndexMap` stays populated and
+    /// `epochInstalled` flips `true`. `None` until
+    /// [`Client::with_keys_dc`] is called; relay clients skip it.
+    pub(crate) keys_dc_cid: Option<str0m::channel::ChannelId>,
     /// Phase 2b: pre-negotiated DC id:4 (`chat-data`,
     /// `negotiated: Some(4), ordered: true, reliability: Reliable`).
     /// SFU terminates the SCTP association and re-emits per-peer; this
