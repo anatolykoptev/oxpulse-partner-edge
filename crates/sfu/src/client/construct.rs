@@ -67,6 +67,7 @@ impl Client {
             chat_ctrl_cid: None,
             voice_data_cid: None,
             reactions_dc_cid: None,
+            reactions_dc_opened: false,
             relay_source_pending: None,
             origin: oxpulse_sfu_kit::ClientOrigin::Local,
             relay_auth_secret: None,
@@ -141,8 +142,11 @@ impl Client {
         let voice_data_cid = self.rtc.direct_api().create_data_channel(ChannelConfig {
             label: "voice".to_string(),
             ordered: false,
+            // `max_pkt_lifetime_ms` is in milliseconds — matches browser
+            // `maxPacketLifeTime` semantics and str0m's `Reliability::MaxPacketLifetime`
+            // `lifetime` field (unit: ms per sctp/mod.rs).
             reliability: Reliability::MaxPacketLifetime {
-                lifetime: max_pkt_lifetime_ms,
+                lifetime: max_pkt_lifetime_ms, // ms
             },
             negotiated: Some(6),
             protocol: String::new(),
@@ -170,15 +174,19 @@ impl Client {
         let reactions_dc_cid = self.rtc.direct_api().create_data_channel(ChannelConfig {
             label: "reactions-group".to_string(),
             ordered: true,
-            reliability: Reliability::MaxPacketLifetime { lifetime: 1000 },
+            // 1000 ms — matches browser `maxPacketLifeTime: 1000` (milliseconds).
+            // str0m `Reliability::MaxPacketLifetime { lifetime }` field unit is
+            // milliseconds per sctp/mod.rs doc comment ("lifetime of a packet in ms").
+            reliability: Reliability::MaxPacketLifetime { lifetime: 1000 }, // ms
             negotiated: Some(7),
             protocol: String::new(),
         });
         self.reactions_dc_cid = Some(reactions_dc_cid);
-        self.metrics
-            .chat_relay_active_channels
-            .with_label_values(&["reactions"])
-            .inc();
+        // NOTE: `chat_relay_active_channels{dc="reactions"}` is NOT incremented
+        // here. Increment deferred to `Event::ChannelOpen` in dispatch.rs so that
+        // v0.12.22 browsers that never complete SCTP DCEP don't inflate the gauge
+        // with phantom entries. The `reactions_dc_opened` bool tracks whether the
+        // gauge was actually incremented for safe dec in reap/steal.
         self
     }
 
@@ -307,7 +315,10 @@ mod tests {
     }
 
     #[test]
-    fn with_reactions_dc_opens_channel_and_increments_gauge() {
+    fn with_reactions_dc_opens_channel_cid_only() {
+        // MAJOR 2: gauge must NOT be incremented at construction — it defers
+        // to Event::ChannelOpen so that v0.12.22 browser clients that never
+        // complete SCTP DCEP don't inflate the gauge with phantom entries.
         let rtc = str0m::Rtc::new(std::time::Instant::now());
         let metrics = Arc::new(crate::metrics::SfuMetrics::default());
         let client = Client::new(rtc, metrics.clone())
@@ -318,14 +329,31 @@ mod tests {
             client.reactions_dc_cid.is_some(),
             "reactions_dc_cid must be Some after with_reactions_dc()"
         );
-        // Gauge must have been incremented exactly once.
+        // Gauge must stay at 0 until Event::ChannelOpen fires.
         assert_eq!(
             metrics
                 .chat_relay_active_channels
                 .with_label_values(&["reactions"])
                 .get(),
-            1,
-            "chat_relay_active_channels{{dc=\"reactions\"}} must be 1 after with_reactions_dc()"
+            0,
+            "chat_relay_active_channels{{dc=\"reactions\"}} must be 0 at construction — inc deferred to ChannelOpen"
+        );
+        // The opened flag must also be false at construction.
+        assert!(
+            !client.reactions_dc_opened,
+            "reactions_dc_opened must be false until ChannelOpen"
+        );
+    }
+
+    #[test]
+    fn new_client_seed_does_not_open_reactions_dc() {
+        // MAJOR 3: new_client() (relay/relay-tests path) must NOT open
+        // reactions DC — relay clients skip fan-out for hearts.
+        use crate::client::test_seed::new_client;
+        let c = new_client(crate::propagate::ClientId(0));
+        assert!(
+            c.reactions_dc_cid.is_none(),
+            "new_client must not open reactions DC — use new_client_with_reactions for browser tests"
         );
     }
 }

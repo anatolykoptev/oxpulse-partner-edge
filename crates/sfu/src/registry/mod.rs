@@ -325,8 +325,11 @@ impl Registry {
                 .with_label_values(&["ctrl"])
                 .dec();
         }
-        // reactions gauge dec — mirror chat/voice pattern for session-steal.
-        if old.reactions_dc_cid.is_some() {
+        // reactions gauge dec — only when the gauge was actually incremented
+        // (Event::ChannelOpen fired). Guard on `reactions_dc_opened` (not
+        // `reactions_dc_cid.is_some()`) to prevent double-dec and phantom decs
+        // for v0.12.22 browsers that never completed SCTP DCEP before steal.
+        if old.reactions_dc_opened {
             self.metrics
                 .chat_relay_active_channels
                 .with_label_values(&["reactions"])

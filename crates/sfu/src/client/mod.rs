@@ -178,6 +178,15 @@ pub struct Client {
     /// `{ negotiated: true, id: 7, label: "reactions-group" }`.
     /// `None` until `with_reactions_dc()` is called; relay clients skip it.
     pub(crate) reactions_dc_cid: Option<str0m::channel::ChannelId>,
+    /// True once `Event::ChannelOpen` fires for the reactions DC (id:7).
+    /// The `chat_relay_active_channels{dc="reactions"}` gauge is incremented
+    /// in dispatch when this transitions false→true and decremented in
+    /// `reap_dead` / `evict_for_steal` only when this is true. Prevents:
+    /// (a) phantom gauge inflation for v0.12.22 browsers that open the DC
+    ///     at construction but never complete SCTP DCEP before disconnecting,
+    /// (b) double-dec when both paths see `reactions_dc_cid.is_some()` — the
+    ///     flag is the single authoritative "was gauge incremented?" gate.
+    pub reactions_dc_opened: bool,
     /// For outbound relay clients: the DC message to send once Event::Connected fires.
     /// Tuple: (dc_id, upstream_url, room_token). Cleared after send in dispatch.rs.
     /// None for browser clients and inbound relay clients (they *receive* relay_source).

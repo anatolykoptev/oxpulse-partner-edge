@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use oxpulse_sfu::client::test_seed::{new_client, seed_track_in};
+use oxpulse_sfu::client::test_seed::{new_client, new_client_with_reactions, seed_track_in};
 use oxpulse_sfu::metrics::{spawn_metrics_server, SfuMetrics};
 use oxpulse_sfu::{ClientId, Registry};
 use str0m::media::MediaKind;
@@ -302,5 +302,104 @@ async fn layer_transitions_total_increments_on_layer_change() {
             && body.contains(r#"from="q""#)
             && body.contains(r#"to="h""#),
         "layer transition q→h counter present:\n{body}",
+    );
+}
+
+/// MINOR 5: `reap_dead` must decrement `chat_relay_active_channels{dc="reactions"}`
+/// when a client that had its reactions DC gauge incremented (via Event::ChannelOpen)
+/// is reaped, so reconnect churn doesn't monotonically inflate the gauge.
+///
+/// Strategy: directly increment the gauge (simulating the ChannelOpen inc path),
+/// set `reactions_dc_opened = true` via test seam, force-disconnect, reap, assert
+/// gauge is back to 0.
+#[tokio::test]
+async fn reap_dead_drops_reactions_dc_gauge() {
+    let (port, _handle, metrics) = bind_metrics_server();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Directly bump the gauge — simulates what ChannelOpen does in dispatch.
+    metrics
+        .chat_relay_active_channels
+        .with_label_values(&["reactions"])
+        .inc();
+
+    // Pre-condition: gauge must be 1.
+    assert_eq!(
+        metrics
+            .chat_relay_active_channels
+            .with_label_values(&["reactions"])
+            .get(),
+        1,
+        "gauge must be 1 before reap"
+    );
+
+    // Build a registry with the shared metrics, insert a reactions-DC client,
+    // mark reactions_dc_opened so reap knows to dec.
+    let mut registry = Registry::new(metrics.clone());
+    let mut client = new_client_with_reactions(ClientId(600));
+    client.reactions_dc_opened = true;
+    registry.insert(client);
+    registry.disconnect_client_for_tests(ClientId(600));
+    registry.reap_dead_for_tests();
+
+    // Post-condition: gauge must be 0 (dec fired).
+    assert_eq!(
+        metrics
+            .chat_relay_active_channels
+            .with_label_values(&["reactions"])
+            .get(),
+        0,
+        "chat_relay_active_channels{{dc=\"reactions\"}} must be 0 after reap"
+    );
+}
+
+/// MINOR 5: `evict_for_steal` must decrement `chat_relay_active_channels{dc="reactions"}`
+/// when it evicts a client whose reactions gauge was incremented.
+///
+/// Mirrors `reap_dead_drops_reactions_dc_gauge` but exercises the session-steal path.
+#[tokio::test]
+async fn evict_for_steal_drops_reactions_dc_gauge() {
+    let (port, _handle, metrics) = bind_metrics_server();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Directly bump the gauge to simulate the ChannelOpen inc.
+    metrics
+        .chat_relay_active_channels
+        .with_label_values(&["reactions"])
+        .inc();
+
+    let mut registry = Registry::new(metrics.clone());
+    // Insert first client with external_peer_id=77 and reactions opened.
+    let mut first = new_client_with_reactions(ClientId(700)).with_external_peer_id(77);
+    first.reactions_dc_opened = true;
+    let _first_id = *first.id;
+    registry.insert(first);
+
+    // Pre-condition: gauge is 1.
+    assert_eq!(
+        metrics
+            .chat_relay_active_channels
+            .with_label_values(&["reactions"])
+            .get(),
+        1,
+        "gauge must be 1 before steal"
+    );
+
+    // Insert second client with same peer_id — triggers evict_for_steal of first.
+    let second = new_client_with_reactions(ClientId(701)).with_external_peer_id(77);
+    registry.insert(second);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Post-condition: gauge must be 0 (dec fired in evict_for_steal for first).
+    // Note: second client's reactions DC gauge was not incremented (no ChannelOpen
+    // fired in test — reactions_dc_opened is false), so net gauge = 1 - 1 = 0.
+    assert_eq!(
+        metrics
+            .chat_relay_active_channels
+            .with_label_values(&["reactions"])
+            .get(),
+        0,
+        "chat_relay_active_channels{{dc=\"reactions\"}} must be 0 after steal"
     );
 }

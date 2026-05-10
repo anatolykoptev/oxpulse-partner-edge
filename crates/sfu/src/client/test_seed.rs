@@ -49,6 +49,12 @@ impl Client {
 /// unnegotiated — writer calls inside `handle_media_data_out` will
 /// no-op, but the `delivered_media` counter still ticks so fanout is
 /// observable.
+///
+/// Opens chat and voice DCs (mirrors the production browser path) but
+/// does NOT open the reactions DC. Tests that exercise reactions fan-out
+/// or the reactions gauge must use [`new_client_with_reactions`] instead.
+/// This separation matches the relay/relay-tests path which skips
+/// reactions fan-out on cascade edges.
 pub fn new_client(id: ClientId) -> Client {
     let rtc = Rtc::builder().build(Instant::now());
     let metrics = Arc::new(SfuMetrics::default());
@@ -57,7 +63,23 @@ pub fn new_client(id: ClientId) -> Client {
     // `Client::new(...).with_chat_dcs()`. Tests covering relay-only
     // scenarios still go through `Client::new_outbound_relay` and never
     // hit this seam, so the conflicting SCTP id 5 case is preserved.
-    let mut c = Client::new(rtc, metrics).with_chat_dcs().with_reactions_dc().with_voice_dc(200);
+    let mut c = Client::new(rtc, metrics).with_chat_dcs().with_voice_dc(200);
+    c.id = id;
+    c
+}
+
+/// Build a fresh `Client` that also opens the pre-negotiated reactions DC
+/// (id:7, `reactions-group`). Use for tests that exercise reactions fan-out,
+/// reactions gauge scrub on reap/steal, or the `Event::ChannelOpen` path for
+/// DC id:7. All other tests should use [`new_client`] to keep the common test
+/// path relay-compatible (relay clients skip the reactions DC).
+pub fn new_client_with_reactions(id: ClientId) -> Client {
+    let rtc = Rtc::builder().build(Instant::now());
+    let metrics = Arc::new(SfuMetrics::default());
+    let mut c = Client::new(rtc, metrics)
+        .with_chat_dcs()
+        .with_voice_dc(200)
+        .with_reactions_dc();
     c.id = id;
     c
 }
