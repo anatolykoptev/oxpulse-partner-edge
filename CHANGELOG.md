@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.25](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.24...partner-edge-v0.12.25) (2026-05-10)
+
+
+### Bug Fixes
+
+* **sfu:** drop bogon ICE destinations before send_to (mobile reliability) ([#104](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/104)) ([ce69639](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ce69639b9052d1fea8aad4bf3fa7af2311a5a679))
+
 ## [0.12.24](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.23...partner-edge-v0.12.24) (2026-05-10)
 
 
