@@ -17,6 +17,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use oxpulse_sfu::client_ws::{spawn_client_ws_api, PendingClient};
 use oxpulse_sfu::metrics::SfuMetrics;
 use oxpulse_sfu::room_auth::RoomClaims;
+use serial_test::serial;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{
@@ -608,7 +609,7 @@ async fn bwe_hint_counter_scrubbed_on_reap_dead_specific() {
     // containing this peer_id label.
     assert!(
         !encoded.lines().any(|l| {
-            l.starts_with("sfu_sfu_bwe_hint_received_total") && l.contains(r#"peer_id="777""#)
+            l.starts_with("sfu_bwe_hint_received_total") && l.contains(r#"peer_id="777""#)
         }),
         "sfu_bwe_hint_received_total{{peer_id=\"777\"}} must be scrubbed after reap_dead"
     );
@@ -638,7 +639,7 @@ async fn bwe_hint_counter_scrubbed_on_evict_for_steal_specific() {
     let encoded = metrics.encode_text().expect("encode ok");
     assert!(
         !encoded.lines().any(|l| {
-            l.starts_with("sfu_sfu_bwe_hint_received_total") && l.contains(r#"peer_id="888""#)
+            l.starts_with("sfu_bwe_hint_received_total") && l.contains(r#"peer_id="888""#)
         }),
         "sfu_bwe_hint_received_total{{peer_id=\"888\"}} must be scrubbed after evict_for_steal"
     );
@@ -678,6 +679,7 @@ async fn bwe_hint_rate_limit_interval_gauge_registered() {
 /// RED: fails before `hint_min_interval_ms` is exported from `oxpulse_sfu`
 /// (symbol doesn't exist at compile time).
 #[test]
+#[serial]
 fn hint_min_interval_ms_env_zero_clamps_to_one() {
     // Safety: test-only, serial within this process.
     // `cargo test --features test-utils` runs tests in separate processes per
@@ -696,6 +698,7 @@ fn hint_min_interval_ms_env_zero_clamps_to_one() {
 ///
 /// RED: fails before the gauge reads via the shared function.
 #[test]
+#[serial]
 fn hint_gauge_reflects_shared_fn_when_env_zero() {
     std::env::set_var("SFU_BWE_HINT_MIN_INTERVAL_MS", "0");
     oxpulse_sfu::bwe_hint::reset_hint_min_interval_for_tests();
@@ -744,6 +747,69 @@ fn hint_rate_registry_scrub_removes_only_target_peer() {
         2,
         "registry must have exactly 2 entries after scrub"
     );
+}
+
+// ─── Round-4: poisoned-mutex must not panic ──────────────────────────────────
+
+/// `hint_min_interval_ms()` must not panic when the override mutex is poisoned.
+/// Instead it must recover and return the env-based default.
+///
+/// RED: fails before `.lock().unwrap_or_else(|p| p.into_inner())` poison recovery.
+#[cfg(feature = "test-utils")]
+#[test]
+#[serial]
+fn hint_min_interval_ms_poisoned_mutex_no_panic() {
+    use std::sync::Arc;
+    // Poison the override mutex from another thread.
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let b2 = barrier.clone();
+    let _t = std::thread::spawn(move || {
+        // Acquire the static override lock, then panic — this poisons the mutex.
+        let _guard = oxpulse_sfu::bwe_hint::poison_override_for_tests();
+        b2.wait(); // let main thread know we hold it
+        panic!("intentional poison");
+    });
+    barrier.wait(); // wait until spawned thread holds the lock and is about to panic
+                    // Give the thread time to panic and release.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Must not panic — should return default (100 ms) via poison recovery.
+    let ms = oxpulse_sfu::bwe_hint::hint_min_interval_ms();
+    assert!(
+        ms >= 1,
+        "poisoned-mutex recovery must return a sane value, got {ms}"
+    );
+    // Reset for subsequent tests.
+    oxpulse_sfu::bwe_hint::reset_hint_min_interval_for_tests();
+}
+
+/// `scrub_hint_registry` must not panic and must log when the registry mutex is
+/// poisoned. The function should return without error.
+///
+/// RED: currently the `if let Ok(mut m) = registry.lock()` silently drops the
+/// Err but does not log. After fix it must warn + bump counter (verified via
+/// tracing subscriber in integration; here we just confirm no panic).
+#[test]
+fn scrub_hint_registry_poisoned_mutex_no_panic() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    let registry: Arc<Mutex<HashMap<u64, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+    {
+        let mut m = registry.lock().unwrap();
+        m.insert(1, Instant::now());
+    }
+
+    // Poison the mutex from another thread.
+    let r2 = registry.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = r2.lock().unwrap();
+        panic!("intentional poison");
+    })
+    .join(); // join so poison is definitely set before we proceed
+
+    // Must not panic.
+    oxpulse_sfu::bwe_hint::scrub_hint_registry(&registry, 1);
 }
 
 /// After a session-steal eviction, `client_delivered_media_count{peer_id=X}`

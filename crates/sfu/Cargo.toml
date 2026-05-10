@@ -62,6 +62,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 rand = "0.8"
+serial_test = "3"
 
 [[test]]
 name = "multi_client"
