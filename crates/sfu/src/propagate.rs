@@ -159,6 +159,14 @@ pub enum Propagated {
     /// subscribers' outbound voice DCs. Skip-self and DC-not-open guards
     /// mirror the chat-data relay path.
     VoiceData(ClientId, Vec<u8>),
+
+    /// KX fix: payload received on the pre-negotiated `sframe-keys` DC
+    /// (id:1, ordered, `Reliability::Reliable`). Carries SFrame key-exchange
+    /// `identity` JSON from one peer to all others — without relay the
+    /// receiving peer's `peerIndexMap` stays empty and every inbound
+    /// encrypted frame fails to decrypt. Skip-self and DC-not-open guards
+    /// mirror the chat-data relay path.
+    KeysData(ClientId, Vec<u8>),
 }
 
 impl Propagated {
@@ -173,7 +181,8 @@ impl Propagated {
             | Propagated::ClientBudgetHint(c, _)
             | Propagated::ChatData(c, _)
             | Propagated::ChatCtrl(c, _)
-            | Propagated::VoiceData(c, _) => Some(*c),
+            | Propagated::VoiceData(c, _)
+            | Propagated::KeysData(c, _) => Some(*c),
             #[cfg(feature = "vfm")]
             Propagated::VfmLayerCap(c, _) => Some(*c),
             Propagated::PublisherLayerHint { publisher_id, .. } => Some(*publisher_id),
@@ -210,6 +219,13 @@ mod tests {
     fn chat_ctrl_client_id_returns_origin() {
         let cid = ClientId(11);
         let p = Propagated::ChatCtrl(cid, b"typing".to_vec());
+        assert_eq!(p.client_id(), Some(cid));
+    }
+
+    #[test]
+    fn keys_data_client_id_returns_origin() {
+        let cid = ClientId(42);
+        let p = Propagated::KeysData(cid, b"identity".to_vec());
         assert_eq!(p.client_id(), Some(cid));
     }
 }
