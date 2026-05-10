@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.24](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.23...partner-edge-v0.12.24) (2026-05-10)
+
+
+### Features
+
+* **sfu:** open reactions-group DC id=7 (hearts fix) ([#101](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/101)) ([a546970](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a546970))
+
+
 ## [0.12.23](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.22...partner-edge-v0.12.23) (2026-05-10)
 
 
