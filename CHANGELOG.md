@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.23](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.22...partner-edge-v0.12.23) (2026-05-10)
+
+
+### Features
+
+* **sfu:** bwe-hint message + `sfu_bwe_hint_received_total` counter (Phase 2c) ([#97](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/97)) ([4eeeca8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4eeeca8))
+
+
 ## [0.12.22](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.21...partner-edge-v0.12.22) (2026-05-09)
 
 
