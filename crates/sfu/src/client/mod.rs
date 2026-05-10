@@ -70,9 +70,9 @@ pub mod chat;
 pub mod construct;
 pub mod dc;
 pub mod dispatch;
-pub mod keys;
 pub mod fanout;
 pub mod keyframe;
+pub mod keys;
 pub mod layer;
 pub mod renegotiation;
 #[cfg(any(test, feature = "test-utils"))]
