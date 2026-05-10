@@ -360,6 +360,18 @@ pub struct SfuMetrics {
     /// Rising rate indicates a misbehaving or malicious client.
     pub sfu_bwe_hint_throttled_total: IntCounterVec,
 
+    /// Process-level counter for mutex-poison recovery in the bwe-hint subsystem.
+    ///
+    /// Incremented whenever `scrub_hint_registry` or `hint_min_interval_ms`
+    /// recovers from a poisoned mutex (no labels — per-process counter). A
+    /// value > 0 indicates a thread panicked while holding a bwe-hint internal
+    /// lock; data integrity was preserved via poison recovery but the event is
+    /// worth alerting on in production.
+    ///
+    /// Alert: `sfu_bwe_hint_registry_mutex_poisoned_total > 0` → investigate
+    /// thread panics in the bwe-hint rate-gate path.
+    pub sfu_bwe_hint_registry_mutex_poisoned_total: IntCounter,
+
     /// Operator-visible gauge showing the configured minimum interval between
     /// accepted bwe-hint frames per peer (milliseconds).
     ///
@@ -1004,6 +1016,15 @@ impl SfuMetrics {
         )
         .context("sfu_bwe_hint_throttled_total")?);
 
+        let sfu_bwe_hint_registry_mutex_poisoned_total = reg!(IntCounter::with_opts(Opts::new(
+            "sfu_bwe_hint_registry_mutex_poisoned_total",
+            "Process-level count of mutex-poison recovery events in the bwe-hint subsystem \
+             (scrub_hint_registry + hint_min_interval_ms override mutex). \
+             A value > 0 means a thread panicked while holding a bwe-hint internal lock; \
+             poison recovery preserved integrity. Alert on any non-zero value.",
+        ))
+        .context("sfu_bwe_hint_registry_mutex_poisoned_total")?);
+
         // Phase 2c round-3: operator-visible interval gauge. Published once at startup
         // via the shared `bwe_hint::hint_min_interval_ms()` so the gauge and the
         // session rate gate always read the same value (MAJOR divergence fix).
@@ -1081,6 +1102,7 @@ impl SfuMetrics {
             sfu_solo_room_kicked_total,
             sfu_bwe_hint_received_total,
             sfu_bwe_hint_throttled_total,
+            sfu_bwe_hint_registry_mutex_poisoned_total,
             sfu_bwe_hint_rate_limit_min_interval_ms,
         })
     }

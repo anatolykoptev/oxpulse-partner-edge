@@ -763,15 +763,16 @@ fn hint_min_interval_ms_poisoned_mutex_no_panic() {
     // Poison the override mutex from another thread.
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let b2 = barrier.clone();
-    let _t = std::thread::spawn(move || {
+    let t = std::thread::spawn(move || {
         // Acquire the static override lock, then panic — this poisons the mutex.
         let _guard = oxpulse_sfu::bwe_hint::poison_override_for_tests();
         b2.wait(); // let main thread know we hold it
         panic!("intentional poison");
     });
     barrier.wait(); // wait until spawned thread holds the lock and is about to panic
-                    // Give the thread time to panic and release.
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Join (expecting Err) guarantees the thread has panicked and the mutex is
+    // poisoned before hint_min_interval_ms() is called. Replaces the racy sleep.
+    t.join().expect_err("thread must have panicked");
     // Must not panic — should return default (100 ms) via poison recovery.
     let ms = oxpulse_sfu::bwe_hint::hint_min_interval_ms();
     assert!(
@@ -810,6 +811,87 @@ fn scrub_hint_registry_poisoned_mutex_no_panic() {
 
     // Must not panic.
     oxpulse_sfu::bwe_hint::scrub_hint_registry(&registry, 1);
+}
+
+/// `scrub_hint_registry` must increment `sfu_bwe_hint_registry_mutex_poisoned_total`
+/// when the registry mutex is poisoned.
+///
+/// RED: fails until `sfu_bwe_hint_registry_mutex_poisoned_total` is added to
+/// `SfuMetrics` and bumped in the `Err` arm of `scrub_hint_registry`.
+#[test]
+fn scrub_hint_registry_poisoned_mutex_bumps_counter() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    let registry: Arc<Mutex<HashMap<u64, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+    {
+        let mut m = registry.lock().unwrap();
+        m.insert(1, Instant::now());
+    }
+
+    // Poison the mutex from another thread.
+    let r2 = registry.clone();
+    let _ = std::thread::spawn(move || {
+        let _guard = r2.lock().unwrap();
+        panic!("intentional poison");
+    })
+    .join(); // join so poison is definitely set before we proceed
+
+    let metrics = Arc::new(SfuMetrics::default());
+    let before = metrics
+        .sfu_bwe_hint_registry_mutex_poisoned_total
+        .get();
+
+    // Trigger the poisoned path.
+    oxpulse_sfu::bwe_hint::scrub_hint_registry_with_metrics(&registry, 1, &metrics);
+
+    assert_eq!(
+        metrics
+            .sfu_bwe_hint_registry_mutex_poisoned_total
+            .get(),
+        before + 1,
+        "sfu_bwe_hint_registry_mutex_poisoned_total must increment on mutex poison"
+    );
+}
+
+/// `hint_min_interval_ms` must increment `sfu_bwe_hint_registry_mutex_poisoned_total`
+/// when the override mutex is poisoned.
+///
+/// RED: fails until the counter is bumped in the poison-recovery arm of
+/// `hint_min_interval_ms`.
+#[test]
+#[serial]
+fn hint_min_interval_ms_poisoned_mutex_bumps_counter() {
+    use std::sync::Arc;
+
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let b2 = barrier.clone();
+    let t = std::thread::spawn(move || {
+        let _guard = oxpulse_sfu::bwe_hint::poison_override_for_tests();
+        b2.wait();
+        panic!("intentional poison");
+    });
+    barrier.wait();
+    t.join().expect_err("thread must have panicked");
+
+    let metrics = Arc::new(SfuMetrics::default());
+    let before = metrics
+        .sfu_bwe_hint_registry_mutex_poisoned_total
+        .get();
+
+    // Must not panic and must bump counter.
+    let ms = oxpulse_sfu::bwe_hint::hint_min_interval_ms_with_metrics(&metrics);
+    assert!(ms >= 1, "poisoned-mutex recovery must return a sane value, got {ms}");
+    assert_eq!(
+        metrics
+            .sfu_bwe_hint_registry_mutex_poisoned_total
+            .get(),
+        before + 1,
+        "sfu_bwe_hint_registry_mutex_poisoned_total must increment on override mutex poison"
+    );
+
+    oxpulse_sfu::bwe_hint::reset_hint_min_interval_for_tests();
 }
 
 /// After a session-steal eviction, `client_delivered_media_count{peer_id=X}`

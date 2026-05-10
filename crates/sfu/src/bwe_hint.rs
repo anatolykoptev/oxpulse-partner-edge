@@ -98,6 +98,70 @@ pub fn scrub_hint_registry(registry: &std::sync::Arc<Mutex<HashMap<u64, Instant>
     }
 }
 
+/// Same as [`scrub_hint_registry`] but increments
+/// `sfu_bwe_hint_registry_mutex_poisoned_total` on mutex poison.
+///
+/// Call sites that have access to [`crate::metrics::SfuMetrics`] should prefer
+/// this variant. The no-metrics variant is preserved for call sites in the test
+/// harness that construct a bare `Arc<Mutex<HashMap>>`.
+pub fn scrub_hint_registry_with_metrics(
+    registry: &std::sync::Arc<Mutex<HashMap<u64, Instant>>>,
+    peer_id: u64,
+    metrics: &crate::metrics::SfuMetrics,
+) {
+    match registry.lock() {
+        Ok(mut m) => {
+            m.remove(&peer_id);
+        }
+        Err(poisoned) => {
+            metrics
+                .sfu_bwe_hint_registry_mutex_poisoned_total
+                .inc();
+            tracing::warn!(
+                peer_id,
+                "scrub_hint_registry: registry mutex poisoned, peer entry may leak"
+            );
+            poisoned.into_inner().remove(&peer_id);
+        }
+    }
+}
+
+/// Same as [`hint_min_interval_ms`] but increments
+/// `sfu_bwe_hint_registry_mutex_poisoned_total` when the override mutex is
+/// poisoned (test-utils feature only).
+///
+/// Production callers that hold `SfuMetrics` should use this to make the
+/// poison-recovery event observable.
+pub fn hint_min_interval_ms_with_metrics(metrics: &crate::metrics::SfuMetrics) -> u64 {
+    #[cfg(feature = "test-utils")]
+    {
+        let result = HINT_MIN_INTERVAL_OVERRIDE.lock();
+        let guard = match result {
+            Ok(g) => g,
+            Err(poisoned) => {
+                metrics
+                    .sfu_bwe_hint_registry_mutex_poisoned_total
+                    .inc();
+                tracing::warn!(
+                    "hint_min_interval_ms: override mutex poisoned, falling back to env/default"
+                );
+                poisoned.into_inner()
+            }
+        };
+        if guard.is_none() {
+            drop(guard);
+            return std::env::var("SFU_BWE_HINT_MIN_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_MS)
+                .max(1);
+        }
+        return guard.unwrap();
+    }
+    #[allow(unreachable_code)]
+    hint_min_interval_ms()
+}
+
 /// Resets the override so the next call to [`hint_min_interval_ms`] re-reads
 /// the environment variable.
 ///
