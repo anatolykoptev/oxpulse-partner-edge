@@ -57,7 +57,7 @@ pub fn new_client(id: ClientId) -> Client {
     // `Client::new(...).with_chat_dcs()`. Tests covering relay-only
     // scenarios still go through `Client::new_outbound_relay` and never
     // hit this seam, so the conflicting SCTP id 5 case is preserved.
-    let mut c = Client::new(rtc, metrics).with_chat_dcs().with_voice_dc(200);
+    let mut c = Client::new(rtc, metrics).with_chat_dcs().with_reactions_dc().with_voice_dc(200);
     c.id = id;
     c
 }

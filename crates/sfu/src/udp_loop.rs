@@ -327,6 +327,7 @@ where
                         let ws_ctrl_rx = pending.ws_ctrl_rx;
                         let client = crate::client::Client::new(pending.rtc, metrics_ref.clone())
                             .with_chat_dcs()
+                            .with_reactions_dc()
                             .with_external_peer_id(external_peer_id)
                             .with_close_signal(pending.close_signal)
                             // Phase J M2: wire WS channels so the client can push

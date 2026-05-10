@@ -325,6 +325,13 @@ impl Registry {
                 .with_label_values(&["ctrl"])
                 .dec();
         }
+        // reactions gauge dec — mirror chat/voice pattern for session-steal.
+        if old.reactions_dc_cid.is_some() {
+            self.metrics
+                .chat_relay_active_channels
+                .with_label_values(&["reactions"])
+                .dec();
+        }
 
         self.metrics.client_disconnect_total.inc();
         self.metrics.active_participants.dec();

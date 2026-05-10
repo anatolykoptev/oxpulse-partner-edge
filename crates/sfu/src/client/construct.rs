@@ -66,6 +66,7 @@ impl Client {
             chat_data_cid: None,
             chat_ctrl_cid: None,
             voice_data_cid: None,
+            reactions_dc_cid: None,
             relay_source_pending: None,
             origin: oxpulse_sfu_kit::ClientOrigin::Local,
             relay_auth_secret: None,
@@ -150,6 +151,33 @@ impl Client {
         self.metrics
             .voice_relay_active_channels
             .with_label_values(&["voice"])
+            .inc();
+        self
+    }
+
+    /// Open the pre-negotiated reactions DC (id:7, `reactions-group`,
+    /// ordered, `MaxPacketLifetime{1000ms}`) so the SCTP DCEP exchange
+    /// completes on both sides. PR #558 (web) wired the browser half;
+    /// without this call the SFU side never opens its end → both peers
+    /// stuck `connecting` forever → hearts never delivered.
+    ///
+    /// Browser side: `pc.createDataChannel("reactions-group",
+    /// { negotiated: true, id: 7, ordered: true, maxPacketLifeTime: 1000 })`.
+    ///
+    /// Browser construction sites chain this after `with_chat_dcs()`;
+    /// relay clients skip it (no reactions fan-out on cascade edges).
+    pub fn with_reactions_dc(mut self) -> Self {
+        let reactions_dc_cid = self.rtc.direct_api().create_data_channel(ChannelConfig {
+            label: "reactions-group".to_string(),
+            ordered: true,
+            reliability: Reliability::MaxPacketLifetime { lifetime: 1000 },
+            negotiated: Some(7),
+            protocol: String::new(),
+        });
+        self.reactions_dc_cid = Some(reactions_dc_cid);
+        self.metrics
+            .chat_relay_active_channels
+            .with_label_values(&["reactions"])
             .inc();
         self
     }
@@ -276,5 +304,28 @@ mod tests {
         let client = Client::new(rtc, Arc::new(crate::metrics::SfuMetrics::default()));
         assert!(!client.is_relay());
         assert!(client.relay_source_pending.is_none());
+    }
+
+    #[test]
+    fn with_reactions_dc_opens_channel_and_increments_gauge() {
+        let rtc = str0m::Rtc::new(std::time::Instant::now());
+        let metrics = Arc::new(crate::metrics::SfuMetrics::default());
+        let client = Client::new(rtc, metrics.clone())
+            .with_chat_dcs()
+            .with_reactions_dc();
+        // DC handle must be populated — None means the channel was never opened.
+        assert!(
+            client.reactions_dc_cid.is_some(),
+            "reactions_dc_cid must be Some after with_reactions_dc()"
+        );
+        // Gauge must have been incremented exactly once.
+        assert_eq!(
+            metrics
+                .chat_relay_active_channels
+                .with_label_values(&["reactions"])
+                .get(),
+            1,
+            "chat_relay_active_channels{{dc=\"reactions\"}} must be 1 after with_reactions_dc()"
+        );
     }
 }

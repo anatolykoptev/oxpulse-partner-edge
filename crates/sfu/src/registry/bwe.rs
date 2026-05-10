@@ -183,6 +183,14 @@ impl Registry {
                         .with_label_values(&["ctrl"])
                         .dec();
                 }
+                // reactions gauge dec — mirrors chat/voice pattern.
+                // with_reactions_dc increments on open; decrement on reap.
+                if c.reactions_dc_cid.is_some() {
+                    metrics
+                        .chat_relay_active_channels
+                        .with_label_values(&["reactions"])
+                        .dec();
+                }
             }
             alive
         });
