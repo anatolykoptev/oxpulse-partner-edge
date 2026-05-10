@@ -770,8 +770,8 @@ fn hint_min_interval_ms_poisoned_mutex_no_panic() {
         panic!("intentional poison");
     });
     barrier.wait(); // wait until spawned thread holds the lock and is about to panic
-    // Join (expecting Err) guarantees the thread has panicked and the mutex is
-    // poisoned before hint_min_interval_ms() is called. Replaces the racy sleep.
+                    // Join (expecting Err) guarantees the thread has panicked and the mutex is
+                    // poisoned before hint_min_interval_ms() is called. Replaces the racy sleep.
     t.join().expect_err("thread must have panicked");
     // Must not panic — should return default (100 ms) via poison recovery.
     let ms = oxpulse_sfu::bwe_hint::hint_min_interval_ms();
@@ -839,17 +839,13 @@ fn scrub_hint_registry_poisoned_mutex_bumps_counter() {
     .join(); // join so poison is definitely set before we proceed
 
     let metrics = Arc::new(SfuMetrics::default());
-    let before = metrics
-        .sfu_bwe_hint_registry_mutex_poisoned_total
-        .get();
+    let before = metrics.sfu_bwe_hint_registry_mutex_poisoned_total.get();
 
     // Trigger the poisoned path.
     oxpulse_sfu::bwe_hint::scrub_hint_registry_with_metrics(&registry, 1, &metrics);
 
     assert_eq!(
-        metrics
-            .sfu_bwe_hint_registry_mutex_poisoned_total
-            .get(),
+        metrics.sfu_bwe_hint_registry_mutex_poisoned_total.get(),
         before + 1,
         "sfu_bwe_hint_registry_mutex_poisoned_total must increment on mutex poison"
     );
@@ -876,17 +872,16 @@ fn hint_min_interval_ms_poisoned_mutex_bumps_counter() {
     t.join().expect_err("thread must have panicked");
 
     let metrics = Arc::new(SfuMetrics::default());
-    let before = metrics
-        .sfu_bwe_hint_registry_mutex_poisoned_total
-        .get();
+    let before = metrics.sfu_bwe_hint_registry_mutex_poisoned_total.get();
 
     // Must not panic and must bump counter.
     let ms = oxpulse_sfu::bwe_hint::hint_min_interval_ms_with_metrics(&metrics);
-    assert!(ms >= 1, "poisoned-mutex recovery must return a sane value, got {ms}");
+    assert!(
+        ms >= 1,
+        "poisoned-mutex recovery must return a sane value, got {ms}"
+    );
     assert_eq!(
-        metrics
-            .sfu_bwe_hint_registry_mutex_poisoned_total
-            .get(),
+        metrics.sfu_bwe_hint_registry_mutex_poisoned_total.get(),
         before + 1,
         "sfu_bwe_hint_registry_mutex_poisoned_total must increment on override mutex poison"
     );

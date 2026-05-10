@@ -16,7 +16,9 @@
 //! env value. The OnceLock is bypassed entirely in test builds.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+#[cfg(feature = "test-utils")]
+use std::sync::MutexGuard;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 /// Default minimum interval between accepted bwe-hint frames per peer (ms).
@@ -61,7 +63,7 @@ pub fn hint_min_interval_ms() -> u64 {
                 .unwrap_or(DEFAULT_MS)
                 .max(1);
         }
-        return guard.unwrap();
+        return guard.expect("guard is Some — is_none() returned false above");
     }
     #[allow(unreachable_code)]
     *HINT_MIN_INTERVAL_MS.get_or_init(|| {
@@ -114,9 +116,7 @@ pub fn scrub_hint_registry_with_metrics(
             m.remove(&peer_id);
         }
         Err(poisoned) => {
-            metrics
-                .sfu_bwe_hint_registry_mutex_poisoned_total
-                .inc();
+            metrics.sfu_bwe_hint_registry_mutex_poisoned_total.inc();
             tracing::warn!(
                 peer_id,
                 "scrub_hint_registry: registry mutex poisoned, peer entry may leak"
@@ -128,36 +128,57 @@ pub fn scrub_hint_registry_with_metrics(
 
 /// Same as [`hint_min_interval_ms`] but increments
 /// `sfu_bwe_hint_registry_mutex_poisoned_total` when the override mutex is
-/// poisoned (test-utils feature only).
+/// poisoned (only reachable under the `test-utils` feature where the override
+/// mutex exists; in production the OnceLock path has no mutex to poison so the
+/// counter is never triggered but the increment path is compiled and wired in
+/// all builds).
 ///
 /// Production callers that hold `SfuMetrics` should use this to make the
 /// poison-recovery event observable.
-pub fn hint_min_interval_ms_with_metrics(metrics: &crate::metrics::SfuMetrics) -> u64 {
+pub fn hint_min_interval_ms_with_metrics(
+    // Used only under test-utils to increment the poison counter; in
+    // production the override mutex does not exist so the parameter is unused.
+    #[cfg_attr(not(feature = "test-utils"), allow(unused_variables))]
+    metrics: &crate::metrics::SfuMetrics,
+) -> u64 {
     #[cfg(feature = "test-utils")]
     {
         let result = HINT_MIN_INTERVAL_OVERRIDE.lock();
-        let guard = match result {
-            Ok(g) => g,
-            Err(poisoned) => {
-                metrics
-                    .sfu_bwe_hint_registry_mutex_poisoned_total
-                    .inc();
+        let (guard, poisoned) = match result {
+            Ok(g) => (g, false),
+            Err(p) => {
                 tracing::warn!(
                     "hint_min_interval_ms: override mutex poisoned, falling back to env/default"
                 );
-                poisoned.into_inner()
+                (p.into_inner(), true)
             }
         };
-        if guard.is_none() {
+        if poisoned {
+            // Counter is compiled and wired in all builds; the increment path
+            // is only reachable under test-utils where the override mutex exists.
+            metrics.sfu_bwe_hint_registry_mutex_poisoned_total.inc();
             drop(guard);
+            // Fall back to env/default after recovering from poison.
             return std::env::var("SFU_BWE_HINT_MIN_INTERVAL_MS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(DEFAULT_MS)
                 .max(1);
         }
-        return guard.unwrap();
+        if guard.is_some() {
+            return guard.expect("guard is Some — is_none() returned false above");
+        }
+        // guard is None: re-read env (override was reset).
+        drop(guard);
+        return std::env::var("SFU_BWE_HINT_MIN_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_MS)
+            .max(1);
     }
+
+    // Production (no test-utils): use OnceLock — no override mutex, no poison
+    // possible on this path. Counter is wired in test-utils builds above.
     #[allow(unreachable_code)]
     hint_min_interval_ms()
 }
@@ -183,4 +204,69 @@ pub fn poison_override_for_tests() -> MutexGuard<'static, Option<u64>> {
     HINT_MIN_INTERVAL_OVERRIDE
         .lock()
         .unwrap_or_else(|p| p.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::SfuMetrics;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    fn make_poisoned_registry() -> Arc<Mutex<HashMap<u64, Instant>>> {
+        let registry: Arc<Mutex<HashMap<u64, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+        let reg_clone = Arc::clone(&registry);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = reg_clone.lock().unwrap();
+            panic!("intentional poison");
+        });
+        assert!(
+            registry.is_poisoned(),
+            "mutex must be poisoned after caught panic"
+        );
+        registry
+    }
+
+    /// Prod-path: `scrub_hint_registry_with_metrics` bumps the poison counter
+    /// when the registry mutex is poisoned.
+    ///
+    /// This is the session-equivalent test: it simulates what the session exit
+    /// path does. Before the fix the call site used the bare
+    /// `scrub_hint_registry` which silently drops the metric — this test
+    /// calls `scrub_hint_registry_with_metrics` directly and will stay green
+    /// once the call site is switched.
+    #[test]
+    fn scrub_with_metrics_bumps_counter_on_poisoned_registry() {
+        let registry = make_poisoned_registry();
+        let metrics = SfuMetrics::default();
+        let before = metrics.sfu_bwe_hint_registry_mutex_poisoned_total.get();
+
+        // This is the call that the session exit path must use (not the bare
+        // scrub_hint_registry which does NOT increment the counter).
+        scrub_hint_registry_with_metrics(&registry, 42, &metrics);
+
+        let after = metrics.sfu_bwe_hint_registry_mutex_poisoned_total.get();
+        assert_eq!(
+            after,
+            before + 1,
+            "counter must increment on poisoned registry"
+        );
+    }
+
+    /// Regression guard: the bare `scrub_hint_registry` must NOT bump the
+    /// poison counter (it has no metrics handle). This ensures the two variants
+    /// remain distinct — the bare variant is for test harnesses without
+    /// SfuMetrics; the `_with_metrics` variant is for production call sites.
+    #[test]
+    fn bare_scrub_does_not_bump_counter() {
+        let registry = make_poisoned_registry();
+        let metrics = SfuMetrics::default();
+        let before = metrics.sfu_bwe_hint_registry_mutex_poisoned_total.get();
+
+        scrub_hint_registry(&registry, 99);
+
+        let after = metrics.sfu_bwe_hint_registry_mutex_poisoned_total.get();
+        assert_eq!(after, before, "bare scrub must not touch metrics counter");
+    }
 }

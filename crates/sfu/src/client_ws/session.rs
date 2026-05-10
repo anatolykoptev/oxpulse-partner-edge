@@ -125,12 +125,13 @@ mod close_code {
 
 /// Returns the configured bwe-hint rate-limit interval.
 ///
-/// Delegates to [`crate::bwe_hint::hint_min_interval_ms`], which reads
-/// `SFU_BWE_HINT_MIN_INTERVAL_MS` once via a `OnceLock` cache and clamps
-/// the result to ≥ 1 ms. Using the shared function ensures session.rs and
-/// `SfuMetrics::new()` always report the same value (Phase 2c round-3 fix).
-fn hint_min_interval() -> Duration {
-    Duration::from_millis(crate::bwe_hint::hint_min_interval_ms())
+/// Delegates to [`crate::bwe_hint::hint_min_interval_ms_with_metrics`], which
+/// reads `SFU_BWE_HINT_MIN_INTERVAL_MS` via a `OnceLock` cache and clamps the
+/// result to ≥ 1 ms. The `_with_metrics` variant ensures any mutex-poison
+/// recovery on the override path is observable via the
+/// `sfu_bwe_hint_registry_mutex_poisoned_total` counter (Phase 2c round-6 fix).
+fn hint_min_interval(metrics: &crate::metrics::SfuMetrics) -> Duration {
+    Duration::from_millis(crate::bwe_hint::hint_min_interval_ms_with_metrics(metrics))
 }
 
 /// RAII guard for the `client_ws_active_sessions` gauge and
@@ -446,7 +447,9 @@ pub async fn run(
 
     // Phase 2c round-3 (MINOR fix): scrub the peer's rate-gate entry so
     // disconnected peers do not accumulate entries in the registry forever.
-    crate::bwe_hint::scrub_hint_registry(&hint_registry_scrub, peer_id);
+    // Phase 2c round-6 fix: use _with_metrics to make registry mutex-poison
+    // events observable via sfu_bwe_hint_registry_mutex_poisoned_total.
+    crate::bwe_hint::scrub_hint_registry_with_metrics(&hint_registry_scrub, peer_id, &metrics_ref);
 
     if stole {
         // Steal-driven close already wrote the 4031 frame; just drain
@@ -582,7 +585,7 @@ async fn park_until_close_or_steal(
     // `last_hint: Option<Instant>` to a shared registry keyed by peer_id.
     // This prevents two concurrent tasks for the same peer (steal window, duplicate
     // tab) from each independently accepting one hint — previously 2× the cap.
-    let hint_interval = hint_min_interval();
+    let hint_interval = hint_min_interval(metrics);
 
     loop {
         tokio::select! {
