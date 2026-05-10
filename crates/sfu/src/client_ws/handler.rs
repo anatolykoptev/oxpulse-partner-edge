@@ -7,8 +7,10 @@
 //! so the SDP exchange and Registry registration happen here, then the
 //! main UDP loop drives ICE/DTLS just like for relay clients.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::metrics::SfuMetrics;
 use axum::{
@@ -82,6 +84,15 @@ pub struct ClientWsState {
     /// 0 = disabled. Forwarded to `session::run` so each new `Rtc` is
     /// built with `RtcConfig::set_stats_interval(Some(Duration))`.
     pub stats_interval_secs: u64,
+    /// Shared per-peer rate-gate clock for bwe-hint throttling.
+    ///
+    /// Keyed by numeric peer_id (JWT `sub`). A session writes the accepted
+    /// `Instant` here; concurrent sessions for the same peer_id (steal window,
+    /// duplicate tab) check this shared clock and are correctly throttled within
+    /// the same HINT_MIN_INTERVAL window. BLOCKER fix: prior implementation used
+    /// a task-local `last_hint: Option<Instant>`, allowing two concurrent tasks
+    /// for the same peer to each accept one hint independently (2× the cap).
+    pub hint_rate_registry: Arc<std::sync::Mutex<HashMap<u64, Instant>>>,
 }
 
 /// Spawn the client WS API on the given listener. Returns the join handle
@@ -102,6 +113,7 @@ pub fn spawn_client_ws_api(
         local_udp_addr,
         metrics,
         stats_interval_secs,
+        hint_rate_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
     let app = Router::new()
         // axum 0.8 routes WS upgrades through `any` (the upgrade is GET
@@ -244,6 +256,7 @@ pub async fn client_ws_upgrade(
     let local_udp_addr = state.local_udp_addr;
     let metrics = state.metrics.clone();
     let stats_interval_secs = state.stats_interval_secs;
+    let hint_rate_registry = state.hint_rate_registry.clone();
     tracing::info!(
         target: "sfu::client_ws",
         peer_id, %room_id,
@@ -260,6 +273,7 @@ pub async fn client_ws_upgrade(
                 inject_tx,
                 metrics.clone(),
                 stats_interval_secs,
+                hint_rate_registry,
             )
             .await
             {

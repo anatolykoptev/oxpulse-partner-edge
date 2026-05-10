@@ -147,6 +147,14 @@ impl Registry {
                 let _ = metrics
                     .voice_relay_rx_bytes_total
                     .remove_label_values(&[&peer_label]);
+                // Phase 2c review fix (MAJOR 1): drop bwe-hint counter series
+                // on disconnect so reconnect churn doesn't grow cardinality.
+                let _ = metrics
+                    .sfu_bwe_hint_received_total
+                    .remove_label_values(&[&peer_label]);
+                let _ = metrics
+                    .sfu_bwe_hint_throttled_total
+                    .remove_label_values(&[&peer_label]);
                 // MAJOR-2: decrement voice_relay_active_channels gauge.
                 // with_voice_dc increments on open; we mirror it here on
                 // reap so reconnect storms don't monotonically inflate the

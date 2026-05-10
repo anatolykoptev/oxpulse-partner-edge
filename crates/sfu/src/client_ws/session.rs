@@ -47,6 +47,7 @@
 //!    drop-and-go path, we keep the WS open so future M4.A4 server→
 //!    client DC events can reuse the same socket.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -120,6 +121,17 @@ mod close_code {
     /// Server's inject channel into the registry is closed — the SFU is
     /// shutting down or the UDP loop has exited.
     pub const SERVER_GOING_AWAY: CloseCode = 1001;
+}
+
+/// Returns the configured bwe-hint rate-limit interval.
+///
+/// Delegates to [`crate::bwe_hint::hint_min_interval_ms_with_metrics`], which
+/// reads `SFU_BWE_HINT_MIN_INTERVAL_MS` via a `OnceLock` cache and clamps the
+/// result to ≥ 1 ms. The `_with_metrics` variant ensures any mutex-poison
+/// recovery on the override path is observable via the
+/// `sfu_bwe_hint_registry_mutex_poisoned_total` counter (Phase 2c round-6 fix).
+fn hint_min_interval(metrics: &crate::metrics::SfuMetrics) -> Duration {
+    Duration::from_millis(crate::bwe_hint::hint_min_interval_ms_with_metrics(metrics))
 }
 
 /// RAII guard for the `client_ws_active_sessions` gauge and
@@ -227,6 +239,8 @@ pub struct PendingClient {
     skip(socket, inject_tx, metrics),
     fields(otel.kind = "server", room_id = %room_id, peer_id = peer_id)
 )]
+// TODO(#98): Refactor params into a SessionConfig struct to remove this allow.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut socket: WebSocket,
     room_id: String,
@@ -235,6 +249,7 @@ pub async fn run(
     inject_tx: Sender<PendingClient>,
     metrics: Arc<SfuMetrics>,
     stats_interval_secs: u64,
+    hint_rate_registry: Arc<std::sync::Mutex<HashMap<u64, Instant>>>,
 ) -> anyhow::Result<()> {
     let mut guard = ActiveSessionGuard::new(metrics.clone());
     // 1. Read the first text frame, expect a JSON offer.
@@ -415,6 +430,8 @@ pub async fn run(
     //    have to wait through queued frames before the older WS A
     //    receives its 4031 close.
     let metrics_ref = guard.metrics.clone();
+    // Clone the Arc so we can scrub the registry entry after park returns.
+    let hint_registry_scrub = hint_rate_registry.clone();
     let stole = park_until_close_or_steal(
         &mut socket,
         &mut close_signal_rx,
@@ -424,8 +441,15 @@ pub async fn run(
         peer_id,
         &mut guard,
         &metrics_ref,
+        hint_rate_registry,
     )
     .await;
+
+    // Phase 2c round-3 (MINOR fix): scrub the peer's rate-gate entry so
+    // disconnected peers do not accumulate entries in the registry forever.
+    // Phase 2c round-6 fix: use _with_metrics to make registry mutex-poison
+    // events observable via sfu_bwe_hint_registry_mutex_poisoned_total.
+    crate::bwe_hint::scrub_hint_registry_with_metrics(&hint_registry_scrub, peer_id, &metrics_ref);
 
     if stole {
         // Steal-driven close already wrote the 4031 frame; just drain
@@ -544,6 +568,7 @@ async fn read_offer(socket: &mut WebSocket) -> Result<String, OfferReadError> {
 /// `not biased` — it has equal priority with the socket arm so a
 /// high-traffic WS cannot starve server-push messages, but steal
 /// still beats both via the `biased` first-arm ordering.
+// TODO(#98): Refactor params into a SessionConfig struct to remove this allow.
 #[allow(clippy::too_many_arguments)]
 async fn park_until_close_or_steal(
     socket: &mut WebSocket,
@@ -554,7 +579,14 @@ async fn park_until_close_or_steal(
     peer_id: u64,
     guard: &mut ActiveSessionGuard,
     metrics: &Arc<SfuMetrics>,
+    hint_rate_registry: Arc<std::sync::Mutex<HashMap<u64, Instant>>>,
 ) -> bool {
+    // Phase 2c round-3 (BLOCKER fix): per-peer rate gate moved from task-local
+    // `last_hint: Option<Instant>` to a shared registry keyed by peer_id.
+    // This prevents two concurrent tasks for the same peer (steal window, duplicate
+    // tab) from each independently accepting one hint — previously 2× the cap.
+    let hint_interval = hint_min_interval(metrics);
+
     loop {
         tokio::select! {
             biased;
@@ -621,6 +653,68 @@ async fn park_until_close_or_steal(
                                 } else {
                                     tracing::warn!(target: "sfu::client_ws", peer_id,
                                         %room_id, "answer-renegotiate missing sdp — malformed frame dropped");
+                                }
+                                continue;
+                            }
+                            // Phase 2c: client bandwidth hint (observability-only, v1).
+                            // Wire format: {"kind":"bwe-hint","from":"<peer_uuid>",
+                            //               "ts":<unix_ms>,"bps":<u64>}
+                            // No fail-OPEN: missing fields → warn + drop (no WS close).
+                            //
+                            // Review fix (MAJOR 2): per-peer rate gate — 10 hints/s cap.
+                            // Excess frames increment sfu_bwe_hint_throttled_total and
+                            // are silently dropped. info! → debug! (hot path).
+                            // Review fix (MINOR 3): `from` truncated to 64 chars before log.
+                            if msg_kind == Some("bwe-hint") {
+                                let from = v.get("from").and_then(|f| f.as_str());
+                                let ts   = v.get("ts").and_then(|t| t.as_i64());
+                                let bps  = v.get("bps").and_then(|b| b.as_u64());
+                                match (from, ts, bps) {
+                                    (Some(from), Some(_ts), Some(_bps)) => {
+                                        let now = Instant::now();
+                                        let peer_label = peer_id.to_string();
+                                        // Shared rate gate: check-and-update atomically
+                                        // under the registry lock so concurrent tasks for
+                                        // the same peer_id see a consistent clock.
+                                        let throttled = {
+                                            let mut map = hint_rate_registry.lock()
+                                                .unwrap_or_else(|p| p.into_inner());
+                                            let last = map.get(&peer_id).copied();
+                                            if last.is_some_and(|t| now.duration_since(t) < hint_interval) {
+                                                true
+                                            } else {
+                                                map.insert(peer_id, now);
+                                                false
+                                            }
+                                        };
+                                        if throttled {
+                                            metrics
+                                                .sfu_bwe_hint_throttled_total
+                                                .with_label_values(&[&peer_label])
+                                                .inc();
+                                        } else {
+                                            // MINOR 3: truncate `from` to 64 chars before logging.
+                                            let from_safe: String = from.chars().take(64).collect();
+                                            tracing::debug!(
+                                                target: "sfu::client_ws",
+                                                peer_id, %room_id,
+                                                from = %from_safe,
+                                                "client bwe-hint received"
+                                            );
+                                            metrics
+                                                .sfu_bwe_hint_received_total
+                                                .with_label_values(&[&peer_label])
+                                                .inc();
+                                        }
+                                    }
+                                    _ => {
+                                        tracing::warn!(
+                                            target: "sfu::client_ws",
+                                            peer_id, %room_id,
+                                            "bwe-hint missing required field (from|ts|bps) \
+                                             — malformed frame dropped"
+                                        );
+                                    }
                                 }
                                 continue;
                             }
