@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.26](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.25...partner-edge-v0.12.26) (2026-05-10)
+
+
+### Bug Fixes
+
+* **sfu:** relay DC id:1 sframe-keys cross-peer — KX never propagated ([#106](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/106)) ([a7cbd15](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a7cbd156d938c9d86ba136efc6ccbb392a4eee04))
+
 ## [0.12.25](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.24...partner-edge-v0.12.25) (2026-05-10)
 
 
