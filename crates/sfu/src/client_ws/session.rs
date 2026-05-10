@@ -123,25 +123,14 @@ mod close_code {
     pub const SERVER_GOING_AWAY: CloseCode = 1001;
 }
 
-/// Default minimum interval between accepted bwe-hint frames per peer (100 ms).
-///
-/// Overridable at runtime via `SFU_BWE_HINT_MIN_INTERVAL_MS`. The
-/// `sfu_bwe_hint_rate_limit_min_interval_ms` gauge is published at startup
-/// by `SfuMetrics::new()` so operators can confirm the active value.
-const HINT_MIN_INTERVAL_MS_DEFAULT: u64 = 100;
-
 /// Returns the configured bwe-hint rate-limit interval.
 ///
-/// Reads `SFU_BWE_HINT_MIN_INTERVAL_MS` once per process start (called from
-/// within the WS session). Clamped to ≥1 ms to prevent a zero-interval
-/// effectively disabling the gate.
+/// Delegates to [`crate::bwe_hint::hint_min_interval_ms`], which reads
+/// `SFU_BWE_HINT_MIN_INTERVAL_MS` once via a `OnceLock` cache and clamps
+/// the result to ≥ 1 ms. Using the shared function ensures session.rs and
+/// `SfuMetrics::new()` always report the same value (Phase 2c round-3 fix).
 fn hint_min_interval() -> Duration {
-    let ms = std::env::var("SFU_BWE_HINT_MIN_INTERVAL_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(HINT_MIN_INTERVAL_MS_DEFAULT)
-        .max(1);
-    Duration::from_millis(ms)
+    Duration::from_millis(crate::bwe_hint::hint_min_interval_ms())
 }
 
 /// RAII guard for the `client_ws_active_sessions` gauge and
@@ -249,6 +238,7 @@ pub struct PendingClient {
     skip(socket, inject_tx, metrics),
     fields(otel.kind = "server", room_id = %room_id, peer_id = peer_id)
 )]
+// TODO(#98): Refactor params into a SessionConfig struct to remove this allow.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut socket: WebSocket,
@@ -439,6 +429,8 @@ pub async fn run(
     //    have to wait through queued frames before the older WS A
     //    receives its 4031 close.
     let metrics_ref = guard.metrics.clone();
+    // Clone the Arc so we can scrub the registry entry after park returns.
+    let hint_registry_scrub = hint_rate_registry.clone();
     let stole = park_until_close_or_steal(
         &mut socket,
         &mut close_signal_rx,
@@ -451,6 +443,10 @@ pub async fn run(
         hint_rate_registry,
     )
     .await;
+
+    // Phase 2c round-3 (MINOR fix): scrub the peer's rate-gate entry so
+    // disconnected peers do not accumulate entries in the registry forever.
+    crate::bwe_hint::scrub_hint_registry(&hint_registry_scrub, peer_id);
 
     if stole {
         // Steal-driven close already wrote the 4031 frame; just drain
@@ -569,6 +565,7 @@ async fn read_offer(socket: &mut WebSocket) -> Result<String, OfferReadError> {
 /// `not biased` — it has equal priority with the socket arm so a
 /// high-traffic WS cannot starve server-push messages, but steal
 /// still beats both via the `biased` first-arm ordering.
+// TODO(#98): Refactor params into a SessionConfig struct to remove this allow.
 #[allow(clippy::too_many_arguments)]
 async fn park_until_close_or_steal(
     socket: &mut WebSocket,

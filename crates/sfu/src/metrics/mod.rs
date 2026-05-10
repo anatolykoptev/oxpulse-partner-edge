@@ -1005,12 +1005,9 @@ impl SfuMetrics {
         .context("sfu_bwe_hint_throttled_total")?);
 
         // Phase 2c round-3: operator-visible interval gauge. Published once at startup
-        // from SFU_BWE_HINT_MIN_INTERVAL_MS (default 100 ms). Lets dashboards compare
-        // the configured rate cap against the observed throttle rate.
-        let interval_ms: i64 = std::env::var("SFU_BWE_HINT_MIN_INTERVAL_MS")
-            .ok()
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(100);
+        // via the shared `bwe_hint::hint_min_interval_ms()` so the gauge and the
+        // session rate gate always read the same value (MAJOR divergence fix).
+        let interval_ms: i64 = crate::bwe_hint::hint_min_interval_ms() as i64;
         let sfu_bwe_hint_rate_limit_min_interval_ms = reg!(IntGauge::with_opts(Opts::new(
             "sfu_bwe_hint_rate_limit_min_interval_ms",
             "Configured minimum interval between accepted bwe-hint frames per peer \

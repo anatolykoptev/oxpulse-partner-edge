@@ -668,6 +668,84 @@ async fn bwe_hint_rate_limit_interval_gauge_registered() {
 
 // ─── MINOR: evict_for_steal must scrub client_delivered_media_count ──────────
 
+// ─── Round-3 MAJOR: env=0 → hint_min_interval_ms() returns 1 (shared fn) ────
+
+/// `hint_min_interval_ms()` must be the single authoritative source for the
+/// env-parse logic. When `SFU_BWE_HINT_MIN_INTERVAL_MS=0` the clamped result
+/// is 1 ms.  Both the session rate gate and the metrics gauge must read through
+/// this shared function so they can never diverge.
+///
+/// RED: fails before `hint_min_interval_ms` is exported from `oxpulse_sfu`
+/// (symbol doesn't exist at compile time).
+#[test]
+fn hint_min_interval_ms_env_zero_clamps_to_one() {
+    // Safety: test-only, serial within this process.
+    // `cargo test --features test-utils` runs tests in separate processes per
+    // binary so env isolation is sufficient.
+    std::env::set_var("SFU_BWE_HINT_MIN_INTERVAL_MS", "0");
+    // Reset the OnceLock so the re-read happens (test-utils feature exposes this).
+    oxpulse_sfu::bwe_hint::reset_hint_min_interval_for_tests();
+    let ms = oxpulse_sfu::bwe_hint::hint_min_interval_ms();
+    std::env::remove_var("SFU_BWE_HINT_MIN_INTERVAL_MS");
+    oxpulse_sfu::bwe_hint::reset_hint_min_interval_for_tests();
+    assert_eq!(ms, 1, "env=0 must clamp to 1 ms, got {ms}");
+}
+
+/// The `sfu_bwe_hint_rate_limit_min_interval_ms` gauge must reflect the value
+/// returned by `hint_min_interval_ms()`.  When env=0 the gauge must be 1.
+///
+/// RED: fails before the gauge reads via the shared function.
+#[test]
+fn hint_gauge_reflects_shared_fn_when_env_zero() {
+    std::env::set_var("SFU_BWE_HINT_MIN_INTERVAL_MS", "0");
+    oxpulse_sfu::bwe_hint::reset_hint_min_interval_for_tests();
+    let m = SfuMetrics::new().expect("metrics build");
+    let gauge_val = m.sfu_bwe_hint_rate_limit_min_interval_ms.get();
+    std::env::remove_var("SFU_BWE_HINT_MIN_INTERVAL_MS");
+    oxpulse_sfu::bwe_hint::reset_hint_min_interval_for_tests();
+    assert_eq!(
+        gauge_val, 1,
+        "gauge must report clamped value (1) when env=0, got {gauge_val}"
+    );
+}
+
+// ─── Round-3 MINOR: hint_rate_registry scrubbed on session exit ──────────────
+
+/// `bwe_hint::scrub_hint_registry` must remove the given peer_id and leave
+/// all other entries intact. This validates the scrub helper that the session
+/// exit path calls after `park_until_close_or_steal` returns.
+///
+/// RED: fails before `oxpulse_sfu::bwe_hint::scrub_hint_registry` exists.
+#[test]
+fn hint_rate_registry_scrub_removes_only_target_peer() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    let registry: Arc<Mutex<HashMap<u64, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    let now = Instant::now();
+    {
+        let mut m = registry.lock().unwrap();
+        m.insert(1, now);
+        m.insert(2, now);
+        m.insert(3, now);
+    }
+
+    // Scrub peer 2.
+    oxpulse_sfu::bwe_hint::scrub_hint_registry(&registry, 2);
+
+    let m = registry.lock().unwrap();
+    assert!(m.contains_key(&1), "peer 1 must be retained");
+    assert!(!m.contains_key(&2), "peer 2 must be removed");
+    assert!(m.contains_key(&3), "peer 3 must be retained");
+    assert_eq!(
+        m.len(),
+        2,
+        "registry must have exactly 2 entries after scrub"
+    );
+}
+
 /// After a session-steal eviction, `client_delivered_media_count{peer_id=X}`
 /// must be absent from the encoded metrics.
 ///
