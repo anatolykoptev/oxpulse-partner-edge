@@ -354,6 +354,10 @@ where
 ///
 /// Returns `Some(kind)` where `kind` is one of:
 /// * `"rfc1918"` — private IPv4 (10/8, 172.16/12, 192.168/16) or IPv6 unique-local (fc00::/7).
+/// * `"cgnat"` — RFC 6598 shared address space (100.64.0.0/10). Used by Verizon and T-Mobile
+///   carrier-grade NAT. `Ipv4Addr::is_private()` does not cover this range, so it is
+///   checked explicitly. Verizon CGNAT uses 100.64–127.x; str0m retransmits to these
+///   addresses produce OS error 89 (EDESTADDRREQ) with no connectivity.
 /// * `"loopback"` — 127.0.0.0/8 or ::1/128.
 /// * `"link_local"` — 169.254.0.0/16 or fe80::/10.
 /// * `"multicast"` — 224.0.0.0/4 or ff00::/8.
@@ -376,6 +380,13 @@ fn is_bogon(addr: &std::net::SocketAddr) -> Option<&'static str> {
             if v4.is_private() {
                 return Some("rfc1918");
             }
+            // RFC 6598 CGNAT: 100.64.0.0/10 (100.64.x.x – 100.127.x.x).
+            // `is_private()` does not cover this range. Check: first octet == 100
+            // and (second octet & 0xc0) == 64, which selects [64, 127].
+            let octets = v4.octets();
+            if octets[0] == 100 && (octets[1] & 0xc0) == 64 {
+                return Some("cgnat");
+            }
             if v4.is_unspecified() || v4.is_broadcast() {
                 return Some("other");
             }
@@ -384,8 +395,8 @@ fn is_bogon(addr: &std::net::SocketAddr) -> Option<&'static str> {
             if v6.is_loopback() {
                 return Some("loopback");
             }
-            // fe80::/10 link-local — is_unicast_link_local is unstable;
-            // check the prefix manually instead.
+            // fe80::/10 link-local — is_unicast_link_local stabilised in Rust 1.79;
+            // replace with v6.is_unicast_link_local() when MSRV >= 1.79.
             let segs = v6.segments();
             if (segs[0] & 0xffc0) == 0xfe80 {
                 return Some("link_local");
@@ -814,7 +825,46 @@ mod tests {
         );
     }
 
-    // ── bogon-filter TDD (RED phase) ──────────────────────────────────────────
+    // ── bogon-filter TDD ──────────────────────────────────────────────────────
+
+    /// RFC 6598 CGNAT (100.64.0.0/10) must be classified as "cgnat".
+    ///
+    /// Range: 100.64.0.0 – 100.127.255.255.
+    /// Boundary: 100.64.0.0 = first byte 100, second byte 64 (0b0100_0000),
+    /// mask 0xc0 → (second & 0xc0) == 64 for [64..127].
+    #[test]
+    fn is_bogon_cgnat_rfc6598_in_range() {
+        use std::net::{Ipv4Addr, SocketAddr};
+        for ip in [
+            Ipv4Addr::new(100, 64, 0, 1),      // first usable
+            Ipv4Addr::new(100, 95, 255, 254),  // mid-range
+            Ipv4Addr::new(100, 127, 255, 254), // last usable
+        ] {
+            let sa: SocketAddr = (ip, 5000u16).into();
+            assert_eq!(
+                is_bogon(&sa),
+                Some("cgnat"),
+                "{ip} must be classified as cgnat (RFC 6598)"
+            );
+        }
+    }
+
+    /// Addresses just outside RFC 6598 CGNAT must NOT be classified as "cgnat".
+    #[test]
+    fn is_bogon_cgnat_rfc6598_out_of_range() {
+        use std::net::{Ipv4Addr, SocketAddr};
+        for ip in [
+            Ipv4Addr::new(100, 63, 255, 255), // one below range
+            Ipv4Addr::new(100, 128, 0, 0),    // one above range
+        ] {
+            let sa: SocketAddr = (ip, 5000u16).into();
+            assert_eq!(
+                is_bogon(&sa),
+                None,
+                "{ip} is outside CGNAT range and must return None"
+            );
+        }
+    }
 
     /// Every RFC-1918 address must be classified as "rfc1918".
     #[test]
@@ -929,14 +979,13 @@ mod tests {
         assert_eq!(is_bogon(&sa), Some("multicast"));
     }
 
-    /// flush_transmits must bump `udp_bogon_dest_dropped_total` and NOT call
-    /// `send_to` when the destination is a bogon address.
-    ///
-    /// Strategy: use a loopback socket so send_to on a public addr would
-    /// succeed, but the bogon address (10.8.0.3) must be skipped entirely —
-    /// no counter on udp_send_failed, but bogon counter incremented.
+    /// Verifies `is_bogon` classifies RFC-1918 addresses correctly and that
+    /// the counter increment path works. This is an honest-scope unit test —
+    /// it does NOT exercise the `flush_transmits` code path end-to-end.
+    /// Actual flush_transmits coverage requires socket integration tests
+    /// (deferred: needs a seam to inject transmits without a live Rtc).
     #[tokio::test]
-    async fn flush_transmits_skips_bogon_dest_and_bumps_counter() {
+    async fn is_bogon_counter_increment_rfc1918() {
         use crate::metrics::SfuMetrics;
         use std::net::{Ipv4Addr, SocketAddr};
         use std::sync::Arc;
@@ -963,11 +1012,20 @@ mod tests {
         assert_eq!(dropped, 1, "bogon counter must be incremented for rfc1918");
 
         // send_failed counter must NOT be touched.
-        let send_failed: u64 = ["dest_required", "network_unreachable", "host_unreachable", "perm", "other"]
-            .iter()
-            .map(|k| metrics.udp_send_failed.with_label_values(&[k]).get())
-            .sum();
-        assert_eq!(send_failed, 0, "send_failed counter must stay 0 for bogon skip");
+        let send_failed: u64 = [
+            "dest_required",
+            "network_unreachable",
+            "host_unreachable",
+            "perm",
+            "other",
+        ]
+        .iter()
+        .map(|k| metrics.udp_send_failed.with_label_values(&[k]).get())
+        .sum();
+        assert_eq!(
+            send_failed, 0,
+            "send_failed counter must stay 0 for bogon skip"
+        );
 
         drop(socket);
     }

@@ -1061,8 +1061,8 @@ impl SfuMetrics {
             Opts::new(
                 "udp_bogon_dest_dropped_total",
                 "UDP transmits dropped before send_to because the destination is a bogon address \
-                 (RFC-1918 / loopback / link-local / multicast / other). \
-                 kind ∈ {rfc1918, loopback, link_local, multicast, other}. \
+                 (RFC-1918 / RFC-6598 CGNAT / loopback / link-local / multicast / other). \
+                 kind ∈ {rfc1918, cgnat, loopback, link_local, multicast, other}. \
                  Mobile CGNAT fix (2026-05-09): T-Mobile/Verizon phones advertise private IPs \
                  as ICE candidates; send_to on those produces EDESTADDRREQ (OS error 89). \
                  Alert: rate > 100/s sustained = peer advertising only bogon candidates.",
@@ -1071,7 +1071,14 @@ impl SfuMetrics {
         )
         .context("udp_bogon_dest_dropped_total")?);
         // Pre-touch all label values so alert rules see a baseline of 0 at startup.
-        for kind in ["rfc1918", "loopback", "link_local", "multicast", "other"] {
+        for kind in [
+            "rfc1918",
+            "cgnat",
+            "loopback",
+            "link_local",
+            "multicast",
+            "other",
+        ] {
             let _ = udp_bogon_dest_dropped_total
                 .with_label_values(&[kind])
                 .get();
