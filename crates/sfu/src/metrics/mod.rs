@@ -379,6 +379,24 @@ pub struct SfuMetrics {
     /// Alerts and dashboards can compare this value against the observed
     /// throttle rate to detect misconfiguration or a default that's too tight.
     pub sfu_bwe_hint_rate_limit_min_interval_ms: IntGauge,
+
+    // ── bogon ICE destination filter (mobile reliability) ────────────────────
+    /// UDP transmits silently dropped because the destination is a bogon
+    /// address (RFC-1918, loopback, link-local, multicast, other).
+    ///
+    /// Labels: `kind` ∈ `{rfc1918, loopback, link_local, multicast, other}`.
+    ///
+    /// Root cause: mobile carriers (T-Mobile/Verizon CGNAT) advertise private
+    /// IPs (e.g. 10.8.0.3) as ICE candidates. str0m's `flush_transmits`
+    /// previously called `send_to(10.8.0.3:…)` → OS error 89 EDESTADDRREQ,
+    /// consuming retransmit budget without producing connectivity.
+    ///
+    /// Filter added 2026-05-09; see PR #fix/sfu-bogon-ice-filter.
+    ///
+    /// Alert: `rate(sfu_udp_bogon_dest_dropped_total[5m]) > 0` is normal on
+    /// mobile-heavy rooms; spike above 100/s may indicate a peer advertising
+    /// only bogon candidates (ICE failure scenario).
+    pub udp_bogon_dest_dropped_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -1038,6 +1056,27 @@ impl SfuMetrics {
         .context("sfu_bwe_hint_rate_limit_min_interval_ms")?);
         sfu_bwe_hint_rate_limit_min_interval_ms.set(interval_ms);
 
+        // ── bogon ICE destination filter ──────────────────────────────────────
+        let udp_bogon_dest_dropped_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "udp_bogon_dest_dropped_total",
+                "UDP transmits dropped before send_to because the destination is a bogon address \
+                 (RFC-1918 / loopback / link-local / multicast / other). \
+                 kind ∈ {rfc1918, loopback, link_local, multicast, other}. \
+                 Mobile CGNAT fix (2026-05-09): T-Mobile/Verizon phones advertise private IPs \
+                 as ICE candidates; send_to on those produces EDESTADDRREQ (OS error 89). \
+                 Alert: rate > 100/s sustained = peer advertising only bogon candidates.",
+            ),
+            &["kind"],
+        )
+        .context("udp_bogon_dest_dropped_total")?);
+        // Pre-touch all label values so alert rules see a baseline of 0 at startup.
+        for kind in ["rfc1918", "loopback", "link_local", "multicast", "other"] {
+            let _ = udp_bogon_dest_dropped_total
+                .with_label_values(&[kind])
+                .get();
+        }
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1104,6 +1143,7 @@ impl SfuMetrics {
             sfu_bwe_hint_throttled_total,
             sfu_bwe_hint_registry_mutex_poisoned_total,
             sfu_bwe_hint_rate_limit_min_interval_ms,
+            udp_bogon_dest_dropped_total,
         })
     }
 
