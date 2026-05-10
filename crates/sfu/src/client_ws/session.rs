@@ -47,6 +47,7 @@
 //!    drop-and-go path, we keep the WS open so future M4.A4 server→
 //!    client DC events can reuse the same socket.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -120,6 +121,27 @@ mod close_code {
     /// Server's inject channel into the registry is closed — the SFU is
     /// shutting down or the UDP loop has exited.
     pub const SERVER_GOING_AWAY: CloseCode = 1001;
+}
+
+/// Default minimum interval between accepted bwe-hint frames per peer (100 ms).
+///
+/// Overridable at runtime via `SFU_BWE_HINT_MIN_INTERVAL_MS`. The
+/// `sfu_bwe_hint_rate_limit_min_interval_ms` gauge is published at startup
+/// by `SfuMetrics::new()` so operators can confirm the active value.
+const HINT_MIN_INTERVAL_MS_DEFAULT: u64 = 100;
+
+/// Returns the configured bwe-hint rate-limit interval.
+///
+/// Reads `SFU_BWE_HINT_MIN_INTERVAL_MS` once per process start (called from
+/// within the WS session). Clamped to ≥1 ms to prevent a zero-interval
+/// effectively disabling the gate.
+fn hint_min_interval() -> Duration {
+    let ms = std::env::var("SFU_BWE_HINT_MIN_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(HINT_MIN_INTERVAL_MS_DEFAULT)
+        .max(1);
+    Duration::from_millis(ms)
 }
 
 /// RAII guard for the `client_ws_active_sessions` gauge and
@@ -227,6 +249,7 @@ pub struct PendingClient {
     skip(socket, inject_tx, metrics),
     fields(otel.kind = "server", room_id = %room_id, peer_id = peer_id)
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut socket: WebSocket,
     room_id: String,
@@ -235,6 +258,7 @@ pub async fn run(
     inject_tx: Sender<PendingClient>,
     metrics: Arc<SfuMetrics>,
     stats_interval_secs: u64,
+    hint_rate_registry: Arc<std::sync::Mutex<HashMap<u64, Instant>>>,
 ) -> anyhow::Result<()> {
     let mut guard = ActiveSessionGuard::new(metrics.clone());
     // 1. Read the first text frame, expect a JSON offer.
@@ -424,6 +448,7 @@ pub async fn run(
         peer_id,
         &mut guard,
         &metrics_ref,
+        hint_rate_registry,
     )
     .await;
 
@@ -554,11 +579,13 @@ async fn park_until_close_or_steal(
     peer_id: u64,
     guard: &mut ActiveSessionGuard,
     metrics: &Arc<SfuMetrics>,
+    hint_rate_registry: Arc<std::sync::Mutex<HashMap<u64, Instant>>>,
 ) -> bool {
-    // Phase 2c review fix (MAJOR 2): per-peer rate gate — at most 10 hints/s.
-    // `last_hint` tracks when the most recent valid hint was accepted.
-    let mut last_hint: Option<Instant> = None;
-    const HINT_MIN_INTERVAL: Duration = Duration::from_millis(100);
+    // Phase 2c round-3 (BLOCKER fix): per-peer rate gate moved from task-local
+    // `last_hint: Option<Instant>` to a shared registry keyed by peer_id.
+    // This prevents two concurrent tasks for the same peer (steal window, duplicate
+    // tab) from each independently accepting one hint — previously 2× the cap.
+    let hint_interval = hint_min_interval();
 
     loop {
         tokio::select! {
@@ -646,14 +673,26 @@ async fn park_until_close_or_steal(
                                     (Some(from), Some(_ts), Some(_bps)) => {
                                         let now = Instant::now();
                                         let peer_label = peer_id.to_string();
-                                        if last_hint.is_some_and(|t| now.duration_since(t) < HINT_MIN_INTERVAL) {
-                                            // Rate-limited: drop and count.
+                                        // Shared rate gate: check-and-update atomically
+                                        // under the registry lock so concurrent tasks for
+                                        // the same peer_id see a consistent clock.
+                                        let throttled = {
+                                            let mut map = hint_rate_registry.lock()
+                                                .unwrap_or_else(|p| p.into_inner());
+                                            let last = map.get(&peer_id).copied();
+                                            if last.is_some_and(|t| now.duration_since(t) < hint_interval) {
+                                                true
+                                            } else {
+                                                map.insert(peer_id, now);
+                                                false
+                                            }
+                                        };
+                                        if throttled {
                                             metrics
                                                 .sfu_bwe_hint_throttled_total
                                                 .with_label_values(&[&peer_label])
                                                 .inc();
                                         } else {
-                                            last_hint = Some(now);
                                             // MINOR 3: truncate `from` to 64 chars before logging.
                                             let from_safe: String = from.chars().take(64).collect();
                                             tracing::debug!(

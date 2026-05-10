@@ -251,6 +251,12 @@ impl Registry {
             .metrics
             .bandwidth_estimate_bps
             .remove_label_values(&[&peer_label]);
+        // MINOR (round-3): mirror reap_dead's client_delivered_media_count scrub
+        // so reconnect churn doesn't grow cardinality via the steal path.
+        let _ = self
+            .metrics
+            .client_delivered_media_count
+            .remove_label_values(&[&peer_label]);
         for rid_label in PACER_RID_LABELS {
             let _ = self
                 .metrics

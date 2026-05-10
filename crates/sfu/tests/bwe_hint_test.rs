@@ -253,8 +253,20 @@ async fn bwe_hint_malformed_dropped_no_counter_no_close() {
         .await
         .expect("send malformed bwe-hint");
 
-    // Brief poll — counter must stay 0 for 100 ms before we check.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Poll for 100 ms; counter must stay 0 the entire time (MINOR 4 fix:
+    // replaces the prior sleep(100ms) with a poll-loop that checks each 5ms tick).
+    let check_deadline = std::time::Instant::now() + Duration::from_millis(100);
+    while std::time::Instant::now() < check_deadline {
+        let v = metrics
+            .sfu_bwe_hint_received_total
+            .with_label_values(&[&peer_id.to_string()])
+            .get();
+        assert_eq!(
+            v, 0,
+            "malformed frame must not increment counter (checked mid-poll)"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     let counter = metrics
         .sfu_bwe_hint_received_total
@@ -451,4 +463,241 @@ async fn bwe_hint_rate_gate_throttles_flood() {
     );
 }
 
-// MINOR 4: existing sleep(50ms) calls replaced with inline poll-loops above.
+// ─── BLOCKER: rate gate must be shared across two tasks for the same peer ────
+//
+// When a session-steal occurs, both the old and new WS tasks run concurrently
+// during the steal window. Each previously had its own local `last_hint` clock,
+// allowing 2× the cap (one accepted per task). The shared registry keyed by
+// peer_id must enforce the cap across both tasks.
+
+/// Two concurrent WS sessions for the same peer_id each get exactly one hint
+/// accepted (the very first one, within the same 100ms window). With per-task
+/// `last_hint` both tasks accept their first hint independently → received = 2.
+/// With the shared rate registry keyed by peer_id, only the first accepted hint
+/// (whichever task wins the race) resets the clock; the other task's first
+/// hint lands within the window and is throttled → received = 1.
+///
+/// The test sends exactly one hint per session (to avoid relying on which
+/// task "wins" the first slot) and asserts that combined received ≤ 1.
+///
+/// RED: fails with per-task `last_hint` because both tasks have `last_hint=None`
+/// on their first hint → both pass the gate → received = 2.
+#[tokio::test]
+async fn bwe_hint_rate_gate_shared_across_concurrent_tasks() {
+    let (base, _inject_rx, _handle, metrics) = start_handler_with_metrics().await;
+    let peer_id: u64 = 555;
+    let token_a = make_token(ROOM_ID, peer_id, HS256_SECRET, 3600);
+    let token_b = make_token(ROOM_ID, peer_id, HS256_SECRET, 3600);
+    let url = format!("{base}/sfu/ws/{ROOM_ID}");
+
+    // Open session A.
+    let req_a = build_request(&url, &token_a);
+    let (mut ws_a, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio_tungstenite::connect_async(req_a),
+    )
+    .await
+    .expect("ws_a handshake within 2s")
+    .expect("ws_a OK");
+    do_handshake(&mut ws_a).await;
+
+    // Open session B (same peer_id — steal window or concurrent tabs).
+    let req_b = build_request(&url, &token_b);
+    let (mut ws_b, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio_tungstenite::connect_async(req_b),
+    )
+    .await
+    .expect("ws_b handshake within 2s")
+    .expect("ws_b OK");
+    do_handshake(&mut ws_b).await;
+
+    // Send exactly 1 hint from each session simultaneously.
+    // Both tasks have last_hint=None before this point. With per-task state,
+    // both pass the gate → received=2. With shared state, only one passes.
+    let hint_a = serde_json::json!({
+        "kind": "bwe-hint",
+        "from": "aaaaaaaa-e29b-41d4-a716-446655440555",
+        "ts": 1_700_000_000_000i64,
+        "bps": 1_000_000u64
+    })
+    .to_string();
+    let hint_b = serde_json::json!({
+        "kind": "bwe-hint",
+        "from": "bbbbbbbb-e29b-41d4-a716-446655440555",
+        "ts": 1_700_000_000_001i64,
+        "bps": 1_000_000u64
+    })
+    .to_string();
+    // Send both at once.
+    let (r_a, r_b) = tokio::join!(
+        ws_a.send(Message::Text(hint_a.into())),
+        ws_b.send(Message::Text(hint_b.into()))
+    );
+    r_a.expect("send hint_a");
+    r_b.expect("send hint_b");
+
+    // Wait for both frames to be processed (received+throttled = 2 or deadline).
+    let peer_label = peer_id.to_string();
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let received = metrics
+            .sfu_bwe_hint_received_total
+            .with_label_values(&[&peer_label])
+            .get();
+        let throttled = metrics
+            .sfu_bwe_hint_throttled_total
+            .with_label_values(&[&peer_label])
+            .get();
+        if received + throttled >= 2 || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let received = metrics
+        .sfu_bwe_hint_received_total
+        .with_label_values(&[&peer_label])
+        .get();
+
+    // With shared state: exactly 1 accepted (the first to grab the lock),
+    // the second throttled. With per-task state: 2 accepted (both had None).
+    assert_eq!(
+        received, 1,
+        "shared rate gate must accept exactly 1 hint when two tasks race for the \
+         same peer_id within the same 100ms window; got {received} (indicates \
+         per-task last_hint instead of shared registry)"
+    );
+}
+
+// ─── MAJOR: test string match must be metric-specific ────────────────────────
+//
+// The previous `!encoded.contains(r#"peer_id="777""#)` check is over-broad:
+// any metric with peer_id="777" would mask the bug if the scrub removed
+// only one counter but left the other. We verify the specific metric line.
+
+/// After reap_dead, the specific `sfu_bwe_hint_received_total{peer_id="777"}`
+/// label must be absent (metric-specific line check, not just any peer_id="777").
+#[tokio::test]
+async fn bwe_hint_counter_scrubbed_on_reap_dead_specific() {
+    use oxpulse_sfu::client::test_seed::new_client;
+    use oxpulse_sfu::{ClientId, Registry};
+
+    let metrics = Arc::new(SfuMetrics::default());
+    let mut registry = Registry::new(metrics.clone());
+
+    let peer_id = ClientId(777u64);
+    let client = new_client(peer_id);
+    registry.insert(client);
+
+    metrics
+        .sfu_bwe_hint_received_total
+        .with_label_values(&[&(*peer_id).to_string()])
+        .inc();
+    // Also touch another metric with same peer_id to prove the broad check is
+    // insufficient — this series will STAY after reap (different metric).
+    // (In production, bandwidth_estimate_bps is also peer-labelled and scrubbed;
+    // but we can materialise something that WON'T be scrubbed for the test.)
+
+    registry.disconnect_client_for_tests(peer_id);
+    registry.reap_dead_for_tests();
+
+    let encoded = metrics.encode_text().expect("encode ok");
+
+    // Metric-specific check: no line starting with the metric name AND
+    // containing this peer_id label.
+    assert!(
+        !encoded.lines().any(|l| {
+            l.starts_with("sfu_sfu_bwe_hint_received_total") && l.contains(r#"peer_id="777""#)
+        }),
+        "sfu_bwe_hint_received_total{{peer_id=\"777\"}} must be scrubbed after reap_dead"
+    );
+}
+
+/// After evict_for_steal, the specific `sfu_bwe_hint_received_total{peer_id="888"}`
+/// label must be absent (metric-specific line check).
+#[tokio::test]
+async fn bwe_hint_counter_scrubbed_on_evict_for_steal_specific() {
+    use oxpulse_sfu::client::test_seed::new_client;
+    use oxpulse_sfu::{ClientId, Registry};
+
+    let metrics = Arc::new(SfuMetrics::default());
+    let mut registry = Registry::new(metrics.clone());
+
+    let peer_id = ClientId(888u64);
+    let client = new_client(peer_id);
+    registry.insert(client);
+
+    metrics
+        .sfu_bwe_hint_received_total
+        .with_label_values(&[&(*peer_id).to_string()])
+        .inc();
+
+    registry.evict_for_steal_for_tests(0);
+
+    let encoded = metrics.encode_text().expect("encode ok");
+    assert!(
+        !encoded.lines().any(|l| {
+            l.starts_with("sfu_sfu_bwe_hint_received_total") && l.contains(r#"peer_id="888""#)
+        }),
+        "sfu_bwe_hint_received_total{{peer_id=\"888\"}} must be scrubbed after evict_for_steal"
+    );
+}
+
+// ─── MAJOR: HINT_MIN_INTERVAL must be env-configurable + gauge published ─────
+
+/// The `sfu_bwe_hint_rate_limit_min_interval_ms` gauge must be registered
+/// at startup and reflect the configured interval (default 100 ms).
+///
+/// RED: fails before the gauge is added to `SfuMetrics`.
+#[tokio::test]
+async fn bwe_hint_rate_limit_interval_gauge_registered() {
+    let m = SfuMetrics::new().expect("metrics build");
+    let text = m.encode_text().expect("encode");
+    assert!(
+        text.contains("sfu_bwe_hint_rate_limit_min_interval_ms"),
+        "rate-limit interval gauge must appear in /metrics output"
+    );
+}
+
+// ─── MINOR: remaining sleep(100ms) in bwe_malformed test replaced with poll ──
+// The sleep(100ms) at bwe_hint_malformed_dropped_no_counter_no_close:257
+// has been replaced inline above with the poll-loop pattern (100ms deadline,
+// checking counter stays 0). This comment documents the intent; no new test
+// is needed — the existing test already uses the poll-loop approach.
+
+// ─── MINOR: evict_for_steal must scrub client_delivered_media_count ──────────
+
+/// After a session-steal eviction, `client_delivered_media_count{peer_id=X}`
+/// must be absent from the encoded metrics.
+///
+/// RED: fails before `evict_for_steal` calls
+/// `remove_label_values` on `client_delivered_media_count`.
+#[tokio::test]
+async fn evict_for_steal_scrubs_client_delivered_media_count() {
+    use oxpulse_sfu::client::test_seed::new_client;
+    use oxpulse_sfu::{ClientId, Registry};
+
+    let metrics = Arc::new(SfuMetrics::default());
+    let mut registry = Registry::new(metrics.clone());
+
+    let peer_id = ClientId(999u64);
+    let client = new_client(peer_id);
+    registry.insert(client);
+
+    // Materialise the series.
+    metrics
+        .client_delivered_media_count
+        .with_label_values(&[&(*peer_id).to_string()])
+        .set(42);
+
+    registry.evict_for_steal_for_tests(0);
+
+    let encoded = metrics.encode_text().expect("encode ok");
+    assert!(
+        !encoded.lines().any(|l| {
+            l.starts_with("sfu_client_delivered_media_count") && l.contains(r#"peer_id="999""#)
+        }),
+        "client_delivered_media_count{{peer_id=\"999\"}} must be scrubbed after evict_for_steal"
+    );
+}

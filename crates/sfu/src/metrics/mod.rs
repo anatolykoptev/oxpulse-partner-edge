@@ -359,6 +359,14 @@ pub struct SfuMetrics {
     /// rate gate (10 hints/s cap). Labels: `peer_id`.
     /// Rising rate indicates a misbehaving or malicious client.
     pub sfu_bwe_hint_throttled_total: IntCounterVec,
+
+    /// Operator-visible gauge showing the configured minimum interval between
+    /// accepted bwe-hint frames per peer (milliseconds).
+    ///
+    /// Set once at startup from `SFU_BWE_HINT_MIN_INTERVAL_MS` (default 100).
+    /// Alerts and dashboards can compare this value against the observed
+    /// throttle rate to detect misconfiguration or a default that's too tight.
+    pub sfu_bwe_hint_rate_limit_min_interval_ms: IntGauge,
 }
 
 impl SfuMetrics {
@@ -996,6 +1004,22 @@ impl SfuMetrics {
         )
         .context("sfu_bwe_hint_throttled_total")?);
 
+        // Phase 2c round-3: operator-visible interval gauge. Published once at startup
+        // from SFU_BWE_HINT_MIN_INTERVAL_MS (default 100 ms). Lets dashboards compare
+        // the configured rate cap against the observed throttle rate.
+        let interval_ms: i64 = std::env::var("SFU_BWE_HINT_MIN_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(100);
+        let sfu_bwe_hint_rate_limit_min_interval_ms = reg!(IntGauge::with_opts(Opts::new(
+            "sfu_bwe_hint_rate_limit_min_interval_ms",
+            "Configured minimum interval between accepted bwe-hint frames per peer \
+             (milliseconds). Set from SFU_BWE_HINT_MIN_INTERVAL_MS (default 100). \
+             Compare against sfu_bwe_hint_throttled_total to detect misconfiguration.",
+        ))
+        .context("sfu_bwe_hint_rate_limit_min_interval_ms")?);
+        sfu_bwe_hint_rate_limit_min_interval_ms.set(interval_ms);
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1060,6 +1084,7 @@ impl SfuMetrics {
             sfu_solo_room_kicked_total,
             sfu_bwe_hint_received_total,
             sfu_bwe_hint_throttled_total,
+            sfu_bwe_hint_rate_limit_min_interval_ms,
         })
     }
 
