@@ -251,6 +251,12 @@ impl Registry {
             .metrics
             .bandwidth_estimate_bps
             .remove_label_values(&[&peer_label]);
+        // MINOR (round-3): mirror reap_dead's client_delivered_media_count scrub
+        // so reconnect churn doesn't grow cardinality via the steal path.
+        let _ = self
+            .metrics
+            .client_delivered_media_count
+            .remove_label_values(&[&peer_label]);
         for rid_label in PACER_RID_LABELS {
             let _ = self
                 .metrics
@@ -286,6 +292,16 @@ impl Registry {
         let _ = self
             .metrics
             .voice_relay_rx_bytes_total
+            .remove_label_values(&[&peer_label]);
+        // Phase 2c review fix (MAJOR 1): mirror reap_dead scrub for bwe-hint
+        // counters on session-steal eviction path.
+        let _ = self
+            .metrics
+            .sfu_bwe_hint_received_total
+            .remove_label_values(&[&peer_label]);
+        let _ = self
+            .metrics
+            .sfu_bwe_hint_throttled_total
             .remove_label_values(&[&peer_label]);
         // MAJOR-2: mirror the reap_dead gauge dec for the session-steal path.
         if old.voice_data_cid.is_some() {

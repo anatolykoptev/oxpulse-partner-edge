@@ -339,6 +339,46 @@ pub struct SfuMetrics {
     /// Alert: `rate(sfu_solo_room_kicked_total[5m]) > 0` → lone-peer sessions
     /// are being cleaned up (informational) or possibly thrashing (if high).
     pub sfu_solo_room_kicked_total: IntCounter,
+
+    // ── Phase 2c: client-to-SFU bandwidth hint ───────────────────────────────
+    /// `{"kind":"bwe-hint","from":"<peer_uuid>","ts":<unix_ms>,"bps":<u64>}`
+    /// frames received from browser clients over the WS control channel.
+    ///
+    /// Labels: `peer_id` — server-side numeric peer id (JWT `sub` claim).
+    /// Cardinality is bounded to active peers; series materialise on first
+    /// reception and are scrubbed via `reap_dead` / `evict_for_steal` on
+    /// disconnect.
+    ///
+    /// v1 is observability-only: log INFO + bump counter. No SVC layer
+    /// switching. Rising rate confirms client-side hint emission is wired;
+    /// zero rate after feature flag enabled = hint not being sent.
+    pub sfu_bwe_hint_received_total: IntCounterVec,
+
+    // ── Phase 2c review fix: per-peer rate-gate throttle counter ────────────
+    /// Counts bwe-hint frames that were silently dropped by the per-peer
+    /// rate gate (10 hints/s cap). Labels: `peer_id`.
+    /// Rising rate indicates a misbehaving or malicious client.
+    pub sfu_bwe_hint_throttled_total: IntCounterVec,
+
+    /// Process-level counter for mutex-poison recovery in the bwe-hint subsystem.
+    ///
+    /// Incremented whenever `scrub_hint_registry` or `hint_min_interval_ms`
+    /// recovers from a poisoned mutex (no labels — per-process counter). A
+    /// value > 0 indicates a thread panicked while holding a bwe-hint internal
+    /// lock; data integrity was preserved via poison recovery but the event is
+    /// worth alerting on in production.
+    ///
+    /// Alert: `sfu_bwe_hint_registry_mutex_poisoned_total > 0` → investigate
+    /// thread panics in the bwe-hint rate-gate path.
+    pub sfu_bwe_hint_registry_mutex_poisoned_total: IntCounter,
+
+    /// Operator-visible gauge showing the configured minimum interval between
+    /// accepted bwe-hint frames per peer (milliseconds).
+    ///
+    /// Set once at startup from `SFU_BWE_HINT_MIN_INTERVAL_MS` (default 100).
+    /// Alerts and dashboards can compare this value against the observed
+    /// throttle rate to detect misconfiguration or a default that's too tight.
+    pub sfu_bwe_hint_rate_limit_min_interval_ms: IntGauge,
 }
 
 impl SfuMetrics {
@@ -950,6 +990,54 @@ impl SfuMetrics {
         ))
         .context("sfu_solo_room_kicked_total")?);
 
+        // ── Phase 2c: client-to-SFU bandwidth hint ───────────────────────────
+        let sfu_bwe_hint_received_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_bwe_hint_received_total",
+                "bwe-hint frames received from browser clients over the WS control channel \
+                 (Phase 2c). Label: peer_id (server-side numeric id, JWT sub claim). \
+                 Cardinality bounded to active peers; scrubbed on disconnect. \
+                 v1 observability-only — no SVC layer switching.",
+            ),
+            &["peer_id"],
+        )
+        .context("sfu_bwe_hint_received_total")?);
+        // No pre-touch: peer_id labels are dynamic (one per active client).
+        // Series materialise on first reception, mirroring client_delivered_media_count.
+
+        let sfu_bwe_hint_throttled_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_bwe_hint_throttled_total",
+                "bwe-hint frames silently dropped by the per-peer rate gate \
+                 (10 hints/s cap). Label: peer_id. Rising rate = misbehaving client. \
+                 Scrubbed on disconnect alongside sfu_bwe_hint_received_total.",
+            ),
+            &["peer_id"],
+        )
+        .context("sfu_bwe_hint_throttled_total")?);
+
+        let sfu_bwe_hint_registry_mutex_poisoned_total = reg!(IntCounter::with_opts(Opts::new(
+            "sfu_bwe_hint_registry_mutex_poisoned_total",
+            "Process-level count of mutex-poison recovery events in the bwe-hint subsystem \
+             (scrub_hint_registry + hint_min_interval_ms override mutex). \
+             A value > 0 means a thread panicked while holding a bwe-hint internal lock; \
+             poison recovery preserved integrity. Alert on any non-zero value.",
+        ))
+        .context("sfu_bwe_hint_registry_mutex_poisoned_total")?);
+
+        // Phase 2c round-3: operator-visible interval gauge. Published once at startup
+        // via the shared `bwe_hint::hint_min_interval_ms()` so the gauge and the
+        // session rate gate always read the same value (MAJOR divergence fix).
+        let interval_ms: i64 = crate::bwe_hint::hint_min_interval_ms() as i64;
+        let sfu_bwe_hint_rate_limit_min_interval_ms = reg!(IntGauge::with_opts(Opts::new(
+            "sfu_bwe_hint_rate_limit_min_interval_ms",
+            "Configured minimum interval between accepted bwe-hint frames per peer \
+             (milliseconds). Set from SFU_BWE_HINT_MIN_INTERVAL_MS (default 100). \
+             Compare against sfu_bwe_hint_throttled_total to detect misconfiguration.",
+        ))
+        .context("sfu_bwe_hint_rate_limit_min_interval_ms")?);
+        sfu_bwe_hint_rate_limit_min_interval_ms.set(interval_ms);
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1012,6 +1100,10 @@ impl SfuMetrics {
 
             sfu_writer_write_errors_total,
             sfu_solo_room_kicked_total,
+            sfu_bwe_hint_received_total,
+            sfu_bwe_hint_throttled_total,
+            sfu_bwe_hint_registry_mutex_poisoned_total,
+            sfu_bwe_hint_rate_limit_min_interval_ms,
         })
     }
 
