@@ -183,6 +183,17 @@ impl Registry {
                         .with_label_values(&["ctrl"])
                         .dec();
                 }
+                // reactions gauge dec — only when the gauge was actually
+                // incremented (Event::ChannelOpen fired). Using the
+                // `reactions_dc_opened` flag (not `reactions_dc_cid.is_some()`)
+                // prevents double-dec and guards against v0.12.22 clients that
+                // called `with_reactions_dc` but never completed SCTP DCEP.
+                if c.reactions_dc_opened {
+                    metrics
+                        .chat_relay_active_channels
+                        .with_label_values(&["reactions"])
+                        .dec();
+                }
             }
             alive
         });
