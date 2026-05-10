@@ -1,6 +1,10 @@
 //! Data-channel ingestion for the SFU-side subscriber path.
 //!
 //! Channels handled:
+//!   * DC id:1, label `sframe-keys` (negotiated, ordered, reliable) —
+//!     KX fix. SFrame key-exchange identity frames. Opaque payloads are
+//!     wrapped in `Propagated::KeysData(client_id, bytes)` and fanned out
+//!     to every other peer so `peerIndexMap` is populated on all receivers.
 //!   * DC id:2, label `sfu-budget` (negotiated, unordered) — subscriber
 //!     control messages. Wire format parsed without serde; malformed
 //!     messages are logged at WARN and dropped.
@@ -39,6 +43,13 @@ const CHAT_CTRL_CHANNEL_LABEL: &str = "chat-ctrl";
 
 /// Label of the pre-negotiated Phase 8 T10 voice DC.
 const VOICE_CHANNEL_LABEL: &str = "voice";
+
+/// Label of the pre-negotiated KX sframe-keys DC (id:1, ordered, reliable).
+const SFRAME_KEYS_CHANNEL_LABEL: &str = "sframe-keys";
+
+/// Maximum accepted sframe-keys payload size in bytes. SFrame identity
+/// frames are small JSON objects; 64 KB is generous defence-in-depth.
+const SFRAME_KEYS_FRAME_MAX_BYTES: usize = 64 * 1024;
 
 /// Maximum accepted voice payload size in bytes.
 /// Mirrors [`super::voice::VOICE_FRAME_MAX_BYTES`] — replicated as a private
@@ -193,6 +204,20 @@ pub(super) fn handle_channel_data(
             return Propagated::Noop;
         }
         return Propagated::VoiceData(client_id, data.to_vec());
+    }
+
+    // KX fix: sframe-keys DC (id:1, ordered, reliable). Opaque payload —
+    // SFU does not parse the identity JSON; relay cross-peer as-is.
+    if label == SFRAME_KEYS_CHANNEL_LABEL {
+        if data.len() > SFRAME_KEYS_FRAME_MAX_BYTES {
+            tracing::warn!(
+                client = *client_id,
+                len = data.len(),
+                "sframe-keys DC: frame exceeds size cap, dropping"
+            );
+            return Propagated::Noop;
+        }
+        return Propagated::KeysData(client_id, data.to_vec());
     }
 
     if label != BUDGET_CHANNEL_LABEL {
@@ -541,6 +566,38 @@ mod tests {
             Some(pub_pem2.as_str()),
         );
         assert!(matches!(result, Propagated::Noop));
+    }
+
+    // ── KX sframe-keys tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn sframe_keys_label_emits_keys_data_propagated() {
+        let payload = b"identity-payload-bytes";
+        let result = handle_channel_data(ClientId(80), "sframe-keys", payload, None, None);
+        match result {
+            Propagated::KeysData(cid, bytes) => {
+                assert_eq!(*cid, 80);
+                assert_eq!(bytes, payload);
+            }
+            other => panic!("expected KeysData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sframe_keys_oversize_dropped() {
+        let big = vec![0u8; super::SFRAME_KEYS_FRAME_MAX_BYTES + 1];
+        let result = handle_channel_data(ClientId(81), "sframe-keys", &big, None, None);
+        assert!(matches!(result, Propagated::Noop));
+    }
+
+    #[test]
+    fn sframe_keys_carries_binary_unmodified() {
+        let bin: Vec<u8> = (0u8..=255u8).collect();
+        let result = handle_channel_data(ClientId(82), "sframe-keys", &bin, None, None);
+        match result {
+            Propagated::KeysData(_, bytes) => assert_eq!(bytes, bin),
+            other => panic!("expected KeysData passthrough, got {other:?}"),
+        }
     }
 
     // ── Phase 2b chat-data / chat-ctrl tests ────────────────────────────────

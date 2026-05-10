@@ -63,6 +63,7 @@ impl Client {
             #[cfg(any(test, feature = "test-utils"))]
             buffered_amount_override: None,
             active_speaker_cid,
+            keys_dc_cid: None,
             chat_data_cid: None,
             chat_ctrl_cid: None,
             voice_data_cid: None,
@@ -187,6 +188,29 @@ impl Client {
         // v0.12.22 browsers that never complete SCTP DCEP don't inflate the gauge
         // with phantom entries. The `reactions_dc_opened` bool tracks whether the
         // gauge was actually incremented for safe dec in reap/steal.
+        self
+    }
+
+    /// KX fix: open the pre-negotiated `sframe-keys` DC (id:1, ordered,
+    /// reliable) so this client participates in SFrame key-exchange fanout.
+    ///
+    /// The browser creates the symmetric DC with
+    /// `{ negotiated: true, id: 1, label: "sframe-keys" }` (see
+    /// `web/src/lib/webrtc-keys.ts`). Without the SFU opening its side,
+    /// inbound `identity` frames are silently dropped at dc.rs:198 →
+    /// `peerIndexMap` stays empty on all receivers → every encrypted frame
+    /// fails to decrypt. Browser construction sites chain this after
+    /// `with_reactions_dc()`; relay clients skip it (no KX on cascade edges).
+    pub fn with_keys_dc(mut self) -> Self {
+        let keys_dc_cid = self.rtc.direct_api().create_data_channel(ChannelConfig {
+            label: "sframe-keys".to_string(),
+            ordered: true,
+            reliability: Reliability::Reliable,
+            // id MUST be 1 — matches browser `{ negotiated: true, id: 1 }`.
+            negotiated: Some(1),
+            protocol: String::new(),
+        });
+        self.keys_dc_cid = Some(keys_dc_cid);
         self
     }
 

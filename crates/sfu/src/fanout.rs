@@ -87,6 +87,8 @@ pub(crate) fn fanout(p: &Propagated, clients: &mut [Client]) {
             // Phase 8 T10: voice DC relay. Same skip-self + dc-not-open
             // guard pattern as chat-data / chat-ctrl above.
             Propagated::VoiceData(_, payload) => client.handle_voice_data_out(origin, payload),
+            // KX fix: sframe-keys relay. Skip-self guard mirrors chat-data.
+            Propagated::KeysData(_, payload) => client.handle_keys_data_out(origin, payload),
             Propagated::Noop
             | Propagated::Timeout(_)
             | Propagated::ActiveSpeakerChanged { .. }

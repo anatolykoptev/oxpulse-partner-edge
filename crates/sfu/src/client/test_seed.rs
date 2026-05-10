@@ -63,7 +63,10 @@ pub fn new_client(id: ClientId) -> Client {
     // `Client::new(...).with_chat_dcs()`. Tests covering relay-only
     // scenarios still go through `Client::new_outbound_relay` and never
     // hit this seam, so the conflicting SCTP id 5 case is preserved.
-    let mut c = Client::new(rtc, metrics).with_chat_dcs().with_voice_dc(200);
+    let mut c = Client::new(rtc, metrics)
+        .with_keys_dc()
+        .with_chat_dcs()
+        .with_voice_dc(200);
     c.id = id;
     c
 }
@@ -77,6 +80,7 @@ pub fn new_client_with_reactions(id: ClientId) -> Client {
     let rtc = Rtc::builder().build(Instant::now());
     let metrics = Arc::new(SfuMetrics::default());
     let mut c = Client::new(rtc, metrics)
+        .with_keys_dc()
         .with_chat_dcs()
         .with_voice_dc(200)
         .with_reactions_dc();
