@@ -12,6 +12,7 @@ all-features = false
 # Advisories — zero tolerance
 # ---------------------------------------------------------------------------
 [advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
 # Deny any crate with an active security advisory.
 version = 2
 # Deny yanked crates (published versions explicitly retracted by the author).
