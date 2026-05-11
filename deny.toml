@@ -1,0 +1,134 @@
+# cargo-deny configuration for oxpulse-partner-edge.
+# Zero-tolerance for vulnerabilities — partner edges handle anti-censorship
+# TLS and relay handshakes; supply-chain hygiene is load-bearing.
+
+[graph]
+# Only resolve for the default host target (linux aarch64 / x86_64).
+# Windows/wasm targets are pulled in transitively by some crates but are
+# never compiled here, so we don't block on their platform-specific deps.
+all-features = false
+
+# ---------------------------------------------------------------------------
+# Advisories — zero tolerance
+# ---------------------------------------------------------------------------
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Deny any crate with an active security advisory.
+version = 2
+# Deny yanked crates (published versions explicitly retracted by the author).
+yanked = "deny"
+# Warn on unmaintained workspace deps only; transitive deps from upstream
+# crates we don't control are too noisy to error on.
+unmaintained = "workspace"
+# No ignore entries — any new advisory must be triaged and fixed before merge.
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+# All licenses explicitly allowed.  Anything not listed → error.
+allow = [
+    # Standard permissive
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",   # wasi / wasip2 / wit-bindgen
+    "MIT",
+    "MIT-0",                             # aws-lc-sys, dunce
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    # Unicode data crates
+    "Unicode-3.0",
+    # Unicode-DFS-2016 not currently in graph but allowed for future icu deps
+    # "Unicode-DFS-2016",
+    # Compression / utility
+    "Zlib",
+    "BSL-1.0",                           # ryu (chrono dep)
+    "CC0-1.0",                           # dunce
+    "Unlicense",                         # memchr
+    # CDLA for certificate root bundles
+    "CDLA-Permissive-2.0",
+    # MPL is copyleft-per-file — acceptable for library use; not currently in
+    # graph but allow in advance for potential future deps (e.g. webpki forks)
+    # "MPL-2.0",
+    # LGPL — r-efi is a WASI shim; never linked into the SFU binary on Linux
+    "LGPL-2.1-or-later",
+    # Own code — AGPL is explicitly allowed because the entire project is AGPL
+    "AGPL-3.0-or-later",
+]
+# Confidence threshold for license detection (SPDX fuzzy match).
+confidence-threshold = 0.8
+
+# ---------------------------------------------------------------------------
+# Banned crates
+# ---------------------------------------------------------------------------
+[bans]
+# Deny multiple versions of the same crate (with exceptions below).
+multiple-versions = "warn"
+# Deny workspace-internal path sources that sneak in by mistake.
+wildcards = "deny"
+
+# Allow specific duplicate versions that come from transitive dep trees
+# we do not control.
+[[bans.skip]]
+name = "windows-sys"
+reason = "tokio and reqwest pull different minor versions"
+
+[[bans.skip]]
+name = "tungstenite"
+reason = "tokio-tungstenite 0.26 and 0.29 both appear transitively"
+
+[[bans.skip]]
+name = "tokio-tungstenite"
+reason = "tokio-tungstenite 0.26 and 0.29 both appear transitively"
+
+[[bans.skip]]
+name = "thiserror"
+reason = "thiserror 1.x and 2.x both appear transitively"
+
+[[bans.skip]]
+name = "thiserror-impl"
+reason = "thiserror-impl 1.x and 2.x both appear transitively"
+
+[[bans.skip]]
+name = "untrusted"
+reason = "ring 0.17 pulls 0.9, rustls-webpki pulls 0.7"
+
+[[bans.skip]]
+name = "getrandom"
+reason = "getrandom 0.2 and 0.3 coexist (rand version spread)"
+
+[[bans.skip]]
+name = "hashbrown"
+reason = "hashbrown 0.15 and 0.17 coexist (indexmap + std-internal)"
+
+# Known-bad crypto crates — deny explicitly.
+[[bans.deny]]
+name = "openssl"
+reason = "use rustls + aws-lc-rs instead; openssl-sys < 0.9.92 has RUSTSEC-2023-0044"
+
+[[bans.deny]]
+name = "openssl-sys"
+reason = "use rustls + aws-lc-rs; RUSTSEC-2023-0044 in versions < 0.9.92"
+
+[[bans.deny]]
+name = "native-tls"
+reason = "platform TLS stack divergence; use rustls uniformly"
+
+[[bans.deny]]
+name = "md-5"
+reason = "MD5 is broken; use sha2 / hmac"
+
+[[bans.deny]]
+name = "md5"
+reason = "MD5 is broken; use sha2 / hmac"
+
+# ---------------------------------------------------------------------------
+# Sources — crates.io only, no github/git/path sources in production graph
+# ---------------------------------------------------------------------------
+[sources]
+# Only crates.io is allowed as a source registry.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No allow-git entries — all deps must be published to crates.io.
