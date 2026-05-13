@@ -42,7 +42,12 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "/xh",
-          "mode": "stream-one",
+          "mode": "packet-up",
+          "xmux": {
+            "maxConcurrency": 1,
+            "cMaxReuseTimes": 64,
+            "cMaxLifetimeMs": 15000
+          },
           "extra": {
             "xPaddingBytes": "100-1000"
           }
