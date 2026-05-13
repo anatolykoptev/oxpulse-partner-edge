@@ -20,12 +20,13 @@
 #   5. Else: no-op for Reality rotation (cheap — daily run, ~200B response)
 set -euo pipefail
 
-PREFIX_ETC=/etc/oxpulse-partner-edge
-PREFIX_LIB=/var/lib/oxpulse-partner-edge
+PREFIX_ETC="${PARTNER_EDGE_PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+PREFIX_LIB="${PARTNER_EDGE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
 NODE_CFG="$PREFIX_ETC/node-config.json"
 VERSION_FILE="$PREFIX_LIB/keys-version"
 CHANNELS_VERSION_FILE="$PREFIX_LIB/channels-version"
 SFU_KEYS_ENV="$PREFIX_LIB/sfu-keys.env"
+TEXTFILE_DIR="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
 LOG_FILE="${LOG_FILE:-/var/log/oxpulse-partner-edge-refresh.log}"
 BACKEND_URL="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
 BACKEND_URL="${BACKEND_URL%/}"
@@ -33,6 +34,17 @@ BACKEND_URL="${BACKEND_URL%/}"
 ts()   { date -Iseconds; }
 log()  { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG_FILE"; }
 die()  { log "ERR $*"; exit 1; }
+# Append or create a Prometheus textfile metric (node_exporter textfile collector).
+# Idempotent: overwrites the file on every run so stale gauges do not accumulate.
+# Skips silently when TEXTFILE_DIR is unwritable or absent (non-fatal).
+emit_metric() {
+    local name="$1" labels="$2" value="$3"
+    [[ -d "$TEXTFILE_DIR" ]] || mkdir -p "$TEXTFILE_DIR" 2>/dev/null || return 0
+    local prom_file="$TEXTFILE_DIR/partner_edge.prom"
+    # Append metric line; node_exporter accumulates all lines per scrape.
+    printf '# TYPE %s counter\n%s{%s} %s\n' \
+        "$name" "$name" "$labels" "$value" >> "$prom_file" 2>/dev/null || true
+}
 
 # OS-aware install hint: returns the appropriate install command for the host PM.
 suggest_install() {
@@ -63,32 +75,53 @@ command -v curl >/dev/null 2>&1 \
 NODE_ID=$(jq -r '.node_id // .partner_id // empty' "$NODE_CFG")
 [[ -n "$NODE_ID" ]] || die "node_id not found in $NODE_CFG"
 
-# Fetch fresh keys
+# Fetch fresh keys — non-fatal. DNS or network failure must not suppress
+# the heartbeat POST below (observability liveness must survive key-rotation
+# transient failures). Production incident 2026-05-13: all 3 partner edges
+# fired PartnerEdgeStaleHeartbeat >24h because `|| die` here aborted the
+# script before heartbeat was reached on every DNS-failing daily run.
+KEYS_OK=1
 RESP=$(curl -sS --max-time 10 -fL "$BACKEND_URL/api/partner/keys" 2>&1) \
-    || die "fetch keys failed: $RESP"
+    || { log "WARN fetch keys failed (will retry tomorrow): $RESP"; KEYS_OK=0; }
 
-NEW_VERSION=$(printf '%s' "$RESP" | jq -r '.version' 2>/dev/null) \
-    || die "parse version failed: $RESP"
-[[ -n "$NEW_VERSION" && "$NEW_VERSION" != "null" ]] \
-    || die "empty version in response: $RESP"
+if [[ "$KEYS_OK" -eq 1 ]]; then
+    NEW_VERSION=$(printf '%s' "$RESP" | jq -r '.version' 2>/dev/null) \
+        || { log "WARN parse version failed: $RESP"; KEYS_OK=0; }
+fi
+
+if [[ "$KEYS_OK" -eq 1 ]]; then
+    [[ -n "$NEW_VERSION" && "$NEW_VERSION" != "null" ]] \
+        || { log "WARN empty version in response: $RESP"; KEYS_OK=0; }
+fi
+
+if [[ "$KEYS_OK" -eq 0 ]]; then
+    emit_metric "partner_edge_keys_fetch_failure_total" \
+        "partner_id=\"${NODE_ID}\"" "1"
+    log "WARN keys fetch failed — skipping rotation, proceeding to heartbeat"
+fi
 
 CURRENT_VERSION=$(cat "$VERSION_FILE" 2>/dev/null || echo "none")
 
-NEW_CHANNELS_VERSION=$(printf '%s' "$RESP" | jq -r '.channels_version // empty' 2>/dev/null || true)
+NEW_CHANNELS_VERSION=""
 CURRENT_CHANNELS_VERSION=$(cat "$CHANNELS_VERSION_FILE" 2>/dev/null || echo "none")
+if [[ "$KEYS_OK" -eq 1 ]]; then
+    NEW_CHANNELS_VERSION=$(printf '%s' "$RESP" | jq -r '.channels_version // empty' 2>/dev/null || true)
+fi
 
 # Phase 2: Extract Ed25519 SFU signing public key on EVERY run.
 # Written before the early-exit so the SFU container always has the current
 # key even when Reality hasn't rotated. Ed25519 pubkeys are single-line
 # base64 (~44 chars) — no heredoc needed.
-SFU_SIGNING_PUBKEY=$(printf '%s' "$RESP" | jq -r '.sfu_signing_public_key // empty')
-if [[ -n "$SFU_SIGNING_PUBKEY" ]]; then
-    install -d -m 0700 "$PREFIX_LIB"
-    printf 'SFU_SIGNING_PUBLIC_KEY=%s\n' "$SFU_SIGNING_PUBKEY" > "$SFU_KEYS_ENV"
-    chmod 0600 "$SFU_KEYS_ENV"
-    log "sfu_signing_public_key extracted and saved to $SFU_KEYS_ENV"
-else
-    log "WARNING: sfu_signing_public_key not in /api/partner/keys response (signaling may need updating)"
+if [[ "$KEYS_OK" -eq 1 ]]; then
+    SFU_SIGNING_PUBKEY=$(printf '%s' "$RESP" | jq -r '.sfu_signing_public_key // empty')
+    if [[ -n "$SFU_SIGNING_PUBKEY" ]]; then
+        install -d -m 0700 "$PREFIX_LIB"
+        printf 'SFU_SIGNING_PUBLIC_KEY=%s\n' "$SFU_SIGNING_PUBKEY" > "$SFU_KEYS_ENV"
+        chmod 0600 "$SFU_KEYS_ENV"
+        log "sfu_signing_public_key extracted and saved to $SFU_KEYS_ENV"
+    else
+        log "WARNING: sfu_signing_public_key not in /api/partner/keys response (signaling may need updating)"
+    fi
 fi
 
 # Heartbeat — обновляет partner_nodes.last_seen_at. Без этого вызова
@@ -106,6 +139,8 @@ HB_CODE=$(printf '%s' "$HB_RESP" | tail -n1)
 HB_BODY=$(printf '%s' "$HB_RESP" | sed '$d')
 if [[ "$HB_CODE" != "200" ]]; then
     log "heartbeat failed: http=$HB_CODE body=$HB_BODY"
+    emit_metric "partner_edge_heartbeat_failure_total" \
+        "partner_id=\"${NODE_ID}\"" "1"
     # Non-fatal: heartbeat помогает observability, но не критичен
     # для функциональности ноды. Продолжаем refresh.
 else
@@ -113,8 +148,9 @@ else
 fi
 
 # channels_version check — independent of Reality key rotation.
+# Skip when keys fetch failed (NEW_CHANNELS_VERSION will be empty).
 # Re-renders all channel configs when operator updates channel settings.
-if [[ -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" != "none" && \
+if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" != "none" && \
       "$NEW_CHANNELS_VERSION" != "$CURRENT_CHANNELS_VERSION" ]]; then
     log "channels_version changed: $CURRENT_CHANNELS_VERSION → $NEW_CHANNELS_VERSION"
     _lib="/usr/local/sbin/channel-render-lib.sh"
@@ -132,6 +168,11 @@ if [[ -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" != "none" && \
             log "WARNING: re_render_xray failed — channels_version NOT updated (will retry tomorrow)"
         fi
     fi
+fi
+
+if [[ "$KEYS_OK" -eq 0 ]]; then
+    log "keys fetch failed — skipping rotation check, exiting 0"
+    exit 0
 fi
 
 if [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
