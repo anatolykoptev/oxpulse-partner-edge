@@ -92,11 +92,6 @@ impl Client {
             pacer: oxpulse_sfu_kit::SubscriberPacer::with_config(
                 crate::pacer::oxpulse_partner_edge_pacer_config(),
             ),
-            // Per-subscriber GoogCC v2 estimator. Replaces the registry-level
-            // shared `googcc` field that applied one room-wide estimate to every
-            // subscriber. Each client owns its own instance so congestion on one
-            // downlink does not affect layer selection for peers on healthy links.
-            googcc: oxpulse_sfu_kit::bwe::GoogCcEstimator::new(),
         }
     }
 

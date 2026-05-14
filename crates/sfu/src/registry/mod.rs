@@ -187,6 +187,12 @@ impl Registry {
         // (Post-mortem 2026-05-06: previously hardcoded at init.)
         self.metrics.active_rooms.set(1);
         self.clients.push(client);
+        // Enable GoogCC v2 in BandwidthEstimator for this subscriber so
+        // combined_bps() applies the GoogCC ceiling automatically via
+        // estimate_bps(). Called after push so the client's ClientId is
+        // stable. CAST INVARIANT: same u64-backed ClientId as in reap_dead.
+        self.bandwidth
+            .enable_googcc_for_subscriber(oxpulse_sfu_kit::propagate::ClientId(peer_id));
         // Update solo_since:
         // * 1 client after insert (first joiner) → start solo clock.
         // * ≥2 clients after insert → clear solo clock (second+ joiner joined).

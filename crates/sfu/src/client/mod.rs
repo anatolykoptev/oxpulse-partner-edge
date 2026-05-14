@@ -258,21 +258,6 @@ pub struct Client {
     /// SubscriberPacer instance so lifecycle (drop-on-disconnect) is
     /// automatic and the registry needs no separate cleanup path.
     pub(crate) pacer: oxpulse_sfu_kit::SubscriberPacer,
-    /// Per-subscriber GoogCC v2 estimator (Phase B kit migration).
-    ///
-    /// Replaces the registry-level `Registry::googcc` field that applied a
-    /// single room-wide GCC estimate to every subscriber — incorrect because
-    /// congestion on one downlink must not affect other subscribers.
-    ///
-    /// Fed from incoming video `MediaData` arrival timing in
-    /// `Registry::update_pacer_layers`. Applied as an additional conservative
-    /// ceiling in `update_pacer_layers` (never upgrades beyond Pacer's choice).
-    ///
-    /// A kit-level `BandwidthEstimator::enable_googcc_for_subscriber` API is
-    /// pending (tracked in anatolykoptev/oxpulse-sfu-kit issue #TBD). Once that
-    /// ships, this field moves into `BandwidthEstimator::PerSubscriber` and the
-    /// per-client field can be removed.
-    pub(crate) googcc: oxpulse_sfu_kit::bwe::GoogCcEstimator,
 }
 
 impl Client {

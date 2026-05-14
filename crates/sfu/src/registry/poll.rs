@@ -94,13 +94,16 @@ impl Registry {
             }
         }
         // Feed per-subscriber GoogCC estimators with the latest video timing.
-        // Per-subscriber design: each Client.googcc is independent so congestion
-        // on one downlink does not affect layer selection for other subscribers.
-        // Replaces the previous registry-level shared `googcc` field (reviewer
-        // finding on PR #116).
+        // GoogCC now lives in BandwidthEstimator::PerSubscriber (kit v0.11.4).
+        // estimate_bps() applies it as a ceiling via combined_bps() automatically.
         if let Some((arrival_ms, send_ms)) = last_video_timing {
-            for client in self.clients.iter_mut() {
-                client.googcc.on_receive(arrival_ms, send_ms, 0.0);
+            for client in self.clients.iter() {
+                if let Some(gcc) = self
+                    .bandwidth
+                    .googcc_for_subscriber_mut(oxpulse_sfu_kit::propagate::ClientId(*client.id))
+                {
+                    gcc.on_receive(arrival_ms, send_ms, 0.0);
+                }
             }
         }
         deadline
