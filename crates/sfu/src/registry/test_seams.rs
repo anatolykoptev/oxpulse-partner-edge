@@ -125,13 +125,27 @@ impl Registry {
         );
     }
 
-    /// Test-only: pin the GoogCC v2 estimator bitrate directly so integration
-    /// tests can avoid injecting real TWCC samples when verifying pacer behaviour
-    /// under the GoogCC conservative-merge path. The estimate is shared across
-    /// all subscribers (GoogCC is per-registry, not per-subscriber).
+    /// Test-only: pin the GoogCC v2 estimator bitrate for every connected
+    /// subscriber in `BandwidthEstimator`, so integration tests can avoid
+    /// injecting real TWCC samples when verifying the GoogCC ceiling path.
+    ///
+    /// GoogCC now lives in `BandwidthEstimator::PerSubscriber` (kit v0.11.4,
+    /// resolves anatolykoptev/oxpulse-sfu-kit issue #17). `estimate_bps()`
+    /// automatically applies it as a ceiling via `combined_bps()`. This seam
+    /// drives all per-subscriber estimators to the same `bps` so tests that
+    /// only care about whether the ceiling fires continue to work unchanged.
     #[doc(hidden)]
     pub fn drive_googcc_for_tests(&mut self, bps: u64) {
-        self.googcc.force_high_bps_for_tests(bps);
+        let client_ids: Vec<oxpulse_sfu_kit::propagate::ClientId> = self
+            .clients
+            .iter()
+            .map(|c| oxpulse_sfu_kit::propagate::ClientId(*c.id))
+            .collect();
+        for kit_id in client_ids {
+            if let Some(gcc) = self.bandwidth.googcc_for_subscriber_mut(kit_id) {
+                gcc.force_bps_for_tests(bps);
+            }
+        }
     }
 
     /// Test-only: force the pacer + metrics refresh out-of-band

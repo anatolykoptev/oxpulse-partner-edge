@@ -6,12 +6,10 @@
 //! notification fanout (M1.4), and the writer-stage early returns
 //! that tolerate unnegotiated sessions in tests.
 //!
-//! M5.3: the per-subscriber simulcast layer is no longer static —
-//! [`Client::pacer_select_layer`] runs before the filter and updates
-//! `desired_layer` from the GCC bandwidth estimate produced by the
-//! registry-owned [`oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator`] paired
-//! with the [`crate::pacer::Pacer`]. See those modules for the
-//! algorithm + hysteresis.
+//! Phase B: [`Client::pacer_select_layer`] now drives the per-client
+//! [`oxpulse_sfu_kit::SubscriberPacer`] (kit v0.11) rather than the
+//! legacy registry-level `crate::pacer::Pacer` map. Each `Client` owns
+//! its pacer; the registry passes only the BWE estimate and available RIDs.
 
 use std::sync::atomic::Ordering;
 
@@ -19,45 +17,69 @@ use str0m::media::{MediaData, MediaKind, Rid};
 use str0m::RtcError;
 
 use super::{layer, Client};
-use crate::pacer::Pacer;
 use crate::propagate::ClientId;
 
 impl Client {
-    /// Consult the [`Pacer`] for the simulcast tier this subscriber
-    /// should currently receive, given the latest GCC estimate from
-    /// [`oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator::estimate_bps`]. Updates
-    /// `self.desired_layer` in place (cheap — no SDP renegotiation).
-    /// Returns the chosen layer so the caller can record a metric.
+    /// Consult the per-client [`oxpulse_sfu_kit::SubscriberPacer`] for the
+    /// simulcast tier this subscriber should receive, given the latest BWE
+    /// estimate. Updates `self.desired_layer` in place (no SDP renegotiation).
+    /// Returns the chosen layer for Prometheus recording, or `None` when the
+    /// pacer enters audio-only or video-suspended state.
     ///
-    /// `budget_bps = None` means no estimate yet — hold the default
-    /// `LOW` tier. Below [`AUDIO_ONLY_THRESHOLD_BPS`] the return is
-    /// `None`, signalling the caller to drop video frames entirely.
+    /// **Phase B behaviour change vs. F6-9/F7-5**: kit uses dual-threshold
+    /// audio-only hysteresis (enter at `audio_only_bps=100k`, exit only above
+    /// `low_min_bps=150k`) instead of the single-threshold 2-tick symmetric
+    /// debounce. This is the standard LiveKit/mediasoup pattern. Tests that
+    /// relied on the old F6-9/F7-5 model have been rewritten for the new
+    /// dual-threshold semantics.
     ///
-    /// `available_rids` is the set of simulcast RIDs the *publisher*
-    /// is currently emitting (see [`Client::active_rids`]). Must not
-    /// be empty — caller substitutes the full `[LOW, MEDIUM, HIGH]`
-    /// ladder during the bootstrap window. Without this plumbing a
-    /// screenshare publisher sending only `q` with a 2Mbps subscriber
-    /// would still have the pacer pick `f`, and every incoming `q`
-    /// packet would be dropped by the layer filter (silent
-    /// zero-forwarding).
+    /// `available_rids` drives the layer clamping after a `ChangeLayer` action;
+    /// the pacer ignores which RIDs are available — it emits a target tier and
+    /// this method clamps to the nearest available layer. Must not be empty —
+    /// caller substitutes the full `[LOW, MEDIUM, HIGH]` ladder during bootstrap.
     pub fn pacer_select_layer(
         &mut self,
-        pacer: &mut Pacer,
         budget_bps: Option<u64>,
         available_rids: &[Rid],
     ) -> Option<Rid> {
+        use oxpulse_sfu_kit::PacerAction;
+
         let Some(budget) = budget_bps else {
             return Some(self.desired_layer);
         };
-        if pacer.check_audio_only_stateful(self.id, budget) {
-            return None;
+
+        match self.pacer.update(budget) {
+            PacerAction::NoChange => Some(self.desired_layer),
+            PacerAction::ChangeLayer(sfu_rid) => {
+                // Convert kit SfuRid -> str0m Rid. Both wrap the same 8-byte
+                // array constant; match against known constants avoids the
+                // pub(crate) SfuRid::to_str0m() method.
+                // Clamp to available_rids: if the target isn't available,
+                // fall back to the highest available layer below it.
+                let target = sfu_rid_to_rid(sfu_rid);
+                let rid = clamp_to_available(target, available_rids);
+                if rid != self.desired_layer {
+                    self.set_desired_layer(rid);
+                }
+                Some(rid)
+            }
+            PacerAction::GoAudioOnly | PacerAction::SuspendVideo => {
+                // Drop video — caller skips MediaData forwarding.
+                None
+            }
+            PacerAction::RestoreAudio => {
+                // Resumed audio-only; remain on current layer until RestoreVideo.
+                Some(self.desired_layer)
+            }
+            PacerAction::RestoreVideo => {
+                // BWE recovered; reset to LOW and let upgrade streak build.
+                let rid = layer::LOW;
+                self.set_desired_layer(rid);
+                Some(rid)
+            }
+            // PacerAction is #[non_exhaustive] — catch future variants.
+            _ => Some(self.desired_layer),
         }
-        let chosen = pacer.preferred_rid(self.id, budget, available_rids)?;
-        if chosen != self.desired_layer {
-            self.set_desired_layer(chosen);
-        }
-        Some(chosen)
     }
 
     /// Forward a `MediaData` from `origin` out to this peer. Applies
@@ -239,6 +261,51 @@ impl Client {
             tracing::warn!(client = *self.id, error = ?e, "active_speaker DC write failed");
         }
     }
+}
+
+/// Convert a kit `SfuRid` to a str0m `Rid`.
+///
+/// `SfuRid::to_str0m()` is `pub(crate)` in the kit crate, so we cannot
+/// call it directly. Both types share the same 8-byte backing array for
+/// the q/h/f constants, so a 3-arm match is both correct and zero-cost.
+/// Unknown SfuRid values (future kit additions) parse via `Rid::from(s)`.
+fn sfu_rid_to_rid(sfu_rid: oxpulse_sfu_kit::SfuRid) -> Rid {
+    use oxpulse_sfu_kit::SfuRid;
+    if sfu_rid == SfuRid::LOW {
+        layer::LOW
+    } else if sfu_rid == SfuRid::MEDIUM {
+        layer::MEDIUM
+    } else if sfu_rid == SfuRid::HIGH {
+        layer::HIGH
+    } else {
+        // Defensive fallback: parse via Display. str0m Rid::from() accepts
+        // any short ASCII string without allocating on the heap.
+        Rid::from(sfu_rid.to_string().as_str())
+    }
+}
+
+/// Clamp `target` to the highest available RID at or below its rank.
+/// Falls back to the lowest available if nothing fits.
+fn clamp_to_available(target: Rid, available: &[Rid]) -> Rid {
+    use super::layer::{HIGH, LOW, MEDIUM};
+    fn rank(r: Rid) -> u8 {
+        if r == HIGH {
+            2
+        } else if r == MEDIUM {
+            1
+        } else {
+            0
+        }
+    }
+    let target_rank = rank(target);
+    // Walk downward from target rank.
+    for &candidate in &[HIGH, MEDIUM, LOW] {
+        if rank(candidate) <= target_rank && available.contains(&candidate) {
+            return candidate;
+        }
+    }
+    // Nothing below target available — take whatever's lowest.
+    available.first().copied().unwrap_or(LOW)
 }
 
 /// Format the `sfu-active-speaker` DC payload. Extracted from

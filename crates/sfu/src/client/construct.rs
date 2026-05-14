@@ -89,6 +89,9 @@ impl Client {
             // not subject to peer-id steal.
             external_peer_id: None,
             close_signal: None,
+            pacer: oxpulse_sfu_kit::SubscriberPacer::with_config(
+                crate::pacer::oxpulse_partner_edge_pacer_config(),
+            ),
         }
     }
 

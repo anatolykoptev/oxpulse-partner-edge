@@ -27,8 +27,18 @@ impl Registry {
 
     /// Poll every client until each returns a `Timeout`, queuing
     /// propagated events. Returns the earliest wake-up deadline.
+    ///
+    /// After polling, feeds the latest observed video packet timing into each
+    /// subscriber's per-subscriber GoogCC estimator. Only one timing sample
+    /// per `poll_all` call is used (the last video packet seen); this is a
+    /// conservative approximation sufficient for the overuse-detection signal.
     pub fn poll_all(&mut self, now: Instant) -> Instant {
         let mut deadline = now + std::time::Duration::from_millis(100);
+        // Capture the most recent video packet timing emitted during this poll
+        // pass so we can feed it to each subscriber's GoogCC after the loop.
+        // Separate collection avoids a second mutable borrow of `self.clients`
+        // inside the poll loop.
+        let mut last_video_timing: Option<(f64, f64)> = None;
         for client in self.clients.iter_mut() {
             loop {
                 if !client.is_alive() {
@@ -65,20 +75,34 @@ impl Registry {
                                     self.detector.record_level(origin.0, level, now_ms);
                                 }
                             }
-                            // Feed packet arrival timing to GoogCC v2 trendline estimator.
-                            // Only video — audio clocks are unrelated (48kHz vs 90kHz).
-                            // loss_fraction not yet available (TWCC not wired); 0.0 is safe.
+                            // Record the most recent video packet timing for the
+                            // per-subscriber GoogCC feed below. Only video —
+                            // audio clocks are unrelated (48kHz vs 90kHz).
+                            // loss_fraction not yet available; 0.0 is safe.
                             if data.params.spec().codec.is_video() {
                                 let arrival_ms =
                                     now.saturating_duration_since(self.detector_epoch)
                                         .as_millis() as f64;
                                 // data.time.numer() is the raw 90kHz RTP timestamp.
                                 let send_ms = data.time.numer() as f64 / 90.0;
-                                self.googcc.on_receive(arrival_ms, send_ms, 0.0);
+                                last_video_timing = Some((arrival_ms, send_ms));
                             }
                         }
                         self.to_propagate.push_back(other);
                     }
+                }
+            }
+        }
+        // Feed per-subscriber GoogCC estimators with the latest video timing.
+        // GoogCC now lives in BandwidthEstimator::PerSubscriber (kit v0.11.4).
+        // estimate_bps() applies it as a ceiling via combined_bps() automatically.
+        if let Some((arrival_ms, send_ms)) = last_video_timing {
+            for client in self.clients.iter() {
+                if let Some(gcc) = self
+                    .bandwidth
+                    .googcc_for_subscriber_mut(oxpulse_sfu_kit::propagate::ClientId(*client.id))
+                {
+                    gcc.on_receive(arrival_ms, send_ms, 0.0);
                 }
             }
         }
