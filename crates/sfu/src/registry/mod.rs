@@ -46,8 +46,6 @@ pub struct Registry {
     pub(super) last_speaker_change: Option<Instant>,
     pub(super) metrics: Arc<SfuMetrics>,
     pub(super) bandwidth: BandwidthEstimator,
-    /// GoogCC v2 estimator — trendline delay + AIMD (additive alongside kit BWE).
-    pub(super) googcc: crate::bwe::estimator::GoogCcEstimator,
     /// Instant at which the room first became a solo-peer room (exactly 1 client).
     /// `None` when the room has 0 or ≥2 clients.
     /// Set on `insert` / `reap_dead` when the count drops to 1;
@@ -96,7 +94,6 @@ impl Registry {
             last_speaker_change: None,
             metrics,
             bandwidth: BandwidthEstimator::new(),
-            googcc: crate::bwe::estimator::GoogCcEstimator::new(),
             relay_auth_secret,
             relay_signing_pubkey,
             solo_since: None,

@@ -42,7 +42,7 @@ impl Client {
         budget_bps: Option<u64>,
         available_rids: &[Rid],
     ) -> Option<Rid> {
-        use oxpulse_sfu_kit::{PacerAction, SfuRid};
+        use oxpulse_sfu_kit::PacerAction;
 
         let Some(budget) = budget_bps else {
             return Some(self.desired_layer);
@@ -289,7 +289,13 @@ fn sfu_rid_to_rid(sfu_rid: oxpulse_sfu_kit::SfuRid) -> Rid {
 fn clamp_to_available(target: Rid, available: &[Rid]) -> Rid {
     use super::layer::{HIGH, LOW, MEDIUM};
     fn rank(r: Rid) -> u8 {
-        if r == HIGH { 2 } else if r == MEDIUM { 1 } else { 0 }
+        if r == HIGH {
+            2
+        } else if r == MEDIUM {
+            1
+        } else {
+            0
+        }
     }
     let target_rank = rank(target);
     // Walk downward from target rank.

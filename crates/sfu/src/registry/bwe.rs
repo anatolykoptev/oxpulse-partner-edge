@@ -45,22 +45,6 @@ impl Registry {
         self.clients.iter_mut().map(|c| &mut c.pacer)
     }
 
-    /// Mutable access to the GoogCC v2 estimator. Called from the
-    /// MediaData path in poll_all to feed packet timing.
-    ///
-    /// Reserved for Phase 2 ProbeController integration (see
-    /// `docs/ROADMAP.md` Phase 2 backlog and oxpulse-chat ROADMAP
-    /// Priority 1 GoogCC v2 §"Probe controller"). The probe loop
-    /// will need an external mutator handle to inject synthetic
-    /// probe packets into the estimator. Currently flagged dead by
-    /// static analysis because the in-tree poll loop uses field
-    /// access via `self.googcc`; do NOT remove until probe wiring
-    /// lands or the item is dropped from the roadmap.
-    #[allow(dead_code)]
-    pub fn googcc_mut(&mut self) -> &mut crate::bwe::estimator::GoogCcEstimator {
-        &mut self.googcc
-    }
-
     /// Drop dead clients and update metrics + BWE + pacer state.
     /// Moved from [`super`] so the single code path touches every
     /// per-peer pool that needs eviction on disconnect.
@@ -248,12 +232,14 @@ impl Registry {
             );
             let prev_layer = client.desired_layer;
             let chosen = client.pacer_select_layer(budget, available);
-            // GoogCC v2 conservative contribution: if GoogCC prefers a lower
-            // quality tier than the Pacer, use the lower one. Additive — never
-            // upgrades beyond what Pacer chose.
+            // GoogCC v2 conservative contribution: if this subscriber's own
+            // GoogCC estimator prefers a lower quality tier than the Pacer,
+            // use the lower one. Additive — never upgrades beyond what Pacer
+            // chose. Per-subscriber (not registry-level) so congestion on one
+            // downlink does not affect peers on healthy links.
             let chosen = match chosen {
                 Some(pacer_rid) => {
-                    let googcc_rid = self.googcc.preferred_rid();
+                    let googcc_rid = rid_for_bps(client.googcc.current_bps());
                     if rid_rank(googcc_rid) < rid_rank(pacer_rid) {
                         client.set_desired_layer(googcc_rid);
                         Some(googcc_rid)
@@ -307,6 +293,26 @@ impl Registry {
 /// session-steal eviction path can run the same scrub without
 /// duplicating the list.
 pub(super) const PACER_RID_LABELS: &[&str] = &["q", "h", "f", "other"];
+
+/// Map a GoogCC bitrate estimate to the preferred simulcast layer.
+///
+/// Thresholds are the same as the original partner-edge local
+/// `bwe::estimator::GoogCcEstimator::preferred_rid()` (400 kbps for MEDIUM,
+/// 1.2 Mbps for HIGH). Preserving them keeps the conservative-merge behaviour
+/// identical post-refactor.
+fn rid_for_bps(bps: u64) -> Rid {
+    // 1.2 Mbps — minimum for f (full/high) simulcast layer.
+    const F_LAYER_BPS: u64 = 1_200_000;
+    // 400 kbps — minimum for h (medium) simulcast layer.
+    const H_LAYER_BPS: u64 = 400_000;
+    if bps >= F_LAYER_BPS {
+        layer::HIGH
+    } else if bps >= H_LAYER_BPS {
+        layer::MEDIUM
+    } else {
+        layer::LOW
+    }
+}
 
 /// Rank a simulcast `Rid` for conservative-merge comparisons.
 /// LOW = 0, MEDIUM = 1, HIGH = 2.  Mirrors `pacer::rank_of` (private).

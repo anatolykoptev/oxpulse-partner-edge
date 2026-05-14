@@ -16,6 +16,16 @@ use crate::metrics::SfuMetrics;
 use crate::propagate::ClientId;
 
 impl Client {
+    /// Test-only: whether `ws_msg_tx` is `None`.
+    ///
+    /// The field is `pub(crate)` so integration tests in `tests/` (a separate
+    /// crate) cannot access it directly. This accessor is the minimum-invasive
+    /// alternative to making the field `pub` — tests only need to assert absence
+    /// of the channel in the legacy path, not inspect its value.
+    pub fn ws_msg_tx_is_none(&self) -> bool {
+        self.ws_msg_tx.is_none()
+    }
+
     /// Test-only: inject an observed "publisher-produced" RID without
     /// running the `track_in_media` path. Used by screenshare-like
     /// tests that want to pin `active_rids` to a subset of the full
