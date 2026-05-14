@@ -1,0 +1,13 @@
+[Unit]
+Description=Monthly DB-IP country mmdb refresh
+After=network-online.target
+
+# DB-IP free tier publishes a new file on the 1st of each month.
+# Jitter up to 4h spreads fleet-wide download load across partner nodes.
+[Timer]
+OnCalendar=monthly
+RandomizedDelaySec=4h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

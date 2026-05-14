@@ -1205,6 +1205,33 @@ rm -rf "$stage"
 chmod 0600 "$xray_out" "$coturn_out" || true
 log "  rendered → $compose_out (+ Caddyfile, xray-client.json, coturn.conf, cover/cover.html)"
 
+# ---------- Step 5b: provision DB-IP mmdb (M2b.2) ----------
+# Downloads dbip-country-lite-{YYYY-MM}.mmdb.gz from db-ip.com (CC-BY 4.0,
+# no API key required). Caddy's maxmind_geolocation handler reads this file
+# to inject X-Geo-Country into upstream requests (oxpulse-chat #748).
+# Non-fatal: if the download fails, Caddy starts without geolocation; the
+# Rust fallback chain (X-Client-Region → CF-IPCountry → in-process GeoDb)
+# covers the gap until the monthly timer succeeds.
+if [[ $DRY_RUN -eq 0 ]]; then
+	log "[5b/10] provisioning DB-IP mmdb"
+	if [[ -n "$src_dir" && -f "$src_dir/scripts/oxpulse-geoip-refresh.sh" ]]; then
+		install -m 0755 "$src_dir/scripts/oxpulse-geoip-refresh.sh" \
+			"$PREFIX_SBIN/oxpulse-geoip-refresh"
+	else
+		curl -fsSL "$REPO_RAW/scripts/oxpulse-geoip-refresh.sh" \
+			-o "$PREFIX_SBIN/oxpulse-geoip-refresh"
+		chmod 0755 "$PREFIX_SBIN/oxpulse-geoip-refresh"
+	fi
+	# Run initial download; warn-only on failure.
+	if "$PREFIX_SBIN/oxpulse-geoip-refresh"; then
+		log "  DB-IP mmdb provisioned → /var/lib/geoip/dbip-country-lite.mmdb"
+	else
+		warn "  DB-IP mmdb download failed — maxmind_geolocation will be a no-op until geoip-refresh.timer succeeds"
+	fi
+else
+	warn "  [dry-run] skipping DB-IP mmdb download"
+fi
+
 # Persist install state for upgrade.sh.
 if [[ $DRY_RUN -eq 0 ]]; then
 	cat > "$PREFIX_LIB/install.env" <<EOF
@@ -1393,6 +1420,15 @@ if [[ $DRY_RUN -eq 0 ]]; then
 			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
 		fi
 	done
+	# M2b.2: monthly geoip-refresh timer (DB-IP mmdb for Caddy maxmind_geolocation).
+	# Script already placed into PREFIX_SBIN by Step 5b; only units land here.
+	for unit in oxpulse-geoip-refresh.service oxpulse-geoip-refresh.timer; do
+		if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
+			install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
+		else
+			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+		fi
+	done
 	systemctl daemon-reload
 	if [ "$BAKE_MODE" = "0" ]; then
 		systemctl enable --now oxpulse-partner-edge.service
@@ -1400,6 +1436,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		systemctl enable --now oxpulse-partner-edge-refresh.timer
 		systemctl enable --now oxpulse-partner-edge-sni-rotate.timer
 		systemctl enable --now oxpulse-xray-update.timer
+		systemctl enable --now oxpulse-geoip-refresh.timer
 	else
 		# Bake mode: enable hydrate so it fires on first boot after snapshot→clone.
 		# Do NOT start it now — secrets aren't present yet.
@@ -1407,6 +1444,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		systemctl enable oxpulse-partner-edge-refresh.timer
 		systemctl enable oxpulse-partner-edge-sni-rotate.timer
 		systemctl enable oxpulse-xray-update.timer
+		systemctl enable oxpulse-geoip-refresh.timer
 		log "  [bake] units installed, daemon-reloaded; hydrate + refresh enabled for first boot"
 	fi
 else

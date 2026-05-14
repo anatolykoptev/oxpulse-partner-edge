@@ -28,6 +28,10 @@ services:
       # Cover page for R1 Layer 2 active-probing defense (Task 3.1).
       # Partners can override by mounting their own cover/ directory.
       - ./cover:/srv/cover:ro
+      # M2b.2: DB-IP mmdb for maxmind_geolocation country lookup.
+      # Provisioned by install.sh; refreshed monthly by geoip-refresh.timer.
+      # Read-only — Caddy only needs to read the file.
+      - /var/lib/geoip:/var/lib/geoip:ro
     depends_on:
       xray-client:
         condition: service_started
