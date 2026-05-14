@@ -192,8 +192,10 @@ fn handle_track_open_legacy_path_when_no_ws_channel() {
 
     let mut subscriber = new_client(ClientId(2002));
     // new_client sets ws_msg_tx = None by design.
+    // Use the test seam accessor — ws_msg_tx is pub(crate) and not reachable
+    // from this integration test crate.
     assert!(
-        subscriber.ws_msg_tx.is_none(),
+        subscriber.ws_msg_tx_is_none(),
         "new_client must have no ws_msg_tx"
     );
 

@@ -41,7 +41,10 @@ mod tests {
         assert_eq!(cfg.medium_min_bps, 500_000);
         assert_eq!(cfg.high_min_bps, 1_500_000);
         // Inherited defaults
-        assert_eq!(cfg.suspend_video_bps, oxpulse_sfu_kit::bwe::SUSPEND_VIDEO_BPS);
+        assert_eq!(
+            cfg.suspend_video_bps,
+            oxpulse_sfu_kit::bwe::SUSPEND_VIDEO_BPS
+        );
         assert_eq!(cfg.low_min_bps, oxpulse_sfu_kit::bwe::LOW_MIN_BPS);
         assert_eq!(cfg.suspend_streak, oxpulse_sfu_kit::bwe::SUSPEND_STREAK);
         assert_eq!(cfg.upgrade_streak, oxpulse_sfu_kit::bwe::UPGRADE_STREAK);
