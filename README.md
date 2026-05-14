@@ -123,10 +123,19 @@ cargo build -p partner-cli --release
 sudo install -m 0755 target/release/partner-cli /usr/local/bin/
 ```
 
-**Rotation:** Delete the three `reality.*` files and re-run `install.sh`. This triggers a fresh
-`partner-cli keygen` + a new `POST /api/partner/register` with the new UUID. The backend writes
-the new UUID to `partner_nodes.reality_uuid` (slice 2a) and the path-watcher SIGHUPs xray-reality
-to apply the updated client list (slice 2c). Existing sessions on this edge will reconnect.
+**Rotation procedure:**
+
+1. Delete `/etc/oxpulse-partner-edge/install.env` — otherwise `install.sh` detects an existing
+   install at the top-level guard and short-circuits before reaching the keygen block.
+2. Delete the three Reality files:
+   ```bash
+   sudo rm /etc/oxpulse-partner-edge/reality.{priv,pub,uuid}
+   ```
+3. Re-run `install.sh` — `partner-cli keygen` is invoked, new keys and UUID are written, and
+   `POST /api/partner/register` ships the new `reality_public_key`. The backend upserts
+   `partner_nodes.reality_pubkey` via `ON CONFLICT DO UPDATE` (idempotent — no 409 risk).
+   The path-watcher SIGHUPs xray-reality to apply the updated client list (slice 2c).
+   Existing sessions on this edge will reconnect.
 
 Note: `PARTNER_REALITY_UUID` env var (in `.env`) remains valid for legacy edges that have not
 re-run `install.sh` since M6. New installs populate `partner_nodes.reality_uuid` directly from
