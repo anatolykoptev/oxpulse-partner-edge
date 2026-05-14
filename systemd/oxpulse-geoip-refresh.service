@@ -1,0 +1,8 @@
+[Unit]
+Description=OxPulse partner-edge DB-IP mmdb refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/oxpulse-geoip-refresh
