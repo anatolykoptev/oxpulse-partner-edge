@@ -23,6 +23,15 @@
     }
     email admin@{{PARTNER_DOMAIN}}
 
+    # M2b.2: DB-IP country lookup — sets {vars.maxmind_country_code} for
+    # downstream header injection. If the mmdb file is absent (fresh node
+    # before install.sh provisions /var/lib/geoip/) the handler is a no-op
+    # and the placeholder resolves to an empty string. Rust upstream reads
+    # X-Geo-Country and falls back to its own chain when the value is empty.
+    maxmind_geolocation {
+        db_path /var/lib/geoip/dbip-country-lite.mmdb
+    }
+
     # NOTE: listener_wrappers MUST be at global servers{} scope — not in a
     # site-level snippet (Phase 2 PoC confirmed). layer4 applies to the listener
     # itself, not to per-site handlers.
@@ -105,6 +114,7 @@
             header_up X-Forwarded-Host {{PARTNER_DOMAIN}}
             header_up X-Forwarded-Proto https
             header_up Host oxpulse.chat
+            header_up X-Geo-Country {vars.maxmind_country_code}
         }
 
         # WebSocket — Caddy auto-upgrades on Upgrade: websocket.
@@ -112,6 +122,7 @@
             header_up X-Forwarded-Host {{PARTNER_DOMAIN}}
             header_up X-Forwarded-Proto https
             header_up Host oxpulse.chat
+            header_up X-Geo-Country {vars.maxmind_country_code}
         }
 
         # Event telemetry.
@@ -119,6 +130,7 @@
             header_up X-Forwarded-Host {{PARTNER_DOMAIN}}
             header_up X-Forwarded-Proto https
             header_up Host oxpulse.chat
+            header_up X-Geo-Country {vars.maxmind_country_code}
         }
 
         # SPA fallback — everything else goes through the tunnel so backend can
@@ -127,6 +139,7 @@
             header_up X-Forwarded-Host {{PARTNER_DOMAIN}}
             header_up X-Forwarded-Proto https
             header_up Host oxpulse.chat
+            header_up X-Geo-Country {vars.maxmind_country_code}
         }
     }
 }
