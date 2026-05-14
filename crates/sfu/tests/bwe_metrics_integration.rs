@@ -288,7 +288,7 @@ async fn layer_transitions_total_increments_on_layer_change() {
 
     // Pacer requires UPGRADE_CONSECUTIVE consecutive observations of the same
     // upgrade target before promoting; refresh that many times so q→h fires.
-    for _ in 0..oxpulse_sfu::pacer::UPGRADE_CONSECUTIVE {
+    for _ in 0..oxpulse_sfu_kit::bwe::UPGRADE_STREAK {
         registry.force_pacer_refresh_for_tests(ClientId(300));
     }
 

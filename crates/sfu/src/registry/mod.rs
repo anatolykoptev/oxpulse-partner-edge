@@ -16,7 +16,6 @@ use str0m::Input;
 
 use crate::client::{Client, Transmit};
 use crate::metrics::SfuMetrics;
-use crate::pacer::Pacer;
 use crate::propagate::Propagated;
 use dominant_speaker::ActiveSpeakerDetector;
 use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
@@ -47,7 +46,6 @@ pub struct Registry {
     pub(super) last_speaker_change: Option<Instant>,
     pub(super) metrics: Arc<SfuMetrics>,
     pub(super) bandwidth: BandwidthEstimator,
-    pub(super) pacer: Pacer,
     /// GoogCC v2 estimator — trendline delay + AIMD (additive alongside kit BWE).
     pub(super) googcc: crate::bwe::estimator::GoogCcEstimator,
     /// Instant at which the room first became a solo-peer room (exactly 1 client).
@@ -98,7 +96,6 @@ impl Registry {
             last_speaker_change: None,
             metrics,
             bandwidth: BandwidthEstimator::new(),
-            pacer: Pacer::new(),
             googcc: crate::bwe::estimator::GoogCcEstimator::new(),
             relay_auth_secret,
             relay_signing_pubkey,
@@ -245,7 +242,7 @@ impl Registry {
         self.detector.remove_peer(&old.id.0);
         self.bandwidth
             .reap_dead(oxpulse_sfu_kit::propagate::ClientId(*old.id));
-        self.pacer.remove(&old.id);
+        // Per-client SubscriberPacer drops automatically with old.
 
         let _ = self
             .metrics

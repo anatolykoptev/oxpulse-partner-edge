@@ -22,7 +22,6 @@ pub use client::Client;
 pub use config::SfuConfig;
 pub use metrics::SfuMetrics;
 pub use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
-pub use pacer::Pacer;
 pub use propagate::{ClientId, Propagated};
 pub use registry::Registry;
 pub use udp_loop::run_udp_loop;

@@ -9,7 +9,6 @@
 use str0m::media::Rid;
 
 use crate::client::layer;
-use crate::pacer::Pacer;
 use crate::propagate::ClientId;
 use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
 
@@ -36,23 +35,14 @@ impl Registry {
         &self.bandwidth
     }
 
-    /// Mutable access to the [`Pacer`]. The per-client fanout path
-    /// calls `preferred_rid` via this handle on every forwarded packet.
+    /// Per-client pacer iterator (Phase B migration).
     ///
-    /// Reserved for Phase 2 ProbeController integration (see
-    /// `docs/ROADMAP.md` Phase 2 backlog: "Probe controller — send
-    /// burst at target+30% for 1-2s on ramp-up"). Currently flagged
-    /// dead by static analysis because internal call sites use
-    /// `self.pacer` field access; do NOT remove until probe wiring
-    /// lands or the ProbeController item is dropped from the roadmap.
+    /// Previously returned a registry-level Pacer. After Phase B the pacer
+    /// is per-client (Client::pacer: SubscriberPacer). Preserved for the
+    /// Phase 2 ProbeController seam (docs/ROADMAP.md). Do NOT remove.
     #[allow(dead_code)]
-    pub fn pacer_mut(&mut self) -> &mut Pacer {
-        &mut self.pacer
-    }
-
-    /// Shared read of the pacer — e.g. test helpers.
-    pub fn pacer(&self) -> &Pacer {
-        &self.pacer
+    pub fn pacers_mut(&mut self) -> impl Iterator<Item = &mut oxpulse_sfu_kit::SubscriberPacer> {
+        self.clients.iter_mut().map(|c| &mut c.pacer)
     }
 
     /// Mutable access to the GoogCC v2 estimator. Called from the
@@ -84,7 +74,6 @@ impl Registry {
         let detector = &mut self.detector;
         let metrics = &self.metrics;
         let bandwidth = &mut self.bandwidth;
-        let pacer = &mut self.pacer;
         self.clients.retain(|c| {
             let alive = c.is_alive();
             if !alive {
@@ -94,7 +83,7 @@ impl Registry {
                 // valid while both sides stay u64-backed; revisit on kit
                 // representation change. (Not `// SAFETY:` — no `unsafe`.)
                 bandwidth.reap_dead(oxpulse_sfu_kit::propagate::ClientId(*c.id));
-                pacer.remove(&c.id);
+                // Per-client SubscriberPacer drops automatically with c.
                 metrics.client_disconnect_total.inc();
                 metrics.active_participants.dec();
 
@@ -258,7 +247,7 @@ impl Registry {
                 std::time::Instant::now(),
             );
             let prev_layer = client.desired_layer;
-            let chosen = client.pacer_select_layer(&mut self.pacer, budget, available);
+            let chosen = client.pacer_select_layer(budget, available);
             // GoogCC v2 conservative contribution: if GoogCC prefers a lower
             // quality tier than the Pacer, use the lower one. Additive — never
             // upgrades beyond what Pacer chose.

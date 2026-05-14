@@ -251,6 +251,13 @@ pub struct Client {
     /// WebSocket close frame. `None` for relay-origin clients (no WS task
     /// to wake up) and consumed (`take()`) on first send.
     pub(crate) close_signal: Option<oneshot::Sender<CloseReason>>,
+    /// Per-subscriber hysteretic layer selector (Phase B kit migration).
+    ///
+    /// Migrated from the registry-level [] hash map
+    /// (Phase B — consume oxpulse-sfu-kit v0.11). Each client owns its
+    /// SubscriberPacer instance so lifecycle (drop-on-disconnect) is
+    /// automatic and the registry needs no separate cleanup path.
+    pub(crate) pacer: oxpulse_sfu_kit::SubscriberPacer,
 }
 
 impl Client {
