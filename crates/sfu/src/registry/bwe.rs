@@ -9,7 +9,6 @@
 use str0m::media::Rid;
 
 use crate::client::layer;
-use crate::pacer::Pacer;
 use crate::propagate::ClientId;
 use oxpulse_sfu_kit::bwe::estimator::BandwidthEstimator;
 
@@ -36,39 +35,14 @@ impl Registry {
         &self.bandwidth
     }
 
-    /// Mutable access to the [`Pacer`]. The per-client fanout path
-    /// calls `preferred_rid` via this handle on every forwarded packet.
+    /// Per-client pacer iterator (Phase B migration).
     ///
-    /// Reserved for Phase 2 ProbeController integration (see
-    /// `docs/ROADMAP.md` Phase 2 backlog: "Probe controller — send
-    /// burst at target+30% for 1-2s on ramp-up"). Currently flagged
-    /// dead by static analysis because internal call sites use
-    /// `self.pacer` field access; do NOT remove until probe wiring
-    /// lands or the ProbeController item is dropped from the roadmap.
+    /// Previously returned a registry-level Pacer. After Phase B the pacer
+    /// is per-client (Client::pacer: SubscriberPacer). Preserved for the
+    /// Phase 2 ProbeController seam (docs/ROADMAP.md). Do NOT remove.
     #[allow(dead_code)]
-    pub fn pacer_mut(&mut self) -> &mut Pacer {
-        &mut self.pacer
-    }
-
-    /// Shared read of the pacer — e.g. test helpers.
-    pub fn pacer(&self) -> &Pacer {
-        &self.pacer
-    }
-
-    /// Mutable access to the GoogCC v2 estimator. Called from the
-    /// MediaData path in poll_all to feed packet timing.
-    ///
-    /// Reserved for Phase 2 ProbeController integration (see
-    /// `docs/ROADMAP.md` Phase 2 backlog and oxpulse-chat ROADMAP
-    /// Priority 1 GoogCC v2 §"Probe controller"). The probe loop
-    /// will need an external mutator handle to inject synthetic
-    /// probe packets into the estimator. Currently flagged dead by
-    /// static analysis because the in-tree poll loop uses field
-    /// access via `self.googcc`; do NOT remove until probe wiring
-    /// lands or the item is dropped from the roadmap.
-    #[allow(dead_code)]
-    pub fn googcc_mut(&mut self) -> &mut crate::bwe::estimator::GoogCcEstimator {
-        &mut self.googcc
+    pub fn pacers_mut(&mut self) -> impl Iterator<Item = &mut oxpulse_sfu_kit::SubscriberPacer> {
+        self.clients.iter_mut().map(|c| &mut c.pacer)
     }
 
     /// Drop dead clients and update metrics + BWE + pacer state.
@@ -84,7 +58,6 @@ impl Registry {
         let detector = &mut self.detector;
         let metrics = &self.metrics;
         let bandwidth = &mut self.bandwidth;
-        let pacer = &mut self.pacer;
         self.clients.retain(|c| {
             let alive = c.is_alive();
             if !alive {
@@ -94,7 +67,7 @@ impl Registry {
                 // valid while both sides stay u64-backed; revisit on kit
                 // representation change. (Not `// SAFETY:` — no `unsafe`.)
                 bandwidth.reap_dead(oxpulse_sfu_kit::propagate::ClientId(*c.id));
-                pacer.remove(&c.id);
+                // Per-client SubscriberPacer drops automatically with c.
                 metrics.client_disconnect_total.inc();
                 metrics.active_participants.dec();
 
@@ -258,22 +231,13 @@ impl Registry {
                 std::time::Instant::now(),
             );
             let prev_layer = client.desired_layer;
-            let chosen = client.pacer_select_layer(&mut self.pacer, budget, available);
-            // GoogCC v2 conservative contribution: if GoogCC prefers a lower
-            // quality tier than the Pacer, use the lower one. Additive — never
-            // upgrades beyond what Pacer chose.
-            let chosen = match chosen {
-                Some(pacer_rid) => {
-                    let googcc_rid = self.googcc.preferred_rid();
-                    if rid_rank(googcc_rid) < rid_rank(pacer_rid) {
-                        client.set_desired_layer(googcc_rid);
-                        Some(googcc_rid)
-                    } else {
-                        Some(pacer_rid)
-                    }
-                }
-                None => None,
-            };
+            // GoogCC is now embedded in BandwidthEstimator::PerSubscriber and
+            // applied as a ceiling inside combined_bps() → estimate_bps().
+            // A separate merge gate here would double-count GoogCC. Trust
+            // the kit (anatolykoptev/oxpulse-sfu-kit issue #17 resolved in
+            // v0.11.4). The `budget` value from estimate_bps() already
+            // incorporates the GoogCC ceiling alongside Kalman + native + hint.
+            let chosen = client.pacer_select_layer(budget, available);
             let peer_label = (*client.id).to_string();
             if let Some(bps) = budget {
                 self.metrics
@@ -318,18 +282,6 @@ impl Registry {
 /// session-steal eviction path can run the same scrub without
 /// duplicating the list.
 pub(super) const PACER_RID_LABELS: &[&str] = &["q", "h", "f", "other"];
-
-/// Rank a simulcast `Rid` for conservative-merge comparisons.
-/// LOW = 0, MEDIUM = 1, HIGH = 2.  Mirrors `pacer::rank_of` (private).
-fn rid_rank(rid: Rid) -> u8 {
-    if rid == layer::HIGH {
-        2
-    } else if rid == layer::MEDIUM {
-        1
-    } else {
-        0
-    }
-}
 
 /// Map a simulcast `Rid` to its Prometheus label (`q` / `h` / `f`).
 fn rid_label_for(rid: Rid) -> &'static str {
