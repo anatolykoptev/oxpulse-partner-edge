@@ -17,7 +17,8 @@ FROM caddy:2.11.2-builder AS builder
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     xcaddy build \
-    --with github.com/mholt/caddy-l4@v0.1.0
+    --with github.com/mholt/caddy-l4@v0.1.0 \
+    --with github.com/aksdb/caddy-maxmind-geolocation
 
 # ─── Stage 2: runtime image ─────────────────────────────────────────────────
 FROM caddy:2.11.2-alpine
@@ -29,7 +30,7 @@ LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.version="${VERSION}"
 LABEL oxpulse.component="partner-edge-caddy"
 LABEL oxpulse.version="${VERSION}"
-LABEL oxpulse.plugins="caddy-l4@v0.1.0"
+LABEL oxpulse.plugins="caddy-l4@v0.1.0,caddy-maxmind-geolocation"
 
 # Swap in the xcaddy-built binary (has the caddy-l4 module linked)
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
