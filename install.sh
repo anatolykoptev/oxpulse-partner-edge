@@ -27,6 +27,16 @@ log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
 
+# partner-cli is required for Reality x25519 keypair generation (M6 slice 2b).
+# It ships with oxpulse-chat releases; install from the partner-edge release
+# bundle or build from the oxpulse-chat source (crates/partner-cli).
+if ! command -v partner-cli >/dev/null 2>&1; then
+	die "partner-cli not found on PATH.
+Install it from the oxpulse-chat release artifacts (partner-cli binary) or build
+from source: cd ~/src/oxpulse-chat && cargo build -p partner-cli --release.
+Then place the binary in /usr/local/bin/ and re-run install.sh."
+fi
+
 # Best-effort install of `wg`/`wg-quick` for keygen and conf rendering. The
 # AmneziaWG userspace binary (`amneziawg-go` + `awg`/`awg-quick`) is built
 # from source in install_amneziawg() below; this helper only ensures the
@@ -665,6 +675,91 @@ if [[ -f "$PREFIX_LIB/install.env" && -z "$MANUAL_CONFIG" ]]; then
 		exit 0
 	fi
 fi
+
+# ---------- Reality x25519 keypair + UUID (M6 slice 2b) ----------
+# Generated once at first install; persisted so reinstalls / upgrade runs reuse
+# the same identity. To rotate: delete the three files and re-run install.sh
+# (triggers fresh register with a new UUID — slice 2a backend writes it to
+# partner_nodes.reality_uuid; slice 2c path-watcher SIGHUPs xray-reality).
+#
+# File layout (under PREFIX_ETC = /etc/oxpulse-partner-edge/):
+#   reality.priv  0600  base64url x25519 private key (never leaves this host)
+#   reality.pub   0644  base64url x25519 public key  (sent to krolik on register)
+#   reality.uuid  0644  lowercase UUID               (sent to krolik on register)
+#
+# partner-cli keygen output format (two lines, fixed labels):
+#   private_key: <43-char base64url>
+#   public_key:  <43-char base64url>
+REALITY_PRIV_PATH="$PREFIX_ETC/reality.priv"
+REALITY_PUB_PATH="$PREFIX_ETC/reality.pub"
+REALITY_UUID_PATH="$PREFIX_ETC/reality.uuid"
+
+if [[ $DRY_RUN -eq 1 ]]; then
+	# Dry-run: show what keygen would produce / reuse, but do NOT write files.
+	if [[ -s "$REALITY_PRIV_PATH" && -s "$REALITY_PUB_PATH" && -s "$REALITY_UUID_PATH" ]]; then
+		warn "  [dry-run] reality keypair already exists — would reuse"
+		REALITY_PUBKEY=$(cat "$REALITY_PUB_PATH")
+		REALITY_UUID=$(cat "$REALITY_UUID_PATH")
+		warn "  [dry-run] reality_public_key: $REALITY_PUBKEY"
+		warn "  [dry-run] reality_uuid: $REALITY_UUID"
+	else
+		warn "  [dry-run] would invoke: partner-cli keygen"
+		_keygen_out=$(partner-cli keygen)
+		_reality_priv=$(printf '%s' "$_keygen_out" | grep '^private_key:' | awk '{print $2}')
+		_reality_pub=$(printf '%s' "$_keygen_out"  | grep '^public_key:'  | awk '{print $2}')
+		_reality_uuid=$(uuidgen | tr '[:upper:]' '[:lower:]')
+		warn "  [dry-run] would write $REALITY_PRIV_PATH (mode 0600, not written)"
+		warn "  [dry-run] reality_public_key: $_reality_pub"
+		warn "  [dry-run] reality_uuid: $_reality_uuid"
+		REALITY_PUBKEY="$_reality_pub"
+		REALITY_UUID="$_reality_uuid"
+		unset _keygen_out _reality_priv _reality_pub _reality_uuid
+	fi
+else
+	install -d -m 0700 "$PREFIX_ETC"
+	if [[ ! -s "$REALITY_PRIV_PATH" ]]; then
+		log "  generating Reality x25519 keypair via partner-cli keygen"
+		_keygen_out=$(partner-cli keygen)
+		_reality_priv=$(printf '%s' "$_keygen_out" | grep '^private_key:' | awk '{print $2}')
+		_reality_pub=$(printf '%s' "$_keygen_out"  | grep '^public_key:'  | awk '{print $2}')
+		[[ -n "$_reality_priv" && -n "$_reality_pub" ]] || \
+			die "partner-cli keygen produced unexpected output — cannot parse private_key/public_key"
+		# Write private key first (mode 0600).
+		_reality_priv_tmp=$(mktemp "$PREFIX_ETC/.reality.priv.XXXXXX")
+		chmod 0600 "$_reality_priv_tmp"
+		printf '%s\n' "$_reality_priv" >"$_reality_priv_tmp"
+		mv "$_reality_priv_tmp" "$REALITY_PRIV_PATH"
+		# Write public key (mode 0644).
+		_reality_pub_tmp=$(mktemp "$PREFIX_ETC/.reality.pub.XXXXXX")
+		printf '%s\n' "$_reality_pub" >"$_reality_pub_tmp"
+		mv "$_reality_pub_tmp" "$REALITY_PUB_PATH"
+		unset _keygen_out _reality_priv _reality_pub _reality_priv_tmp _reality_pub_tmp
+	else
+		log "  reality.priv already exists — reusing keypair"
+	fi
+	if [[ ! -s "$REALITY_UUID_PATH" ]]; then
+		if ! command -v uuidgen >/dev/null 2>&1; then
+			die "uuidgen not found — install uuid-runtime (Debian/Ubuntu) or util-linux (RHEL) and retry"
+		fi
+		_uuid=$(uuidgen | tr '[:upper:]' '[:lower:]')
+		# Validate format: 8-4-4-4-12 hex groups separated by dashes.
+		if ! printf '%s' "$_uuid" | grep -qE \
+			'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+			die "uuidgen produced unexpected output: $_uuid"
+		fi
+		_uuid_tmp=$(mktemp "$PREFIX_ETC/.reality.uuid.XXXXXX")
+		printf '%s\n' "$_uuid" >"$_uuid_tmp"
+		mv "$_uuid_tmp" "$REALITY_UUID_PATH"
+		unset _uuid _uuid_tmp
+	else
+		log "  reality.uuid already exists — reusing"
+	fi
+	REALITY_PUBKEY=$(cat "$REALITY_PUB_PATH")
+	REALITY_UUID=$(cat "$REALITY_UUID_PATH")
+	log "  reality_public_key: $REALITY_PUBKEY"
+	log "  reality_uuid: $REALITY_UUID"
+fi
+
 if [[ -n "$MANUAL_CONFIG" ]]; then
 	[[ -r "$MANUAL_CONFIG" ]] || die "manual-config file not readable: $MANUAL_CONFIG"
 	cp "$MANUAL_CONFIG" "$tmp_cfg"
@@ -672,15 +767,16 @@ if [[ -n "$MANUAL_CONFIG" ]]; then
 elif [[ $DRY_RUN -eq 1 ]]; then
 	warn "  [dry-run] skipping POST $BACKEND_API/api/partner/register"
 	# Synthesize a placeholder node config so Step 5 templates render without
-	# leaking real secrets. Values must match the schema expected by json_get
-	# below; secrets are obvious sentinels (DRYRUN-…).
+	# leaking real secrets. reality_public_key + reality_uuid use the values
+	# generated/reused by the Reality keygen block above (real per-edge values).
+	# Other secrets remain obvious sentinels (DRYRUN-…).
 	cat >"$tmp_cfg" <<DRYJSON
 {
   "node_id": "${PARTNER_ID}-DRYRUN",
   "backend_endpoint": "https://api.oxpulse.chat",
   "turn_secret": "DRYRUN-turn-secret",
-  "reality_uuid": "00000000-0000-0000-0000-000000000000",
-  "reality_public_key": "DRYRUN-reality-pubkey",
+  "reality_uuid": "${REALITY_UUID}",
+  "reality_public_key": "${REALITY_PUBKEY}",
   "reality_short_id": "0123456789abcdef",
   "reality_server_name": "www.cloudflare.com",
   "reality_encryption": "",
@@ -732,6 +828,8 @@ else
 		REG_PUBLIC_IP="$PUBLIC_IP" REG_REGION="$REGION" \
 		REG_BRANDING_FILE="$BRANDING_CONFIG" \
 		REG_AWG_PUBKEY="$AWG_PUBKEY" \
+		REG_REALITY_PUBKEY="$REALITY_PUBKEY" \
+		REG_REALITY_UUID="$REALITY_UUID" \
 		REG_BRAND_DISPLAY_NAME="$BRAND_DISPLAY_NAME" \
 		REG_BRAND_DESCRIPTION="$BRAND_DESCRIPTION" \
 		REG_BRAND_COLOR_PRIMARY="$BRAND_COLOR_PRIMARY" \
@@ -781,6 +879,12 @@ if region:
 awg_pubkey = env("REG_AWG_PUBKEY")
 if awg_pubkey:
     body["awg_pubkey"] = awg_pubkey
+reality_pubkey = env("REG_REALITY_PUBKEY")
+if reality_pubkey:
+    body["reality_public_key"] = reality_pubkey
+reality_uuid = env("REG_REALITY_UUID")
+if reality_uuid:
+    body["reality_uuid"] = reality_uuid
 
 branding_path = env("REG_BRANDING_FILE")
 if branding_path:

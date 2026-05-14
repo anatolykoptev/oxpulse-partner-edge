@@ -100,12 +100,37 @@ systemctl list-timers 'oxpulse-partner-*'
 | Path | Contents |
 |------|---------|
 | `/etc/oxpulse-partner-edge/` | Rendered configs (docker-compose, Caddyfile, tunnel JSON, coturn) |
+| `/etc/oxpulse-partner-edge/reality.priv` | x25519 private key (mode 0600, never leaves this host) |
+| `/etc/oxpulse-partner-edge/reality.pub` | x25519 public key (mode 0644, sent to backend on register) |
+| `/etc/oxpulse-partner-edge/reality.uuid` | Per-edge VLESS UUID (mode 0644, sent to backend on register) |
 | `/var/lib/oxpulse-partner-edge/install.env` | Installed partner ID, domain, image version |
 | `/var/lib/oxpulse-partner-edge/node-config.json` | Full node config from registration (credentials, channel list) |
 | `/var/lib/oxpulse-partner-edge/keys-version` | Last-seen key rotation version hash |
 | `/var/lib/oxpulse-partner-edge/channels-version` | Last-seen channel config version hash |
 | `/var/lib/oxpulse-partner-edge/sfu-keys.env` | Ed25519 public key for SFU relay JWT verification |
 | `/var/log/oxpulse-partner-edge-*.log` | Per-component maintenance logs |
+
+### Reality keypair
+
+The x25519 keypair and VLESS UUID are generated once at first install using `partner-cli keygen` and
+persisted under `/etc/oxpulse-partner-edge/`. Reinstalling reuses the existing files — the edge
+keeps its registered identity across upgrades.
+
+**Prerequisite:** `partner-cli` must be on PATH before running `install.sh`. Install it from the
+oxpulse-chat release bundle or build from source:
+```bash
+cargo build -p partner-cli --release
+sudo install -m 0755 target/release/partner-cli /usr/local/bin/
+```
+
+**Rotation:** Delete the three `reality.*` files and re-run `install.sh`. This triggers a fresh
+`partner-cli keygen` + a new `POST /api/partner/register` with the new UUID. The backend writes
+the new UUID to `partner_nodes.reality_uuid` (slice 2a) and the path-watcher SIGHUPs xray-reality
+to apply the updated client list (slice 2c). Existing sessions on this edge will reconnect.
+
+Note: `PARTNER_REALITY_UUID` env var (in `.env`) remains valid for legacy edges that have not
+re-run `install.sh` since M6. New installs populate `partner_nodes.reality_uuid` directly from
+the register payload and do not rely on the fleet-wide env UUID.
 
 ## SFU environment variables
 
