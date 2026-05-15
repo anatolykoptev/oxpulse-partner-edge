@@ -61,10 +61,18 @@ impl Client {
                 if rid != self.desired_layer {
                     self.set_desired_layer(rid);
                 }
+                // ChangeLayer means video is running -- emit VideoMax capability.
+                self.pending_tier_emit = Some(crate::propagate::SuspendTier::VideoMax);
                 Some(rid)
             }
-            PacerAction::GoAudioOnly | PacerAction::SuspendVideo => {
-                // Drop video — caller skips MediaData forwarding.
+            PacerAction::SuspendVideo => {
+                // BWE: video suspended, audio still normal bandwidth.
+                self.pending_tier_emit = Some(crate::propagate::SuspendTier::AudioNormal);
+                None
+            }
+            PacerAction::GoAudioOnly => {
+                // BWE: entered full audio-only (low bandwidth) mode.
+                self.pending_tier_emit = Some(crate::propagate::SuspendTier::AudioLow);
                 None
             }
             PacerAction::RestoreAudio => {
@@ -73,6 +81,8 @@ impl Client {
             }
             PacerAction::RestoreVideo => {
                 // BWE recovered; reset to LOW and let upgrade streak build.
+                // Emit VideoMax to signal peer is back to full capability.
+                self.pending_tier_emit = Some(crate::propagate::SuspendTier::VideoMax);
                 let rid = layer::LOW;
                 self.set_desired_layer(rid);
                 Some(rid)

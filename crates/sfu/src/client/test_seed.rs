@@ -76,7 +76,8 @@ pub fn new_client(id: ClientId) -> Client {
     let mut c = Client::new(rtc, metrics)
         .with_keys_dc()
         .with_chat_dcs()
-        .with_voice_dc(200);
+        .with_voice_dc(200)
+        .with_sfu_events_dc();
     c.id = id;
     c
 }
@@ -93,7 +94,8 @@ pub fn new_client_with_reactions(id: ClientId) -> Client {
         .with_keys_dc()
         .with_chat_dcs()
         .with_voice_dc(200)
-        .with_reactions_dc();
+        .with_reactions_dc()
+        .with_sfu_events_dc();
     c.id = id;
     c
 }
