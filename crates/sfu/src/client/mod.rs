@@ -194,6 +194,23 @@ pub struct Client {
     /// (b) double-dec when both paths see `reactions_dc_cid.is_some()` — the
     ///     flag is the single authoritative "was gauge incremented?" gate.
     pub reactions_dc_opened: bool,
+    /// Phase 2c: pre-negotiated DC id:8 (`sfu-events`,
+    /// `negotiated: Some(8), ordered: false, reliability:
+    /// MaxRetransmits{0}`). SFU-originated event broadcasts (peer-suspended
+    /// tier changes). Browsers MUST NOT write here; write attempts are
+    /// dropped with a warning in dc.rs. `None` until
+    /// [`Client::with_sfu_events_dc`] is called. Relay clients skip it.
+    pub(crate) sfu_events_cid: Option<str0m::channel::ChannelId>,
+    /// Phase 2c: last pacer tier emitted for this peer. Used by
+    /// `registry::bwe::update_pacer_layers` to emit `PeerSuspended` only on
+    /// state transitions, not on every pacer tick. `None` = never emitted
+    /// (initial state; first non-VideoMax tier always emits).
+    pub(crate) last_emitted_tier: Option<crate::propagate::SuspendTier>,
+    /// Phase 2c: transient tier from the current pacer tick's `PacerAction`.
+    /// Set by `pacer_select_layer` inside `client::fanout`; consumed and
+    /// cleared by `registry::bwe::update_pacer_layers` on the same tick.
+    /// `None` if the pacer had `NoChange` / `RestoreAudio` / catch-all this tick.
+    pub(crate) pending_tier_emit: Option<crate::propagate::SuspendTier>,
     /// For outbound relay clients: the DC message to send once Event::Connected fires.
     /// Tuple: (dc_id, upstream_url, room_token). Cleared after send in dispatch.rs.
     /// None for browser clients and inbound relay clients (they *receive* relay_source).
@@ -350,6 +367,37 @@ impl Client {
             .lock()
             .ok()
             .and_then(|guard| guard.clone())
+    }
+
+    /// Phase 2c: write a SFU-originated event frame to the `sfu-events` DC
+    /// (id:8). Called by `crate::fanout::fanout` for `Propagated::PeerSuspended`.
+    ///
+    /// No-op when `sfu_events_cid` is `None` (relay clients that skipped
+    /// `with_sfu_events_dc`). Frames larger than `sfu_events::MAX_FRAME_SIZE`
+    /// are dropped with a warning. Write errors are warned, not panicked.
+    pub fn handle_sfu_event_out(&mut self, payload: &[u8]) {
+        let Some(cid) = self.sfu_events_cid else {
+            return;
+        };
+        if payload.len() > crate::sfu_events::MAX_FRAME_SIZE {
+            tracing::warn!(
+                client = *self.id,
+                len = payload.len(),
+                "sfu-events: frame too large, dropping"
+            );
+            return;
+        }
+        let Some(mut ch) = self.rtc.channel(cid) else {
+            // DC was opened but Rtc::channel returned None -- DTLS closed it.
+            return;
+        };
+        if let Err(e) = ch.write(false, payload) {
+            tracing::warn!(
+                client = *self.id,
+                error = %e,
+                "sfu-events: DC write failed"
+            );
+        }
     }
 
     pub fn is_alive(&self) -> bool {

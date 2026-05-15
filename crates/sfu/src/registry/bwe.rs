@@ -239,6 +239,28 @@ impl Registry {
             // incorporates the GoogCC ceiling alongside Kalman + native + hint.
             let chosen = client.pacer_select_layer(budget, available);
             let peer_label = (*client.id).to_string();
+
+            // Phase 2c: emit PeerSuspended when pacer tier changes.
+            // `pending_tier_emit` is set by pacer_select_layer based on PacerAction;
+            // None means no state transition occurred this tick.
+            if let Some(new_tier) = client.pending_tier_emit.take() {
+                let changed = match &client.last_emitted_tier {
+                    Some(prev) => prev != &new_tier,
+                    // First emission: emit only if not VideoMax (boot assumption
+                    // is that peers start in video-max state).
+                    None => !matches!(new_tier, crate::propagate::SuspendTier::VideoMax),
+                };
+                if changed {
+                    let peer_id = client.id;
+                    client.last_emitted_tier = Some(new_tier.clone());
+                    self.to_propagate
+                        .push_back(crate::propagate::Propagated::PeerSuspended {
+                            peer_id,
+                            tier: new_tier,
+                        });
+                }
+            }
+
             if let Some(bps) = budget {
                 self.metrics
                     .bandwidth_estimate_bps

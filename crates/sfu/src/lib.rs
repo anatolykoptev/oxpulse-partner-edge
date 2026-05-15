@@ -14,6 +14,7 @@ pub mod propagate;
 pub mod registry;
 pub mod relay;
 pub mod room_auth;
+pub mod sfu_events;
 pub mod telemetry;
 pub mod udp_loop;
 

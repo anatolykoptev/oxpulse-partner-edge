@@ -156,3 +156,9 @@ name = "bwe_hint_test"
 # Counter + WS tests do not need test-utils but the feature gate is harmless
 # (test-utils adds no overhead to integration tests).
 required-features = ["test-utils"]
+
+[[test]]
+name = "sfu_events_dc"
+# Phase 2c -- sfu-events DC (id:8) integration tests. Uses `new_client`,
+# `fanout::fanout_for_tests`, `Registry::*_for_tests` seams gated behind test-utils.
+required-features = ["test-utils"]

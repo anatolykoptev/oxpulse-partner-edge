@@ -92,6 +92,10 @@ impl Client {
             pacer: oxpulse_sfu_kit::SubscriberPacer::with_config(
                 crate::pacer::oxpulse_partner_edge_pacer_config(),
             ),
+            // Phase 2c: populated by with_sfu_events_dc(); relay clients leave None.
+            sfu_events_cid: None,
+            last_emitted_tier: None,
+            pending_tier_emit: None,
         }
     }
 
@@ -214,6 +218,26 @@ impl Client {
             protocol: String::new(),
         });
         self.keys_dc_cid = Some(keys_dc_cid);
+        self
+    }
+
+    /// Phase 2c: open the pre-negotiated `sfu-events` DC (id:8, unordered,
+    /// `MaxRetransmits{0}`) so the SFU can broadcast tier-change events to
+    /// browser peers. Browser construction sites chain this after
+    /// `with_reactions_dc()`; relay clients skip it (no SFU-event fan-out
+    /// on cascade edges).
+    ///
+    /// Browser side: `pc.createDataChannel("sfu-events",
+    /// { negotiated: true, id: 8, ordered: false, maxRetransmits: 0 })`.
+    pub fn with_sfu_events_dc(mut self) -> Self {
+        let sfu_events_cid = self.rtc.direct_api().create_data_channel(ChannelConfig {
+            label: crate::sfu_events::SFU_EVENTS_DC_LABEL.to_string(),
+            ordered: false,
+            reliability: Reliability::MaxRetransmits { retransmits: 0 },
+            negotiated: Some(crate::sfu_events::SFU_EVENTS_DC_ID),
+            protocol: String::new(),
+        });
+        self.sfu_events_cid = Some(sfu_events_cid);
         self
     }
 
