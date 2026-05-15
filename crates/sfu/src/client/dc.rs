@@ -47,6 +47,10 @@ const VOICE_CHANNEL_LABEL: &str = "voice";
 /// Label of the pre-negotiated KX sframe-keys DC (id:1, ordered, reliable).
 const SFRAME_KEYS_CHANNEL_LABEL: &str = "sframe-keys";
 
+/// Label of the pre-negotiated Phase 2c `sfu-events` DC (id:8, unordered, MaxRetransmits{0}).
+/// SFU-originated only -- browser writes are dropped with a warning.
+const SFU_EVENTS_CHANNEL_LABEL: &str = crate::sfu_events::SFU_EVENTS_DC_LABEL;
+
 /// Maximum accepted sframe-keys payload size in bytes. SFrame identity
 /// frames are small JSON objects; 64 KB is generous defence-in-depth.
 const SFRAME_KEYS_FRAME_MAX_BYTES: usize = 64 * 1024;
@@ -218,6 +222,16 @@ pub(super) fn handle_channel_data(
             return Propagated::Noop;
         }
         return Propagated::KeysData(client_id, data.to_vec());
+    }
+
+    // Phase 2c: sfu-events DC (id:8). SFU-originated only -- browser writes
+    // are a protocol violation. Drop with warning; do not relay or parse.
+    if label == SFU_EVENTS_CHANNEL_LABEL {
+        tracing::warn!(
+            client = *client_id,
+            "browser wrote to sfu-events DC (id:8); protocol violation, dropping"
+        );
+        return Propagated::Noop;
     }
 
     if label != BUDGET_CHANNEL_LABEL {
@@ -672,5 +686,32 @@ mod tests {
             Some(pub_pem.as_str()),
         );
         assert!(matches!(result, Propagated::MarkRelaySource(..)));
+    }
+
+    // ── Phase 2c: sfu-events DC browser-write guard ─────────────────────────
+
+    #[test]
+    fn sfu_events_browser_write_returns_noop() {
+        // Any write from a browser on the "sfu-events" DC is a protocol violation.
+        let payload =
+            br#"{"kind":"peer-suspended","from":"1","ts":1715712345678,"tier":"audio-normal"}"#;
+        let result = handle_channel_data(ClientId(99), "sfu-events", payload, None, None);
+        assert!(
+            matches!(result, Propagated::Noop),
+            "browser write on sfu-events must return Noop, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn sfu_events_browser_write_empty_payload_returns_noop() {
+        let result = handle_channel_data(ClientId(100), "sfu-events", b"", None, None);
+        assert!(matches!(result, Propagated::Noop));
+    }
+
+    #[test]
+    fn sfu_events_browser_write_binary_payload_returns_noop() {
+        let bin: Vec<u8> = (0u8..=255u8).collect();
+        let result = handle_channel_data(ClientId(101), "sfu-events", &bin, None, None);
+        assert!(matches!(result, Propagated::Noop));
     }
 }

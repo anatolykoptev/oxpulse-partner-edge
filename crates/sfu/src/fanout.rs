@@ -89,6 +89,13 @@ pub(crate) fn fanout(p: &Propagated, clients: &mut [Client]) {
             Propagated::VoiceData(_, payload) => client.handle_voice_data_out(origin, payload),
             // KX fix: sframe-keys relay. Skip-self guard mirrors chat-data.
             Propagated::KeysData(_, payload) => client.handle_keys_data_out(origin, payload),
+            // Phase 2c: SFU-originated tier-change notification via DC id:8 (sfu-events).
+            // Skip-self handled by `client.id == origin` guard above (origin = peer_id).
+            // No metrics here -- the future mini-PR will add the counter.
+            Propagated::PeerSuspended { peer_id, tier } => {
+                client
+                    .handle_sfu_event_out(&crate::sfu_events::build_peer_suspended(*peer_id, tier));
+            }
             Propagated::Noop
             | Propagated::Timeout(_)
             | Propagated::ActiveSpeakerChanged { .. }

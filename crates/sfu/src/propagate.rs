@@ -30,6 +30,42 @@ impl Deref for ClientId {
     }
 }
 
+/// Pacer-tier state for a peer, emitted when BWE drives the pacer
+/// into a different video/audio mode. Wired via
+/// `Propagated::PeerSuspended` -> `fanout` -> `Client::handle_sfu_event_out`
+/// -> DC id:8 (`sfu-events`).
+///
+/// Mapping from `oxpulse_sfu_kit::PacerAction`:
+///
+/// | PacerAction         | SuspendTier   |
+/// |---------------------|---------------|
+/// | SuspendVideo        | AudioNormal   |
+/// | GoAudioOnly         | AudioLow      |
+/// | ChangeLayer /       |               |
+/// |   RestoreVideo      | VideoMax      |
+/// | NoChange /          |               |
+/// |   RestoreAudio / _  | (no emit)     |
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuspendTier {
+    /// Pacer suspended video but audio is normal-bandwidth.
+    AudioNormal,
+    /// Pacer entered full audio-only (low bandwidth) mode.
+    AudioLow,
+    /// Pacer restored video -- peer is back to full capability.
+    VideoMax,
+}
+
+impl SuspendTier {
+    /// Wire-format string written into the `sfu-events` DC frame.
+    pub fn as_wire_str(&self) -> &'static str {
+        match self {
+            Self::AudioNormal => "audio-normal",
+            Self::AudioLow => "audio-low",
+            Self::VideoMax => "video-max",
+        }
+    }
+}
+
 /// Events the registry propagates between clients. `Noop` / `Timeout`
 /// carry no client id and are consumed inside the registry's poll loop.
 #[allow(clippy::large_enum_variant)]
@@ -167,6 +203,19 @@ pub enum Propagated {
     /// encrypted frame fails to decrypt. Skip-self and DC-not-open guards
     /// mirror the chat-data relay path.
     KeysData(ClientId, Vec<u8>),
+    /// Phase 2c: SFU-originated tier-change notification. Emitted by
+    /// `registry::bwe::update_pacer_layers` when the per-subscriber pacer
+    /// transitions between audio-normal / audio-low / video-max states.
+    /// Fanned out via `crate::fanout::fanout` -> `Client::handle_sfu_event_out`
+    /// -> DC id:8 (`sfu-events`). Skip-self is handled by the `client.id == origin`
+    /// guard in the fanout loop (origin = peer_id). `client_id()` returns
+    /// `Some(peer_id)` so the standard origin-skip path works.
+    PeerSuspended {
+        /// The peer whose pacer tier changed.
+        peer_id: ClientId,
+        /// New pacer tier.
+        tier: SuspendTier,
+    },
 }
 
 impl Propagated {
@@ -183,6 +232,7 @@ impl Propagated {
             | Propagated::ChatCtrl(c, _)
             | Propagated::VoiceData(c, _)
             | Propagated::KeysData(c, _) => Some(*c),
+            Propagated::PeerSuspended { peer_id, .. } => Some(*peer_id),
             #[cfg(feature = "vfm")]
             Propagated::VfmLayerCap(c, _) => Some(*c),
             Propagated::PublisherLayerHint { publisher_id, .. } => Some(*publisher_id),
@@ -226,6 +276,57 @@ mod tests {
     fn keys_data_client_id_returns_origin() {
         let cid = ClientId(42);
         let p = Propagated::KeysData(cid, b"identity".to_vec());
+        assert_eq!(p.client_id(), Some(cid));
+    }
+}
+
+#[cfg(test)]
+mod phase_2c_tests {
+    //! 2c.1: tests for SuspendTier + Propagated::PeerSuspended.
+    use super::*;
+
+    #[test]
+    fn suspend_tier_as_wire_str_audio_normal() {
+        assert_eq!(SuspendTier::AudioNormal.as_wire_str(), "audio-normal");
+    }
+
+    #[test]
+    fn suspend_tier_as_wire_str_audio_low() {
+        assert_eq!(SuspendTier::AudioLow.as_wire_str(), "audio-low");
+    }
+
+    #[test]
+    fn suspend_tier_as_wire_str_video_max() {
+        assert_eq!(SuspendTier::VideoMax.as_wire_str(), "video-max");
+    }
+
+    #[test]
+    fn peer_suspended_client_id_returns_peer_id() {
+        let cid = ClientId(99);
+        let p = Propagated::PeerSuspended {
+            peer_id: cid,
+            tier: SuspendTier::AudioNormal,
+        };
+        assert_eq!(p.client_id(), Some(cid));
+    }
+
+    #[test]
+    fn peer_suspended_audio_low_client_id() {
+        let cid = ClientId(77);
+        let p = Propagated::PeerSuspended {
+            peer_id: cid,
+            tier: SuspendTier::AudioLow,
+        };
+        assert_eq!(p.client_id(), Some(cid));
+    }
+
+    #[test]
+    fn peer_suspended_video_max_client_id() {
+        let cid = ClientId(1);
+        let p = Propagated::PeerSuspended {
+            peer_id: cid,
+            tier: SuspendTier::VideoMax,
+        };
         assert_eq!(p.client_id(), Some(cid));
     }
 }
