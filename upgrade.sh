@@ -2,11 +2,18 @@
 # upgrade.sh — pull a newer image tag, recreate services, verify, optionally roll back.
 #
 # Usage:
-#   oxpulse-partner-edge-upgrade                  # pull :latest
-#   oxpulse-partner-edge-upgrade v0.2.0           # pin to specific tag
-#   oxpulse-partner-edge-upgrade --check          # report pending upgrade, don't apply
-#   oxpulse-partner-edge-upgrade --rollback       # restore previous tag
-#   oxpulse-partner-edge-upgrade --templates-only # re-render xray config from upstream template, no image pull
+#   oxpulse-partner-edge-upgrade                       # pull :latest
+#   oxpulse-partner-edge-upgrade v0.2.0                # pin to specific tag
+#   oxpulse-partner-edge-upgrade --check               # report pending upgrade, don't apply
+#   oxpulse-partner-edge-upgrade --rollback            # restore previous tag
+#   oxpulse-partner-edge-upgrade --templates-only      # re-render xray config from upstream template, no image pull
+#   oxpulse-partner-edge-upgrade --ghcr-token=ghp_xxx  # persist GHCR PAT before pull (one-time)
+#
+# GHCR auth: ghcr.io/anatolykoptev/partner-edge-* images are private. Provide
+# a token via --ghcr-token=ghp_xxx (saved to /etc/oxpulse-partner-edge/ghcr.token
+# mode 0600) or OXPULSE_GHCR_TOKEN env (one-shot, not persisted). Once saved,
+# the token is reused on every subsequent run; rotate with --ghcr-token=<new>.
+# See ghcr-auth-lib.sh for the full auth flow.
 set -euo pipefail
 
 PREFIX_ETC=/etc/oxpulse-partner-edge
@@ -38,6 +45,22 @@ else
     die "channel-render-lib.sh not found (tried: $_lib_local and $_lib_installed)"
 fi
 unset _lib_local _lib_installed
+
+# Source ghcr auth helpers (ghcr_save_token / ghcr_login_from_file /
+# ghcr_pull_diagnose / ghcr_configure_token). Same lookup pattern as
+# channel-render-lib.sh.
+_ghcr_local="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/ghcr-auth-lib.sh"
+_ghcr_installed="/usr/local/sbin/ghcr-auth-lib.sh"
+if [[ -f "$_ghcr_local" ]]; then
+    # shellcheck source=ghcr-auth-lib.sh
+    source "$_ghcr_local"
+elif [[ -f "$_ghcr_installed" ]]; then
+    # shellcheck source=/dev/null
+    source "$_ghcr_installed"
+else
+    die "ghcr-auth-lib.sh not found (tried: $_ghcr_local and $_ghcr_installed)"
+fi
+unset _ghcr_local _ghcr_installed
 
 [[ $EUID -eq 0 ]] || die "must run as root"
 [[ -r "$COMPOSE_FILE" ]] || die "no installed bundle at $COMPOSE_FILE"
@@ -87,17 +110,28 @@ CURRENT="${IMAGE_VERSION:-unknown}"
 
 MODE=apply
 TARGET=""
+# GHCR PAT supplied via --ghcr-token=ghp_xxx flag OR OXPULSE_GHCR_TOKEN env.
+# Flag wins over env. Empty string disables the auth path (anonymous pull).
+GHCR_TOKEN_ARG="${OXPULSE_GHCR_TOKEN:-}"
 for arg in "$@"; do
 	case "$arg" in
 		--check)          MODE=check ;;
 		--rollback)       MODE=rollback ;;
 		--templates-only) MODE=templates ;;
+		--ghcr-token=*)   GHCR_TOKEN_ARG="${arg#--ghcr-token=}" ;;
 		v*|latest)        TARGET="$arg" ;;
 		-h|--help)
-			sed -n '2,9p' "$0"; exit 0 ;;
+			sed -n '2,16p' "$0"; exit 0 ;;
 		*) die "unknown arg: $arg" ;;
 	esac
 done
+
+# If operator supplied a fresh token, persist + login NOW. Catches the
+# "PAT expired between releases" class of failure before we even try pull.
+if [[ -n "$GHCR_TOKEN_ARG" ]]; then
+	ghcr_configure_token "$GHCR_TOKEN_ARG" || die "failed to save/login with supplied --ghcr-token (see warning above)"
+	unset GHCR_TOKEN_ARG  # don't keep secret in env longer than necessary
+fi
 
 V01_TO_V02=0
 
@@ -141,7 +175,7 @@ if [[ "$MODE" == rollback ]]; then
 	log "rolling back using previous compose file"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
-	(cd "$PREFIX_ETC" && docker compose pull)
+	(ghcr_login_from_file || true; cd "$PREFIX_ETC" && docker compose pull)
 	(cd "$PREFIX_ETC" && docker compose up -d --force-recreate)
 	sleep 10
 	if "$HEALTHCHECK" --local; then
@@ -173,8 +207,21 @@ sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${T
 	"$COMPOSE_FILE"
 sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 
+# Refresh ghcr auth from stored token (no-op if file absent).
+ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
+
 log "pulling new images"
-(cd "$PREFIX_ETC" && docker compose pull) || die "pull failed — previous config preserved at $PREV_COMPOSE_FILE"
+pull_out=$(cd "$PREFIX_ETC" && docker compose pull 2>&1)
+pull_rc=$?
+if [[ $pull_rc -ne 0 ]]; then
+	# Print pull output so operator can see context.
+	printf '%s\n' "$pull_out" >&2
+	# If denied pattern → friendly hint (prints suggestion to use --ghcr-token=).
+	if ! ghcr_pull_diagnose "$pull_out"; then
+		warn "ghcr: pull failed but not for an auth reason (see output above)"
+	fi
+	die "pull failed — previous config preserved at $PREV_COMPOSE_FILE"
+fi
 
 log "recreating services"
 if ! (cd "$PREFIX_ETC" && docker compose up -d --force-recreate); then
@@ -196,7 +243,7 @@ if ! "$HEALTHCHECK" --local; then
 	warn "healthcheck red after upgrade — rolling back"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
-	(cd "$PREFIX_ETC" && docker compose pull)
+	(ghcr_login_from_file || true; cd "$PREFIX_ETC" && docker compose pull)
 	(cd "$PREFIX_ETC" && docker compose up -d --force-recreate) || true
 	die "upgrade rolled back due to post-upgrade healthcheck failure"
 fi
