@@ -5,6 +5,25 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.27](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.26...partner-edge-v0.12.27) (2026-05-15)
+
+
+### Features
+
+* **install:** M6 slice 2b — Reality keypair + UUID on install + register payload ([#115](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/115)) ([1d45b36](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1d45b366cb3936ea329caf6492e54e10bcc5fd93))
+* **partner-edge:** Caddy maxmind_geolocation defence-in-depth (M2b.2) ([20361cb](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/20361cb101d23e7540f7df578eed6d4e567990c4))
+* **scripts:** idempotent update.sh + packet-up template ([#113](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/113)) ([e4661ea](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e4661ea3562aeaf04de72da44f0a759742866578))
+* **security:** cargo-deny + nextest for supply-chain hygiene ([#109](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/109)) ([acb71b0](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/acb71b0ed0bc94becf443930d88808436aee9e29))
+* **sfu:** peer-suspended bridge via sfu-events DC id:8 (Phase 2c) ([#119](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/119)) ([763aaaa](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/763aaaa265cebfa919f44f5d7eb33b59b1a2e4be))
+* **sfu:** Phase B — migrate pacer to oxpulse-sfu-kit v0.11 per-subscriber ([#116](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/116)) ([a644059](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a644059ac67c818ad871f381109c33a0be430494))
+
+
+### Bug Fixes
+
+* **gitignore:** match target as file/symlink, not just directory ([#117](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/117)) ([31cfb87](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/31cfb87393c70826b81d7a4e92a7d4cb5b3a29c2))
+* **install:** keygen idempotency guard — preserve existing identity on re-run ([#118](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/118)) ([f99890f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/f99890f5947dff92e5db7a4c48d561b1fa3e5ed0))
+* **refresh:** decouple heartbeat from keys fetch — fixes PartnerEdgeStaleHeartbeat alert ([#112](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/112)) ([1728504](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1728504e9ebc8e4e365bf8d02f84394808f88244))
+
 ## [0.12.26](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.25...partner-edge-v0.12.26) (2026-05-10)
 
 
