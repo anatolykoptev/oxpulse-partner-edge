@@ -249,6 +249,9 @@ Registration (pick one):
   --token=<ptkn_...>         Fetch node config from $BACKEND_API/api/partner/register
                              (also accepts '-' to read from stdin; OXPULSE_PARTNER_TOKEN env supported)
   --token-file=<path>        Read token from a file (chmod 0600 recommended)
+  --ghcr-token=<ghp_...>     GHCR PAT for pulling private partner-edge images.
+                             Saved to /etc/oxpulse-partner-edge/ghcr.token (0600);
+                             reused by upgrade.sh on every subsequent pull.
   --manual-config=<path>     Read node config from a local JSON file
 
 Optional:
@@ -297,11 +300,16 @@ USAGE
 	exit 2
 }
 
+# GHCR PAT supplied via --ghcr-token=ghp_xxx or OXPULSE_GHCR_TOKEN env.
+# Flag wins over env. Empty disables (anonymous pull / assume prior docker login).
+GHCR_TOKEN_FLAG="${OXPULSE_GHCR_TOKEN:-}"
+
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--domain=*)         DOMAIN="${1#*=}" ;;
 		--partner-id=*)     PARTNER_ID="${1#*=}" ;;
 		--token=*)          TOKEN="${1#*=}" ;;
+		--ghcr-token=*)     GHCR_TOKEN_FLAG="${1#*=}" ;;
 		--token-file=*)     TOKEN_FILE="${1#*=}" ;;
 		--manual-config=*)  MANUAL_CONFIG="${1#*=}" ;;
 		--tunnel=*)         TUNNEL="${1#*=}" ;;
@@ -640,6 +648,29 @@ fi
 # Runs unconditionally (bake + full-install modes).
 # In bake mode: caches images into the VM for snapshotting (spec line 1507).
 # In full-install mode: ensures images are ready before compose-up.
+# ghcr-auth setup before the pull loop. Source lib (from checkout or sbin),
+# then either configure-and-login (if --ghcr-token=) or relogin from stored
+# token (idempotent). Anything missing → fall through; the docker pulls in
+# the loop below will fail loud with a denied error on private packages.
+_ghcr_lib_local="${src_dir:-.}/ghcr-auth-lib.sh"
+_ghcr_lib_installed="$PREFIX_SBIN/ghcr-auth-lib.sh"
+if [[ -f "$_ghcr_lib_local" ]]; then
+	# shellcheck source=ghcr-auth-lib.sh
+	source "$_ghcr_lib_local"
+elif [[ -f "$_ghcr_lib_installed" ]]; then
+	# shellcheck source=/dev/null
+	source "$_ghcr_lib_installed"
+fi
+unset _ghcr_lib_local _ghcr_lib_installed
+
+if [[ -n "${GHCR_TOKEN_FLAG:-}" ]] && declare -f ghcr_configure_token >/dev/null 2>&1; then
+	ghcr_configure_token "$GHCR_TOKEN_FLAG" \
+		|| die "failed to save/login with --ghcr-token (see warning above)"
+	unset GHCR_TOKEN_FLAG
+elif declare -f ghcr_login_from_file >/dev/null 2>&1; then
+	ghcr_login_from_file || warn "ghcr: login from stored token failed; pull may fail"
+fi
+
 log "[3b] pulling images (image_version=$IMAGE_VERSION)"
 if [[ $DRY_RUN -eq 0 ]]; then
 	tpl_src=""
@@ -1536,6 +1567,14 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	else
 		curl -fsSL "$REPO_RAW/channel-render-lib.sh" -o "$PREFIX_SBIN/channel-render-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/channel-render-lib.sh"
+	fi
+
+	# GHCR auth lib into /usr/local/sbin (sourced by upgrade.sh).
+	if [[ -n "$src_dir" && -f "$src_dir/ghcr-auth-lib.sh" ]]; then
+		install -m 0644 "$src_dir/ghcr-auth-lib.sh" "$PREFIX_SBIN/ghcr-auth-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/ghcr-auth-lib.sh" -o "$PREFIX_SBIN/ghcr-auth-lib.sh"
+		chmod 0644 "$PREFIX_SBIN/ghcr-auth-lib.sh"
 	fi
 	# Hydrate script into /usr/local/sbin (installed in all modes; needed by the
 	# oneshot unit on first boot after snapshot→clone).
