@@ -1,4 +1,4 @@
-target/
+target
 *.tar.gz
 .DS_Store
 install.env
