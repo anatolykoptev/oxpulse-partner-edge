@@ -26,7 +26,6 @@ set -euo pipefail
 # Paths (all overridable via env for tests)
 # ---------------------------------------------------------------------------
 PREFIX_ETC="${PARTNER_EDGE_PREFIX_ETC:-/etc/oxpulse-partner-edge}"
-PREFIX_LIB="${PARTNER_EDGE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
 NODE_CFG="${NODE_CFG:-$PREFIX_ETC/node-config.json}"
 XRAY_CFG="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
 TOKEN_FILE="${TOKEN_FILE:-$PREFIX_ETC/token}"
