@@ -231,6 +231,11 @@ BRAND_LEGAL_COUNTRY=""
 BRAND_LEGAL_CONTACT=""
 DRY_RUN=0
 BAKE_MODE=0
+# Idempotency guard: when existing reality identity files are found, keygen is
+# skipped and the existing UUID/keys are reused. Set to 1 via --force-keygen
+# or --rotate-identity to override — this is the slice 3 contract for
+# operator-initiated rotation. Requires explicit invocation; never auto-triggered.
+FORCE_KEYGEN=0
 
 usage() {
 	sed -n '2,18p' "$0" >&2
@@ -280,6 +285,11 @@ assembles a minimal BrandingConfig payload from whichever flags are set):
   --brand-legal-contact=<email>    Legal contact email
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
+  --force-keygen             Force generation of a new Reality identity even if one exists.
+  --rotate-identity          Alias for --force-keygen (slice 3 operator-rotation contract).
+                             Both flags back up existing reality.{priv,pub,uuid} to .bak.<epoch>
+                             before invoking keygen. Without this flag, any existing identity is
+                             preserved — re-runs and re-deploys are fully idempotent.
   -h|--help                  Show this help
 
 Env overrides: OXPULSE_IMAGE_REGISTRY, OXPULSE_BACKEND_API, OXPULSE_REPO_RAW, REGION
@@ -332,6 +342,7 @@ while [[ $# -gt 0 ]]; do
 		--brand-legal-contact=*)   BRAND_LEGAL_CONTACT="${1#*=}" ;;
 		--dry-run)          DRY_RUN=1 ;;
 		--bake)             BAKE_MODE=1 ;;
+		--force-keygen|--rotate-identity) FORCE_KEYGEN=1 ;;
 		-h|--help)          usage ;;
 		*) die "unknown arg: $1 (try --help)" ;;
 	esac
@@ -678,10 +689,11 @@ fi
 
 # ---------- Reality x25519 keypair + UUID (M6 slice 2b) ----------
 # Generated once at first install; persisted so reinstalls / upgrade runs reuse
-# the same identity. To rotate: delete the three files and re-run install.sh
-# (triggers fresh partner-cli keygen; reality_public_key is sent to the backend
-# on POST /api/partner/register and stored in partner_nodes.reality_pubkey via
-# the COALESCE upsert; slice 2c path-watcher SIGHUPs xray-reality to apply).
+# the same identity (idempotency guard — incident §13, 2026-05-14).
+# To rotate: use --force-keygen / --rotate-identity flag (backs up + regenerates).
+# reality_public_key is sent to the backend on POST /api/partner/register and
+# stored in partner_nodes.reality_pubkey via the COALESCE upsert; slice 2c
+# path-watcher SIGHUPs xray-reality to apply.
 #
 # File layout (under PREFIX_ETC = /etc/oxpulse-partner-edge/):
 #   reality.priv  0600  base64url x25519 private key (never leaves this host)
@@ -702,12 +714,25 @@ REALITY_UUID_PATH="$PREFIX_ETC/reality.uuid"
 if [[ $DRY_RUN -eq 1 ]]; then
 	# Dry-run: show what keygen would produce / reuse, but do NOT write files.
 	# No partner-cli invocation — dry-run must be side-effect-free.
-	if [[ -s "$REALITY_PRIV_PATH" && -s "$REALITY_PUB_PATH" && -s "$REALITY_UUID_PATH" ]]; then
-		warn "  [dry-run] reality keypair already exists — would reuse"
+	_dry_count=0
+	for _f in "$REALITY_PRIV_PATH" "$REALITY_PUB_PATH" "$REALITY_UUID_PATH"; do
+		[[ -s "$_f" ]] && _dry_count=$((_dry_count + 1))
+	done
+	unset _f
+	if [[ $FORCE_KEYGEN -eq 1 ]]; then
+		warn "  [dry-run] --force-keygen: would backup existing identity files and invoke partner-cli keygen"
+		REALITY_PUBKEY="DRYRUN-pub"
+		REALITY_UUID="DRYRUN-uuid-00000000-0000-0000-0000-000000000000"
+	elif [[ $_dry_count -eq 3 ]]; then
+		warn "  [dry-run] reality keypair already exists — would reuse (idempotent re-install)"
 		REALITY_PUBKEY=$(cat "$REALITY_PUB_PATH")
 		REALITY_UUID=$(cat "$REALITY_UUID_PATH")
 		warn "  [dry-run] reality_public_key: $REALITY_PUBKEY"
 		warn "  [dry-run] reality_uuid: $REALITY_UUID"
+	elif [[ $_dry_count -gt 0 ]]; then
+		warn "  [dry-run] PARTIAL identity files detected ($_dry_count/3) — would abort on real run"
+		REALITY_PUBKEY="DRYRUN-pub"
+		REALITY_UUID="DRYRUN-uuid-00000000-0000-0000-0000-000000000000"
 	else
 		warn "  [dry-run] would invoke: partner-cli keygen → $REALITY_PRIV_PATH $REALITY_PUB_PATH $REALITY_UUID_PATH"
 		warn "  [dry-run] would write $REALITY_PRIV_PATH (mode 0600, not written)"
@@ -716,16 +741,71 @@ if [[ $DRY_RUN -eq 1 ]]; then
 		REALITY_PUBKEY="DRYRUN-pub"
 		REALITY_UUID="DRYRUN-uuid-00000000-0000-0000-0000-000000000000"
 	fi
+	unset _dry_count
 else
 	install -d -m 0700 "$PREFIX_ETC"
-	# All three files are one atomic unit — produced by a single partner-cli keygen
-	# call. Guard requires ALL THREE present and non-empty; any missing triggers a
-	# full regeneration. Partial state (e.g. priv written, pub missing) is treated
-	# the same as absent — old partial files are overwritten.
-	if [[ -s "$REALITY_PRIV_PATH" && -s "$REALITY_PUB_PATH" && -s "$REALITY_UUID_PATH" ]]; then
-		log "  reality keypair: reusing existing (all three files present)"
+	# ---------- Idempotency guard (incident §13, 2026-05-14) ----------
+	# All three files (reality.priv + reality.pub + reality.uuid) form ONE atomic
+	# identity unit. Re-runs MUST reuse the existing identity to prevent silent
+	# breakage of all distributed VLESS links.
+	#
+	# Decision tree:
+	#   FORCE_KEYGEN=1 (--force-keygen / --rotate-identity)
+	#     → backup existing files, then generate fresh identity
+	#   All three present and non-empty
+	#     → skip keygen; reuse existing identity; echo UUID to stdout
+	#   Exactly one or two present (partial state)
+	#     → ABORT loudly; no files modified; operator must resolve manually
+	#   None present (fresh install)
+	#     → generate fresh identity; echo UUID to stdout
+	_reality_all_present=0
+	_reality_partial=0
+	_reality_count=0
+	for _f in "$REALITY_PRIV_PATH" "$REALITY_PUB_PATH" "$REALITY_UUID_PATH"; do
+		[[ -s "$_f" ]] && _reality_count=$((_reality_count + 1))
+	done
+	[[ $_reality_count -eq 3 ]] && _reality_all_present=1
+	[[ $_reality_count -gt 0 && $_reality_count -lt 3 ]] && _reality_partial=1
+
+	if [[ $FORCE_KEYGEN -eq 1 ]]; then
+		# Explicit operator-initiated rotation (slice 3 contract). Back up any
+		# existing files before overwriting so a botched rotation is recoverable.
+		log "  --force-keygen: backing up existing identity files (if present)"
+		_bak_epoch=$(date +%s)
+		for _f in reality.priv reality.pub reality.uuid; do
+			if [[ -f "$PREFIX_ETC/$_f" ]]; then
+				cp "$PREFIX_ETC/$_f" "$PREFIX_ETC/$_f.bak.$_bak_epoch"
+				log "    backed up $PREFIX_ETC/$_f → $PREFIX_ETC/$_f.bak.$_bak_epoch"
+			fi
+		done
+		unset _bak_epoch _f
+		log "  generating Reality x25519 keypair via partner-cli keygen (forced rotation)"
+		_do_keygen=1
+	elif [[ $_reality_all_present -eq 1 ]]; then
+		# All three files present — idempotent re-install or re-deploy.
+		# Reuse existing identity; distributed VLESS links remain valid.
+		log "  reality keypair: reusing existing identity (all three files present)"
+		_do_keygen=0
+	elif [[ $_reality_partial -eq 1 ]]; then
+		# Partial state detected — this is not a clean fresh install.
+		# Silent regeneration would silently rotate the UUID and break VLESS links.
+		# Abort loudly so the operator can make an explicit decision.
+		die "install: PARTIAL identity files detected ($_reality_count/3 reality.* files present).
+Manual recovery required — choose one option:
+  Option 1 (fresh identity): remove all reality.* files and re-run install.sh
+    sudo rm -f $PREFIX_ETC/reality.priv $PREFIX_ETC/reality.pub $PREFIX_ETC/reality.uuid
+  Option 2 (explicit rotation): run with --force-keygen to rotate and backup
+    sudo bash install.sh --force-keygen <other-flags>
+  Option 3 (restore from backup): copy reality.{priv,pub,uuid}.bak.* back to their originals
+Aborting to prevent silent UUID rotation and VLESS link breakage."
 	else
-		log "  reality keypair: generating fresh (partial or absent state detected)"
+		# All three absent — fresh install.
+		log "  reality keypair: fresh install, generating new identity"
+		_do_keygen=1
+	fi
+	unset _reality_all_present _reality_partial _reality_count
+
+	if [[ ${_do_keygen:-0} -eq 1 ]]; then
 		log "  generating Reality x25519 keypair via partner-cli keygen"
 		_keygen_out=$(partner-cli keygen)
 		_reality_priv=$(printf '%s' "$_keygen_out" | grep '^private_key:' | awk '{print $2}')
@@ -766,7 +846,7 @@ else
 		chmod 0644 "$_uuid_tmp"
 		printf '%s\n' "$_uuid" >"$_uuid_tmp"
 		mv "$_uuid_tmp" "$REALITY_UUID_PATH"
-		unset _uuid _uuid_tmp
+		unset _uuid _uuid_tmp _do_keygen
 	fi
 	REALITY_PUBKEY=$(cat "$REALITY_PUB_PATH")
 	REALITY_UUID=$(cat "$REALITY_UUID_PATH")
