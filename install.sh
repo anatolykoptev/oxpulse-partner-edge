@@ -763,6 +763,19 @@ elif [[ -f "$_ghcr_lib_installed" ]]; then
 fi
 unset _ghcr_lib_local _ghcr_lib_installed
 
+_chan_lib_local="${src_dir:-.}/channel-render-lib.sh"
+_chan_lib_installed="$PREFIX_SBIN/channel-render-lib.sh"
+if [[ -f "$_chan_lib_local" ]]; then
+	# shellcheck source=channel-render-lib.sh
+	source "$_chan_lib_local"
+elif [[ -f "$_chan_lib_installed" ]]; then
+	# shellcheck source=/dev/null
+	source "$_chan_lib_installed"
+else
+	die "channel-render-lib.sh not found (looked at $_chan_lib_local and $_chan_lib_installed)"
+fi
+unset _chan_lib_local _chan_lib_installed
+
 if [[ -n "${GHCR_TOKEN_FLAG:-}" ]] && declare -f ghcr_configure_token >/dev/null 2>&1; then
 	ghcr_configure_token "$GHCR_TOKEN_FLAG" \
 		|| die "failed to save/login with --ghcr-token (see warning above)"
@@ -1292,6 +1305,7 @@ AWG_H2=$(awg_extract               "$tmp_cfg" h2)
 AWG_H3=$(awg_extract               "$tmp_cfg" h3)
 AWG_H4=$(awg_extract               "$tmp_cfg" h4)
 SFU_EDGE_ID=$(awg_extract          "$tmp_cfg" edge_id)
+export OTEL_EXPORTER_OTLP_ENDPOINT
 OTEL_EXPORTER_OTLP_ENDPOINT=$(awg_extract "$tmp_cfg" otel_endpoint)
 # Pre-existing SFU_EDGE_ID derivation (post-arg-parse) is the fallback when
 # backend doesn't return one — keep that path.
@@ -1301,10 +1315,12 @@ OTEL_EXPORTER_OTLP_ENDPOINT=$(awg_extract "$tmp_cfg" otel_endpoint)
 # only if the backend did not return one (pre-v0.2 deployments).
 REGISTER_TURNS_SUBDOMAIN=$(json_get turns_subdomain "$tmp_cfg")
 # CH3/CH5 fallback channel vars — optional; empty if backend does not provision them.
+export HYSTERIA2_SERVER HYSTERIA2_PORT HYSTERIA2_AUTH HYSTERIA2_OBFS
 HYSTERIA2_SERVER=$(json_get hysteria2_server "$tmp_cfg")
 HYSTERIA2_PORT=$(json_get hysteria2_port "$tmp_cfg")
 HYSTERIA2_AUTH=$(json_get hysteria2_auth "$tmp_cfg")
 HYSTERIA2_OBFS=$(json_get hysteria2_obfs "$tmp_cfg")
+export NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS
 NAIVE_SERVER=$(json_get naive_server "$tmp_cfg")
 NAIVE_PORT=$(json_get naive_port "$tmp_cfg")
 NAIVE_USER=$(json_get naive_user "$tmp_cfg")
@@ -1407,6 +1423,7 @@ if [[ -n "${PRIVATE_IP:-}" ]]; then
 else
 	EXTERNAL_IP_LINE="${PUBLIC_IP}"
 fi
+export EXTERNAL_IP_LINE
 
 # ---------- Step 5: stage templates ----------
 log "[5/10] rendering templates"
@@ -1444,39 +1461,6 @@ fetch_tpl naive-client.json.tpl     "$stage/naive.tpl"
 mkdir -p "$stage/cover"
 fetch_tpl cover/cover.html "$stage/cover/cover.html"
 
-render() {
-	local src=$1 dst=$2
-	# Mustache-style placeholder substitution via python3 (universally available
-	# on every supported OS family). Replaces the previous sed-based renderer
-	# which broke on multi-line values: PEM-formatted SFU_SIGNING_PUBLIC_KEY
-	# contains embedded newlines that sed interprets as expression terminators,
-	# producing "unterminated `s' command" at install step 5. See PR fix for
-	# zvonilka.net fresh-install regression (2026-05-16).
-	PARTNER_ID="$PARTNER_ID" PARTNER_DOMAIN="$DOMAIN" \
-	BACKEND_ENDPOINT="$BACKEND_ENDPOINT" BACKEND_HOST="$BACKEND_HOST" BACKEND_PORT="$BACKEND_PORT" \
-	TURN_SECRET="$TURN_SECRET" REALITY_UUID="$REALITY_UUID" REALITY_PUBLIC_KEY="$REALITY_PUBLIC_KEY" \
-	REALITY_SHORT_ID="$REALITY_SHORT_ID" REALITY_SERVER_NAME="$REALITY_SERVER_NAME" \
-	REALITY_ENCRYPTION="$REALITY_ENCRYPTION" TURNS_SUBDOMAIN="$TURNS_SUBDOMAIN" \
-	PUBLIC_IP="$PUBLIC_IP" PRIVATE_IP="${PRIVATE_IP:-}" EXTERNAL_IP_LINE="$EXTERNAL_IP_LINE" \
-	IMAGE_VERSION="$IMAGE_VERSION" SFU_UDP_PORT="$SFU_UDP_PORT" SFU_METRICS_PORT="$SFU_METRICS_PORT" \
-	SFU_EDGE_ID="$SFU_EDGE_ID" OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}" \
-	SFU_SIGNING_PUBLIC_KEY="${SFU_SIGNING_PUBLIC_KEY:-}" RELAY_JWT_SECRET="$RELAY_JWT_SECRET" \
-	SIGNALING_SFU_SECRET="${SIGNALING_SFU_SECRET:-}" \
-	HYSTERIA2_SERVER="${HYSTERIA2_SERVER:-}" HYSTERIA2_PORT="${HYSTERIA2_PORT:-51822}" \
-	HYSTERIA2_AUTH="${HYSTERIA2_AUTH:-}" HYSTERIA2_OBFS="${HYSTERIA2_OBFS:-}" \
-	HYSTERIA2_SOCKS_PORT="${HYSTERIA2_SOCKS_PORT:-18891}" \
-	NAIVE_SERVER="${NAIVE_SERVER:-}" NAIVE_PORT="${NAIVE_PORT:-44433}" \
-	NAIVE_USER="${NAIVE_USER:-}" NAIVE_PASS="${NAIVE_PASS:-}" NAIVE_SOCKS_PORT="${NAIVE_SOCKS_PORT:-18892}" \
-	python3 -c '
-import os, sys, re
-src, dst = sys.argv[1], sys.argv[2]
-with open(src) as f: tpl = f.read()
-# Substitute every {{NAME}} placeholder with the matching env var (empty if unset).
-out = re.sub(r"\{\{([A-Z][A-Z0-9_]*)\}\}", lambda m: os.environ.get(m.group(1), ""), tpl)
-with open(dst, "w") as f: f.write(out)
-' "$src" "$dst"
-}
-
 compose_out="$PREFIX_ETC/docker-compose.yml"
 caddy_out="$PREFIX_ETC/Caddyfile"
 xray_out="$PREFIX_ETC/xray-client.json"
@@ -1492,14 +1476,14 @@ if [[ $DRY_RUN -eq 1 ]]; then
 	coturn_out="$dryroot/coturn.conf"
 	cover_out_dir="$dryroot/cover"
 fi
-render "$stage/compose.tpl" "$compose_out"
-render "$stage/caddy.tpl"   "$caddy_out"
+render_template "$stage/compose.tpl" "$compose_out"
+render_template "$stage/caddy.tpl"   "$caddy_out"
 # Phase 1: compute sha256 of rendered Caddyfile and substitute __CADDYFILE_SHA__
 # placeholder so /canary/config-hash returns the actual hash at runtime.
 _rendered_sha=$(sha256sum "$caddy_out" | awk '{print $1}')
 sed -i "s|__CADDYFILE_SHA__|${_rendered_sha}|g" "$caddy_out"
-render "$stage/xray.tpl"    "$xray_out"
-render "$stage/coturn.tpl"  "$coturn_out"
+render_template "$stage/xray.tpl"    "$xray_out"
+render_template "$stage/coturn.tpl"  "$coturn_out"
 
 # AmneziaWG mesh setup — runs only when the central returned an awg block.
 # Builds amneziawg from source, writes /etc/amnezia/amneziawg/awg0.conf
@@ -1518,7 +1502,7 @@ install -m 0644 "$stage/cover/cover.html" "$cover_out_dir/cover.html"
 # service starts alongside the core stack (docker compose --profile ch3 up).
 COMPOSE_PROFILES_EXTRA=""
 if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
-	render "$stage/hysteria2.tpl" "$PREFIX_ETC/hysteria2-client.yaml"
+	render_template "$stage/hysteria2.tpl" "$PREFIX_ETC/hysteria2-client.yaml"
 	chmod 0600 "$PREFIX_ETC/hysteria2-client.yaml"
 	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
 	log "  hysteria2-client.yaml rendered (CH3 profile enabled)"
@@ -1560,7 +1544,7 @@ if declare -f re_render_hysteria2 >/dev/null 2>&1; then
 	fi
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
-	render "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"
+	render_template "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"
 	chmod 0600 "$PREFIX_ETC/naive-client.json"
 	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch5"
 	log "  naive-client.json rendered (CH5 profile enabled)"
