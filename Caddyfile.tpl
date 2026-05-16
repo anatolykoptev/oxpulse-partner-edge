@@ -23,14 +23,14 @@
     }
     email admin@{{PARTNER_DOMAIN}}
 
-    # M2b.2: DB-IP country lookup — sets {vars.maxmind_country_code} for
-    # downstream header injection. If the mmdb file is absent (fresh node
-    # before install.sh provisions /var/lib/geoip/) the handler is a no-op
-    # and the placeholder resolves to an empty string. Rust upstream reads
-    # X-Geo-Country and falls back to its own chain when the value is empty.
-    maxmind_geolocation {
-        db_path /var/lib/geoip/dbip-country-lite.mmdb
-    }
+    # M2b.2: DB-IP country lookup — DISABLED 2026-05-16.
+    # The aksdb fork registered maxmind_geolocation as a global option;
+    # porech v1.0.3 (current build) only exposes it as an HTTP matcher.
+    # Caddy v2.11.2 rejects this block as "unrecognized global option".
+    # X-Geo-Country header injections below now emit an empty string for
+    # {vars.maxmind_country_code}; Rust upstream falls back to its own chain.
+    # Follow-up: re-implement geo lookup using porech matcher form OR
+    # a different plugin that supports a global db_path declaration.
 
     # NOTE: listener_wrappers MUST be at global servers{} scope — not in a
     # site-level snippet (Phase 2 PoC confirmed). layer4 applies to the listener
