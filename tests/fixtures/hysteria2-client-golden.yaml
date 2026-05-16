@@ -1,13 +1,13 @@
 # Rendered by oxpulse-partner-edge install.sh / update.sh.
 # Phase 1.7 — hy2 as 2nd partner-edge control-plane channel.
-server: 192.9.243.148:51822
+server: "192.9.243.148:51822"
 
-auth: GOLDEN_AUTH_PASS_FIXTURE
+auth: "GOLDEN_AUTH_PASS_FIXTURE"
 
 obfs:
   type: salamander
   salamander:
-    password: GOLDEN_OBFS_PASS_FIXTURE
+    password: "GOLDEN_OBFS_PASS_FIXTURE"
 
 tls:
   insecure: true
@@ -19,3 +19,4 @@ bandwidth:
 tcpForwarding:
   - listen: 0.0.0.0:18443
     remote: 127.0.0.1:8907
+EOF

@@ -98,9 +98,6 @@ except Exception:
     local backend_host="${backend%:*}"
     local backend_port="${backend##*:}"
 
-    # Escape sed replacement metacharacters (|, &, \).
-    _esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
-
     local out
     out=$(mktemp)
     sed \
@@ -130,9 +127,9 @@ except Exception:
 # Render the hysteria2-client.yaml from template via simple sed substitution.
 # Pattern mirrors _render_xray_to() at top of this file.
 
-# Escape sed replacement metacharacters (|, &, \\).
-# Promoted to module scope for _render_hysteria2_to().
-_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+# Escape sed replacement metacharacters (\, &, |, ") for sed replacement strings.
+# Single source used by all render functions in this module.
+_esc() { printf '%s' "$1" | sed -e 's/[\\&|"]/\\&/g'; }
 
 # Internal — render to a specific output path. Used by the test runner.
 _render_hysteria2_to() {
@@ -153,7 +150,8 @@ _render_hysteria2_to() {
 # Writes to /etc/oxpulse-partner-edge/hysteria2-client.yaml with mode 600.
 re_render_hysteria2() {
     local tpl="${OXPULSE_REPO_DIR:-/usr/local/share/oxpulse-partner-edge}/hysteria2-client.yaml.tpl"
-    local out="/etc/oxpulse-partner-edge/hysteria2-client.yaml"
+    # HY2_OUTPUT_PATH: optional override for tests (default: /etc/oxpulse-partner-edge/hysteria2-client.yaml)
+    local out="${HY2_OUTPUT_PATH:-/etc/oxpulse-partner-edge/hysteria2-client.yaml}"
     local backup="${out}.bak.$(date +%s)"
     local server="${HY2_SERVER:-192.9.243.148:51822}"
     local listen="${HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
@@ -168,9 +166,13 @@ re_render_hysteria2() {
         return 1
     fi
 
-    [[ -f "$out" ]] && cp "$out" "$backup"
-    _render_hysteria2_to "$tpl" "$out" \
-        "$server" "$HY2_AUTH_PASS" "$HY2_OBFS_PASS" "$listen" "$backend"
-    chmod 600 "$out"
-    echo "$(date -Iseconds) re_render_hysteria2: wrote $out (backup $backup)"
+    # Backup with mode-preserved copy (install -m 600 preserves secret perms, cp does not).
+    [[ -f "$out" ]] && install -m 600 "$out" "$backup"
+
+    # Atomic write: render into a 0600 tmp in same dir, then rename.
+    local tmp="${out}.tmp.$$"
+    ( umask 077 && _render_hysteria2_to "$tpl" "$tmp" \
+        "$server" "$HY2_AUTH_PASS" "$HY2_OBFS_PASS" "$listen" "$backend" )
+    mv -f "$tmp" "$out"
+    log "re_render_hysteria2: wrote $out (backup $backup)"
 }
