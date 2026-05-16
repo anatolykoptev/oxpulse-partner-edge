@@ -1426,6 +1426,42 @@ if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
 	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
 	log "  hysteria2-client.yaml rendered (CH3 profile enabled)"
 fi
+# Phase 1.7 — fetch shared hy2 credentials + render hysteria2-client.yaml.
+# For Phase 1 these are fleet-shared (per-edge identity = Phase 7).
+# Source: GET /api/partner/hy2-credentials returns JSON {auth_pass, obfs_pass}
+# Falls back to env if API not yet deployed (HTTP 404 / connection refused).
+# Source the channel render library to access re_render_hysteria2().
+_hy2_lib_local="${src_dir:+$src_dir/channel-render-lib.sh}"
+_hy2_lib_installed="/usr/local/sbin/channel-render-lib.sh"
+if [[ -n "${_hy2_lib_local:-}" && -f "${_hy2_lib_local}" ]]; then
+	# shellcheck source=channel-render-lib.sh
+	source "$_hy2_lib_local"
+elif [[ -f "$_hy2_lib_installed" ]]; then
+	# shellcheck source=/dev/null
+	source "$_hy2_lib_installed"
+fi
+unset _hy2_lib_local _hy2_lib_installed
+if declare -f re_render_hysteria2 >/dev/null 2>&1; then
+	log "fetching hy2 credentials"
+	_hy2_creds_url="${BACKEND_API}/api/partner/hy2-credentials"
+	_hy2_creds_json=$(curl -fsS --max-time 10 \
+		-H "Authorization: Bearer ${OXPULSE_SERVICE_TOKEN:-}" \
+		"$_hy2_creds_url" 2>/dev/null || echo '{}')
+	HY2_AUTH_PASS=$(printf '%s' "$_hy2_creds_json" | jq -r '.auth_pass // empty' 2>/dev/null || true)
+	HY2_OBFS_PASS=$(printf '%s' "$_hy2_creds_json" | jq -r '.obfs_pass // empty' 2>/dev/null || true)
+	unset _hy2_creds_url _hy2_creds_json
+	# Fallback: env vars (for offline install / pre-API-deploy)
+	HY2_AUTH_PASS="${HY2_AUTH_PASS:-${OXPULSE_HY2_AUTH_PASS:-}}"
+	HY2_OBFS_PASS="${HY2_OBFS_PASS:-${OXPULSE_HY2_OBFS_PASS:-}}"
+	if [[ -n "$HY2_AUTH_PASS" && -n "$HY2_OBFS_PASS" ]]; then
+		export HY2_AUTH_PASS HY2_OBFS_PASS
+		re_render_hysteria2
+		COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
+		log "hy2 channel provisioned"
+	else
+		warn "hy2 credentials unavailable — installing awg-only mode (hy2 will provision on next upgrade)"
+	fi
+fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
 	render "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"
 	chmod 0600 "$PREFIX_ETC/naive-client.json"
