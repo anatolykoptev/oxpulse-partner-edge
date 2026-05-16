@@ -242,9 +242,29 @@
 																			}
 																		}
 																	},
+																	"health_checks": {
+																		"active": {
+																			"expect_status": 2,
+																			"fails": 3,
+																			"interval": 10000000000,
+																			"passes": 2,
+																			"timeout": 3000000000,
+																			"uri": "/api/health"
+																		}
+																	},
+																	"load_balancing": {
+																		"selection_policy": {
+																			"policy": "first"
+																		},
+																		"try_duration": 5000000000,
+																		"try_interval": 250000000
+																	},
 																	"upstreams": [
 																		{
-																			"dial": "xray-client:3080"
+																			"dial": "10.9.0.2:8907"
+																		},
+																		{
+																			"dial": "host.docker.internal:18443"
 																		}
 																	]
 																}
@@ -279,9 +299,29 @@
 																			}
 																		}
 																	},
+																	"health_checks": {
+																		"active": {
+																			"expect_status": 2,
+																			"fails": 3,
+																			"interval": 10000000000,
+																			"passes": 2,
+																			"timeout": 3000000000,
+																			"uri": "/api/health"
+																		}
+																	},
+																	"load_balancing": {
+																		"selection_policy": {
+																			"policy": "first"
+																		},
+																		"try_duration": 5000000000,
+																		"try_interval": 250000000
+																	},
 																	"upstreams": [
 																		{
-																			"dial": "xray-client:3080"
+																			"dial": "10.9.0.2:8907"
+																		},
+																		{
+																			"dial": "host.docker.internal:18443"
 																		}
 																	]
 																}
@@ -316,9 +356,29 @@
 																			}
 																		}
 																	},
+																	"health_checks": {
+																		"active": {
+																			"expect_status": 2,
+																			"fails": 3,
+																			"interval": 10000000000,
+																			"passes": 2,
+																			"timeout": 3000000000,
+																			"uri": "/api/health"
+																		}
+																	},
+																	"load_balancing": {
+																		"selection_policy": {
+																			"policy": "first"
+																		},
+																		"try_duration": 5000000000,
+																		"try_interval": 250000000
+																	},
 																	"upstreams": [
 																		{
-																			"dial": "xray-client:3080"
+																			"dial": "10.9.0.2:8907"
+																		},
+																		{
+																			"dial": "host.docker.internal:18443"
 																		}
 																	]
 																}
@@ -353,9 +413,29 @@
 																			}
 																		}
 																	},
+																	"health_checks": {
+																		"active": {
+																			"expect_status": 2,
+																			"fails": 3,
+																			"interval": 10000000000,
+																			"passes": 2,
+																			"timeout": 3000000000,
+																			"uri": "/api/health"
+																		}
+																	},
+																	"load_balancing": {
+																		"selection_policy": {
+																			"policy": "first"
+																		},
+																		"try_duration": 5000000000,
+																		"try_interval": 250000000
+																	},
 																	"upstreams": [
 																		{
-																			"dial": "xray-client:3080"
+																			"dial": "10.9.0.2:8907"
+																		},
+																		{
+																			"dial": "host.docker.internal:18443"
 																		}
 																	]
 																}

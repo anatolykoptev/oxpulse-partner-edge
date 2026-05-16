@@ -165,7 +165,7 @@ services:
   # Started only when install.sh renders hysteria2-client.yaml (backend
   # provisioned CH3). Activated via `docker compose --profile ch3 up -d`.
   # Traffic: QUIC + salamander obfuscation → looks like random UDP noise.
-  # SOCKS5 listener on 127.0.0.1:HYSTERIA2_SOCKS_PORT for local proxying.
+  # tcpForwarding listener on 127.0.0.1:18443 for local proxying.
   hysteria2-client:
     image: ghcr.io/apernet/hysteria:app-v2.8.1
     container_name: oxpulse-partner-hysteria2
@@ -176,12 +176,15 @@ services:
       - ./hysteria2-client.yaml:/etc/hysteria/config.yaml:ro
     command: ["client", "--config", "/etc/hysteria/config.yaml"]
     healthcheck:
-      # Probe the local SOCKS5 listener that Hysteria2 exposes.
-      test: ["CMD-SHELL", "ss -tnlp | grep -q ':${HYSTERIA2_SOCKS_PORT:-18891}' || exit 1"]
+      # Probe the local tcpForwarding listener that Hysteria2 exposes.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 18443 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
+    labels:
+      oxpulse.channel: "hy2"
+      oxpulse.phase: "1.7"
 
   # ── CH5 NaiveProxy client (fallback) ────────────────────────────────────
   # Started only when install.sh renders naive-client.json (backend

@@ -170,10 +170,21 @@ if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
 	flock -n 9 || die "another upgrade.sh is running (lock: $LOCK_FILE). If stuck, check the pid and remove the lock file."
 fi
 
-# --templates-only: re-render xray config from upstream template, skip image ops.
+# --templates-only: re-render channel client configs from upstream templates, skip image ops.
 if [[ "$MODE" == templates ]]; then
-	log "--templates-only: refreshing xray-client.json from upstream template"
+	log "--templates-only: refreshing channel client configs from upstream templates"
 	re_render_xray
+	# Phase 1.7 — render hy2 too if creds available
+	if [[ -n "${HY2_AUTH_PASS:-${OXPULSE_HY2_AUTH_PASS:-}}" \
+	   && -n "${HY2_OBFS_PASS:-${OXPULSE_HY2_OBFS_PASS:-}}" ]]; then
+		HY2_AUTH_PASS="${HY2_AUTH_PASS:-$OXPULSE_HY2_AUTH_PASS}"
+		HY2_OBFS_PASS="${HY2_OBFS_PASS:-$OXPULSE_HY2_OBFS_PASS}"
+		export HY2_AUTH_PASS HY2_OBFS_PASS
+		re_render_hysteria2
+		log "hy2 channel refreshed"
+	else
+		log "hy2 credentials not in env — skipping (set OXPULSE_HY2_AUTH_PASS + OXPULSE_HY2_OBFS_PASS)"
+	fi
 	log "done"
 	exit 0
 fi
