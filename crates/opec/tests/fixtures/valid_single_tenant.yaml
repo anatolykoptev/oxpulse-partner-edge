@@ -1,0 +1,35 @@
+schema_version: 1
+tenants:
+  - id: cheburator
+    domains:
+      - cheburator.bot
+      - www.cheburator.bot
+    enabled: true
+    routes:
+      - path: /api/landing-chat*
+        action: proxy
+        upstream: https://webhooks.cheburator.rvpn.space
+        host_header: webhooks.cheburator.rvpn.space
+        sse: true
+      - path: /static/*
+        action: file_server
+        root: /srv/cheburator-static
+        cache_control: "public, max-age=86400"
+        strip_path_prefix: /static
+      - path: /favicon.ico
+        action: file_server
+        root: /srv/cheburator-static
+        try_files:
+          - /favicon.ico
+      - path: /
+        action: file_server
+        root: /srv/cheburator-landing
+        try_files:
+          - "{path}"
+          - /index.html
+        cache_control: "public, max-age=300"
+    security_headers: cheb_default
+    redirects:
+      - from_host: www.cheburator.bot
+        to: "https://cheburator.bot{uri}"
+        permanent: true

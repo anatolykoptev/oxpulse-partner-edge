@@ -213,3 +213,17 @@ See [CHANGELOG.md](CHANGELOG.md).
 - **Commercial license** — for organizations that cannot accept AGPL § 13 (network use as SaaS) or want to ship proprietary modifications. See [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md).
 
 Contributions to this repo require signing the [Contributor License Agreement](CLA.md) — necessary for the dual-licensing model. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the contribution flow.
+
+## opec — tenant control plane
+
+`opec` is included as a compiled binary starting from the release where this crate is introduced.
+
+```bash
+# Build locally:
+cargo build --release -p opec
+./target/release/opec --help
+
+# opec: ./target/release/opec — tenant control plane (4.0: read-only)
+```
+
+See [`crates/opec/README.md`](crates/opec/README.md) and [`docs/runbooks/opec-tenant.md`](docs/runbooks/opec-tenant.md).
