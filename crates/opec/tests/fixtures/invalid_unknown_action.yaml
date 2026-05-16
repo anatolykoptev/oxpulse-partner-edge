@@ -1,0 +1,10 @@
+schema_version: 1
+tenants:
+  - id: alpha
+    domains:
+      - alpha.example.com
+    enabled: true
+    routes:
+      - path: /api/*
+        action: redirect
+        target: https://other.example.com

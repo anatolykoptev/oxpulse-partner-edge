@@ -1,0 +1,18 @@
+schema_version: 1
+tenants:
+  - id: UPPERCASE
+    domains:
+      - upper.example.com
+    enabled: true
+    routes:
+      - path: /
+        action: file_server
+        root: /srv/upper
+  - id: -leading-dash
+    domains:
+      - dash.example.com
+    enabled: true
+    routes:
+      - path: /
+        action: file_server
+        root: /srv/dash
