@@ -5,6 +5,26 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **CH3 Hysteria2 client** as second control-plane channel alongside CH2 AmneziaWG mesh.
+  - New service `hysteria2-client` in compose (image `tobyxdd/hysteria:latest`, host network, restart always).
+  - New `re_render_hysteria2()` in `channel-render-lib.sh` (mirrors `re_render_xray` pattern).
+  - Caddy `tunnel_upstream` snippet → 2-upstream pool (`10.9.0.2:8907` primary, `host.docker.internal:18443` fallback) with `lb_policy first` + active health probes at `/api/health` every 10s.
+  - `install.sh` provisions hy2 if `/api/partner/hy2-credentials` returns creds OR env vars `OXPULSE_HY2_AUTH_PASS` + `OXPULSE_HY2_OBFS_PASS` present.
+  - `upgrade.sh --templates-only` re-renders hy2 alongside xray on existing edges.
+  - 2 new healthcheck items: hy2 container healthy + `:18443` listener (graceful on awg-only edges).
+- Golden-file test for `hysteria2-client.yaml` rendering: `tests/test_hysteria2_render.sh`.
+
+### Changed
+- `Caddyfile.tpl` `(tunnel_upstream)` + `(tunnel_upstream_default)` snippets — now emit pool + health directives (backward-incompatible with single-upstream golden — bumped fixture).
+
+### Notes
+- Phase 1 uses fleet-shared hy2 credentials. Per-edge identity = Phase 7 (`partner_nodes.hy2_auth_hash` schema migration TBD).
+- CH5 NaiveProxy deferred — caddy-forwardproxy `forbidden_zones` blocks RFC1918+loopback at krolik server-side; needs external relay (Phase 2).
+- CH1 Reality reinstall blocked on oxpulse-chat PR #971 (XRAY_XHTTP_MODE env extraction).
+
 ## [0.12.27](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.26...partner-edge-v0.12.27) (2026-05-15)
 
 

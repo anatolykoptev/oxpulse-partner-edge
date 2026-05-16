@@ -98,9 +98,6 @@ except Exception:
     local backend_host="${backend%:*}"
     local backend_port="${backend##*:}"
 
-    # Escape sed replacement metacharacters (|, &, \).
-    _esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
-
     local out
     out=$(mktemp)
     sed \
@@ -123,4 +120,59 @@ except Exception:
     log "xray-client.json refreshed from template"
     (cd "$PREFIX_ETC" && docker compose restart xray-client 2>/dev/null || true)
     log "xray-client restarted"
+}
+
+# ── hysteria2 (Phase 1.7 CH3) ────────────────────────────────────────────
+#
+# Render the hysteria2-client.yaml from template via simple sed substitution.
+# Pattern mirrors _render_xray_to() at top of this file.
+
+# Escape sed replacement metacharacters (\, &, |, ") for sed replacement strings.
+# Single source used by all render functions in this module.
+_esc() { printf '%s' "$1" | sed -e 's/[\\&|"]/\\&/g'; }
+
+# Internal — render to a specific output path. Used by the test runner.
+_render_hysteria2_to() {
+    local tpl="$1" out="$2"
+    local server="$3" auth="$4" obfs="$5" listen="$6" backend="$7"
+    sed \
+        -e "s|{{HY2_SERVER}}|$(_esc "$server")|g" \
+        -e "s|{{HY2_AUTH_PASS}}|$(_esc "$auth")|g" \
+        -e "s|{{HY2_OBFS_PASS}}|$(_esc "$obfs")|g" \
+        -e "s|{{HY2_LOCAL_LISTEN}}|$(_esc "$listen")|g" \
+        -e "s|{{HY2_REMOTE_BACKEND}}|$(_esc "$backend")|g" \
+        "$tpl" > "$out"
+}
+
+# Public — full render-and-install pipeline.
+# Sources hy2 credentials from $HY2_AUTH_PASS, $HY2_OBFS_PASS env vars
+# (populated by install.sh from /api/partner/hy2-credentials response).
+# Writes to /etc/oxpulse-partner-edge/hysteria2-client.yaml with mode 600.
+re_render_hysteria2() {
+    local tpl="${OXPULSE_REPO_DIR:-/usr/local/share/oxpulse-partner-edge}/hysteria2-client.yaml.tpl"
+    # HY2_OUTPUT_PATH: optional override for tests (default: /etc/oxpulse-partner-edge/hysteria2-client.yaml)
+    local out="${HY2_OUTPUT_PATH:-/etc/oxpulse-partner-edge/hysteria2-client.yaml}"
+    local backup="${out}.bak.$(date +%s)"
+    local server="${HY2_SERVER:-192.9.243.148:51822}"
+    local listen="${HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
+    local backend="${HY2_REMOTE_BACKEND:-127.0.0.1:8907}"
+
+    if [[ ! -f "$tpl" ]]; then
+        echo "ERR re_render_hysteria2: template not found: $tpl" >&2
+        return 1
+    fi
+    if [[ -z "${HY2_AUTH_PASS:-}" || -z "${HY2_OBFS_PASS:-}" ]]; then
+        echo "ERR re_render_hysteria2: HY2_AUTH_PASS or HY2_OBFS_PASS empty — call install.sh hy2-creds fetch first" >&2
+        return 1
+    fi
+
+    # Backup with mode-preserved copy (install -m 600 preserves secret perms, cp does not).
+    [[ -f "$out" ]] && install -m 600 "$out" "$backup"
+
+    # Atomic write: render into a 0600 tmp in same dir, then rename.
+    local tmp="${out}.tmp.$$"
+    ( umask 077 && _render_hysteria2_to "$tpl" "$tmp" \
+        "$server" "$HY2_AUTH_PASS" "$HY2_OBFS_PASS" "$listen" "$backend" )
+    mv -f "$tmp" "$out"
+    log "re_render_hysteria2: wrote $out (backup $backup)"
 }
