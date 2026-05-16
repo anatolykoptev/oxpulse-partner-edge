@@ -90,3 +90,38 @@ opec tenant diff /etc/oxpulse-partner-edge/tenants.yaml tenants.yaml.new
 | `routes[].upstream` | proxy only | non-empty URL |
 | `routes[].root` | file_server only | non-empty absolute path |
 | `schema_version` | yes | must be `1` |
+
+## Sub-phase 4.1 — dry-run reconcile
+
+Before applying changes, preview the exact Caddy admin-API JSON that would
+be PATCHed:
+
+```bash
+# Preview in human-readable form (default)
+opec tenant reconcile --dry-run
+
+# Preview as JSON (pipe to jq, save to file, etc.)
+opec tenant reconcile --dry-run --format json | jq .
+
+# Use a non-default yaml path
+opec tenant reconcile --dry-run --yaml /tmp/tenants-draft.yaml
+```
+
+The output includes:
+- `mode: dry-run` — confirms no HTTP call was made
+- `tenants_count` — number of enabled tenants rendered
+- `proposed_routes` — full Caddy route array for `apps/http/servers/srv0/routes`
+- `patch_target` — the Caddy config path that will be PATCHed in 4.2
+
+**Operator action: read-only.** No Caddy API calls, no file writes.
+The actual PATCH arrives in sub-phase 4.2.
+
+### Non-dry-run guard
+
+Running `opec tenant reconcile` without `--dry-run` exits 1 in sub-phase 4.1:
+
+```
+opec error: real PATCH not yet implemented; use --dry-run in sub-phase 4.1.
+```
+
+This is intentional — 4.2 implements the HTTP client.
