@@ -1,0 +1,92 @@
+# Runbook: opec tenant — multi-tenant config on partner edge
+
+## Where tenants.yaml lives
+
+```
+/etc/oxpulse-partner-edge/tenants.yaml   (mode 0644, owned by root)
+```
+
+This file is the source of truth for all tenants on a partner edge node.
+Edit it with your preferred editor; then run `opec tenant validate` before
+applying any changes.
+
+## Tenant skeleton (copy-paste template)
+
+```yaml
+schema_version: 1
+tenants:
+  - id: your-tenant-id              # ^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$
+    domains:
+      - your-domain.example.com
+    enabled: true
+    routes:
+      - path: /api/*
+        action: proxy
+        upstream: https://upstream.your-domain.example.com
+        host_header: upstream.your-domain.example.com
+      - path: /
+        action: file_server
+        root: /srv/your-tenant-static
+        try_files: ["{path}", /index.html]
+    redirects:
+      - from_host: www.your-domain.example.com
+        to: "https://your-domain.example.com{uri}"
+        permanent: true
+```
+
+## Adding a tenant manually (sub-phase 4.0)
+
+Sub-phase 4.3 will add `opec tenant add` for interactive scaffolding.
+Until then:
+
+1. Edit `/etc/oxpulse-partner-edge/tenants.yaml` — add your stanza.
+2. Validate: `opec tenant validate`
+3. If validation passes, apply (sub-phase 4.3+: `opec tenant reconcile`).
+
+**Operator action for sub-phase 4.0: NONE.** The binary is read-only;
+no behavioral changes on the edge.
+
+## Validate before every edit
+
+```bash
+opec tenant validate
+# OK — 3 tenant(s) valid
+
+opec tenant validate --format json
+# {"ok":true,"errors":[]}
+```
+
+Exit 0 = clean. Exit 1 = errors printed. Fix all before reconciling.
+
+## Inspect current config
+
+```bash
+opec tenant list
+# ID                   DOMAINS                                  ENABLED  ROUTES
+# -----------------------------------------------------------------------
+# cheburator            cheburator.bot, www.cheburator.bot       true     4
+
+opec tenant list --format json
+```
+
+## Compare two versions
+
+```bash
+opec tenant diff /etc/oxpulse-partner-edge/tenants.yaml tenants.yaml.new
+# + beta-org  (added)
+# ~ cheburator  (changed)
+#     1 changed route(s): /api/landing-chat*
+```
+
+## Field reference
+
+| Field | Required | Constraints |
+|-------|----------|-------------|
+| `id` | yes | `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
+| `domains` | yes | valid hostnames, globally unique |
+| `enabled` | yes | bool |
+| `routes[].path` | yes | non-empty, starts with `/` |
+| `routes[].action` | yes | `proxy` or `file_server` |
+| `routes[].upstream` | proxy only | non-empty URL |
+| `routes[].root` | file_server only | non-empty absolute path |
+| `schema_version` | yes | must be `1` |
