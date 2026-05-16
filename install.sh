@@ -1376,6 +1376,12 @@ _keys_resp=$(curl -sS --max-time 10 -fL "$BACKEND_API/api/partner/keys" 2>/dev/n
 if [[ -n "$_keys_resp" ]]; then
 	SFU_SIGNING_PUBLIC_KEY=$(printf '%s' "$_keys_resp" | jq -r '.sfu_signing_public_key // empty' 2>/dev/null || true)
 fi
+# Backend returns PEM with embedded newlines. Escape them as literal \n so the
+# rendered docker-compose.yml stays a valid YAML inline string. The YAML parser
+# then converts \n back to real newlines when the SFU container reads its env.
+if [[ -n "$SFU_SIGNING_PUBLIC_KEY" ]]; then
+	SFU_SIGNING_PUBLIC_KEY="${SFU_SIGNING_PUBLIC_KEY//$'\n'/\\n}"
+fi
 if [[ -n "$SFU_SIGNING_PUBLIC_KEY" ]]; then
 	log "  sfu_signing_public_key obtained"
 	if [[ $DRY_RUN -eq 0 ]]; then
@@ -1440,44 +1446,35 @@ fetch_tpl cover/cover.html "$stage/cover/cover.html"
 
 render() {
 	local src=$1 dst=$2
-	# Mustache-style placeholder substitution via sed. No external deps.
-	# REALITY_ENCRYPTION may contain sed-special chars — use a literal-safe delimiter (|) and
-	# emit via --posix-disabled sed -f script so embedded '|' never collides (none observed to date).
-	sed \
-		-e "s|{{PARTNER_ID}}|${PARTNER_ID}|g" \
-		-e "s|{{PARTNER_DOMAIN}}|${DOMAIN}|g" \
-		-e "s|{{BACKEND_ENDPOINT}}|${BACKEND_ENDPOINT}|g" \
-		-e "s|{{BACKEND_HOST}}|${BACKEND_HOST}|g" \
-		-e "s|{{BACKEND_PORT}}|${BACKEND_PORT}|g" \
-		-e "s|{{TURN_SECRET}}|${TURN_SECRET}|g" \
-		-e "s|{{REALITY_UUID}}|${REALITY_UUID}|g" \
-		-e "s|{{REALITY_PUBLIC_KEY}}|${REALITY_PUBLIC_KEY}|g" \
-		-e "s|{{REALITY_SHORT_ID}}|${REALITY_SHORT_ID}|g" \
-		-e "s|{{REALITY_SERVER_NAME}}|${REALITY_SERVER_NAME}|g" \
-		-e "s|{{REALITY_ENCRYPTION}}|${REALITY_ENCRYPTION}|g" \
-		-e "s|{{TURNS_SUBDOMAIN}}|${TURNS_SUBDOMAIN}|g" \
-		-e "s|{{PUBLIC_IP}}|${PUBLIC_IP}|g" \
-		-e "s|{{PRIVATE_IP}}|${PRIVATE_IP:-}|g" \
-		-e "s|{{EXTERNAL_IP_LINE}}|${EXTERNAL_IP_LINE}|g" \
-		-e "s|{{IMAGE_VERSION}}|${IMAGE_VERSION}|g" \
-		-e "s|{{SFU_UDP_PORT}}|${SFU_UDP_PORT}|g" \
-		-e "s|{{SFU_METRICS_PORT}}|${SFU_METRICS_PORT}|g" \
-		-e "s|{{SFU_EDGE_ID}}|${SFU_EDGE_ID}|g" \
-		-e "s|{{OTEL_EXPORTER_OTLP_ENDPOINT}}|${OTEL_EXPORTER_OTLP_ENDPOINT:-}|g" \
-		-e "s|{{SFU_SIGNING_PUBLIC_KEY}}|${SFU_SIGNING_PUBLIC_KEY:-}|g" \
-		-e "s|{{RELAY_JWT_SECRET}}|${RELAY_JWT_SECRET}|g" \
-		-e "s|{{SIGNALING_SFU_SECRET}}|${SIGNALING_SFU_SECRET:-}|g" \
-		-e "s|{{HYSTERIA2_SERVER}}|${HYSTERIA2_SERVER:-}|g" \
-		-e "s|{{HYSTERIA2_PORT}}|${HYSTERIA2_PORT:-51822}|g" \
-		-e "s|{{HYSTERIA2_AUTH}}|${HYSTERIA2_AUTH:-}|g" \
-		-e "s|{{HYSTERIA2_OBFS}}|${HYSTERIA2_OBFS:-}|g" \
-		-e "s|{{HYSTERIA2_SOCKS_PORT}}|${HYSTERIA2_SOCKS_PORT:-18891}|g" \
-		-e "s|{{NAIVE_SERVER}}|${NAIVE_SERVER:-}|g" \
-		-e "s|{{NAIVE_PORT}}|${NAIVE_PORT:-44433}|g" \
-		-e "s|{{NAIVE_USER}}|${NAIVE_USER:-}|g" \
-		-e "s|{{NAIVE_PASS}}|${NAIVE_PASS:-}|g" \
-		-e "s|{{NAIVE_SOCKS_PORT}}|${NAIVE_SOCKS_PORT:-18892}|g" \
-		"$src" > "$dst"
+	# Mustache-style placeholder substitution via python3 (universally available
+	# on every supported OS family). Replaces the previous sed-based renderer
+	# which broke on multi-line values: PEM-formatted SFU_SIGNING_PUBLIC_KEY
+	# contains embedded newlines that sed interprets as expression terminators,
+	# producing "unterminated `s' command" at install step 5. See PR fix for
+	# zvonilka.net fresh-install regression (2026-05-16).
+	PARTNER_ID="$PARTNER_ID" PARTNER_DOMAIN="$DOMAIN" \
+	BACKEND_ENDPOINT="$BACKEND_ENDPOINT" BACKEND_HOST="$BACKEND_HOST" BACKEND_PORT="$BACKEND_PORT" \
+	TURN_SECRET="$TURN_SECRET" REALITY_UUID="$REALITY_UUID" REALITY_PUBLIC_KEY="$REALITY_PUBLIC_KEY" \
+	REALITY_SHORT_ID="$REALITY_SHORT_ID" REALITY_SERVER_NAME="$REALITY_SERVER_NAME" \
+	REALITY_ENCRYPTION="$REALITY_ENCRYPTION" TURNS_SUBDOMAIN="$TURNS_SUBDOMAIN" \
+	PUBLIC_IP="$PUBLIC_IP" PRIVATE_IP="${PRIVATE_IP:-}" EXTERNAL_IP_LINE="$EXTERNAL_IP_LINE" \
+	IMAGE_VERSION="$IMAGE_VERSION" SFU_UDP_PORT="$SFU_UDP_PORT" SFU_METRICS_PORT="$SFU_METRICS_PORT" \
+	SFU_EDGE_ID="$SFU_EDGE_ID" OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}" \
+	SFU_SIGNING_PUBLIC_KEY="${SFU_SIGNING_PUBLIC_KEY:-}" RELAY_JWT_SECRET="$RELAY_JWT_SECRET" \
+	SIGNALING_SFU_SECRET="${SIGNALING_SFU_SECRET:-}" \
+	HYSTERIA2_SERVER="${HYSTERIA2_SERVER:-}" HYSTERIA2_PORT="${HYSTERIA2_PORT:-51822}" \
+	HYSTERIA2_AUTH="${HYSTERIA2_AUTH:-}" HYSTERIA2_OBFS="${HYSTERIA2_OBFS:-}" \
+	HYSTERIA2_SOCKS_PORT="${HYSTERIA2_SOCKS_PORT:-18891}" \
+	NAIVE_SERVER="${NAIVE_SERVER:-}" NAIVE_PORT="${NAIVE_PORT:-44433}" \
+	NAIVE_USER="${NAIVE_USER:-}" NAIVE_PASS="${NAIVE_PASS:-}" NAIVE_SOCKS_PORT="${NAIVE_SOCKS_PORT:-18892}" \
+	python3 -c '
+import os, sys, re
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f: tpl = f.read()
+# Substitute every {{NAME}} placeholder with the matching env var (empty if unset).
+out = re.sub(r"\{\{([A-Z][A-Z0-9_]*)\}\}", lambda m: os.environ.get(m.group(1), ""), tpl)
+with open(dst, "w") as f: f.write(out)
+' "$src" "$dst"
 }
 
 compose_out="$PREFIX_ETC/docker-compose.yml"
