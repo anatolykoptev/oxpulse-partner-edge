@@ -152,7 +152,8 @@ re_render_hysteria2() {
     local tpl="${OXPULSE_REPO_DIR:-/usr/local/share/oxpulse-partner-edge}/hysteria2-client.yaml.tpl"
     # HY2_OUTPUT_PATH: optional override for tests (default: /etc/oxpulse-partner-edge/hysteria2-client.yaml)
     local out="${HY2_OUTPUT_PATH:-/etc/oxpulse-partner-edge/hysteria2-client.yaml}"
-    local backup="${out}.bak.$(date +%s)"
+    local backup
+    backup="${out}.bak.$(date +%s)"
     local server="${HY2_SERVER:-203.0.113.10:51822}"
     local listen="${HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
     local backend="${HY2_REMOTE_BACKEND:-127.0.0.1:8907}"
