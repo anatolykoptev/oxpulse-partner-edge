@@ -75,7 +75,16 @@
 # A second snippet (tunnel_upstream_default) handles the no-path catch-all SPA
 # fallback where there is no route argument.
 (tunnel_upstream) {
-    reverse_proxy {args[0]} xray-client:3080 {
+    reverse_proxy {args[0]} 10.9.0.2:8907 host.docker.internal:18443 {
+        lb_policy first
+        lb_try_duration 5s
+        lb_try_interval 250ms
+        health_uri /api/health
+        health_interval 10s
+        health_timeout 3s
+        health_status 2xx
+        health_passes 2
+        health_fails 3
         header_up X-Forwarded-Host {{PARTNER_DOMAIN}}
         header_up X-Forwarded-Proto https
         header_up Host oxpulse.chat
@@ -84,7 +93,16 @@
 }
 
 (tunnel_upstream_default) {
-    reverse_proxy xray-client:3080 {
+    reverse_proxy 10.9.0.2:8907 host.docker.internal:18443 {
+        lb_policy first
+        lb_try_duration 5s
+        lb_try_interval 250ms
+        health_uri /api/health
+        health_interval 10s
+        health_timeout 3s
+        health_status 2xx
+        health_passes 2
+        health_fails 3
         header_up X-Forwarded-Host {{PARTNER_DOMAIN}}
         header_up X-Forwarded-Proto https
         header_up Host oxpulse.chat
