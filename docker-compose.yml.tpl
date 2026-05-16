@@ -167,7 +167,7 @@ services:
   # Traffic: QUIC + salamander obfuscation → looks like random UDP noise.
   # tcpForwarding listener on 127.0.0.1:18443 for local proxying.
   hysteria2-client:
-    image: ghcr.io/apernet/hysteria:app-v2.8.1
+    image: tobyxdd/hysteria:v2.8.2
     container_name: oxpulse-partner-hysteria2
     profiles: [ch3]
     restart: unless-stopped
@@ -186,25 +186,9 @@ services:
       oxpulse.channel: "hy2"
       oxpulse.phase: "1.7"
 
-  # ── CH5 NaiveProxy client (fallback) ────────────────────────────────────
-  # Started only when install.sh renders naive-client.json (backend
-  # provisioned CH5). Activated via `docker compose --profile ch5 up -d`.
-  # Traffic: HTTPS CONNECT tunnel → indistinguishable from browser HTTPS.
-  naive-client:
-    image: ghcr.io/klzgrad/naiveproxy:v130.0.6723.58-1
-    container_name: oxpulse-partner-naive
-    profiles: [ch5]
-    restart: unless-stopped
-    network_mode: host
-    volumes:
-      - ./naive-client.json:/config.json:ro
-    command: ["/config.json"]
-    healthcheck:
-      test: ["CMD-SHELL", "ss -tnlp | grep -q ':${NAIVE_SOCKS_PORT:-18892}' || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+  # CH5 NaiveProxy client: deferred — klzgrad/naiveproxy is not published as a
+  # Docker image. CH5 will be re-added once the edge-side wiring lands (see
+  # plans/2026-05-16-multi-channel-partner-edge.md §Phase 2).
 
 volumes:
   caddy-data:
