@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.29](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.28...partner-edge-v0.12.29) (2026-05-16)
+
+
+### Bug Fixes
+
+* **channel-render:** split local+assign to silence SC2155 (release lint gate) ([#137](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/137)) ([7caa72c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7caa72c2b3571680ca3dbe4a30d7e08d6355471a))
+
 ## [0.12.28](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.27...partner-edge-v0.12.28) (2026-05-16)
 
 
