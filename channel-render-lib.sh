@@ -41,7 +41,11 @@ render_template() {
     local dst_dir
     dst_dir=$(dirname "$dst")
     [[ -d "$dst_dir" ]] || { warn "render_template: dest dir missing: $dst_dir"; return 1; }
-    local tmp="${dst}.tmp.$$"
+    local tmp
+    tmp=$(mktemp --tmpdir="$dst_dir" ".$(basename "$dst").XXXXXX.tmp") || {
+        warn "render_template: mktemp failed in $dst_dir"
+        return 1
+    }
     if ! python3 -c '
 import os, sys, re
 src, dst = sys.argv[1], sys.argv[2]
@@ -53,7 +57,11 @@ with open(dst, "w") as f: f.write(out)
         rm -f "$tmp"
         return 1
     fi
-    mv -f "$tmp" "$dst"
+    if ! mv -f "$tmp" "$dst"; then
+        warn "render_template: mv failed: $dst"
+        rm -f "$tmp"
+        return 1
+    fi
 }
 
 # Re-render xray-client.json from the upstream template, preserving secrets

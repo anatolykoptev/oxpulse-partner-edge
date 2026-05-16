@@ -21,6 +21,7 @@ setup() {
   grep -q "^backend: 192.9.243.148:5349$" "$out"
   grep -q "^pem: some-key$" "$out"
   grep -q "^empty: $" "$out"
+  rm -f "$out"
 }
 
 @test "render_template treats unset vars as empty string" {
@@ -29,6 +30,7 @@ setup() {
   render_template tests/fixtures/render-template/input.tpl "$out"
   grep -q "^partner_id: $" "$out"
   grep -q "^backend: :$" "$out"
+  rm -f "$out"
 }
 
 @test "render_template preserves literal dollar signs and percent signs" {
@@ -36,19 +38,25 @@ setup() {
   render_template tests/fixtures/render-template/input.tpl "$out"
   grep -F 'literal-percent: 100%' "$out"
   grep -F 'literal-dollar: $HOME' "$out"
+  rm -f "$out"
 }
 
 @test "render_template handles multi-line PEM (closes hydrate bug class)" {
   export SFU_SIGNING_PUBLIC_KEY=$'-----BEGIN PUBLIC KEY-----\nLINE1\nLINE2\n-----END PUBLIC KEY-----'
   out=$(mktemp)
   render_template tests/fixtures/render-template/input.tpl "$out"
-  grep -F "BEGIN PUBLIC KEY" "$out"
-  grep -F "LINE1" "$out"
-  grep -F "LINE2" "$out"
-  grep -F "END PUBLIC KEY" "$out"
+  # Extract the PEM block (line after "pem: " through next blank or non-PEM line)
+  # and compare verbatim with newlines preserved.
+  expected=$'pem: -----BEGIN PUBLIC KEY-----\nLINE1\nLINE2\n-----END PUBLIC KEY-----'
+  actual=$(awk '/^pem: /{flag=1} flag{print} /END PUBLIC KEY/{flag=0}' "$out")
+  [ "$actual" = "$expected" ]
+  rm -f "$out"
 }
 
 @test "render_template fails cleanly on missing source" {
   out=$(mktemp)
-  ! render_template /nonexistent/path.tpl "$out"
+  run render_template /nonexistent/path.tpl "$out"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "source not found" ]]
+  rm -f "$out"
 }
