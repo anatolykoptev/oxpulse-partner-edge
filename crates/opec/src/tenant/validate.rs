@@ -26,7 +26,11 @@ pub enum ValidationError {
     DuplicateTenantId { id: String },
 
     #[error("domain '{domain}' claimed by both tenant '{a}' and tenant '{b}'")]
-    DomainCollision { domain: String, a: String, b: String },
+    DomainCollision {
+        domain: String,
+        a: String,
+        b: String,
+    },
 
     #[error("tenant[{id}].routes[{index}].path: must be non-empty and start with '/'")]
     InvalidRoutePath { id: String, index: usize },
@@ -54,12 +58,9 @@ pub fn validate(file: &TenantsFile) -> Result<(), Vec<ValidationError>> {
         });
     }
 
-    let tenant_id_re =
-        Regex::new(r"^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$").expect("static regex");
-    let domain_re = Regex::new(
-        r"^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$",
-    )
-    .expect("static regex");
+    let tenant_id_re = Regex::new(r"^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$").expect("static regex");
+    let domain_re = Regex::new(r"^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$")
+        .expect("static regex");
 
     let mut seen_ids: HashSet<String> = HashSet::new();
     // domain → first-claiming tenant id

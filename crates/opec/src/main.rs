@@ -105,7 +105,11 @@ fn run_tenant(action: TenantCommands) -> Result<()> {
     match action {
         TenantCommands::List { yaml, format } => cmd_list(&yaml, &format),
         TenantCommands::Validate { yaml, format } => cmd_validate(&yaml, &format),
-        TenantCommands::Diff { left, right, format } => cmd_diff(&left, &right, &format),
+        TenantCommands::Diff {
+            left,
+            right,
+            format,
+        } => cmd_diff(&left, &right, &format),
     }
 }
 
@@ -177,7 +181,10 @@ fn cmd_validate(yaml_path: &PathBuf, format: &Format) -> Result<()> {
         Ok(()) => {
             match format {
                 Format::Json => {
-                    let out = ValidateOutput { ok: true, errors: vec![] };
+                    let out = ValidateOutput {
+                        ok: true,
+                        errors: vec![],
+                    };
                     println!("{}", serde_json::to_string_pretty(&out)?);
                 }
                 Format::Table => {
@@ -193,7 +200,9 @@ fn cmd_validate(yaml_path: &PathBuf, format: &Format) -> Result<()> {
                         ok: false,
                         errors: errs
                             .iter()
-                            .map(|e| ValidateError { message: e.to_string() })
+                            .map(|e| ValidateError {
+                                message: e.to_string(),
+                            })
                             .collect(),
                     };
                     println!("{}", serde_json::to_string_pretty(&out)?);
@@ -290,7 +299,11 @@ fn cmd_diff(left_path: &PathBuf, right_path: &PathBuf, format: &Format) -> Resul
         }
     }
 
-    let diff = DiffOutput { added, removed, changed };
+    let diff = DiffOutput {
+        added,
+        removed,
+        changed,
+    };
 
     match format {
         Format::Json => {
@@ -333,7 +346,7 @@ fn cmd_diff(left_path: &PathBuf, right_path: &PathBuf, format: &Format) -> Resul
 // ---------------------------------------------------------------------------
 
 fn load(path: &PathBuf) -> Result<TenantsFile> {
-    let src = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let src =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     parse(&src).with_context(|| format!("parsing {}", path.display()))
 }

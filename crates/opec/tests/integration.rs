@@ -1,6 +1,5 @@
 //! Integration tests for opec schema, validator, and CLI.
 
-
 // ---------------------------------------------------------------------------
 // schema parse tests
 // ---------------------------------------------------------------------------
@@ -13,8 +12,7 @@ mod schema_tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name);
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("cannot read fixture {name}: {e}"))
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read fixture {name}: {e}"))
     }
 
     #[test]
@@ -72,8 +70,7 @@ mod validator_tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name);
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("cannot read fixture {name}: {e}"))
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read fixture {name}: {e}"))
     }
 
     fn load_and_validate(name: &str) -> Result<(), Vec<ValidationError>> {
@@ -97,9 +94,9 @@ mod validator_tests {
     #[test]
     fn rejects_duplicate_id() {
         let errs = load_and_validate("invalid_duplicate_id.yaml").unwrap_err();
-        let has_dup = errs.iter().any(|e| {
-            matches!(e, ValidationError::DuplicateTenantId { id } if id == "alpha")
-        });
+        let has_dup = errs
+            .iter()
+            .any(|e| matches!(e, ValidationError::DuplicateTenantId { id } if id == "alpha"));
         assert!(has_dup, "expected DuplicateTenantId error, got: {errs:?}");
     }
 
@@ -109,7 +106,10 @@ mod validator_tests {
         let has_collision = errs.iter().any(|e| {
             matches!(e, ValidationError::DomainCollision { domain, .. } if domain == "shared.example.com")
         });
-        assert!(has_collision, "expected DomainCollision error, got: {errs:?}");
+        assert!(
+            has_collision,
+            "expected DomainCollision error, got: {errs:?}"
+        );
     }
 
     #[test]
@@ -120,7 +120,10 @@ mod validator_tests {
             .iter()
             .filter(|e| matches!(e, ValidationError::InvalidTenantId { .. }))
             .count();
-        assert!(count >= 1, "expected at least 1 InvalidTenantId error, got: {errs:?}");
+        assert!(
+            count >= 1,
+            "expected at least 1 InvalidTenantId error, got: {errs:?}"
+        );
     }
 
     #[test]
@@ -129,7 +132,10 @@ mod validator_tests {
         let has_path_err = errs
             .iter()
             .any(|e| matches!(e, ValidationError::InvalidRoutePath { .. }));
-        assert!(has_path_err, "expected InvalidRoutePath error, got: {errs:?}");
+        assert!(
+            has_path_err,
+            "expected InvalidRoutePath error, got: {errs:?}"
+        );
     }
 
     #[test]
@@ -138,7 +144,10 @@ mod validator_tests {
         let has_ver_err = errs
             .iter()
             .any(|e| matches!(e, ValidationError::UnsupportedSchemaVersion { version: 2 }));
-        assert!(has_ver_err, "expected UnsupportedSchemaVersion(2), got: {errs:?}");
+        assert!(
+            has_ver_err,
+            "expected UnsupportedSchemaVersion(2), got: {errs:?}"
+        );
     }
 
     #[test]
@@ -207,8 +216,7 @@ tenants:
         let right = parse(RIGHT).expect("parse right");
 
         use std::collections::{HashMap, HashSet};
-        let left_map: HashMap<&str, _> =
-            left.tenants.iter().map(|t| (t.id.as_str(), t)).collect();
+        let left_map: HashMap<&str, _> = left.tenants.iter().map(|t| (t.id.as_str(), t)).collect();
         let right_map: HashMap<&str, _> =
             right.tenants.iter().map(|t| (t.id.as_str(), t)).collect();
         let left_ids: HashSet<&str> = left_map.keys().copied().collect();
@@ -272,7 +280,10 @@ mod cli_tests {
             .clone();
         let stdout = String::from_utf8(output).unwrap();
         assert!(stdout.contains("alpha"), "table should contain 'alpha'");
-        assert!(stdout.contains("beta-org"), "table should contain 'beta-org'");
+        assert!(
+            stdout.contains("beta-org"),
+            "table should contain 'beta-org'"
+        );
     }
 
     #[test]
