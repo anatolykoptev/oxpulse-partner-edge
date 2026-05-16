@@ -57,6 +57,16 @@
             tls
         }
     }
+    # Phase 1: structured JSON access logs to stdout.
+    # Docker JSON driver collects to journald. Fields including request.host,
+    # request.uri, resp_status, duration_ms, upstream_status,
+    # upstream_duration_ms, upstream_address are emitted automatically
+    # by caddy when format=json.
+    log {
+        format json
+        level INFO
+    }
+
 }
 
 {{PARTNER_DOMAIN}} {
@@ -162,4 +172,46 @@
         }
     }
     respond 421
+}
+
+# =============================================================================
+# Phase 1 canary site -- 127.0.0.1:9080 ONLY, never publicly exposed.
+# Provides 4 diagnostic endpoints for healthcheck.sh and operators.
+# DO NOT add to any public-facing listener or firewall rule.
+# =============================================================================
+http://127.0.0.1:9080 {
+    # /canary/tunnel -- probe xray-client via /health path.
+    # 2xx = tunnel reachable; non-2xx = upstream sick but container up.
+    handle /canary/tunnel {
+        reverse_proxy xray-client:3080/health {
+            transport http {
+                dial_timeout 2s
+                response_header_timeout 2s
+            }
+        }
+    }
+
+    # /canary/upstream -- bypass tunnel health path, hit xray-client directly.
+    # If this fails too, the xray-client container itself is down.
+    handle /canary/upstream {
+        reverse_proxy xray-client:3080 {
+            transport http {
+                dial_timeout 2s
+                response_header_timeout 2s
+            }
+        }
+    }
+
+    # /canary/config-hash -- sha256 of the rendered Caddyfile.
+    # install.sh writes CADDYFILE_SHA to install.env; healthcheck.sh check 15
+    # compares these to detect operator drift edits.
+    handle /canary/config-hash {
+        respond "__CADDYFILE_SHA__" 200
+    }
+
+    # /canary/route-table -- static route manifest.
+    # Placeholder for Phase 5 introspection; used now to confirm canary is live.
+    handle /canary/route-table {
+        respond `{"routes":["tunnel","sfu","relay","branding"]}` 200
+    }
 }

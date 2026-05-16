@@ -46,4 +46,34 @@ grep -q 'disable_tlsalpn_challenge' "$TPL" || { echo "FAIL: disable_tlsalpn_chal
 awk '/listener_wrappers \{/,/^    \}$/' "$TPL" | grep -qxE '[[:space:]]+tls' \
   || { echo "FAIL: fallback 'tls' directive missing inside listener_wrappers"; exit 1; }
 
-echo "PASS: Caddyfile.tpl validates + has required l4 demux structure"
+# Phase 1 canary site checks
+grep -qF "http://127.0.0.1:9080" "$TPL" \
+  || { echo "FAIL: canary site block missing (http://127.0.0.1:9080)"; exit 1; }
+grep -q "/canary/tunnel" "$TPL" \
+  || { echo "FAIL: /canary/tunnel endpoint missing"; exit 1; }
+grep -q "/canary/upstream" "$TPL" \
+  || { echo "FAIL: /canary/upstream endpoint missing"; exit 1; }
+grep -q "/canary/config-hash" "$TPL" \
+  || { echo "FAIL: /canary/config-hash endpoint missing"; exit 1; }
+grep -q "/canary/route-table" "$TPL" \
+  || { echo "FAIL: /canary/route-table endpoint missing"; exit 1; }
+# Phase 1 JSON log checks
+grep -q "format json" "$TPL" \
+  || { echo "FAIL: log format json directive missing in global block"; exit 1; }
+grep -q "level INFO" "$TPL" \
+  || { echo "FAIL: log level INFO directive missing in global block"; exit 1; }
+# Confirm canary site is NOT on :443 (must never be public)
+python3 - "$TPL" <<'PYEOF'
+import sys, re
+with open(sys.argv[1]) as f:
+    t = f.read()
+# Find canary block and assert no :443 binding
+m = re.search(r'http://127\.0\.0\.1:9080\s*\{(.+?)\n\}', t, re.DOTALL)
+if not m:
+    print("FAIL: canary site block not parseable"); sys.exit(1)
+if ":443" in m.group(0):
+    print("FAIL: canary block references :443 -- must be 127.0.0.1:9080 only"); sys.exit(1)
+print("OK: canary block bound to 127.0.0.1:9080 only")
+PYEOF
+
+echo "PASS: Caddyfile.tpl validates + has required l4 demux structure + Phase 1 canary + JSON logs"
