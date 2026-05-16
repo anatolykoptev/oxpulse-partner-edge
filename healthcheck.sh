@@ -200,8 +200,29 @@ else
 	fi
 fi
 
+# --- 16. hy2 container running + healthy (graceful on awg-only edges) ---
+# In Phase 1.7 partial rollout, edges without hy2 provisioned are awg-only.
+# Container absent = info (not fail). Container present but unhealthy = warn.
+echo -n "  16. hy2 container healthy:                        "
+_hy2_health=$(docker inspect -f '{{.State.Health.Status}}' oxpulse-partner-hy2 2>/dev/null || true)
+_hy2_running=$(docker ps --filter name=oxpulse-partner-hy2 --format '{{.Names}}' 2>/dev/null | grep -c oxpulse-partner-hy2 || true)
+if [[ "$_hy2_health" == "healthy" ]]; then
+	echo -e "\033[32mOK\033[0m"
+elif [[ "$_hy2_running" -gt 0 ]]; then
+	echo -e "\033[33mWARN\033[0m (running but health status not 'healthy': ${_hy2_health:-unknown} — may be starting)"
+else
+	echo "INFO (hy2 container not deployed — awg-only mode, Phase 1.7 hy2 not provisioned)"
+fi
+
+# --- 17. hy2 TCP forwarder listening on :18443 (only if container deployed) ---
+if [[ "$_hy2_running" -gt 0 ]]; then
+	check "17. TCP 18443 listening (hy2 forwarder)" bash -c '
+		ss -ltnH 2>/dev/null | awk '"'"'{print $4}'"'"' | grep -qE ":18443$"
+	'
+fi
+
 if [[ $FAIL -eq 0 ]]; then
-	echo "All 15 checks passed."
+	echo "All checks passed."
 	exit 0
 else
 	echo "$FAIL check(s) failed."
