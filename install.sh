@@ -1476,6 +1476,22 @@ if [[ $DRY_RUN -eq 1 ]]; then
 	coturn_out="$dryroot/coturn.conf"
 	cover_out_dir="$dryroot/cover"
 fi
+# render_template (channel-render-lib.sh) calls python3 as a subprocess and
+# reads template placeholders from ambient env. Every {{VAR}} placeholder in
+# the 6 .tpl files must therefore be exported. Co-located here so the export
+# list is easy to audit against the placeholder set. Previously these were
+# passed as `VAR=val python3 -c '...'` env prefix inside the deleted local
+# render() function.
+PARTNER_DOMAIN="$DOMAIN"
+export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
+       TURN_SECRET \
+       REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
+       REALITY_ENCRYPTION TURNS_SUBDOMAIN \
+       PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE \
+       IMAGE_VERSION \
+       SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID \
+       OTEL_EXPORTER_OTLP_ENDPOINT \
+       SFU_SIGNING_PUBLIC_KEY RELAY_JWT_SECRET SIGNALING_SFU_SECRET
 render_template "$stage/compose.tpl" "$compose_out"
 render_template "$stage/caddy.tpl"   "$caddy_out"
 # Phase 1: compute sha256 of rendered Caddyfile and substitute __CADDYFILE_SHA__
