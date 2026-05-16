@@ -1479,7 +1479,7 @@ EOF
 	chmod 0600 "$PREFIX_LIB/install.env"
 	# Phase 1: record sha256 of rendered Caddyfile for drift detection.
 	# healthcheck.sh check 15 compares this against /canary/config-hash.
-	_caddy_sha=$(sha256sum "$caddy_out" | awk '{print $1}')
+	_caddy_sha="$_rendered_sha"  # reuse hash computed before substitution (drift-safe)
 	printf 'CADDYFILE_SHA=%s\n' "$_caddy_sha" >> "$PREFIX_LIB/install.env"
 fi
 
