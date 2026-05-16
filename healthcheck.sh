@@ -188,11 +188,15 @@ echo -n "  15. CADDYFILE_SHA drift check:                    "
 if [[ -z "${CADDYFILE_SHA:-}" ]]; then
 	echo "SKIP -- CADDYFILE_SHA not set in install.env (pre-phase1 node?)"
 else
+	# FIX 6: disambiguate "endpoint down" from "hash drift" — both previously
+	# emitted the same WARN with empty canary= which operators couldn't distinguish.
 	_canary_hash=$(curl -fso- --max-time 5 "http://127.0.0.1:9080/canary/config-hash" 2>/dev/null || true)
-	if [[ "$_canary_hash" == "$CADDYFILE_SHA" ]]; then
+	if [[ -z "$_canary_hash" ]]; then
+		echo -e "\033[33mWARN\033[0m (canary endpoint unreachable -- port 9080 down? pre-Phase-1 node?)"
+	elif [[ "$_canary_hash" == "$CADDYFILE_SHA" ]]; then
 		echo -e "\033[32mOK\033[0m"
 	else
-		echo -e "\033[33mWARN\033[0m (canary=$_canary_hash install.env=$CADDYFILE_SHA -- drift detected, manual edit?)"
+		echo -e "\033[33mWARN\033[0m (drift: canary=$_canary_hash install.env=$CADDYFILE_SHA -- manual edit?)"
 	fi
 fi
 
