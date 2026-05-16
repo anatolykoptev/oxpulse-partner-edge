@@ -18,6 +18,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # Phase 1 canary endpoints: host-only bind so healthcheck.sh can reach them.
+      - "127.0.0.1:9080:9080"
     environment:
       PARTNER_DOMAIN: "{{PARTNER_DOMAIN}}"
       PARTNER_ID: "{{PARTNER_ID}}"
