@@ -1,0 +1,10 @@
+schema_version: 2
+tenants:
+  - id: alpha
+    domains:
+      - alpha.example.com
+    enabled: true
+    routes:
+      - path: /
+        action: file_server
+        root: /srv/alpha

@@ -1,0 +1,34 @@
+schema_version: 1
+tenants:
+  - id: alpha
+    domains:
+      - alpha.example.com
+    enabled: true
+    routes:
+      - path: /api/*
+        action: proxy
+        upstream: https://api.alpha.example.com
+  - id: beta-org
+    domains:
+      - beta.example.com
+      - www.beta.example.com
+    enabled: false
+    routes:
+      - path: /
+        action: file_server
+        root: /srv/beta-static
+  - id: gamma01
+    domains:
+      - gamma.example.org
+    enabled: true
+    routes:
+      - path: /app/*
+        action: proxy
+        upstream: https://upstream.gamma.example.org
+        host_header: upstream.gamma.example.org
+      - path: /
+        action: file_server
+        root: /srv/gamma-landing
+        try_files:
+          - "{path}"
+          - /index.html

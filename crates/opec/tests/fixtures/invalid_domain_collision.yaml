@@ -1,0 +1,19 @@
+schema_version: 1
+tenants:
+  - id: alpha
+    domains:
+      - shared.example.com
+    enabled: true
+    routes:
+      - path: /
+        action: file_server
+        root: /srv/alpha
+  - id: beta-org
+    domains:
+      - shared.example.com
+      - beta.example.com
+    enabled: true
+    routes:
+      - path: /
+        action: file_server
+        root: /srv/beta
