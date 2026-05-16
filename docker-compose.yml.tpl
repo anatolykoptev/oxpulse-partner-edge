@@ -182,6 +182,9 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    labels:
+      oxpulse.channel: "hy2"
+      oxpulse.phase: "1.7"
 
   # ── CH5 NaiveProxy client (fallback) ────────────────────────────────────
   # Started only when install.sh renders naive-client.json (backend
