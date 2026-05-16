@@ -1,0 +1,606 @@
+{
+	"admin": {
+		"listen": "localhost:2019",
+		"origins": [
+			"localhost",
+			"127.0.0.1"
+		]
+	},
+	"logging": {
+		"logs": {
+			"default": {
+				"encoder": {
+					"format": "json"
+				},
+				"level": "INFO"
+			}
+		}
+	},
+	"apps": {
+		"http": {
+			"servers": {
+				"srv0": {
+					"listen": [
+						":443"
+					],
+					"listener_wrappers": [
+						{
+							"routes": [
+								{
+									"handle": [
+										{
+											"handler": "proxy",
+											"upstreams": [
+												{
+													"dial": [
+														"tcp/host.docker.internal:5349"
+													]
+												}
+											]
+										}
+									],
+									"match": [
+										{
+											"tls": {
+												"sni": [
+													"api-abc.test.example.test.example"
+												]
+											}
+										}
+									]
+								}
+							],
+							"wrapper": "layer4"
+						},
+						{
+							"wrapper": "tls"
+						}
+					],
+					"routes": [
+						{
+							"match": [
+								{
+									"host": [
+										"api-abc.test.example.test.example"
+									]
+								}
+							],
+							"handle": [
+								{
+									"handler": "subroute",
+									"routes": [
+										{
+											"handle": [
+												{
+													"handler": "static_response",
+													"status_code": 421
+												}
+											]
+										}
+									]
+								}
+							],
+							"terminal": true
+						},
+						{
+							"match": [
+								{
+									"host": [
+										"test.example"
+									]
+								}
+							],
+							"handle": [
+								{
+									"handler": "subroute",
+									"routes": [
+										{
+											"handle": [
+												{
+													"handler": "headers",
+													"response": {
+														"deferred": true,
+														"delete": [
+															"Server",
+															"Via",
+															"Alt-Svc"
+														],
+														"set": {
+															"Referrer-Policy": [
+																"no-referrer"
+															],
+															"Strict-Transport-Security": [
+																"max-age=31536000; includeSubDomains"
+															],
+															"X-Content-Type-Options": [
+																"nosniff"
+															],
+															"X-Frame-Options": [
+																"DENY"
+															]
+														}
+													}
+												},
+												{
+													"encodings": {
+														"gzip": {},
+														"zstd": {}
+													},
+													"handler": "encode",
+													"prefer": [
+														"gzip",
+														"zstd"
+													]
+												}
+											]
+										},
+										{
+											"group": "group8",
+											"handle": [
+												{
+													"handler": "subroute",
+													"routes": [
+														{
+															"handle": [
+																{
+																	"handler": "reverse_proxy",
+																	"upstreams": [
+																		{
+																			"dial": "host.docker.internal:8920"
+																		}
+																	]
+																}
+															]
+														}
+													]
+												}
+											],
+											"match": [
+												{
+													"path": [
+														"/sfu/ws/*"
+													]
+												}
+											]
+										},
+										{
+											"group": "group8",
+											"handle": [
+												{
+													"handler": "subroute",
+													"routes": [
+														{
+															"handle": [
+																{
+																	"handler": "reverse_proxy",
+																	"upstreams": [
+																		{
+																			"dial": "host.docker.internal:8912"
+																		}
+																	]
+																}
+															]
+														}
+													]
+												}
+											],
+											"match": [
+												{
+													"path": [
+														"/relay/*"
+													]
+												}
+											]
+										},
+										{
+											"group": "group8",
+											"handle": [
+												{
+													"handler": "subroute",
+													"routes": [
+														{
+															"handle": [
+																{
+																	"handler": "headers",
+																	"response": {
+																		"set": {
+																			"Cache-Control": [
+																				"public, max-age=31536000, immutable"
+																			]
+																		}
+																	}
+																}
+															],
+															"match": [
+																{
+																	"path_regexp": {
+																		"name": "immutable",
+																		"pattern": "/_app/immutable/.*"
+																	}
+																}
+															]
+														},
+														{
+															"handle": [
+																{
+																	"handler": "reverse_proxy",
+																	"headers": {
+																		"request": {
+																			"set": {
+																				"Host": [
+																					"oxpulse.chat"
+																				],
+																				"X-Forwarded-Host": [
+																					"test.example"
+																				],
+																				"X-Forwarded-Proto": [
+																					"https"
+																				],
+																				"X-Geo-Country": [
+																					"{http.vars.maxmind_country_code}"
+																				]
+																			}
+																		}
+																	},
+																	"upstreams": [
+																		{
+																			"dial": "xray-client:3080"
+																		}
+																	]
+																}
+															],
+															"match": [
+																{
+																	"path": [
+																		"/events/*"
+																	]
+																}
+															]
+														},
+														{
+															"handle": [
+																{
+																	"handler": "reverse_proxy",
+																	"headers": {
+																		"request": {
+																			"set": {
+																				"Host": [
+																					"oxpulse.chat"
+																				],
+																				"X-Forwarded-Host": [
+																					"test.example"
+																				],
+																				"X-Forwarded-Proto": [
+																					"https"
+																				],
+																				"X-Geo-Country": [
+																					"{http.vars.maxmind_country_code}"
+																				]
+																			}
+																		}
+																	},
+																	"upstreams": [
+																		{
+																			"dial": "xray-client:3080"
+																		}
+																	]
+																}
+															],
+															"match": [
+																{
+																	"path": [
+																		"/api/*"
+																	]
+																}
+															]
+														},
+														{
+															"handle": [
+																{
+																	"handler": "reverse_proxy",
+																	"headers": {
+																		"request": {
+																			"set": {
+																				"Host": [
+																					"oxpulse.chat"
+																				],
+																				"X-Forwarded-Host": [
+																					"test.example"
+																				],
+																				"X-Forwarded-Proto": [
+																					"https"
+																				],
+																				"X-Geo-Country": [
+																					"{http.vars.maxmind_country_code}"
+																				]
+																			}
+																		}
+																	},
+																	"upstreams": [
+																		{
+																			"dial": "xray-client:3080"
+																		}
+																	]
+																}
+															],
+															"match": [
+																{
+																	"path": [
+																		"/ws/*"
+																	]
+																}
+															]
+														},
+														{
+															"handle": [
+																{
+																	"handler": "reverse_proxy",
+																	"headers": {
+																		"request": {
+																			"set": {
+																				"Host": [
+																					"oxpulse.chat"
+																				],
+																				"X-Forwarded-Host": [
+																					"test.example"
+																				],
+																				"X-Forwarded-Proto": [
+																					"https"
+																				],
+																				"X-Geo-Country": [
+																					"{http.vars.maxmind_country_code}"
+																				]
+																			}
+																		}
+																	},
+																	"upstreams": [
+																		{
+																			"dial": "xray-client:3080"
+																		}
+																	]
+																}
+															]
+														}
+													]
+												}
+											]
+										}
+									]
+								}
+							],
+							"terminal": true
+						}
+					],
+					"protocols": [
+						"h1",
+						"h2"
+					]
+				},
+				"srv1": {
+					"listen": [
+						":9080"
+					],
+					"listener_wrappers": [
+						{
+							"routes": [
+								{
+									"handle": [
+										{
+											"handler": "proxy",
+											"upstreams": [
+												{
+													"dial": [
+														"tcp/host.docker.internal:5349"
+													]
+												}
+											]
+										}
+									],
+									"match": [
+										{
+											"tls": {
+												"sni": [
+													"api-abc.test.example.test.example"
+												]
+											}
+										}
+									]
+								}
+							],
+							"wrapper": "layer4"
+						},
+						{
+							"wrapper": "tls"
+						}
+					],
+					"routes": [
+						{
+							"match": [
+								{
+									"host": [
+										"127.0.0.1"
+									]
+								}
+							],
+							"handle": [
+								{
+									"handler": "subroute",
+									"routes": [
+										{
+											"group": "group10",
+											"handle": [
+												{
+													"handler": "subroute",
+													"routes": [
+														{
+															"handle": [
+																{
+																	"body": "__CADDYFILE_SHA__",
+																	"handler": "static_response",
+																	"status_code": 200
+																}
+															]
+														}
+													]
+												}
+											],
+											"match": [
+												{
+													"path": [
+														"/canary/config-hash"
+													]
+												}
+											]
+										},
+										{
+											"group": "group10",
+											"handle": [
+												{
+													"handler": "subroute",
+													"routes": [
+														{
+															"handle": [
+																{
+																	"body": "{\"routes\":[\"tunnel\",\"sfu\",\"relay\",\"branding\"]}",
+																	"handler": "static_response",
+																	"status_code": 200
+																}
+															]
+														}
+													]
+												}
+											],
+											"match": [
+												{
+													"path": [
+														"/canary/route-table"
+													]
+												}
+											]
+										},
+										{
+											"group": "group10",
+											"handle": [
+												{
+													"handler": "subroute",
+													"routes": [
+														{
+															"handle": [
+																{
+																	"handler": "reverse_proxy",
+																	"transport": {
+																		"dial_timeout": 2000000000,
+																		"protocol": "http",
+																		"response_header_timeout": 2000000000
+																	},
+																	"upstreams": [
+																		{
+																			"dial": "xray-client:3080"
+																		}
+																	]
+																}
+															]
+														}
+													]
+												}
+											],
+											"match": [
+												{
+													"path": [
+														"/canary/upstream"
+													]
+												}
+											]
+										},
+										{
+											"group": "group10",
+											"handle": [
+												{
+													"handler": "subroute",
+													"routes": [
+														{
+															"handle": [
+																{
+																	"handler": "reverse_proxy",
+																	"transport": {
+																		"dial_timeout": 2000000000,
+																		"protocol": "http",
+																		"response_header_timeout": 2000000000
+																	},
+																	"upstreams": [
+																		{
+																			"dial": "xray-client:3080/health:80"
+																		}
+																	]
+																}
+															]
+														}
+													]
+												}
+											],
+											"match": [
+												{
+													"path": [
+														"/canary/tunnel"
+													]
+												}
+											]
+										}
+									]
+								}
+							],
+							"terminal": true
+						}
+					],
+					"automatic_https": {
+						"skip": [
+							"127.0.0.1"
+						]
+					},
+					"protocols": [
+						"h1",
+						"h2"
+					]
+				}
+			}
+		},
+		"tls": {
+			"automation": {
+				"policies": [
+					{
+						"subjects": [
+							"api-abc.test.example.test.example"
+						],
+						"issuers": [
+							{
+								"challenges": {
+									"tls-alpn": {
+										"disabled": true
+									}
+								},
+								"email": "admin@test.example",
+								"module": "acme"
+							}
+						]
+					},
+					{
+						"subjects": [
+							"test.example"
+						],
+						"issuers": [
+							{
+								"email": "admin@test.example",
+								"module": "acme"
+							},
+							{
+								"ca": "https://acme.zerossl.com/v2/DV90",
+								"email": "admin@test.example",
+								"module": "acme"
+							}
+						]
+					}
+				]
+			}
+		}
+	}
+}
