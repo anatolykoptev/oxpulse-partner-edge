@@ -160,6 +160,16 @@ fi
 
 V01_TO_V02=0
 
+# FIX 5: exclusive lock to prevent two concurrent upgrade.sh invocations from
+# corrupting the .prev backup chain. Both operators writing .prev simultaneously
+# would interleave state and leave rollback pointing at partially-applied config.
+# Skip for read-only modes: --dry-run and --check never mutate state.
+if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
+	LOCK_FILE="$PREFIX_LIB/upgrade.lock"
+	exec 9>"$LOCK_FILE"
+	flock -n 9 || die "another upgrade.sh is running (lock: $LOCK_FILE). If stuck, check the pid and remove the lock file."
+fi
+
 # --templates-only: re-render xray config from upstream template, skip image ops.
 if [[ "$MODE" == templates ]]; then
 	log "--templates-only: refreshing xray-client.json from upstream template"
@@ -228,8 +238,12 @@ re_render_caddy() {
 		return 0
 	fi
 
-	# Atomic install: write to temp path, rename into place.
-	install -m 0644 "$out_caddy" "$PREFIX_ETC/Caddyfile"
+	# FIX 3: atomic install via sibling temp + mv (rename(2) on same filesystem).
+	# Direct install -m 0644 does O_WRONLY|O_TRUNC — caddy reading during the
+	# write window sees truncated content → crashloop (cheburator morning incident).
+	local tmp_caddy="$PREFIX_ETC/Caddyfile.new.$$"
+	install -m 0644 "$out_caddy" "$tmp_caddy"
+	mv -f "$tmp_caddy" "$PREFIX_ETC/Caddyfile"
 	log "Caddyfile rendered (sha256=$rendered_sha)"
 
 	# Update CADDYFILE_SHA in install.env (replace existing line or append).
@@ -263,7 +277,11 @@ re_render_healthcheck() {
 		return 0
 	fi
 
-	install -m 0755 "$out_hc" "$HEALTHCHECK"
+	# FIX 3: atomic install — sibling temp + mv (same filesystem → rename(2)).
+	local tmp_hc
+	tmp_hc="$(dirname "$HEALTHCHECK")/healthcheck.sh.new.$$"
+	install -m 0755 "$out_hc" "$tmp_hc"
+	mv -f "$tmp_hc" "$HEALTHCHECK"
 	log "healthcheck.sh updated"
 }
 
@@ -297,6 +315,15 @@ do_rollback_templates() {
 	fi
 
 	[[ "$restored" -eq 1 ]] || die "no .prev backup files found — nothing to restore"
+
+	# FIX 4: ensure the previous image is in local cache before the caller does
+	# compose up. If the previous tag was a floating tag that has since been
+	# evicted from the local cache, compose up would use whatever is cached —
+	# possibly stale or wrong. Pull is best-effort; failure is non-fatal because
+	# the image may still be present from the original pull.
+	log "rollback: ensuring previous image is in local cache"
+	(cd "$PREFIX_ETC" && ghcr_login_from_file || true; $DOCKER_BIN compose pull) \
+		|| warn "rollback pull failed — proceeding with cached image"
 }
 
 maybe_v01_to_v02_preflight() {
@@ -392,9 +419,22 @@ _conflict_check_1() {
 	fi
 
 	# Locate cover dir from live compose for the volume mount.
+	# FIX 1: extract the HOST-side path (left of ':') not the container path.
+	# Repro: echo '      - ./cover:/srv/cover:ro' | grep -oP 'cover:\s*\K[^[:space:]]+'
+	#        outputs /srv/cover:ro (container path) — causes docker: invalid volume spec.
 	local cover_dir
-	cover_dir=$(grep -oP 'cover:\s*\K[^[:space:]]+' "$COMPOSE_FILE" 2>/dev/null | head -1 || true)
-	[[ -z "$cover_dir" ]] && cover_dir=/tmp
+	cover_dir=$(grep -oP '^\s*-\s*\K[^[:space:]:]+(?=:/srv/cover)' "$COMPOSE_FILE" 2>/dev/null | head -1 || true)
+	# Resolve relative paths against the compose file directory.
+	if [[ -n "$cover_dir" && "$cover_dir" =~ ^\./ ]]; then
+		cover_dir="$(dirname "$COMPOSE_FILE")/${cover_dir#./}"
+	fi
+	# FIX 2: use an empty tmpdir fallback rather than /tmp (which would mount
+	# unrelated host content over /srv/cover, giving false caddy validate results).
+	if [[ -z "$cover_dir" || ! -d "$cover_dir" ]]; then
+		cover_dir=$(mktemp -d)
+		# shellcheck disable=SC2064
+		trap "rm -rf '$cover_dir'" RETURN
+	fi
 
 	local validate_out validate_rc
 	validate_rc=0

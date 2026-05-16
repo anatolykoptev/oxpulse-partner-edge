@@ -322,5 +322,82 @@ REPO_ROOT="$REPO_ROOT" bash "$REPO_ROOT/tests/test_upgrade_with_templates.sh" \
     || { echo "FAIL: test_upgrade_with_templates.sh regressed"; exit 1; }
 echo "OK: Test 9 — existing template tests still pass"
 
+# ============================================================
+# Test 10 (FIX 1): cover_dir extraction extracts HOST path, not container path
+# ============================================================
+echo "==> Test 10: FIX 1 — cover_dir extraction with realistic compose volume line"
+
+# Repro from the reviewer: the old regex extracted /srv/cover:ro (container path).
+# Verify the new regex extracts the host path: ./cover (or resolved absolute path).
+_cover_test_compose=$(mktemp)
+cat > "$_cover_test_compose" << 'COVER_COMPOSE'
+services:
+  caddy:
+    image: ghcr.io/anatolykoptev/partner-edge-caddy:v0.12.26
+    volumes:
+      - ./cover:/srv/cover:ro
+COVER_COMPOSE
+
+# New regex from upgrade.sh FIX 1.
+_extracted=$(grep -oP '^\s*-\s*\K[^[:space:]:]+(?=:/srv/cover)' "$_cover_test_compose" 2>/dev/null | head -1 || true)
+rm -f "$_cover_test_compose"
+
+if [[ "$_extracted" == "./cover" ]]; then
+    echo "OK: Test 10 — extracted host path: '$_extracted' (correct)"
+else
+    echo "FAIL: Test 10 — cover_dir extraction returned '$_extracted', expected './cover'"
+    exit 1
+fi
+
+# Also verify the old regex would fail (confirm the fix is needed).
+_cover_test_compose2=$(mktemp)
+printf '      - ./cover:/srv/cover:ro\n' > "$_cover_test_compose2"
+_old_extracted=$(grep -oP 'cover:\s*\K[^[:space:]]+' "$_cover_test_compose2" 2>/dev/null | head -1 || true)
+rm -f "$_cover_test_compose2"
+if [[ "$_old_extracted" == "/srv/cover:ro" ]]; then
+    echo "OK: Test 10 — confirmed old regex was broken (extracted '$_old_extracted')"
+else
+    echo "NOTE: Test 10 — old regex returned '$_old_extracted' (expected /srv/cover:ro)"
+fi
+
+# ============================================================
+# Test 11 (FIX 5): concurrency lock — second invocation dies with lock error
+# ============================================================
+echo "==> Test 11: FIX 5 — flock prevents concurrent upgrade.sh runs"
+
+T11_ETC=$(make_sandbox t11)
+T11_LIB="$TMPROOT/lib-t11"
+T11_SHIM="$TMPROOT/docker-t11.sh"
+make_docker_shim "$T11_SHIM" "partner-edge-caddy:v0.12.26" 0 ""
+
+# Hold the lock manually to simulate a running upgrade.
+T11_LOCK="$T11_LIB/upgrade.lock"
+touch "$T11_LOCK"
+exec 19>"$T11_LOCK"
+flock -x 19  # hold exclusive lock from this test process
+
+# Run upgrade.sh --with-templates --dry-run — dry-run skips the lock (read-only).
+# Then run WITHOUT --dry-run (will try to acquire lock, should fail).
+# We use a MODE that triggers the lock: apply (default), not check/dry-run.
+# Since apply needs real docker+state, use a sub-sandbox but expect lock rejection.
+_lock_out=$(DOCKER_BIN="$T11_SHIM" \
+    OXPULSE_PREFIX_ETC="$T11_ETC" \
+    OXPULSE_PREFIX_LIB="$T11_LIB" \
+    OXPULSE_SKIP_ROOT_CHECK=1 \
+    OXPULSE_HEALTHCHECK="/bin/true" \
+    OXPULSE_REPO_RAW="http://127.0.0.1:$SERVE_PORT" \
+        bash "$UPGRADE" --with-templates latest 2>&1 || true)
+
+# Release our lock.
+flock -u 19
+exec 19>&-
+
+if echo "$_lock_out" | grep -qi "another upgrade\|lock"; then
+    echo "OK: Test 11 — second invocation blocked by flock: $(echo "$_lock_out" | grep -i 'lock\|another' | head -1)"
+else
+    echo "FAIL: Test 11 — expected lock-rejection message, got: $_lock_out"
+    exit 1
+fi
+
 echo ""
 echo "PASS: all test_upgrade_dry_run_conflicts tests passed"
