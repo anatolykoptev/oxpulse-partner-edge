@@ -1,0 +1,66 @@
+# Full fixture: one of each route action type + redirect, three tenants.
+# Used by caddy renderer tests in sub-phase 4.1.
+schema_version: 1
+tenants:
+  - id: cheburator
+    domains:
+      - cheburator.bot
+      - www.cheburator.bot
+    enabled: true
+    routes:
+      - path: /api/landing-chat*
+        action: proxy
+        upstream: https://webhooks.cheburator.rvpn.space
+        host_header: webhooks.cheburator.rvpn.space
+        sse: true
+      - path: /static/*
+        action: file_server
+        root: /srv/cheburator-static
+        cache_control: "public, max-age=86400"
+        strip_path_prefix: /static
+      - path: /favicon.ico
+        action: file_server
+        root: /srv/cheburator-static
+        try_files:
+          - /favicon.ico
+      - path: /
+        action: file_server
+        root: /srv/cheburator-landing
+        try_files:
+          - "{path}"
+          - /index.html
+        cache_control: "public, max-age=300"
+    redirects:
+      - from_host: www.cheburator.bot
+        to: "https://cheburator.bot{uri}"
+        permanent: true
+
+  - id: alpha-bot
+    domains:
+      - alpha.example.com
+    enabled: true
+    routes:
+      - path: /api/*
+        action: proxy
+        upstream: http://api.alpha.internal
+        host_header: api.alpha.internal
+      - path: /
+        action: file_server
+        root: /srv/alpha-bot
+        try_files:
+          - "{path}"
+          - /index.html
+
+  - id: gamma-static
+    domains:
+      - gamma.example.org
+    enabled: false
+    routes:
+      - path: /
+        action: file_server
+        root: /srv/gamma-static
+        cache_control: "public, max-age=3600"
+    redirects:
+      - from_host: www.gamma.example.org
+        to: "https://gamma.example.org{uri}"
+        permanent: false

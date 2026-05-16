@@ -1,8 +1,10 @@
 //! opec — OxPulse Partner Edge Controller
 //!
 //! Sub-phase 4.0: read-only tenant subcommands (list, validate, diff).
-//! No Caddy admin API calls. No mutations. No async runtime.
+//! Sub-phase 4.1: Caddy JSON renderer + `reconcile --dry-run`.
+//! No Caddy admin API calls at runtime. No mutations. No async runtime.
 
+mod caddy;
 mod tenant;
 
 use std::{
@@ -15,10 +17,12 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use caddy::render::render_tenant_routes;
 use tenant::schema::{parse, TenantsFile};
 use tenant::validate::validate;
 
 const DEFAULT_YAML_PATH: &str = "/etc/oxpulse-partner-edge/tenants.yaml";
+const DEFAULT_ADMIN_URL: &str = "http://localhost:2019";
 
 // ---------------------------------------------------------------------------
 // CLI structure
@@ -30,7 +34,7 @@ const DEFAULT_YAML_PATH: &str = "/etc/oxpulse-partner-edge/tenants.yaml";
     version,
     about = "OxPulse Partner Edge Controller",
     long_about = "opec manages tenant configuration on an OxPulse partner edge node.\n\
-                  Sub-phase 4.0: read-only (list, validate, diff). Mutations arrive in 4.3+."
+                  Sub-phase 4.1: Caddy JSON renderer + dry-run reconcile."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -39,7 +43,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Tenant management (4.0: list, validate, diff)
+    /// Tenant management
     Tenant {
         #[command(subcommand)]
         action: TenantCommands,
@@ -66,7 +70,7 @@ enum TenantCommands {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
-    /// Show per-tenant diff between two yaml files (4.0: tenant-level only)
+    /// Show per-tenant diff between two yaml files
     Diff {
         /// Left (old) tenants.yaml
         left: PathBuf,
@@ -76,11 +80,33 @@ enum TenantCommands {
         #[arg(long, value_enum, default_value = "table")]
         format: Format,
     },
+    /// Reconcile tenants.yaml with Caddy admin API.
+    /// In 4.1, only --dry-run is implemented (prints proposed PATCH payload without sending).
+    Reconcile {
+        /// Path to tenants.yaml
+        #[arg(long, default_value = DEFAULT_YAML_PATH)]
+        yaml: PathBuf,
+        /// Caddy admin API base URL
+        #[arg(long, default_value = DEFAULT_ADMIN_URL)]
+        admin_url: String,
+        /// Preview the PATCH payload without sending it. Required in sub-phase 4.1.
+        #[arg(long)]
+        dry_run: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value = "text")]
+        format: ReconcileFormat,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
 enum Format {
     Table,
+    Json,
+}
+
+#[derive(Clone, ValueEnum)]
+enum ReconcileFormat {
+    Text,
     Json,
 }
 
@@ -110,6 +136,12 @@ fn run_tenant(action: TenantCommands) -> Result<()> {
             right,
             format,
         } => cmd_diff(&left, &right, &format),
+        TenantCommands::Reconcile {
+            yaml,
+            admin_url,
+            dry_run,
+            format,
+        } => cmd_reconcile(&yaml, &admin_url, dry_run, &format),
     }
 }
 
@@ -275,7 +307,6 @@ fn cmd_diff(left_path: &PathBuf, right_path: &PathBuf, format: &Format) -> Resul
             .map(|s| s.to_string())
             .collect();
 
-        // Also check existing paths for changes
         for path in left_paths.intersection(&right_paths) {
             let lr = lt.routes.iter().find(|r| r.path == *path);
             let rr = rt.routes.iter().find(|r| r.path == *path);
@@ -338,6 +369,86 @@ fn cmd_diff(left_path: &PathBuf, right_path: &PathBuf, format: &Format) -> Resul
             }
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// reconcile (4.1: --dry-run only)
+// ---------------------------------------------------------------------------
+
+const PATCH_TARGET: &str = "apps/http/servers/srv0/routes";
+
+#[derive(Serialize)]
+struct ReconcileDryRunOutput {
+    mode: String,
+    admin_url: String,
+    tenants_count: usize,
+    proposed_routes: Vec<serde_json::Value>,
+    patch_target: String,
+}
+
+fn cmd_reconcile(
+    yaml_path: &PathBuf,
+    admin_url: &str,
+    dry_run: bool,
+    format: &ReconcileFormat,
+) -> Result<()> {
+    if !dry_run {
+        eprintln!(
+            "opec error: real PATCH not yet implemented; use --dry-run in sub-phase 4.1.\n\
+             Sub-phase 4.2 will implement the actual Caddy admin-API PATCH."
+        );
+        process::exit(1);
+    }
+
+    // Step 1: load + validate yaml. Errors → exit 1.
+    let file = load(yaml_path)?;
+    if let Err(errs) = validate(&file) {
+        eprintln!("Validation failed ({} error(s)):", errs.len());
+        for e in &errs {
+            eprintln!("  - {e}");
+        }
+        process::exit(1);
+    }
+
+    // Step 2: render.
+    let proposed = render_tenant_routes(&file.tenants);
+
+    // Step 3: validate shape of each rendered route (catch renderer bugs).
+    for (i, r) in proposed.iter().enumerate() {
+        caddy::render::validate_caddy_route_shape(r)
+            .with_context(|| format!("rendered route[{i}] failed shape validation"))?;
+    }
+
+    let enabled_count = file.tenants.iter().filter(|t| t.enabled).count();
+
+    match format {
+        ReconcileFormat::Json => {
+            let out = ReconcileDryRunOutput {
+                mode: "dry-run".to_string(),
+                admin_url: admin_url.to_string(),
+                tenants_count: enabled_count,
+                proposed_routes: proposed,
+                patch_target: PATCH_TARGET.to_string(),
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+        ReconcileFormat::Text => {
+            println!("Mode:          dry-run (no changes sent)");
+            println!("Admin URL:     {admin_url}");
+            println!("Patch target:  {PATCH_TARGET}");
+            println!(
+                "Tenants:       {} enabled / {} total",
+                enabled_count,
+                file.tenants.len()
+            );
+            println!("Routes:        {} route object(s) proposed", proposed.len());
+            println!();
+            println!("--- Proposed Caddy routes ---");
+            println!("{}", serde_json::to_string_pretty(&proposed)?);
+        }
+    }
+
     Ok(())
 }
 

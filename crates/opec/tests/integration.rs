@@ -334,3 +334,116 @@ mod cli_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 4.1 reconcile CLI tests
+// ---------------------------------------------------------------------------
+
+mod reconcile_tests {
+    use assert_cmd::Command;
+    use std::path::Path;
+
+    fn fixture_path(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn cli_reconcile_dry_run_outputs_routes() {
+        let mut cmd = Command::cargo_bin("opec").unwrap();
+        let output = cmd
+            .args([
+                "tenant",
+                "reconcile",
+                "--format",
+                "json",
+                "--dry-run",
+                "--yaml",
+            ])
+            .arg(fixture_path("valid_three_tenants_full.yaml"))
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8(output).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid json output");
+        let routes = v["proposed_routes"]
+            .as_array()
+            .expect("proposed_routes array");
+        assert!(
+            !routes.is_empty(),
+            "proposed_routes must be non-empty for fixture with enabled tenants"
+        );
+        assert_eq!(v["mode"], "dry-run");
+        assert_eq!(v["patch_target"], "apps/http/servers/srv0/routes");
+    }
+
+    #[test]
+    fn cli_reconcile_requires_dry_run_flag_in_4_1() {
+        let mut cmd = Command::cargo_bin("opec").unwrap();
+        // No --dry-run flag → must exit non-zero with "not yet implemented" message.
+        let output = cmd
+            .args(["tenant", "reconcile", "--yaml"])
+            .arg(fixture_path("valid_three_tenants_full.yaml"))
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone();
+        let stderr = String::from_utf8(output).unwrap();
+        assert!(
+            stderr.contains("not yet implemented") || stderr.contains("--dry-run"),
+            "expected 'not yet implemented' or '--dry-run' in stderr, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn cli_reconcile_validates_yaml_first() {
+        let mut cmd = Command::cargo_bin("opec").unwrap();
+        // Invalid yaml (duplicate id) → exit 1, validation errors printed, no routes rendered.
+        let output = cmd
+            .args(["tenant", "reconcile", "--dry-run", "--yaml"])
+            .arg(fixture_path("invalid_duplicate_id.yaml"))
+            .assert()
+            .failure()
+            .get_output()
+            .stderr
+            .clone();
+        let stderr = String::from_utf8(output).unwrap();
+        assert!(
+            stderr.contains("Validation failed") || stderr.contains("duplicate"),
+            "expected validation error in stderr, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn cli_reconcile_dry_run_text_format() {
+        let mut cmd = Command::cargo_bin("opec").unwrap();
+        let output = cmd
+            .args([
+                "tenant",
+                "reconcile",
+                "--dry-run",
+                "--format",
+                "text",
+                "--yaml",
+            ])
+            .arg(fixture_path("valid_three_tenants_full.yaml"))
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8(output).unwrap();
+        assert!(
+            stdout.contains("dry-run"),
+            "text output must mention dry-run mode"
+        );
+        assert!(
+            stdout.contains("Proposed Caddy routes"),
+            "text output must show route section"
+        );
+    }
+}
