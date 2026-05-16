@@ -7,7 +7,9 @@
 #   oxpulse-partner-edge-upgrade --check               # report pending upgrade, don't apply
 #   oxpulse-partner-edge-upgrade --rollback            # restore previous tag
 #   oxpulse-partner-edge-upgrade --templates-only      # re-render xray config from upstream template, no image pull
+#   oxpulse-partner-edge-upgrade --with-templates      # re-render Caddyfile + healthcheck + pull new image (atomic)
 #   oxpulse-partner-edge-upgrade --ghcr-token=ghp_xxx  # persist GHCR PAT before pull (one-time)
+#   oxpulse-partner-edge-upgrade --dry-run             # print plan, skip docker and file writes
 #
 # GHCR auth: ghcr.io/anatolykoptev/partner-edge-* images are private. Provide
 # a token via --ghcr-token=ghp_xxx (saved to /etc/oxpulse-partner-edge/ghcr.token
@@ -22,10 +24,14 @@ COMPOSE_FILE="$PREFIX_ETC/docker-compose.yml"
 STATE_FILE="$PREFIX_LIB/install.env"
 PREV_STATE_FILE="$PREFIX_LIB/install.env.prev"
 PREV_COMPOSE_FILE="$PREFIX_LIB/docker-compose.yml.prev"
+PREV_CADDYFILE="$PREFIX_LIB/Caddyfile.prev"
+PREV_HEALTHCHECK="$PREFIX_LIB/healthcheck.prev"
 HEALTHCHECK="/usr/local/sbin/oxpulse-partner-edge-healthcheck"
 REPO_RAW="${OXPULSE_REPO_RAW:-https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main}"
 NODE_CFG="$PREFIX_ETC/node-config.json"
 XRAY_CFG="$PREFIX_ETC/xray-client.json"
+# Allow tests to override docker binary (e.g. DOCKER_BIN=true for dry-run).
+DOCKER_BIN="${DOCKER_BIN:-docker}"
 
 log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
@@ -110,6 +116,7 @@ CURRENT="${IMAGE_VERSION:-unknown}"
 
 MODE=apply
 TARGET=""
+DRY_RUN=0
 # GHCR PAT supplied via --ghcr-token=ghp_xxx flag OR OXPULSE_GHCR_TOKEN env.
 # Flag wins over env. Empty string disables the auth path (anonymous pull).
 GHCR_TOKEN_ARG="${OXPULSE_GHCR_TOKEN:-}"
@@ -118,10 +125,12 @@ for arg in "$@"; do
 		--check)          MODE=check ;;
 		--rollback)       MODE=rollback ;;
 		--templates-only) MODE=templates ;;
+		--with-templates) MODE=with_templates ;;
+		--dry-run)        DRY_RUN=1 ;;
 		--ghcr-token=*)   GHCR_TOKEN_ARG="${arg#--ghcr-token=}" ;;
 		v*|latest)        TARGET="$arg" ;;
 		-h|--help)
-			sed -n '2,16p' "$0"; exit 0 ;;
+			sed -n '2,17p' "$0"; exit 0 ;;
 		*) die "unknown arg: $arg" ;;
 	esac
 done
@@ -142,6 +151,137 @@ if [[ "$MODE" == templates ]]; then
 	log "done"
 	exit 0
 fi
+
+# ---------------------------------------------------------------------------
+# re_render_caddy — fetch Caddyfile.tpl, render with install.env values,
+# compute and embed the sha256 (__CADDYFILE_SHA__ logic matching install.sh),
+# update CADDYFILE_SHA in install.env.
+#
+# Design constraint: docker-compose.yml has 20+ placeholders (TURN_SECRET,
+# REALITY_* secrets, SFU secrets, etc.) that live only in the baked-in live
+# compose file; install.env does NOT persist them. Re-rendering compose from
+# template would silently wipe those secrets. Therefore --with-templates
+# re-renders Caddyfile only and patch-updates image tags in compose (same as
+# the plain image-upgrade path). See PR body for full rationale.
+#
+# Piter node: caddy service absent — Caddyfile render is skipped gracefully.
+# ---------------------------------------------------------------------------
+re_render_caddy() {
+	local tmpdir out_tpl out_caddy rendered_sha
+
+	# Detect piter (SFU-only): no caddy service in live compose.
+	if ! grep -qE '^\s+caddy:' "$COMPOSE_FILE" 2>/dev/null; then
+		warn "caddy service not found in $COMPOSE_FILE — skipping Caddyfile re-render (SFU-only node?)"
+		return 0
+	fi
+
+	[[ -n "${PARTNER_DOMAIN:-}" ]]   || die "PARTNER_DOMAIN missing from $STATE_FILE — cannot render Caddyfile"
+	[[ -n "${TURNS_SUBDOMAIN:-}" ]]  || die "TURNS_SUBDOMAIN missing from $STATE_FILE — cannot render Caddyfile"
+
+	tmpdir=$(mktemp -d)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$tmpdir'" RETURN
+
+	out_tpl="$tmpdir/Caddyfile.tpl"
+	out_caddy="$tmpdir/Caddyfile"
+
+	log "fetching Caddyfile.tpl from $REPO_RAW"
+	if ! curl -fsSL --max-time 30 "$REPO_RAW/Caddyfile.tpl" -o "$out_tpl" 2>/dev/null; then
+		die "could not fetch Caddyfile.tpl from $REPO_RAW — aborting (no changes applied)"
+	fi
+
+	# Escape sed replacement metacharacters (same helper as channel-render-lib.sh).
+	_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+
+	# Render placeholders. Only PARTNER_DOMAIN and TURNS_SUBDOMAIN are in
+	# Caddyfile.tpl — confirmed by grep of the template.
+	sed \
+		-e "s|{{PARTNER_DOMAIN}}|$(_esc "$PARTNER_DOMAIN")|g" \
+		-e "s|{{TURNS_SUBDOMAIN}}|$(_esc "$TURNS_SUBDOMAIN")|g" \
+		"$out_tpl" > "$out_caddy"
+
+	# Phase 1: compute sha256 of the rendered file BEFORE substituting
+	# __CADDYFILE_SHA__ — this matches install.sh exactly so that
+	# /canary/config-hash returns the recorded hash and check 15 stays green.
+	rendered_sha=$(sha256sum "$out_caddy" | awk '{print $1}')
+	sed -i "s|__CADDYFILE_SHA__|${rendered_sha}|g" "$out_caddy"
+
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		log "[dry-run] would write Caddyfile (sha256=$rendered_sha) to $PREFIX_ETC/Caddyfile"
+		log "[dry-run] would update CADDYFILE_SHA=$rendered_sha in $STATE_FILE"
+		return 0
+	fi
+
+	# Atomic install: write to temp path, rename into place.
+	install -m 0644 "$out_caddy" "$PREFIX_ETC/Caddyfile"
+	log "Caddyfile rendered (sha256=$rendered_sha)"
+
+	# Update CADDYFILE_SHA in install.env (replace existing line or append).
+	if grep -q '^CADDYFILE_SHA=' "$STATE_FILE"; then
+		sed -i "s|^CADDYFILE_SHA=.*|CADDYFILE_SHA=${rendered_sha}|" "$STATE_FILE"
+	else
+		printf 'CADDYFILE_SHA=%s\n' "$rendered_sha" >> "$STATE_FILE"
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# re_render_healthcheck — fetch fresh healthcheck.sh, install atomically.
+# healthcheck.sh has no template placeholders — straight copy.
+# ---------------------------------------------------------------------------
+re_render_healthcheck() {
+	local tmpdir out_hc
+
+	tmpdir=$(mktemp -d)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$tmpdir'" RETURN
+
+	out_hc="$tmpdir/healthcheck.sh"
+
+	log "fetching healthcheck.sh from $REPO_RAW"
+	if ! curl -fsSL --max-time 30 "$REPO_RAW/healthcheck.sh" -o "$out_hc" 2>/dev/null; then
+		die "could not fetch healthcheck.sh from $REPO_RAW — aborting (no changes applied)"
+	fi
+
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		log "[dry-run] would install healthcheck.sh to $HEALTHCHECK"
+		return 0
+	fi
+
+	install -m 0755 "$out_hc" "$HEALTHCHECK"
+	log "healthcheck.sh updated"
+}
+
+# ---------------------------------------------------------------------------
+# do_rollback_templates — restore Caddyfile, healthcheck, and install.env
+# from .prev backups. Called by --rollback when template backups exist, and
+# auto-triggered after --with-templates healthcheck failure.
+# ---------------------------------------------------------------------------
+do_rollback_templates() {
+	local restored=0
+
+	if [[ -f "$PREV_CADDYFILE" ]]; then
+		install -m 0644 "$PREV_CADDYFILE" "$PREFIX_ETC/Caddyfile"
+		log "restored Caddyfile from backup"
+		restored=1
+	fi
+	if [[ -f "$PREV_HEALTHCHECK" ]]; then
+		install -m 0755 "$PREV_HEALTHCHECK" "$HEALTHCHECK"
+		log "restored healthcheck from backup"
+		restored=1
+	fi
+	if [[ -f "$PREV_STATE_FILE" ]]; then
+		cp -a "$PREV_STATE_FILE" "$STATE_FILE"
+		log "restored install.env from backup"
+		restored=1
+	fi
+	if [[ -f "$PREV_COMPOSE_FILE" ]]; then
+		cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
+		log "restored docker-compose.yml from backup"
+		restored=1
+	fi
+
+	[[ "$restored" -eq 1 ]] || die "no .prev backup files found — nothing to restore"
+}
 
 maybe_v01_to_v02_preflight() {
 	[[ "$CURRENT" =~ ^v0\.1($|\.) ]] || return 0
@@ -169,21 +309,115 @@ maybe_v01_to_v02_preflight() {
 
 maybe_v01_to_v02_preflight
 
+# ---- --rollback mode ----
 if [[ "$MODE" == rollback ]]; then
-	[[ -r "$PREV_STATE_FILE" && -r "$PREV_COMPOSE_FILE" ]] \
+	# Template rollback: restore Caddyfile/healthcheck if .prev files exist.
+	_have_template_prev=0
+	[[ -f "$PREV_CADDYFILE" || -f "$PREV_HEALTHCHECK" ]] && _have_template_prev=1
+
+	# Image rollback: compose.prev + state.prev must exist.
+	_have_image_prev=0
+	[[ -r "$PREV_STATE_FILE" && -r "$PREV_COMPOSE_FILE" ]] && _have_image_prev=1
+
+	[[ "$_have_template_prev" -eq 1 || "$_have_image_prev" -eq 1 ]] \
 		|| die "no previous version recorded — nothing to roll back to"
-	log "rolling back using previous compose file"
-	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
-	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
-	(ghcr_login_from_file || true; cd "$PREFIX_ETC" && docker compose pull)
-	(cd "$PREFIX_ETC" && docker compose up -d --force-recreate)
-	sleep 10
-	if "$HEALTHCHECK" --local; then
-		log "rollback complete"
-		exit 0
+
+	log "rolling back to previous state"
+	do_rollback_templates  # restores all .prev files it can find
+
+	if [[ "$DRY_RUN" -eq 0 ]]; then
+		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull)
+		(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate)
+		sleep 10
+		if "$HEALTHCHECK" --local; then
+			log "rollback complete"
+			exit 0
+		else
+			die "rollback applied but healthcheck still failing — manual recovery required"
+		fi
 	else
-		die "rollback applied but healthcheck still failing — manual recovery required"
+		log "[dry-run] would docker compose pull + up -d after rollback"
+		exit 0
 	fi
+fi
+
+# ---- --with-templates mode ----
+if [[ "$MODE" == with_templates ]]; then
+	[[ -z "$TARGET" ]] && TARGET=latest
+	log "--with-templates: atomic Caddyfile + healthcheck + image upgrade (target=$TARGET)"
+
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		log "[dry-run] plan:"
+		log "  1. backup Caddyfile, healthcheck.sh, install.env, docker-compose.yml"
+		log "  2. fetch + render Caddyfile.tpl → $PREFIX_ETC/Caddyfile"
+		log "  3. fetch healthcheck.sh → $HEALTHCHECK"
+		log "  4. patch image tags to $TARGET in $COMPOSE_FILE"
+		log "  5. docker compose pull"
+		log "  6. docker compose up -d"
+		log "  7. healthcheck; auto-rollback on failure"
+		# Still run render functions (they are no-ops in dry-run mode).
+		re_render_caddy
+		re_render_healthcheck
+		exit 0
+	fi
+
+	# Step 1: backup current state before any mutation.
+	[[ -f "$PREFIX_ETC/Caddyfile" ]]  && cp -a "$PREFIX_ETC/Caddyfile" "$PREV_CADDYFILE"
+	[[ -f "$HEALTHCHECK" ]]           && cp -a "$HEALTHCHECK" "$PREV_HEALTHCHECK"
+	cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
+	cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
+
+	# Step 2+3: fetch + render templates. die()s on fetch failure — no state
+	# has been mutated yet (backups exist but originals are untouched).
+	re_render_caddy
+	re_render_healthcheck
+
+	# Step 4: patch image tags in compose (same as plain image upgrade).
+	sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
+		"$COMPOSE_FILE"
+	sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
+
+	# Step 5: pull new images.
+	ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
+	log "pulling images (tag=$TARGET)"
+	pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull 2>&1)
+	pull_rc=$?
+	if [[ $pull_rc -ne 0 ]]; then
+		printf '%s\n' "$pull_out" >&2
+		if ! ghcr_pull_diagnose "$pull_out"; then
+			warn "ghcr: pull failed but not for an auth reason (see output above)"
+		fi
+		warn "pull failed — rolling back"
+		do_rollback_templates
+		die "pull failed — rolled back to previous state"
+	fi
+
+	# Step 6: recreate services.
+	log "recreating services"
+	if ! (cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d); then
+		warn "compose up failed — rolling back"
+		do_rollback_templates
+		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull) || true
+		(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d) || true
+		die "--with-templates upgrade rolled back due to compose up failure"
+	fi
+
+	# Step 7: verify.
+	sleep 10
+	if ! "$HEALTHCHECK" --local; then
+		warn "healthcheck red after --with-templates upgrade — rolling back"
+		do_rollback_templates
+		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull) || true
+		(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d) || true
+		if ! "$HEALTHCHECK" --local; then
+			die "--with-templates rolled back but healthcheck still failing — manual recovery required"
+		fi
+		die "--with-templates upgrade rolled back due to post-upgrade healthcheck failure"
+	fi
+
+	log "--with-templates upgrade to $TARGET complete"
+	re_render_xray
+	exit 0
 fi
 
 [[ -z "$TARGET" ]] && TARGET=latest
@@ -211,7 +445,7 @@ sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
 
 log "pulling new images"
-pull_out=$(cd "$PREFIX_ETC" && docker compose pull 2>&1)
+pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull 2>&1)
 pull_rc=$?
 if [[ $pull_rc -ne 0 ]]; then
 	# Print pull output so operator can see context.
@@ -224,11 +458,11 @@ if [[ $pull_rc -ne 0 ]]; then
 fi
 
 log "recreating services"
-if ! (cd "$PREFIX_ETC" && docker compose up -d --force-recreate); then
+if ! (cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate); then
 	warn "up failed — rolling back to $CURRENT"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
-	(cd "$PREFIX_ETC" && docker compose up -d --force-recreate) || true
+	(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate) || true
 	die "upgrade rolled back"
 fi
 
@@ -243,8 +477,8 @@ if ! "$HEALTHCHECK" --local; then
 	warn "healthcheck red after upgrade — rolling back"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
-	(ghcr_login_from_file || true; cd "$PREFIX_ETC" && docker compose pull)
-	(cd "$PREFIX_ETC" && docker compose up -d --force-recreate) || true
+	(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull)
+	(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate) || true
 	die "upgrade rolled back due to post-upgrade healthcheck failure"
 fi
 
