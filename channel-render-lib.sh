@@ -124,3 +124,53 @@ except Exception:
     (cd "$PREFIX_ETC" && docker compose restart xray-client 2>/dev/null || true)
     log "xray-client restarted"
 }
+
+# ── hysteria2 (Phase 1.7 CH3) ────────────────────────────────────────────
+#
+# Render the hysteria2-client.yaml from template via simple sed substitution.
+# Pattern mirrors _render_xray_to() at top of this file.
+
+# Escape sed replacement metacharacters (|, &, \\).
+# Promoted to module scope for _render_hysteria2_to().
+_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+
+# Internal — render to a specific output path. Used by the test runner.
+_render_hysteria2_to() {
+    local tpl="$1" out="$2"
+    local server="$3" auth="$4" obfs="$5" listen="$6" backend="$7"
+    sed \
+        -e "s|{{HY2_SERVER}}|$(_esc "$server")|g" \
+        -e "s|{{HY2_AUTH_PASS}}|$(_esc "$auth")|g" \
+        -e "s|{{HY2_OBFS_PASS}}|$(_esc "$obfs")|g" \
+        -e "s|{{HY2_LOCAL_LISTEN}}|$(_esc "$listen")|g" \
+        -e "s|{{HY2_REMOTE_BACKEND}}|$(_esc "$backend")|g" \
+        "$tpl" > "$out"
+}
+
+# Public — full render-and-install pipeline.
+# Sources hy2 credentials from $HY2_AUTH_PASS, $HY2_OBFS_PASS env vars
+# (populated by install.sh from /api/partner/hy2-credentials response).
+# Writes to /etc/oxpulse-partner-edge/hysteria2-client.yaml with mode 600.
+re_render_hysteria2() {
+    local tpl="${OXPULSE_REPO_DIR:-/usr/local/share/oxpulse-partner-edge}/hysteria2-client.yaml.tpl"
+    local out="/etc/oxpulse-partner-edge/hysteria2-client.yaml"
+    local backup="${out}.bak.$(date +%s)"
+    local server="${HY2_SERVER:-192.9.243.148:51822}"
+    local listen="${HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
+    local backend="${HY2_REMOTE_BACKEND:-127.0.0.1:8907}"
+
+    if [[ ! -f "$tpl" ]]; then
+        echo "ERR re_render_hysteria2: template not found: $tpl" >&2
+        return 1
+    fi
+    if [[ -z "${HY2_AUTH_PASS:-}" || -z "${HY2_OBFS_PASS:-}" ]]; then
+        echo "ERR re_render_hysteria2: HY2_AUTH_PASS or HY2_OBFS_PASS empty — call install.sh hy2-creds fetch first" >&2
+        return 1
+    fi
+
+    [[ -f "$out" ]] && cp "$out" "$backup"
+    _render_hysteria2_to "$tpl" "$out" \
+        "$server" "$HY2_AUTH_PASS" "$HY2_OBFS_PASS" "$listen" "$backend"
+    chmod 600 "$out"
+    echo "$(date -Iseconds) re_render_hysteria2: wrote $out (backup $backup)"
+}

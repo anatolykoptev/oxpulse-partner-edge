@@ -1,23 +1,21 @@
-# Hysteria2 client configuration (CH3 fallback channel).
-# Activated when the operator's backend returns CH3 config in channels[].
-# Server uses salamander obfuscation; traffic appears as random UDP noise.
-server: "{{HYSTERIA2_SERVER}}:{{HYSTERIA2_PORT}}"
+# Rendered by oxpulse-partner-edge install.sh / update.sh.
+# Phase 1.7 — hy2 as 2nd partner-edge control-plane channel.
+server: {{HY2_SERVER}}
 
-auth: "{{HYSTERIA2_AUTH}}"
-
-tls:
-  insecure: true
+auth: {{HY2_AUTH_PASS}}
 
 obfs:
   type: salamander
   salamander:
-    password: "{{HYSTERIA2_OBFS}}"
+    password: {{HY2_OBFS_PASS}}
 
-socks5:
-  listen: "127.0.0.1:{{HYSTERIA2_SOCKS_PORT}}"
+tls:
+  insecure: true
 
-quic:
-  initStreamReceiveWindow: 8388608
-  maxStreamReceiveWindow: 8388608
-  initConnReceiveWindow: 20971520
-  maxConnReceiveWindow: 20971520
+bandwidth:
+  up: 50 mbps
+  down: 200 mbps
+
+tcpForwarding:
+  - listen: {{HY2_LOCAL_LISTEN}}
+    remote: {{HY2_REMOTE_BACKEND}}
