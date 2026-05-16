@@ -5,6 +5,30 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.28](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.27...partner-edge-v0.12.28) (2026-05-16)
+
+
+### Features
+
+* **caddy:** phase 1 — canary endpoints + structured JSON logs ([#122](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/122)) ([c1e0381](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c1e038121176552dde6cd9e5a74fea7f57baf0e6))
+* **caddy:** phase 2 — extract tunnel_upstream snippet + golden-file test ([#129](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/129)) ([d8b91fb](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d8b91fb9abb21bec4d594e80bbb0da9b0d0bbade))
+* **caddy:** phase 3 — conf.d/ override slot + install.sh --check ([#130](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/130)) ([6e8de6a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/6e8de6aef41c43be8f817b93012d6c9388c07855))
+* **channels:** Phase 1.7 — integrate hy2 second channel into installer ([#134](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/134)) ([567b569](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/567b5690b72ca6c670d371b7bf3a04509bb7d41f))
+* **install,upgrade:** GHCR auth via --ghcr-token + persistent token file ([#120](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/120)) ([bcffd3b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/bcffd3b92d05fc61df4e8f1db6ac305bfdc8b445))
+* **opec:** phase 4.0 — tenant yaml schema + validator + read-only CLI ([#131](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/131)) ([dc95d49](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/dc95d497a3e0a7f7f505f96451f6c866ed012e43))
+* **opec:** phase 4.1 — Caddy JSON renderer + tenant reconcile --dry-run ([#132](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/132)) ([7dbd3c4](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7dbd3c4a089099f70c0ab0fccbd9ea34624f128c))
+* **upgrade:** --dry-run surfaces concrete conflicts before apply ([#125](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/125)) ([c80c8fc](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c80c8fcbeaf8ca47c6397d83997505e8b4507c6b))
+* **upgrade:** --with-templates for atomic Caddyfile+healthcheck+image lockstep ([#124](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/124)) ([c45d805](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c45d805e3f3d11cf542ba2bbf1e3b4665fc291f2))
+
+
+### Bug Fixes
+
+* **caddy:** remove unrecognized maxmind_geolocation global option ([#128](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/128)) ([cdcfe3c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/cdcfe3c0e23ce579c326b680286fa2bcce675841))
+* **compose:** publish canary port 9080 on host loopback ([#123](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/123)) ([a52771a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a52771a57ea27b1fe4637f2241ee056c66c79459))
+* **installer:** correct hysteria2 image path, drop unbuildable naive client ([#135](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/135)) ([cfc821d](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/cfc821d8208259d410c73d6db3e2a29323246b8d))
+* **installer:** render() handles multi-line values (SFU_SIGNING_PUBLIC_KEY PEM) ([#136](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/136)) ([a4c62ac](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a4c62acc7682173bc8794c64e12ab66e388402af))
+* **upgrade:** reviewer findings — cover_dir, atomic install, flock, rollback pull, healthcheck disambig ([#126](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/126)) ([92f7f5a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/92f7f5a76c46c2986e568e60cde8b9fe191cb235))
+
 ## [Unreleased]
 
 ### Added
