@@ -1,12 +1,12 @@
 # Rendered by install.sh → /etc/oxpulse-partner-edge/Caddyfile
-# Placeholders: {{PARTNER_DOMAIN}}, {{TURNS_SUBDOMAIN}}
+# Placeholders: test.example, api-abc.test.example
 #
 # Traffic split on partner edge:
 #   / (SPA)         → xray-client:3080 (backend renders branded index.html)
 #   /_app/immutable → xray-client:3080 BUT cached 1 year at Caddy
 #   /api/*          → xray-client:3080 with X-Forwarded-Host header
 #   /ws/*           → xray-client:3080 (WebSocket upgrade preserved by Caddy)
-#   {{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}} TLS passthrough → coturn:5349
+#   api-abc.test.example.test.example TLS passthrough → coturn:5349
 #
 # caddy-l4 TURNS SNI mux: listener_wrappers peeks TLS ClientHello BEFORE Caddy
 # HTTP app sees it. Matching SNI → raw TCP to coturn (coturn terminates own TLS).
@@ -21,7 +21,7 @@
     admin localhost:2019 {
         origins localhost 127.0.0.1
     }
-    email admin@{{PARTNER_DOMAIN}}
+    email admin@test.example
 
     # M2b.2: DB-IP country lookup — DISABLED 2026-05-16.
     # The aksdb fork registered maxmind_geolocation as a global option;
@@ -40,7 +40,7 @@
         protocols h1 h2
         listener_wrappers {
             layer4 {
-                @turns tls sni {{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}}
+                @turns tls sni api-abc.test.example.test.example
                 route @turns {
                     # coturn runs in network_mode: host and binds 5349 on every
                     # host interface. From this Caddy container's perspective
@@ -69,30 +69,7 @@
 
 }
 
-# Phase 2: tunnel_upstream snippet — collapses the 4 repeated reverse_proxy
-# blocks (api, ws, events, SPA fallback) into a single authoritative definition.
-# {args[0]} receives the path pattern from `import tunnel_upstream /api/*`.
-# A second snippet (tunnel_upstream_default) handles the no-path catch-all SPA
-# fallback where there is no route argument.
-(tunnel_upstream) {
-    reverse_proxy {args[0]} xray-client:3080 {
-        header_up X-Forwarded-Host {{PARTNER_DOMAIN}}
-        header_up X-Forwarded-Proto https
-        header_up Host oxpulse.chat
-        header_up X-Geo-Country {vars.maxmind_country_code}
-    }
-}
-
-(tunnel_upstream_default) {
-    reverse_proxy xray-client:3080 {
-        header_up X-Forwarded-Host {{PARTNER_DOMAIN}}
-        header_up X-Forwarded-Proto https
-        header_up Host oxpulse.chat
-        header_up X-Geo-Country {vars.maxmind_country_code}
-    }
-}
-
-{{PARTNER_DOMAIN}} {
+test.example {
     encode gzip zstd
 
     header {
@@ -143,17 +120,37 @@
         header @immutable Cache-Control "public, max-age=31536000, immutable"
 
         # API — preserve partner domain so backend branding resolver picks right config.
-        import tunnel_upstream /api/*
+        reverse_proxy /api/* xray-client:3080 {
+            header_up X-Forwarded-Host test.example
+            header_up X-Forwarded-Proto https
+            header_up Host oxpulse.chat
+            header_up X-Geo-Country {vars.maxmind_country_code}
+        }
 
         # WebSocket — Caddy auto-upgrades on Upgrade: websocket.
-        import tunnel_upstream /ws/*
+        reverse_proxy /ws/* xray-client:3080 {
+            header_up X-Forwarded-Host test.example
+            header_up X-Forwarded-Proto https
+            header_up Host oxpulse.chat
+            header_up X-Geo-Country {vars.maxmind_country_code}
+        }
 
         # Event telemetry.
-        import tunnel_upstream /events/*
+        reverse_proxy /events/* xray-client:3080 {
+            header_up X-Forwarded-Host test.example
+            header_up X-Forwarded-Proto https
+            header_up Host oxpulse.chat
+            header_up X-Geo-Country {vars.maxmind_country_code}
+        }
 
         # SPA fallback — everything else goes through the tunnel so backend can
         # inject partner branding into index.html before shipping to browser.
-        import tunnel_upstream_default
+        reverse_proxy xray-client:3080 {
+            header_up X-Forwarded-Host test.example
+            header_up X-Forwarded-Proto https
+            header_up Host oxpulse.chat
+            header_up X-Geo-Country {vars.maxmind_country_code}
+        }
     }
 }
 
@@ -163,7 +160,7 @@
 # Actual :443 traffic for this SNI is routed by caddy-l4 above → coturn
 # before this handler ever sees it — so this respond only fires for
 # ACME-challenge + any stray request that bypassed the l4 mux.
-{{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}} {
+api-abc.test.example.test.example {
     tls {
         issuer acme {
             # CRITICAL: once l4 routes :443 for this SNI to coturn, Caddy can
