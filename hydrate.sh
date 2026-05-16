@@ -166,10 +166,24 @@ log "  secrets fetched (turn_secret len=${#TURN_SECRET}, reality_uuid len=${#REA
 # Wipe raw response — no longer needed, don't leave secrets on disk.
 rm -f "$tmp_resp"
 
+# ---------- Load render library ----------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_chan_lib_local="${SCRIPT_DIR}/channel-render-lib.sh"
+_chan_lib_installed="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
+if [[ -f "$_chan_lib_local" ]]; then
+    # shellcheck source=channel-render-lib.sh
+    source "$_chan_lib_local"
+elif [[ -f "$_chan_lib_installed" ]]; then
+    # shellcheck source=/dev/null
+    source "$_chan_lib_installed"
+else
+    die "channel-render-lib.sh not found (looked at $_chan_lib_local and $_chan_lib_installed)"
+fi
+unset _chan_lib_local _chan_lib_installed
+
 # ---------- Step 4: render templates ----------
 log "[4/7] rendering config templates"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TPL_DIR="$SCRIPT_DIR"
 [[ -d "$TPL_DIR" ]] || TPL_DIR="/usr/local/share/oxpulse-partner-edge"
 
@@ -180,66 +194,39 @@ tpl_file() {
     echo "$f"
 }
 
-# Escape sed-replacement metacharacters: \, &, and the delimiter |.
-sed_esc() {
-    printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
-}
+# render_template (channel-render-lib.sh) calls python3 as a subprocess and
+# reads template placeholders from ambient env. Every {{VAR}} placeholder in
+# the .tpl files must therefore be exported. Hardcoded socks ports are set
+# here to match the legacy sed render's inline defaults. Vars not provisioned
+# by the backend response (SFU_*, OTEL_*, SIGNALING_*, HY2_*) are exported
+# empty so placeholders become "" rather than the literal "{{VAR}}" string
+# that the old sed render silently left behind.
+HYSTERIA2_SOCKS_PORT="${HYSTERIA2_SOCKS_PORT:-18891}"
+NAIVE_SOCKS_PORT="${NAIVE_SOCKS_PORT:-18892}"
+export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
+       TURN_SECRET \
+       REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
+       REALITY_ENCRYPTION TURNS_SUBDOMAIN \
+       PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE \
+       IMAGE_VERSION \
+       RELAY_JWT_SECRET \
+       HYSTERIA2_SERVER HYSTERIA2_PORT HYSTERIA2_AUTH HYSTERIA2_OBFS HYSTERIA2_SOCKS_PORT \
+       NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT \
+       SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID OTEL_EXPORTER_OTLP_ENDPOINT \
+       SFU_SIGNING_PUBLIC_KEY SIGNALING_SFU_SECRET \
+       HY2_SERVER HY2_AUTH_PASS HY2_OBFS_PASS HY2_LOCAL_LISTEN HY2_REMOTE_BACKEND
 
-render() {
-    local src=$1 dst=$2
-    local tmp
-    tmp=$(mktemp)
-    cp "$src" "$tmp"
-    local key val safe
-    declare -A _vars=(
-        [PARTNER_ID]="${PARTNER_ID}"
-        [PARTNER_DOMAIN]="${PARTNER_DOMAIN}"
-        [BACKEND_ENDPOINT]="${BACKEND_ENDPOINT}"
-        [BACKEND_HOST]="${BACKEND_HOST}"
-        [BACKEND_PORT]="${BACKEND_PORT}"
-        [TURN_SECRET]="${TURN_SECRET}"
-        [REALITY_UUID]="${REALITY_UUID}"
-        [REALITY_PUBLIC_KEY]="${REALITY_PUBLIC_KEY}"
-        [REALITY_SHORT_ID]="${REALITY_SHORT_ID}"
-        [REALITY_SERVER_NAME]="${REALITY_SERVER_NAME}"
-        [REALITY_ENCRYPTION]="${REALITY_ENCRYPTION}"
-        [PUBLIC_IP]="${PUBLIC_IP}"
-        [PRIVATE_IP]="${PRIVATE_IP:-}"
-        [EXTERNAL_IP_LINE]="${EXTERNAL_IP_LINE}"
-        [TURNS_SUBDOMAIN]="${TURNS_SUBDOMAIN}"
-        [IMAGE_VERSION]="${IMAGE_VERSION}"
-        [RELAY_JWT_SECRET]="${RELAY_JWT_SECRET}"
-        [HYSTERIA2_SERVER]="${HYSTERIA2_SERVER:-}"
-        [HYSTERIA2_PORT]="${HYSTERIA2_PORT:-51822}"
-        [HYSTERIA2_AUTH]="${HYSTERIA2_AUTH:-}"
-        [HYSTERIA2_OBFS]="${HYSTERIA2_OBFS:-}"
-        [HYSTERIA2_SOCKS_PORT]="18891"
-        [NAIVE_SERVER]="${NAIVE_SERVER:-}"
-        [NAIVE_PORT]="${NAIVE_PORT:-44433}"
-        [NAIVE_USER]="${NAIVE_USER:-}"
-        [NAIVE_PASS]="${NAIVE_PASS:-}"
-        [NAIVE_SOCKS_PORT]="18892"
-    )
-    for key in "${!_vars[@]}"; do
-        val="${_vars[$key]}"
-        safe=$(sed_esc "$val")
-        sed -i "s|{{${key}}}|${safe}|g" "$tmp"
-    done
-    mv "$tmp" "$dst"
-    chmod 0600 "$dst"
-}
-
-render "$(tpl_file docker-compose.yml.tpl)" "$PREFIX_ETC/docker-compose.yml"
-render "$(tpl_file Caddyfile.tpl)"          "$PREFIX_ETC/Caddyfile"
-render "$(tpl_file xray-client.json.tpl)"   "$PREFIX_ETC/xray-client.json"
-render "$(tpl_file coturn.conf.tpl)"        "$PREFIX_ETC/coturn.conf"
+render_template "$(tpl_file docker-compose.yml.tpl)" "$PREFIX_ETC/docker-compose.yml"
+render_template "$(tpl_file Caddyfile.tpl)"          "$PREFIX_ETC/Caddyfile"
+render_template "$(tpl_file xray-client.json.tpl)"   "$PREFIX_ETC/xray-client.json"
+render_template "$(tpl_file coturn.conf.tpl)"        "$PREFIX_ETC/coturn.conf"
 # Render CH3 / CH5 if the backend provided the required vars.
 if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
-    render "$(tpl_file hysteria2-client.yaml.tpl)" "$PREFIX_ETC/hysteria2-client.yaml"
+    render_template "$(tpl_file hysteria2-client.yaml.tpl)" "$PREFIX_ETC/hysteria2-client.yaml"
     log "  hysteria2-client.yaml rendered"
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
-    render "$(tpl_file naive-client.json.tpl)" "$PREFIX_ETC/naive-client.json"
+    render_template "$(tpl_file naive-client.json.tpl)" "$PREFIX_ETC/naive-client.json"
     log "  naive-client.json rendered"
 fi
 
