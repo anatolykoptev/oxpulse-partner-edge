@@ -10,6 +10,17 @@
 #   oxpulse-partner-edge-upgrade --with-templates      # re-render Caddyfile + healthcheck + pull new image (atomic)
 #   oxpulse-partner-edge-upgrade --ghcr-token=ghp_xxx  # persist GHCR PAT before pull (one-time)
 #   oxpulse-partner-edge-upgrade --dry-run             # print plan, skip docker and file writes
+#   oxpulse-partner-edge-upgrade --dry-run --skip-check=1,3  # skip specific conflict checks (1-8)
+#
+# --dry-run conflict checks (--with-templates only):
+#   1 [CATASTROPHIC] Caddyfile validates against currently-running image
+#   2 [WARNING]      docker-compose.yml structural drift (ports, env keys, services)
+#   3 [CATASTROPHIC] Image tag direction (downgrade detection)
+#   4 [INFO]         healthcheck.sh check-line diff
+#   5 [INFO]         CADDYFILE_SHA before/after
+#   6 [WARNING]      Unsubstituted placeholders in rendered Caddyfile
+#   7 [CATASTROPHIC] GHCR token availability
+#   8 [WARNING]      Disk space on /var/lib/docker
 #
 # GHCR auth: ghcr.io/anatolykoptev/partner-edge-* images are private. Provide
 # a token via --ghcr-token=ghp_xxx (saved to /etc/oxpulse-partner-edge/ghcr.token
@@ -18,15 +29,15 @@
 # See ghcr-auth-lib.sh for the full auth flow.
 set -euo pipefail
 
-PREFIX_ETC=/etc/oxpulse-partner-edge
-PREFIX_LIB=/var/lib/oxpulse-partner-edge
+PREFIX_ETC="${OXPULSE_PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+PREFIX_LIB="${OXPULSE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
 COMPOSE_FILE="$PREFIX_ETC/docker-compose.yml"
 STATE_FILE="$PREFIX_LIB/install.env"
 PREV_STATE_FILE="$PREFIX_LIB/install.env.prev"
 PREV_COMPOSE_FILE="$PREFIX_LIB/docker-compose.yml.prev"
 PREV_CADDYFILE="$PREFIX_LIB/Caddyfile.prev"
 PREV_HEALTHCHECK="$PREFIX_LIB/healthcheck.prev"
-HEALTHCHECK="/usr/local/sbin/oxpulse-partner-edge-healthcheck"
+HEALTHCHECK="${OXPULSE_HEALTHCHECK:-/usr/local/sbin/oxpulse-partner-edge-healthcheck}"
 REPO_RAW="${OXPULSE_REPO_RAW:-https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main}"
 NODE_CFG="$PREFIX_ETC/node-config.json"
 XRAY_CFG="$PREFIX_ETC/xray-client.json"
@@ -68,7 +79,7 @@ else
 fi
 unset _ghcr_local _ghcr_installed
 
-[[ $EUID -eq 0 ]] || die "must run as root"
+[[ $EUID -eq 0 || "${OXPULSE_SKIP_ROOT_CHECK:-0}" == "1" ]] || die "must run as root"
 [[ -r "$COMPOSE_FILE" ]] || die "no installed bundle at $COMPOSE_FILE"
 [[ -r "$STATE_FILE" ]]   || die "missing $STATE_FILE — reinstall instead of upgrade"
 
@@ -117,6 +128,7 @@ CURRENT="${IMAGE_VERSION:-unknown}"
 MODE=apply
 TARGET=""
 DRY_RUN=0
+SKIPPED_CHECKS=""
 # GHCR PAT supplied via --ghcr-token=ghp_xxx flag OR OXPULSE_GHCR_TOKEN env.
 # Flag wins over env. Empty string disables the auth path (anonymous pull).
 GHCR_TOKEN_ARG="${OXPULSE_GHCR_TOKEN:-}"
@@ -127,10 +139,14 @@ for arg in "$@"; do
 		--templates-only) MODE=templates ;;
 		--with-templates) MODE=with_templates ;;
 		--dry-run)        DRY_RUN=1 ;;
+		--skip-check=*)
+			_sc=" ${arg#--skip-check=} "
+			SKIPPED_CHECKS="${_sc//,/ }"
+			unset _sc ;;
 		--ghcr-token=*)   GHCR_TOKEN_ARG="${arg#--ghcr-token=}" ;;
 		v*|latest)        TARGET="$arg" ;;
 		-h|--help)
-			sed -n '2,17p' "$0"; exit 0 ;;
+			sed -n '2,28p' "$0"; exit 0 ;;
 		*) die "unknown arg: $arg" ;;
 	esac
 done
@@ -341,6 +357,413 @@ if [[ "$MODE" == rollback ]]; then
 	fi
 fi
 
+# ---------------------------------------------------------------------------
+# Conflict detection helpers — used only by run_conflict_checks().
+# Each _check_N function sets CHECK_STATUS[N] and appends to CHECK_DETAIL[N].
+# Severity: CATASTROPHIC | WARNING | INFO | PASS | SKIP
+# ---------------------------------------------------------------------------
+
+# _check_skip N — returns 0 (true = skip) if check N is in SKIPPED_CHECKS
+_check_skip() {
+	[[ " $SKIPPED_CHECKS " == *" $1 "* ]]
+}
+
+# Check 1: Caddyfile validates against currently-running caddy image.
+_conflict_check_1() {
+	CHECK_STATUS[1]="PASS"
+	CHECK_DETAIL[1]=""
+
+	local rendered_caddy="$1"
+
+	# If caddy container is not running, treat as INFO (not catastrophic — e.g. fresh install).
+	local current_image
+	current_image=$($DOCKER_BIN inspect oxpulse-partner-caddy \
+		--format '{{.Config.Image}}' 2>/dev/null || true)
+	if [[ -z "$current_image" ]]; then
+		CHECK_STATUS[1]="INFO"
+		CHECK_DETAIL[1]="  Container oxpulse-partner-caddy not running — validation skipped (INFO only)."
+		return
+	fi
+
+	if [[ ! -f "$rendered_caddy" ]]; then
+		CHECK_STATUS[1]="INFO"
+		CHECK_DETAIL[1]="  Rendered Caddyfile not available — caddy not in live compose (SFU-only node?)."
+		return
+	fi
+
+	# Locate cover dir from live compose for the volume mount.
+	local cover_dir
+	cover_dir=$(grep -oP 'cover:\s*\K[^[:space:]]+' "$COMPOSE_FILE" 2>/dev/null | head -1 || true)
+	[[ -z "$cover_dir" ]] && cover_dir=/tmp
+
+	local validate_out validate_rc
+	validate_rc=0
+	validate_out=$($DOCKER_BIN run --rm \
+		-v "${rendered_caddy}:/etc/caddy/Caddyfile:ro" \
+		-v "${cover_dir}:/srv/cover:ro" \
+		"$current_image" \
+		caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) || validate_rc=$?
+
+	if [[ $validate_rc -ne 0 ]]; then
+		CHECK_STATUS[1]="CATASTROPHIC"
+		local err_line
+		err_line=$(printf '%s' "$validate_out" | grep -m1 'Error\|error\|unrecognized' || echo "$validate_out" | tail -1)
+		CHECK_DETAIL[1]="  Image: $current_image
+  Error: $err_line
+  Hint:  This would crashloop caddy on apply. Either upgrade image first
+         (oxpulse-partner-edge-upgrade --image-only) or pin to compatible Caddyfile."
+	fi
+}
+
+# Check 2: docker-compose.yml structural drift (ports, env keys, services).
+_conflict_check_2() {
+	CHECK_STATUS[2]="PASS"
+	CHECK_DETAIL[2]=""
+
+	local compose_tpl="$1"
+
+	[[ -f "$compose_tpl" ]] || { CHECK_STATUS[2]="INFO"; CHECK_DETAIL[2]="  Compose template not fetched — skipped."; return; }
+	[[ -f "$COMPOSE_FILE"  ]] || { CHECK_STATUS[2]="INFO"; CHECK_DETAIL[2]="  Live compose not found — skipped."; return; }
+
+	local issues
+	issues=$(python3 - "$COMPOSE_FILE" "$compose_tpl" << 'PYEOF'
+import sys, re
+
+def load_yaml_simple(path):
+    """Minimal YAML structural parser — only extracts service names, port lists, and env keys."""
+    import subprocess
+    result = subprocess.run(
+        ['python3', '-c', '''
+import sys, yaml, json
+with open(sys.argv[1]) as f:
+    data = yaml.safe_load(f)
+svcs = data.get("services", {}) or {}
+out = {}
+for svc, cfg in svcs.items():
+    cfg = cfg or {}
+    ports = [str(p) for p in (cfg.get("ports") or [])]
+    env = cfg.get("environment") or {}
+    if isinstance(env, list):
+        keys = sorted(e.split("=")[0] for e in env)
+    else:
+        keys = sorted(env.keys())
+    out[svc] = {"ports": sorted(ports), "env_keys": keys}
+print(json.dumps(out))
+''', sys.argv[1]],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return None, result.stderr.strip()
+    import json
+    return json.loads(result.stdout), None
+
+import json, subprocess, sys
+
+live_path = sys.argv[1]
+tpl_path  = sys.argv[2]
+
+live_data, live_err = load_yaml_simple(live_path)
+tpl_data,  tpl_err  = load_yaml_simple(tpl_path)
+
+if live_err:
+    print(f"WARN: cannot parse live compose: {live_err}")
+    sys.exit(0)
+if tpl_err:
+    print(f"WARN: cannot parse template compose: {tpl_err}")
+    sys.exit(0)
+
+issues = []
+# New services in template
+for svc in sorted(tpl_data):
+    if svc not in live_data:
+        issues.append(f"  Service '{svc}' in template but NOT in live compose (new service added by template).")
+
+# Structural drift per existing service
+for svc in sorted(tpl_data):
+    if svc not in live_data:
+        continue
+    live = live_data[svc]
+    tmpl = tpl_data[svc]
+
+    live_ports = set(live["ports"])
+    tmpl_ports = set(tmpl["ports"])
+    # Filter out placeholder-bearing ports (not substituted in template)
+    tmpl_ports_real = {p for p in tmpl_ports if "{{" not in p and "__" not in p}
+    new_ports = tmpl_ports_real - live_ports
+    if new_ports:
+        for p in sorted(new_ports):
+            remediation = f'sudo sed -i \'/- "{list(live_ports)[0] if live_ports else "443:443"}"/a\\\\      - "{p}"\' /etc/oxpulse-partner-edge/docker-compose.yml'
+            issues.append(
+                f"  Service '{svc}': template adds port {p!r} not in live compose.\n"
+                f"  Will NOT propagate via --with-templates. Manual remediation:\n"
+                f"    {remediation}"
+            )
+
+    live_keys = set(live["env_keys"])
+    tmpl_keys = {k for k in tmpl["env_keys"] if "{{" not in k and "__" not in k}
+    new_keys = tmpl_keys - live_keys
+    if new_keys:
+        issues.append(
+            f"  Service '{svc}': template adds env keys {sorted(new_keys)!r} not in live compose.\n"
+            f"  Will NOT propagate via --with-templates. Requires manual patch or full reinstall."
+        )
+
+for i in issues:
+    print(i)
+PYEOF
+)
+	if [[ -n "$issues" ]]; then
+		CHECK_STATUS[2]="WARNING"
+		CHECK_DETAIL[2]="$issues"
+	fi
+}
+
+# Check 3: Image tag direction — detect downgrade.
+_conflict_check_3() {
+	CHECK_STATUS[3]="PASS"
+	CHECK_DETAIL[3]=""
+
+	local proposed="$1"
+
+	# If proposed is latest, we can't compare meaningfully.
+	if [[ "$proposed" == "latest" ]]; then
+		if [[ "$CURRENT" =~ ^v[0-9] ]]; then
+			CHECK_STATUS[3]="WARNING"
+			CHECK_DETAIL[3]="  Proposed tag is 'latest'; current is '$CURRENT'. Cannot compare — manual review recommended."
+		fi
+		return
+	fi
+
+	# Both must match vMAJOR.MINOR.PATCH for semver comparison.
+	local _semver_re='^v([0-9]+)\.([0-9]+)\.([0-9]+)'
+	if [[ "$CURRENT" =~ $_semver_re ]] && [[ "$proposed" =~ $_semver_re ]]; then
+		local cur_maj cur_min cur_pat prop_maj prop_min prop_pat
+		[[ "$CURRENT"  =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; cur_maj=${BASH_REMATCH[1]}; cur_min=${BASH_REMATCH[2]}; cur_pat=${BASH_REMATCH[3]}
+		[[ "$proposed" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; prop_maj=${BASH_REMATCH[1]}; prop_min=${BASH_REMATCH[2]}; prop_pat=${BASH_REMATCH[3]}
+
+		local cur_int prop_int
+		cur_int=$(( cur_maj * 1000000 + cur_min * 1000 + cur_pat ))
+		prop_int=$(( prop_maj * 1000000 + prop_min * 1000 + prop_pat ))
+
+		if (( prop_int < cur_int )); then
+			CHECK_STATUS[3]="CATASTROPHIC"
+			CHECK_DETAIL[3]="  Proposed $proposed < current $CURRENT — this is a DOWNGRADE.
+  Downgrades may break persisted state or replay incompatible config.
+  If intentional, use --skip-check=3."
+		fi
+	else
+		CHECK_STATUS[3]="WARNING"
+		CHECK_DETAIL[3]="  Cannot parse versions for semver comparison: current='$CURRENT' proposed='$proposed'.
+  Manual review recommended."
+	fi
+}
+
+# Check 4: healthcheck.sh check-count diff.
+_conflict_check_4() {
+	CHECK_STATUS[4]="INFO"
+	CHECK_DETAIL[4]=""
+
+	local proposed_hc="$1"
+
+	[[ -f "$proposed_hc" ]] || { CHECK_DETAIL[4]="  Proposed healthcheck not fetched — skipped."; return; }
+	[[ -f "$HEALTHCHECK"  ]] || { CHECK_DETAIL[4]="  Live healthcheck not found — skipped."; return; }
+
+	local live_checks proposed_checks
+	live_checks=$(grep -cE '^check ' "$HEALTHCHECK" 2>/dev/null || true)
+	live_checks=${live_checks:-0}
+	proposed_checks=$(grep -cE '^check ' "$proposed_hc" 2>/dev/null || true)
+	proposed_checks=${proposed_checks:-0}
+
+	local added removed
+	if (( proposed_checks >= live_checks )); then
+		added=$(( proposed_checks - live_checks ))
+		removed=0
+	else
+		added=0
+		removed=$(( live_checks - proposed_checks ))
+	fi
+
+	CHECK_DETAIL[4]="  live=$live_checks proposed=$proposed_checks (+${added} added, -${removed} removed)"
+}
+
+# Check 5: CADDYFILE_SHA drift.
+_conflict_check_5() {
+	CHECK_STATUS[5]="INFO"
+	local current_sha proposed_sha
+	current_sha="${CADDYFILE_SHA:-unknown}"
+	proposed_sha="$1"
+	if [[ "$current_sha" == "$proposed_sha" ]]; then
+		CHECK_DETAIL[5]="  SHA unchanged: $current_sha"
+	else
+		CHECK_DETAIL[5]="  Current SHA: $current_sha
+  Proposed SHA: $proposed_sha
+  Change: yes — apply will update install.env"
+	fi
+}
+
+# Check 6: Unsubstituted placeholders in rendered Caddyfile.
+_conflict_check_6() {
+	CHECK_STATUS[6]="PASS"
+	CHECK_DETAIL[6]=""
+
+	local rendered_caddy="$1"
+	[[ -f "$rendered_caddy" ]] || { CHECK_STATUS[6]="INFO"; CHECK_DETAIL[6]="  Rendered Caddyfile not available — skipped."; return; }
+
+	local placeholders
+	placeholders=$(grep -oE '\{\{[A-Z_]+\}\}|__[A-Z_]+__' "$rendered_caddy" 2>/dev/null | sort -u || true)
+	if [[ -n "$placeholders" ]]; then
+		CHECK_STATUS[6]="WARNING"
+		local items
+		items=$(printf '%s\n' "$placeholders" | sed 's/^/  Unsubstituted: /')
+		CHECK_DETAIL[6]="$items
+  Each placeholder above was not found in install.env — render incomplete."
+	fi
+}
+
+# Check 7: GHCR token availability.
+_conflict_check_7() {
+	CHECK_STATUS[7]="PASS"
+	CHECK_DETAIL[7]=""
+
+	if [[ ! -r "$PREFIX_ETC/ghcr.token" ]]; then
+		CHECK_STATUS[7]="CATASTROPHIC"
+		CHECK_DETAIL[7]="  No GHCR token at $PREFIX_ETC/ghcr.token.
+  docker compose pull will 401 for private images.
+  Provide via: oxpulse-partner-edge-upgrade --ghcr-token=ghp_..."
+	fi
+}
+
+# Check 8: Disk space on /var/lib/docker.
+_conflict_check_8() {
+	CHECK_STATUS[8]="PASS"
+	CHECK_DETAIL[8]=""
+
+	local avail_kb avail_gb
+	avail_kb=$(df /var/lib/docker 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
+	avail_gb=$(( avail_kb / 1024 / 1024 ))
+
+	if (( avail_gb < 2 )); then
+		CHECK_STATUS[8]="WARNING"
+		CHECK_DETAIL[8]="  Only ${avail_gb}GB free on /var/lib/docker (need ≥2GB for image pull).
+  Free space: docker system prune -f"
+	else
+		CHECK_DETAIL[8]="  ${avail_gb}GB free on /var/lib/docker"
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# run_conflict_checks — run all 8 checks, print structured report, exit with
+# appropriate code: 1=catastrophic, 2=warning-only, 0=clean.
+#
+# Arguments:
+#   $1 = rendered Caddyfile path (from re_render_caddy dry-run)
+#   $2 = proposed compose template path (fetched but not applied)
+#   $3 = proposed healthcheck path (fetched but not applied)
+#   $4 = proposed Caddyfile SHA (computed by re_render_caddy in dry-run)
+#   $5 = proposed image tag (TARGET)
+# ---------------------------------------------------------------------------
+run_conflict_checks() {
+	local rendered_caddy="$1"
+	local proposed_compose="$2"
+	local proposed_hc="$3"
+	local proposed_sha="$4"
+	local proposed_tag="$5"
+
+	declare -a CHECK_STATUS
+	declare -a CHECK_DETAIL
+
+	# Run all checks, skip if requested.
+	if _check_skip 1; then CHECK_STATUS[1]="SKIP"; CHECK_DETAIL[1]="  (skipped via --skip-check)";
+	else _conflict_check_1 "$rendered_caddy"; fi
+
+	if _check_skip 2; then CHECK_STATUS[2]="SKIP"; CHECK_DETAIL[2]="  (skipped via --skip-check)";
+	else _conflict_check_2 "$proposed_compose"; fi
+
+	if _check_skip 3; then CHECK_STATUS[3]="SKIP"; CHECK_DETAIL[3]="  (skipped via --skip-check)";
+	else _conflict_check_3 "$proposed_tag"; fi
+
+	if _check_skip 4; then CHECK_STATUS[4]="SKIP"; CHECK_DETAIL[4]="  (skipped via --skip-check)";
+	else _conflict_check_4 "$proposed_hc"; fi
+
+	if _check_skip 5; then CHECK_STATUS[5]="SKIP"; CHECK_DETAIL[5]="  (skipped via --skip-check)";
+	else _conflict_check_5 "$proposed_sha"; fi
+
+	if _check_skip 6; then CHECK_STATUS[6]="SKIP"; CHECK_DETAIL[6]="  (skipped via --skip-check)";
+	else _conflict_check_6 "$rendered_caddy"; fi
+
+	if _check_skip 7; then CHECK_STATUS[7]="SKIP"; CHECK_DETAIL[7]="  (skipped via --skip-check)";
+	else _conflict_check_7; fi
+
+	if _check_skip 8; then CHECK_STATUS[8]="SKIP"; CHECK_DETAIL[8]="  (skipped via --skip-check)";
+	else _conflict_check_8; fi
+
+	# Print summary table.
+	printf '\n=== upgrade --dry-run: conflict report ===\n'
+	printf 'Mode: --with-templates\n'
+	printf 'Repo: %s\n' "$REPO_RAW"
+	printf '\n'
+
+	local label
+	local -A LABEL_MAP=(
+		[1]="Caddyfile validation vs current image"
+		[2]="Compose structural drift              "
+		[3]="Image tag direction                   "
+		[4]="healthcheck.sh diff                   "
+		[5]="CADDYFILE_SHA drift                   "
+		[6]="Env var coverage                      "
+		[7]="GHCR token                            "
+		[8]="Disk space                            "
+	)
+
+	for i in 1 2 3 4 5 6 7 8; do
+		label="${LABEL_MAP[$i]}"
+		local status="${CHECK_STATUS[$i]}"
+		case "$status" in
+			CATASTROPHIC) printf '[CHECK %d] %s  \033[31mCATASTROPHIC\033[0m\n' "$i" "$label" ;;
+			WARNING)      printf '[CHECK %d] %s  \033[33mWARNING\033[0m\n'      "$i" "$label" ;;
+			INFO)         printf '[CHECK %d] %s  INFO\n'                         "$i" "$label" ;;
+			PASS)         printf '[CHECK %d] %s  \033[32mPASS\033[0m\n'         "$i" "$label" ;;
+			SKIP)         printf '[CHECK %d] %s  SKIP\n'                         "$i" "$label" ;;
+		esac
+	done
+
+	# Print detail blocks for non-PASS/SKIP checks.
+	local has_details=0
+	for i in 1 2 3 4 5 6 7 8; do
+		local st="${CHECK_STATUS[$i]}"
+		local det="${CHECK_DETAIL[$i]}"
+		if [[ -n "$det" && "$st" != "PASS" ]]; then
+			if [[ "$has_details" -eq 0 ]]; then
+				printf '\n--- Details ---\n'
+				has_details=1
+			fi
+			printf '\n[CHECK %d - %s]\n' "$i" "$st"
+			printf '%s\n' "$det"
+		fi
+	done
+
+	# Count severities.
+	local catastrophic_count=0 warning_count=0
+	for i in 1 2 3 4 5 6 7 8; do
+		case "${CHECK_STATUS[$i]}" in
+			CATASTROPHIC) (( catastrophic_count += 1 )) || true ;;
+			WARNING)      (( warning_count += 1 ))      || true ;;
+		esac
+	done
+
+	printf '\n=== summary ===\n'
+	if [[ $catastrophic_count -gt 0 ]]; then
+		printf '%d catastrophic, %d warnings. Exit code: 1.\n' "$catastrophic_count" "$warning_count"
+		return 1
+	elif [[ $warning_count -gt 0 ]]; then
+		printf '0 catastrophic, %d warnings. Exit code: 2.\n' "$warning_count"
+		return 2
+	else
+		printf '0 catastrophic, 0 warnings. Exit code: 0.\n'
+		return 0
+	fi
+}
+
 # ---- --with-templates mode ----
 if [[ "$MODE" == with_templates ]]; then
 	[[ -z "$TARGET" ]] && TARGET=latest
@@ -355,10 +778,52 @@ if [[ "$MODE" == with_templates ]]; then
 		log "  5. docker compose pull"
 		log "  6. docker compose up -d"
 		log "  7. healthcheck; auto-rollback on failure"
-		# Still run render functions (they are no-ops in dry-run mode).
-		re_render_caddy
-		re_render_healthcheck
-		exit 0
+
+		# ------ Conflict detection ------
+		# Fetch compose template and healthcheck into a temp dir for structural analysis.
+		# re_render_caddy in dry-run mode writes rendered Caddyfile to a tmpdir internally
+		# and logs "[dry-run] would write Caddyfile (sha256=...)". We need to capture the
+		# rendered file and sha separately for conflict checks.
+		_conflict_tmpdir=$(mktemp -d)
+		# shellcheck disable=SC2064
+		trap "rm -rf '$_conflict_tmpdir'" EXIT
+
+		# Fetch healthcheck for Check 4.
+		_proposed_hc="$_conflict_tmpdir/healthcheck.sh"
+		curl -fsSL --max-time 30 "$REPO_RAW/healthcheck.sh" -o "$_proposed_hc" 2>/dev/null || true
+
+		# Fetch compose template for Check 2.
+		_proposed_compose="$_conflict_tmpdir/docker-compose.yml.tpl"
+		curl -fsSL --max-time 30 "$REPO_RAW/docker-compose.yml.tpl" -o "$_proposed_compose" 2>/dev/null || true
+
+		# Render Caddyfile directly for Check 1 and Check 6 (re-implementing the
+		# render inline so we get the actual file path, not just a log message).
+		_rendered_caddy="$_conflict_tmpdir/Caddyfile"
+		_proposed_sha="unknown"
+		if grep -qE '^\s+caddy:' "$COMPOSE_FILE" 2>/dev/null && \
+		   [[ -n "${PARTNER_DOMAIN:-}" ]] && [[ -n "${TURNS_SUBDOMAIN:-}" ]]; then
+			_caddyfile_tpl="$_conflict_tmpdir/Caddyfile.tpl"
+			if curl -fsSL --max-time 30 "$REPO_RAW/Caddyfile.tpl" -o "$_caddyfile_tpl" 2>/dev/null; then
+				_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+				sed \
+					-e "s|{{PARTNER_DOMAIN}}|$(_esc "$PARTNER_DOMAIN")|g" \
+					-e "s|{{TURNS_SUBDOMAIN}}|$(_esc "$TURNS_SUBDOMAIN")|g" \
+					"$_caddyfile_tpl" > "$_rendered_caddy"
+				_proposed_sha=$(sha256sum "$_rendered_caddy" | awk '{print $1}')
+				sed -i "s|__CADDYFILE_SHA__|${_proposed_sha}|g" "$_rendered_caddy"
+			fi
+		fi
+
+		# Run all conflict checks; capture exit code without triggering set -e.
+		_conflict_exit=0
+		run_conflict_checks \
+			"$_rendered_caddy" \
+			"$_proposed_compose" \
+			"$_proposed_hc" \
+			"$_proposed_sha" \
+			"$TARGET" || _conflict_exit=$?
+
+		exit "$_conflict_exit"
 	fi
 
 	# Step 1: backup current state before any mutation.
