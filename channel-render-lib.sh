@@ -157,6 +157,43 @@ except Exception:
 
     local out
     out=$(mktemp)
+    # Read xhttp transport settings from node-config.json (server is source of truth).
+    local xhttp_mode xhttp_path xmux_max_concurrency xmux_c_max_reuse_times xmux_c_max_lifetime_ms x_padding_bytes
+    xhttp_mode=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+xhttp=x.get('xhttp',{})
+print(xhttp.get('mode','') or x.get('mode','stream-one'))" "$NODE_CFG" 2>/dev/null || echo "stream-one")
+    xhttp_path=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+print(x.get('xhttp',{}).get('path','/xh'))" "$NODE_CFG" 2>/dev/null || echo "/xh")
+    xmux_max_concurrency=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+xm=x.get('xhttp',{}).get('xmux') or x.get('xmux') or {}
+print(xm.get('maxConcurrency',1))" "$NODE_CFG" 2>/dev/null || echo "1")
+    xmux_c_max_reuse_times=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+xm=x.get('xhttp',{}).get('xmux') or x.get('xmux') or {}
+print(xm.get('cMaxReuseTimes',64))" "$NODE_CFG" 2>/dev/null || echo "64")
+    xmux_c_max_lifetime_ms=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+xm=x.get('xhttp',{}).get('xmux') or x.get('xmux') or {}
+print(xm.get('cMaxLifetimeMs',15000))" "$NODE_CFG" 2>/dev/null || echo "15000")
+    x_padding_bytes=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+print(x.get('xhttp',{}).get('extra',{}).get('xPaddingBytes','100-1000'))" "$NODE_CFG" 2>/dev/null || echo "100-1000")
+
     sed \
         -e "s|{{REALITY_UUID}}|$(_esc "$uuid")|g" \
         -e "s|{{REALITY_ENCRYPTION}}|$(_esc "$enc")|g" \
@@ -166,7 +203,22 @@ except Exception:
         -e "s|{{BACKEND_HOST}}|$(_esc "$backend_host")|g" \
         -e "s|{{BACKEND_PORT}}|$(_esc "$backend_port")|g" \
         -e "s|{{BACKEND_ENDPOINT}}|$(_esc "$backend")|g" \
+        -e "s|{{XRAY_XHTTP_MODE}}|$(_esc "$xhttp_mode")|g" \
+        -e "s|{{XRAY_XHTTP_PATH}}|$(_esc "$xhttp_path")|g" \
+        -e "s|{{XRAY_XHTTP_XMUX_MAX_CONCURRENCY}}|$(_esc "$xmux_max_concurrency")|g" \
+        -e "s|{{XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES}}|$(_esc "$xmux_c_max_reuse_times")|g" \
+        -e "s|{{XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS}}|$(_esc "$xmux_c_max_lifetime_ms")|g" \
+        -e "s|{{XRAY_XHTTP_X_PADDING_BYTES}}|$(_esc "$x_padding_bytes")|g" \
         "$tpl" > "$out"
+
+    # Strip xmux block when mode != packet-up.
+    if [[ "$xhttp_mode" != "packet-up" ]]; then
+        local jq_tmp
+        jq_tmp=$(mktemp)
+        jq 'del(.outbounds[].streamSettings.xhttpSettings.xmux)' "$out" > "$jq_tmp" \
+            && mv "$jq_tmp" "$out" \
+            || { warn "jq xmux strip failed — leaving xmux in config"; rm -f "$jq_tmp"; }
+    fi
     rm -f "$tpl"
 
     # Backup old config, install new one (0600 — contains secrets).
