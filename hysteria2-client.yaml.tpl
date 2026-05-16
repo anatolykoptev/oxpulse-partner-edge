@@ -19,4 +19,3 @@ bandwidth:
 tcpForwarding:
   - listen: {{HY2_LOCAL_LISTEN}}
     remote: {{HY2_REMOTE_BACKEND}}
-EOF
