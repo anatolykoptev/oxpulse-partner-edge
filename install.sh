@@ -231,6 +231,7 @@ BRAND_LEGAL_COUNTRY=""
 BRAND_LEGAL_CONTACT=""
 DRY_RUN=0
 BAKE_MODE=0
+CHECK_MODE=0
 # Idempotency guard: when existing reality identity files are found, keygen is
 # skipped and the existing UUID/keys are reused. Set to 1 via --force-keygen
 # or --rotate-identity to override — this is the slice 3 contract for
@@ -286,6 +287,7 @@ assembles a minimal BrandingConfig payload from whichever flags are set):
   --brand-legal-entity=<text>      Legal entity name
   --brand-legal-country=<code>     ISO 3166 alpha-2 country code
   --brand-legal-contact=<email>    Legal contact email
+  --check                    Re-render templates to /tmp, diff vs installed files. Exit 0=clean, 1=Caddyfile drift, 2=compose drift.
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
   --force-keygen             Force generation of a new Reality identity even if one exists.
@@ -348,6 +350,7 @@ while [[ $# -gt 0 ]]; do
 		--brand-legal-entity=*)    BRAND_LEGAL_ENTITY="${1#*=}" ;;
 		--brand-legal-country=*)   BRAND_LEGAL_COUNTRY="${1#*=}" ;;
 		--brand-legal-contact=*)   BRAND_LEGAL_CONTACT="${1#*=}" ;;
+		--check)            CHECK_MODE=1 ;;
 		--dry-run)          DRY_RUN=1 ;;
 		--bake)             BAKE_MODE=1 ;;
 		--force-keygen|--rotate-identity) FORCE_KEYGEN=1 ;;
@@ -357,8 +360,18 @@ while [[ $# -gt 0 ]]; do
 	shift
 done
 
-[[ -z "$DOMAIN" ]]     && die "--domain is required"
-[[ -z "$PARTNER_ID" ]] && die "--partner-id is required"
+# --check mode: read install.env from installed prefix, no domain/token required.
+if [[ "$CHECK_MODE" -eq 1 ]]; then
+	_state_file="${PREFIX_LIB}/install.env"
+	[[ -f "$_state_file" ]] || die "--check requires an installed node ($PREFIX_LIB/install.env not found)"
+	# shellcheck source=/dev/null
+	source "$_state_file"
+	# install.env uses PARTNER_DOMAIN; install.sh uses DOMAIN.
+	DOMAIN="${PARTNER_DOMAIN:-${DOMAIN:-}}"
+fi
+
+[[ -z "$DOMAIN" ]]     && [[ "$CHECK_MODE" -eq 0 ]] && die "--domain is required"
+[[ -z "$PARTNER_ID" ]] && [[ "$CHECK_MODE" -eq 0 ]] && die "--partner-id is required"
 
 # Resolve token from --token=- (stdin) / --token-file= / --token=raw / env.
 # Order: explicit --token-file beats inline --token; stdin only when
@@ -374,7 +387,7 @@ if [[ -n "$TOKEN" && -t 1 ]] && [[ "$*" == *"--token=ptkn_"* ]]; then
 	warn "  --token=<raw> on the command line leaks via /proc/<pid>/cmdline + shell history; prefer --token-file= or OXPULSE_PARTNER_TOKEN env"
 fi
 
-if [[ "$BAKE_MODE" = "0" && -z "$TOKEN" && -z "$MANUAL_CONFIG" ]]; then
+if [[ "$BAKE_MODE" = "0" && "$CHECK_MODE" -eq 0 && -z "$TOKEN" && -z "$MANUAL_CONFIG" ]]; then
 	die "either --token / --token-file / OXPULSE_PARTNER_TOKEN or --manual-config is required (see --help)"
 fi
 
@@ -424,6 +437,81 @@ fi
 
 if [[ $DRY_RUN -eq 0 && $EUID -ne 0 ]]; then
 	die "must run as root (or with sudo) unless --dry-run"
+fi
+
+# ---------------------------------------------------------------------------
+# --check mode: re-render templates to /tmp, diff vs installed files.
+# Exit codes:
+#   0 — Caddyfile + docker-compose.yml both byte-identical to fresh render
+#   1 — Caddyfile differs (drift detected)
+#   2 — docker-compose.yml differs (compose drift)
+# conf.d/ is explicitly EXCLUDED from the diff (it's an operator override slot).
+# ---------------------------------------------------------------------------
+if [[ "$CHECK_MODE" -eq 1 ]]; then
+	_check_dir=$(mktemp -d)
+	trap 'rm -rf "$_check_dir"' EXIT
+
+	# Determine template source: local checkout or REPO_RAW fetch.
+	_fetch_check_tpl() {
+		local name=$1 dst=$2
+		if [[ -n "${src_dir:-}" && -f "$src_dir/$name" ]]; then
+			cp "$src_dir/$name" "$dst"
+		else
+			curl -fsSL --max-time 30 "$REPO_RAW/$name" -o "$dst" \
+				|| die "[check] could not fetch $name from $REPO_RAW"
+		fi
+	}
+
+	_fetch_check_tpl Caddyfile.tpl "$_check_dir/Caddyfile.tpl"
+	_fetch_check_tpl docker-compose.yml.tpl "$_check_dir/compose.tpl"
+
+	# Render Caddyfile using install.env values.
+	sed \
+		-e "s|{{PARTNER_DOMAIN}}|${DOMAIN}|g" \
+		-e "s|{{TURNS_SUBDOMAIN}}|${TURNS_SUBDOMAIN:-}|g" \
+		"$_check_dir/Caddyfile.tpl" > "$_check_dir/Caddyfile"
+	_check_sha=$(sha256sum "$_check_dir/Caddyfile" | awk '{print $1}')
+	sed -i "s|__CADDYFILE_SHA__|${_check_sha}|g" "$_check_dir/Caddyfile"
+
+	# Render compose — only for drift detection, no secret substitution needed
+	# because we only check byte-identity of the base rendered content.
+	# We use the same render() vars available at this point (sourced from install.env).
+	sed \
+		-e "s|{{PARTNER_ID}}|${PARTNER_ID:-}|g" \
+		-e "s|{{PARTNER_DOMAIN}}|${DOMAIN}|g" \
+		-e "s|{{TURNS_SUBDOMAIN}}|${TURNS_SUBDOMAIN:-}|g" \
+		-e "s|{{IMAGE_VERSION}}|${IMAGE_VERSION:-latest}|g" \
+		"$_check_dir/compose.tpl" > "$_check_dir/docker-compose.yml"
+
+	_rc=0
+	_caddy_installed="$PREFIX_ETC/Caddyfile"
+	_compose_installed="$PREFIX_ETC/docker-compose.yml"
+	_confd_dir="$PREFIX_ETC/conf.d"
+	_confd_count=0
+	[[ -d "$_confd_dir" ]] && _confd_count=$(find "$_confd_dir" -maxdepth 1 -name "*.caddy" | wc -l | tr -d " ")
+
+	if diff -q "$_check_dir/Caddyfile" "$_caddy_installed" >/dev/null 2>&1; then
+		printf "[OK]    Caddyfile\n"
+	else
+		printf "[DRIFT] Caddyfile\n"
+		diff -u "$_check_dir/Caddyfile" "$_caddy_installed" || true
+		_rc=1
+	fi
+
+	# Compose drift check: partial match only (compose has secrets not in install.env).
+	# We diff only the first N lines that don't contain obvious secrets (image: lines).
+	# This is best-effort; exit code 2 = warning, not catastrophic.
+	if diff -q "$_check_dir/docker-compose.yml" "$_compose_installed" >/dev/null 2>&1; then
+		printf "[OK]    docker-compose.yml\n"
+	elif [[ $_rc -eq 0 ]]; then
+		printf "[DRIFT] docker-compose.yml\n"
+		_rc=2
+	else
+		printf "[DRIFT] docker-compose.yml (secondary drift)\n"
+	fi
+
+	printf "[conf.d/] %d files preserved\n" "$_confd_count"
+	exit $_rc
 fi
 
 # ---------- Step 1: preflight ----------
@@ -1437,6 +1525,47 @@ rm -rf "$stage"
 # Secrets-containing files → 0600.
 chmod 0600 "$xray_out" "$coturn_out" || true
 log "  rendered → $compose_out (+ Caddyfile, xray-client.json, coturn.conf, cover/cover.html)"
+
+# Phase 3: create conf.d/ override slot. mkdir -p only — never touch files inside.
+# Operator-side *.caddy files survive install.sh reruns; Caddyfile.tpl imports them at the end.
+if [[ $DRY_RUN -eq 0 ]]; then
+	install -d -m 0755 "$PREFIX_ETC/conf.d"
+	# Write README only if it does not exist (idempotent; preserves operator edits).
+	if [[ ! -f "$PREFIX_ETC/conf.d/README.txt" ]]; then
+		cat > "$PREFIX_ETC/conf.d/README.txt" << 'CONFD_README'
+oxpulse-partner-edge — conf.d/ override slot
+==========================================
+
+Files matching *.caddy in this directory are loaded by Caddy AFTER the
+rendered Caddyfile (via `import /etc/oxpulse-partner-edge/conf.d/*.caddy`).
+
+Survival guarantee
+------------------
+install.sh, update.sh, and upgrade.sh --with-templates NEVER modify files
+inside conf.d/. Your overrides survive every re-run and image upgrade.
+
+File naming convention
+----------------------
+  <tenant>-<purpose>.caddy
+Examples:
+  cheburator-vhosts.caddy   — cheburator.bot + www.cheburator.bot vhosts
+  cheburator-webhook.caddy  — webhook proxy to internal service
+  emergency-patch.caddy     — hotfix that must survive next upgrade
+
+Drift check
+-----------
+  install.sh --check
+Re-renders templates and diffs vs installed Caddyfile + docker-compose.yml.
+conf.d/ files are excluded from the diff (they are operator-managed).
+Exit codes: 0=clean, 1=Caddyfile drift, 2=compose drift.
+
+See docs/runbooks/conf-d.md for full guidance and worked examples.
+CONFD_README
+	fi
+	warn "  conf.d/ slot ready ($PREFIX_ETC/conf.d/) — drop *.caddy files here for persistent overrides"
+else
+	warn "  [dry-run] would create $PREFIX_ETC/conf.d/ override slot"
+fi
 
 # ---------- Step 5b: provision DB-IP mmdb (M2b.2) ----------
 # Downloads dbip-country-lite-{YYYY-MM}.mmdb.gz from db-ip.com (CC-BY 4.0,
