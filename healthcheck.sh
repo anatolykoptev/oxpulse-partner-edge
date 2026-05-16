@@ -168,8 +168,36 @@ check "12. SFU /metrics → 200" bash -c '
 '
 
 echo
+# --- 13. Canary: tunnel probe ---
+check "13. canary /canary/tunnel → 2xx" bash -c '
+	code=$(curl -fso /dev/null -w "%{http_code}" --max-time 5 \
+		"http://127.0.0.1:9080/canary/tunnel" || true)
+	[[ "$code" =~ ^2 ]]
+'
+
+# --- 14. Canary: upstream probe ---
+check "14. canary /canary/upstream → 2xx" bash -c '
+	code=$(curl -fso /dev/null -w "%{http_code}" --max-time 5 \
+		"http://127.0.0.1:9080/canary/upstream" || true)
+	[[ "$code" =~ ^2 ]]
+'
+
+# --- 15. Canary: config-hash matches install.env ---
+# Warn-only: emergency operator edits survive but become visible in output.
+echo -n "  15. CADDYFILE_SHA drift check:                    "
+if [[ -z "${CADDYFILE_SHA:-}" ]]; then
+	echo "SKIP -- CADDYFILE_SHA not set in install.env (pre-phase1 node?)"
+else
+	_canary_hash=$(curl -fso- --max-time 5 "http://127.0.0.1:9080/canary/config-hash" 2>/dev/null || true)
+	if [[ "$_canary_hash" == "$CADDYFILE_SHA" ]]; then
+		echo -e "\033[32mOK\033[0m"
+	else
+		echo -e "\033[33mWARN\033[0m (canary=$_canary_hash install.env=$CADDYFILE_SHA -- drift detected, manual edit?)"
+	fi
+fi
+
 if [[ $FAIL -eq 0 ]]; then
-	echo "All 12 checks passed."
+	echo "All 15 checks passed."
 	exit 0
 else
 	echo "$FAIL check(s) failed."

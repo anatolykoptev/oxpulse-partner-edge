@@ -1397,6 +1397,10 @@ if [[ $DRY_RUN -eq 1 ]]; then
 fi
 render "$stage/compose.tpl" "$compose_out"
 render "$stage/caddy.tpl"   "$caddy_out"
+# Phase 1: compute sha256 of rendered Caddyfile and substitute __CADDYFILE_SHA__
+# placeholder so /canary/config-hash returns the actual hash at runtime.
+_rendered_sha=$(sha256sum "$caddy_out" | awk '{print $1}')
+sed -i "s|__CADDYFILE_SHA__|${_rendered_sha}|g" "$caddy_out"
 render "$stage/xray.tpl"    "$xray_out"
 render "$stage/coturn.tpl"  "$coturn_out"
 
@@ -1473,6 +1477,10 @@ TURNS_SUBDOMAIN=$TURNS_SUBDOMAIN
 INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 	chmod 0600 "$PREFIX_LIB/install.env"
+	# Phase 1: record sha256 of rendered Caddyfile for drift detection.
+	# healthcheck.sh check 15 compares this against /canary/config-hash.
+	_caddy_sha=$(sha256sum "$caddy_out" | awk '{print $1}')
+	printf 'CADDYFILE_SHA=%s\n' "$_caddy_sha" >> "$PREFIX_LIB/install.env"
 fi
 
 # ---------- Step 6: start ----------
