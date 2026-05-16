@@ -1,0 +1,130 @@
+#!/bin/bash
+# tests/test_migrate_bak.sh
+# Tests scripts/migrate-bak-to-confd.sh with a cheburator-like .bak file.
+set -euo pipefail
+
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+MIGRATE="$REPO_ROOT/scripts/migrate-bak-to-confd.sh"
+
+[[ -f "$MIGRATE" ]] || { echo "FAIL: migrate-bak-to-confd.sh not found"; exit 1; }
+bash -n "$MIGRATE" || { echo "FAIL: migrate script syntax errors"; exit 1; }
+echo "OK: syntax clean"
+
+TMPDIR_ROOT=$(mktemp -d)
+T_ETC="$TMPDIR_ROOT/etc"
+T_CONFD="$T_ETC/conf.d"
+mkdir -p "$T_ETC" "$T_CONFD"
+trap 'rm -rf "$TMPDIR_ROOT"' EXIT
+
+BAK_FILE="$T_ETC/Caddyfile.bak.pre-cheburator-20260508"
+cat > "$BAK_FILE" << 'BAKEOF'
+# Rendered by install.sh
+
+{
+    admin localhost:2019 {
+        origins localhost 127.0.0.1
+    }
+    email admin@cheburator.bot
+    servers {
+        protocols h1 h2
+        listener_wrappers {
+            layer4 {
+                @turns tls sni turns.cheburator.bot
+                route @turns {
+                    proxy tcp/host.docker.internal:5349
+                }
+            }
+            tls
+        }
+    }
+    log { format json; level INFO }
+}
+
+cheburator.bot {
+    encode gzip zstd
+    handle /relay/* { reverse_proxy host.docker.internal:8912 }
+    handle { import tunnel_upstream_default }
+}
+
+turns.cheburator.bot {
+    tls { issuer acme { disable_tlsalpn_challenge } }
+    respond 421
+}
+
+# =============================================================================
+# Phase 1 canary site -- 127.0.0.1:9080 ONLY
+# =============================================================================
+http://127.0.0.1:9080 {
+    handle /canary/tunnel {
+        reverse_proxy xray-client:3080/health {
+            transport http { dial_timeout 2s; response_header_timeout 2s }
+        }
+    }
+    handle /canary/config-hash { respond "abc123" 200 }
+    handle /canary/route-table { respond `{"routes":["tunnel"]}` 200 }
+}
+
+# Operator additions
+cheburator.bot.ru {
+    root * /srv/cheburator-static
+    file_server
+    encode gzip
+}
+
+www.cheburator.bot {
+    redir https://cheburator.bot{uri} permanent
+}
+BAKEOF
+
+echo "==> Test 1: dry-run — output shown, no files written"
+DRY_OUT=$(PREFIX_ETC="$T_ETC" bash "$MIGRATE" "$BAK_FILE" 2>&1 || true)
+echo "$DRY_OUT" | grep -qi "cheburator" \
+    || { echo "FAIL: no cheburator content in dry-run output"; echo "$DRY_OUT"; exit 1; }
+echo "$DRY_OUT" | grep -qi "dry.run" \
+    || { echo "FAIL: dry-run notice missing"; echo "$DRY_OUT"; exit 1; }
+CADDY_FILES=$(find "$T_CONFD" -name "*.caddy" 2>/dev/null | wc -l)
+[[ "$CADDY_FILES" -eq 0 ]] \
+    || { echo "FAIL: files written in dry-run mode ($CADDY_FILES found)"; exit 1; }
+echo "OK: dry-run shows content, no files written"
+
+echo "==> Test 2: --apply writes migrated-*.caddy and renames .bak"
+PREFIX_ETC="$T_ETC" bash "$MIGRATE" "$BAK_FILE" --apply >/dev/null 2>&1
+MIGRATED_FILE=$(find "$T_CONFD" -name "migrated-*.caddy" 2>/dev/null | head -1)
+[[ -n "$MIGRATED_FILE" ]] || { echo "FAIL: no migrated-*.caddy created"; exit 1; }
+echo "OK: migrated file: $MIGRATED_FILE"
+
+grep -q "cheburator.bot.ru" "$MIGRATED_FILE" \
+    || { echo "FAIL: cheburator.bot.ru missing from extracted content"; cat "$MIGRATED_FILE"; exit 1; }
+grep -q "www.cheburator.bot" "$MIGRATED_FILE" \
+    || { echo "FAIL: www.cheburator.bot missing from extracted content"; cat "$MIGRATED_FILE"; exit 1; }
+echo "OK: extracted content has operator vhosts"
+
+if grep -q "turns.cheburator.bot" "$MIGRATED_FILE"; then
+    echo "FAIL: auto-generated turns vhost leaked into extracted content"
+    cat "$MIGRATED_FILE"
+    exit 1
+fi
+echo "OK: auto-generated blocks not in extracted content"
+
+[[ ! -f "$BAK_FILE" ]] || { echo "FAIL: original .bak still exists"; exit 1; }
+[[ -f "${BAK_FILE}.migrated" ]] || { echo "FAIL: .bak.migrated not created"; exit 1; }
+echo "OK: .bak renamed to .bak.migrated"
+
+echo "==> Test 3: idempotent — second --apply skips"
+cp "${BAK_FILE}.migrated" "$BAK_FILE"
+BEFORE_COUNT=$(find "$T_CONFD" -name "migrated-*.caddy" | wc -l)
+IDEM_OUT=$(PREFIX_ETC="$T_ETC" bash "$MIGRATE" "$BAK_FILE" --apply 2>&1 || true)
+AFTER_COUNT=$(find "$T_CONFD" -name "migrated-*.caddy" | wc -l)
+[[ "$AFTER_COUNT" -eq "$BEFORE_COUNT" ]] \
+    || { echo "FAIL: second --apply created new files (before=$BEFORE_COUNT after=$AFTER_COUNT)"; exit 1; }
+echo "$IDEM_OUT" | grep -qi "skip\|already\|idempotent" \
+    || { echo "FAIL: idempotency message missing"; echo "$IDEM_OUT"; exit 1; }
+echo "OK: idempotent (count=$AFTER_COUNT, message OK)"
+
+echo "==> Test 4: .bak.migrated input → dies with error"
+ALREADY_RC=0
+PREFIX_ETC="$T_ETC" bash "$MIGRATE" "${BAK_FILE}.migrated" 2>&1 | grep -qi "migrated" || ALREADY_RC=$?
+echo "OK: .bak.migrated input produces error/warning"
+
+echo ""
+echo "PASS: all test_migrate_bak tests passed"

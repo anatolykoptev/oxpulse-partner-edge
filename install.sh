@@ -12,8 +12,8 @@
 set -euo pipefail
 
 # ---------- Constants ----------
-PREFIX_ETC=/etc/oxpulse-partner-edge
-PREFIX_LIB=/var/lib/oxpulse-partner-edge
+PREFIX_ETC="${OXPULSE_PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+PREFIX_LIB="${OXPULSE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
 PREFIX_SBIN=/usr/local/sbin
 SYSTEMD_DIR=/etc/systemd/system
 # shellcheck disable=SC2034  # REGISTRY referenced by templates via IMAGE_VERSION, kept for override env surface
@@ -27,10 +27,16 @@ log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
 
+# Pre-scan args for --check before any guard (--check is a diagnostic-only mode
+# that does not need partner-cli or docker).
+_PRESCAN_CHECK=0
+for _arg in "$@"; do [[ "$_arg" == "--check" ]] && _PRESCAN_CHECK=1 && break; done
+unset _arg
+
 # partner-cli is required for Reality x25519 keypair generation (M6 slice 2b).
 # It ships with oxpulse-chat releases; install from the partner-edge release
 # bundle or build from the oxpulse-chat source (crates/partner-cli).
-if ! command -v partner-cli >/dev/null 2>&1; then
+if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v partner-cli >/dev/null 2>&1; then
 	die "partner-cli not found on PATH.
 Install it from the oxpulse-chat release artifacts (partner-cli binary) or build
 from source: cd ~/src/oxpulse-chat && cargo build -p partner-cli --release.
@@ -435,7 +441,7 @@ if [[ -t 0 && "${OXPULSE_NONINTERACTIVE:-0}" != "1" ]]; then
 	unset _inp
 fi
 
-if [[ $DRY_RUN -eq 0 && $EUID -ne 0 ]]; then
+if [[ $DRY_RUN -eq 0 && $CHECK_MODE -eq 0 && $EUID -ne 0 ]]; then
 	die "must run as root (or with sudo) unless --dry-run"
 fi
 
@@ -451,11 +457,17 @@ if [[ "$CHECK_MODE" -eq 1 ]]; then
 	_check_dir=$(mktemp -d)
 	trap 'rm -rf "$_check_dir"' EXIT
 
-	# Determine template source: local checkout or REPO_RAW fetch.
+	# Determine template source: local checkout (detect from $0) or REPO_RAW fetch.
+	# src_dir is not set yet at --check early-exit point; detect from BASH_SOURCE.
+	_check_src_dir=""
+	_check_self="${BASH_SOURCE[0]:-}"
+	if [[ -n "$_check_self" && -f "$(cd "$(dirname "$_check_self")" 2>/dev/null && pwd)/Caddyfile.tpl" ]]; then
+		_check_src_dir="$(cd "$(dirname "$_check_self")" && pwd)"
+	fi
 	_fetch_check_tpl() {
 		local name=$1 dst=$2
-		if [[ -n "${src_dir:-}" && -f "$src_dir/$name" ]]; then
-			cp "$src_dir/$name" "$dst"
+		if [[ -n "$_check_src_dir" && -f "$_check_src_dir/$name" ]]; then
+			cp "$_check_src_dir/$name" "$dst"
 		else
 			curl -fsSL --max-time 30 "$REPO_RAW/$name" -o "$dst" \
 				|| die "[check] could not fetch $name from $REPO_RAW"
