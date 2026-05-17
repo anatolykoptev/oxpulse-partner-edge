@@ -82,13 +82,14 @@ docker compose -f /etc/oxpulse-partner-edge/docker-compose.yml logs -f
 
 ## Automatic maintenance
 
-Once installed, three systemd timers run without intervention:
+Once installed, four systemd timers run without intervention:
 
 | Timer | Schedule | Purpose |
 |-------|----------|---------|
 | `oxpulse-partner-edge-refresh.timer` | Daily | Fetches updated credentials from the backend; re-renders tunnel config if the operator has rotated keys or changed channel settings |
 | `oxpulse-partner-edge-sni-rotate.timer` | Daily (04:00–06:00 UTC, randomised) | Rotates the tunnel's server-name indicator from a pool provided by the backend; reduces long-lived traffic correlation |
 | `oxpulse-partner-cert-watch.path` | On cert change | Signals coturn to reload when Caddy renews the TURNS TLS certificate |
+| `oxpulse-channels-health-report.timer` | Every 60s | Probes local channel listeners (ch1/ch2/ch3) and reports RTT + handshake status to the central server via `POST /api/partner/channel-health` |
 
 Check timer status:
 ```bash
