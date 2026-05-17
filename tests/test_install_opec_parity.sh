@@ -128,3 +128,19 @@ mirror_install_exports() {
 @test "install.sh no longer inlines OS_FAMILY detection" {
     ! grep -qE '\*\" debian \"\*\|\*\" ubuntu \"\*\) OS_FAMILY=debian' install.sh
 }
+
+@test "install.sh sources lib/install-network.sh module" {
+    grep -qE '_install_lib_source[[:space:]]+install-network\.sh' install.sh
+}
+
+@test "install.sh calls network_run instead of inline Step 3" {
+    grep -qE '^[[:space:]]*network_run([[:space:]]|$)' install.sh
+}
+
+@test "install.sh no longer inlines _detect_public_ipv4" {
+    ! grep -qE '^_detect_public_ipv4\(\)' install.sh
+}
+
+@test "install.sh no longer inlines _detect_region" {
+    ! grep -qE '^_detect_region\(\)' install.sh
+}
