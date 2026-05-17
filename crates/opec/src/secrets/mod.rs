@@ -110,9 +110,11 @@ pub fn dispatch(cmd: SecretsCommands) -> anyhow::Result<()> {
             rotate,
             partner_cli,
         } => reality::keygen(&out_dir, rotate, &partner_cli).map_err(Into::into),
-        SecretsCommands::AwgKeygen { out_dir, rotate, wg } => {
-            awg::keygen(&out_dir, rotate, &wg).map_err(Into::into)
-        }
+        SecretsCommands::AwgKeygen {
+            out_dir,
+            rotate,
+            wg,
+        } => awg::keygen(&out_dir, rotate, &wg).map_err(Into::into),
         SecretsCommands::Register {
             registry_url,
             partner_id,

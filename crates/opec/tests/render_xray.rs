@@ -57,7 +57,10 @@ fn opec_render_xray_byte_identical_to_bash_render_template() {
     opec::render::xray::render(&tpl, out.path()).expect("render ok");
     let actual = fs::read_to_string(out.path()).unwrap();
     let expected = fs::read_to_string(dir.join("expected").join("xray.txt")).unwrap();
-    assert_eq!(actual, expected, "OPEC render output diverged from bash baseline");
+    assert_eq!(
+        actual, expected,
+        "OPEC render output diverged from bash baseline"
+    );
 }
 
 #[test]
