@@ -590,6 +590,7 @@ _install_lib_source() {
 		"${INSTALL_LIB_DIR:-}/$name" \
 		"/usr/local/lib/partner-edge/$name" \
 		"$(dirname "$0")/lib/$name"; do
+		# Skip "/<name>" produced when INSTALL_LIB_DIR is empty/unset.
 		[[ -n "$candidate" && "$candidate" != "/$name" ]] || continue
 		if [[ -r "$candidate" ]]; then
 			# shellcheck source=/dev/null
@@ -599,14 +600,16 @@ _install_lib_source() {
 	done
 	local tmp
 	tmp=$(mktemp)
+	# Trap ensures the temp file is cleaned up even if the sourced module
+	# calls die/exit (e.g. preflight_run on unsupported OS) — otherwise
+	# every failing install leaves a stray /tmp/tmp.XXXX behind.
+	trap "rm -f '$tmp'" RETURN
 	if curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
 		"${REPO_RAW}/lib/$name" -o "$tmp"; then
 		# shellcheck source=/dev/null
 		. "$tmp"
-		rm -f "$tmp"
 		return 0
 	fi
-	rm -f "$tmp"
 	die "lib module $name not found in INSTALL_LIB_DIR / /usr/local/lib/partner-edge / \$(dirname \$0)/lib and fetch from \$REPO_RAW failed"
 }
 

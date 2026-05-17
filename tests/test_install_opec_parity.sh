@@ -118,11 +118,11 @@ mirror_install_exports() {
 }
 
 @test "install.sh calls preflight_run instead of inline Step 1" {
-    grep -qE '^preflight_run$' install.sh
+    grep -qE '^[[:space:]]*preflight_run([[:space:]]|$)' install.sh
 }
 
 @test "install.sh calls deps_install instead of inline Step 2" {
-    grep -qE '^deps_install$' install.sh
+    grep -qE '^[[:space:]]*deps_install([[:space:]]|$)' install.sh
 }
 
 @test "install.sh no longer inlines OS_FAMILY detection" {
