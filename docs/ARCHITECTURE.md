@@ -180,15 +180,15 @@ network-level filtering:
   decryption.
 
 - **AmneziaWG mesh interconnect** — partner-to-partner traffic uses
-  AmneziaWG for mesh connectivity, provisioned during `bootstrap.sh`.
+  AmneziaWG for mesh connectivity, provisioned during `install.sh`.
 
 Architectural rationale for the TURNS-on-:443 via SNI mux design
 (Variant A') is documented in `DECISION.md`.
 
 ## Operational model
 
-1. Partner clones this repository and runs `install.sh` (or
-   `bootstrap.sh` for the full onboarding flow).
+1. Partner runs the one-command installer published as a release asset
+   (`partner-edge-installer.sh` — the contents are `install.sh`).
 2. The installer registers the node with the OxPulse control plane via
    `POST /api/partner/register` using the provided bootstrap token.
 3. The control plane assigns an initial trust score and includes the
