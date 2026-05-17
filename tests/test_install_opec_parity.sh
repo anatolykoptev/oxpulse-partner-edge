@@ -231,3 +231,21 @@ mirror_install_exports() {
 @test "install.sh json_get block skipped when OPEC_REGISTER_USED is set" {
     grep -qE 'OPEC_REGISTER_USED' install.sh
 }
+
+# ---------------------------------------------------------------------------
+# Phase 4.3d Task — sfu-signing-key delegation
+# ---------------------------------------------------------------------------
+
+@test "install.sh delegates sfu-signing-key to opec when OPEC_SECRETS_SFU_KEY!=0" {
+    grep -qE 'OPEC_SECRETS_SFU_KEY' install.sh
+    grep -qE 'opec[[:space:]]+secrets[[:space:]]+sfu-signing-key' install.sh
+}
+
+@test "install.sh preserves bash fallback for sfu-signing-key" {
+    grep -qE 'api/partner/keys' install.sh
+}
+
+@test "install.sh OPEC sfu-signing-key path warns on failure (not die)" {
+    awk '/OPEC_SECRETS_SFU_KEY/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
+        | grep -qE 'warn.*OPEC_SECRETS_SFU_KEY=0|warn.*sfu-signing-key'
+}
