@@ -132,3 +132,84 @@ fn register_missing_required_field_errors() {
         "expected MissingResponseField or Http parse error, got {err:?}"
     );
 }
+
+#[test]
+fn register_rejects_newline_in_response_value() {
+    // Backend returns a value with newline → must refuse to write env-file
+    // (shell-source injection vector).
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(
+            r#"{
+            "node_id": "n",
+            "backend_endpoint": "1.2.3.4:5349",
+            "turn_secret": "ts\nADMIN_TOKEN=hijack",
+            "reality_uuid": "11111111-2222-3333-4444-555555555555",
+            "reality_public_key": "RK",
+            "reality_short_id": "0123",
+            "reality_server_name": "x",
+            "reality_encryption": "mlkem768x25519plus",
+            "relay_jwt_secret": "rjs",
+            "turns_subdomain": "d"
+        }"#,
+        )
+        .create();
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    let err = register::run(args_for(tmp.path(), server.url()))
+        .expect_err("newline in value must be rejected");
+    assert!(
+        matches!(err, SecretsError::InvalidResponseValue { ref name, .. } if name == "TURN_SECRET"),
+        "expected InvalidResponseValue for TURN_SECRET, got: {err:?}"
+    );
+    // out.env must NOT have been written.
+    assert!(
+        !tmp.path().join("out.env").exists(),
+        "env-file must not be created when validation fails"
+    );
+}
+
+#[test]
+fn register_response_parse_error_does_not_leak_body() {
+    // Backend returns non-JSON containing a secret-shaped token. The error
+    // message must NOT include the body content — only length/category.
+    let mut server = mockito::Server::new();
+    let leaky_body = "TURN_SECRET=super-secret-leak-marker-xyz";
+    let _m = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(leaky_body)
+        .create();
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    let err = register::run(args_for(tmp.path(), server.url()))
+        .expect_err("non-JSON response must error");
+    let msg = format!("{err}");
+    assert!(
+        !msg.contains("super-secret-leak-marker-xyz"),
+        "response body must not appear in error message: {msg}"
+    );
+    assert!(
+        matches!(err, SecretsError::ResponseParse { .. }),
+        "expected ResponseParse, got: {err:?}"
+    );
+}
+
+#[test]
+fn register_transport_error_retries_then_fails() {
+    // Point at a port nothing is listening on — every attempt is a Transport
+    // error (connection refused). Verify the retry loop exhausts and returns
+    // Transport (not Http).
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    let mut args = args_for(tmp.path(), "http://127.0.0.1:1".to_string()); // port 1 = reserved/closed
+    args.retries = 1;
+    args.timeout_secs = 2;
+    let err = register::run(args).expect_err("connect-refused must error");
+    assert!(
+        matches!(err, SecretsError::Transport { .. }),
+        "expected Transport after exhausted retries, got: {err:?}"
+    );
+}
