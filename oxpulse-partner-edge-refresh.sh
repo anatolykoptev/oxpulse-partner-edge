@@ -70,6 +70,27 @@ command -v jq >/dev/null 2>&1 \
 command -v curl >/dev/null 2>&1 \
     || die "curl required but not installed — fix: $(suggest_install curl)"
 
+# Service token helper — used for any authenticated /api/partner/* calls.
+# Source the shared lib if present; fall back to inline definition so the
+# script degrades gracefully on nodes that haven't re-run install.sh yet.
+_TOKEN_LIB="${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-token-lib.sh"
+if [[ -r "$_TOKEN_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$_TOKEN_LIB"
+else
+    # Inline fallback (matches lib definition; remove once all nodes upgraded).
+    read_service_token() {
+        if [[ -n "${OXPULSE_SERVICE_TOKEN:-}" ]]; then
+            printf '%s' "$OXPULSE_SERVICE_TOKEN"; return 0
+        fi
+        if [[ -r "${PREFIX_ETC}/token" ]]; then
+            cat "${PREFIX_ETC}/token"; return 0
+        fi
+        return 1
+    }
+fi
+unset _TOKEN_LIB
+
 [[ -f "$NODE_CFG" ]] || die "node-config.json not found at $NODE_CFG"
 
 NODE_ID=$(jq -r '.node_id // .partner_id // empty' "$NODE_CFG")

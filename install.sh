@@ -27,6 +27,22 @@ log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
 
+# Read the service token for Bearer auth. Prefers the env-var override
+# (used in two scenarios: pre-rollout operator backfill, recovery from
+# strand mode). Falls back to the persisted file. Returns 1 if neither
+# is available so callers can substitute an empty string safely.
+read_service_token() {
+	if [[ -n "${OXPULSE_SERVICE_TOKEN:-}" ]]; then
+		printf '%s' "$OXPULSE_SERVICE_TOKEN"
+		return 0
+	fi
+	if [[ -r "${PREFIX_ETC}/token" ]]; then
+		cat "${PREFIX_ETC}/token"
+		return 0
+	fi
+	return 1
+}
+
 # Pre-scan args for --check before any guard (--check is a diagnostic-only mode
 # that does not need partner-cli or docker).
 _PRESCAN_CHECK=0
@@ -1440,6 +1456,53 @@ open(sys.argv[1], 'w').write(json.dumps(cfg, indent=2))
 PYEOF
 		log "  channels[] written to node-config.json (${#CHANNELS_JSON} bytes)"
 	fi
+	# ── service_token persist (Follow-up #2 PR-B) ──────────────────────────────
+	# Decision tree mirrors the Reality keypair idempotency guard (§13 incident,
+	# line ~915). COALESCE-preserve: server only returns service_token when freshly
+	# provisioned; on re-register it omits the field and the file is the authority.
+	#
+	#  Branch A — server returned token, file absent    → atomically write 0600
+	#  Branch B — server returned token, file present   → warn, preserve local
+	#  Branch C — server omitted token,  file absent    → fail-loud with recovery
+	#  Branch D — server omitted token,  file present   → silent success (idempotent)
+	SERVICE_TOKEN=$(jq -r '.service_token // empty' "$tmp_cfg" 2>/dev/null || true)
+	SVC_TOKEN_FILE="$PREFIX_ETC/token"
+	if [[ -n "$SERVICE_TOKEN" ]]; then
+		if [[ ! -e "$SVC_TOKEN_FILE" ]]; then
+			# Branch A: fresh install — atomically write token file.
+			_tok_tmp=$(mktemp "$SVC_TOKEN_FILE.XXXXXX")
+			printf '%s' "$SERVICE_TOKEN" > "$_tok_tmp"
+			chmod 0600 "$_tok_tmp"
+			mv "$_tok_tmp" "$SVC_TOKEN_FILE"
+			unset _tok_tmp
+			log "  service token persisted → $SVC_TOKEN_FILE (raw value redacted)"
+		else
+			# Branch B: operator may have rotated the file manually — don't overwrite.
+			warn "  service token returned by server but local file already exists; preserved local copy (use partner-cli rotate-service-token --force to align)"
+		fi
+	else
+		if [[ ! -e "$SVC_TOKEN_FILE" && -z "${OXPULSE_SERVICE_TOKEN:-}" ]]; then
+			# Branch C: stranded node — no token from server, no local file.
+			NODE_ID_HINT="${NODE_ID:-<NODE_ID>}"
+			die "service_token not returned by server (preserved existing) AND no local
+$SVC_TOKEN_FILE found. This usually means the volume was wiped after the
+original install.
+
+Recovery:
+  1. On krolik: docker exec oxpulse-chat partner-cli rotate-service-token \\
+        --node-id $NODE_ID_HINT --force
+     (copy the printed stkn_ value)
+  2. scp the value to this edge as $SVC_TOKEN_FILE
+     (mode 0600, root:root)
+  3. Re-run install.sh
+
+Or: re-run install.sh with OXPULSE_SERVICE_TOKEN=<raw> in the env
+    to skip the file write and use the env var directly."
+		else
+			# Branch D: idempotent re-install with existing file (or env override).
+			log "  service token reused from existing $SVC_TOKEN_FILE"
+		fi
+	fi
 fi
 [[ -z "$REALITY_SHORT_ID" ]]   && die "reality_short_id missing from config"
 [[ -z "$REALITY_SERVER_NAME" ]] && REALITY_SERVER_NAME="www.samsung.com"
@@ -1612,7 +1675,7 @@ if declare -f re_render_hysteria2 >/dev/null 2>&1; then
 	log "fetching hy2 credentials"
 	_hy2_creds_url="${BACKEND_API}/api/partner/hy2-credentials"
 	_hy2_creds_json=$(curl -fsS --max-time 10 \
-		-H "Authorization: Bearer ${OXPULSE_SERVICE_TOKEN:-}" \
+		-H "Authorization: Bearer $(read_service_token || echo '')" \
 		"$_hy2_creds_url" 2>/dev/null || echo '{}')
 	HY2_AUTH_PASS=$(printf '%s' "$_hy2_creds_json" | jq -r '.auth_pass // empty' 2>/dev/null || true)
 	HY2_OBFS_PASS=$(printf '%s' "$_hy2_creds_json" | jq -r '.obfs_pass // empty' 2>/dev/null || true)
@@ -1831,6 +1894,15 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		curl -fsSL "$REPO_RAW/ghcr-auth-lib.sh" -o "$PREFIX_SBIN/ghcr-auth-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/ghcr-auth-lib.sh"
 	fi
+	# Service token lib into /usr/local/sbin (sourced by refresh.sh + any future
+	# script that calls authenticated /api/partner/* endpoints).
+	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-token-lib.sh" ]]; then
+		install -m 0644 "$src_dir/oxpulse-token-lib.sh" "$PREFIX_SBIN/oxpulse-token-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/oxpulse-token-lib.sh" -o "$PREFIX_SBIN/oxpulse-token-lib.sh"
+		chmod 0644 "$PREFIX_SBIN/oxpulse-token-lib.sh"
+	fi
+
 	# Hydrate script into /usr/local/sbin (installed in all modes; needed by the
 	# oneshot unit on first boot after snapshot→clone).
 	if [[ -n "$src_dir" && -f "$src_dir/hydrate.sh" ]]; then
