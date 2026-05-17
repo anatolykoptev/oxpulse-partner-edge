@@ -1511,14 +1511,30 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID \
        OTEL_EXPORTER_OTLP_ENDPOINT \
        SFU_SIGNING_PUBLIC_KEY RELAY_JWT_SECRET SIGNALING_SFU_SECRET
+# Phase 2 delegation: prefer `opec render <kind>` for the 3 single-purpose
+# templates (xray-client.json, coturn.conf, naive-client.json). OPEC adds
+# post-substitution validation (JSON shape / realm directive) that catches
+# corrupt renders before docker compose start. Fallback to render_template
+# preserves Phase 1 behaviour when the opec binary is not yet on PATH
+# (e.g. fresh installs before OPEC binary ships via release.yml).
+#
+# compose.yml + Caddyfile stay on render_template (Phase 3 scope).
+render_with_opec_or_fallback() {
+    local kind=$1 src=$2 dst=$3
+    if command -v opec >/dev/null 2>&1; then
+        opec render "$kind" --tpl "$src" --out "$dst"
+    else
+        render_template "$src" "$dst"
+    fi
+}
 render_template "$stage/compose.tpl" "$compose_out"
 render_template "$stage/caddy.tpl"   "$caddy_out"
 # Phase 1: compute sha256 of rendered Caddyfile and substitute __CADDYFILE_SHA__
 # placeholder so /canary/config-hash returns the actual hash at runtime.
 _rendered_sha=$(sha256sum "$caddy_out" | awk '{print $1}')
 sed -i "s|__CADDYFILE_SHA__|${_rendered_sha}|g" "$caddy_out"
-render_template "$stage/xray.tpl"    "$xray_out"
-render_template "$stage/coturn.tpl"  "$coturn_out"
+render_with_opec_or_fallback xray    "$stage/xray.tpl"    "$xray_out"
+render_with_opec_or_fallback coturn  "$stage/coturn.tpl"  "$coturn_out"
 
 # AmneziaWG mesh setup — runs only when the central returned an awg block.
 # Builds amneziawg from source, writes /etc/amnezia/amneziawg/awg0.conf
@@ -1573,7 +1589,7 @@ if declare -f re_render_hysteria2 >/dev/null 2>&1; then
 	fi
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
-	render_template "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"
+	render_with_opec_or_fallback naive "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"
 	chmod 0600 "$PREFIX_ETC/naive-client.json"
 	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch5"
 	log "  naive-client.json rendered (CH5 profile enabled)"
