@@ -634,63 +634,13 @@ _install_lib_source() {
 
 _install_lib_source install-preflight.sh
 _install_lib_source install-deps.sh
+_install_lib_source install-network.sh
 
 preflight_run
 
 deps_install
 
-# ---------- Step 3: public/private IP autodetect ----------
-log "[3/10] detecting IPs"
-_detect_public_ipv4() {
-	local ip
-	ip=$(curl -fsS --max-time 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
-	if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then printf '%s' "$ip"; return 0; fi
-	ip=$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)
-	if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then printf '%s' "$ip"; return 0; fi
-	ip=$(curl -fsS --max-time 3 https://ifconfig.me 2>/dev/null || true)
-	if [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then printf '%s' "$ip"; return 0; fi
-	return 1
-}
-PUBLIC_IP="${OXPULSE_PUBLIC_IP:-}"
-[[ -z "$PUBLIC_IP" ]] && PUBLIC_IP=$(_detect_public_ipv4 || true)
-[[ -z "$PUBLIC_IP" ]] && die "unable to autodetect public IP — set OXPULSE_PUBLIC_IP"
-PRIVATE_IP="${OXPULSE_PRIVATE_IP:-}"
-if [[ -z "$PRIVATE_IP" ]]; then
-	iface=$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; exit}')
-	if [[ -n "$iface" ]]; then
-		cand=$(ip -4 -o addr show dev "$iface" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1 || true)
-		[[ "$cand" != "$PUBLIC_IP" ]] && PRIVATE_IP="$cand"
-	fi
-fi
-log "  public=$PUBLIC_IP private=${PRIVATE_IP:-<none>}"
-
-# Auto-detect region tag from PUBLIC_IP via ipinfo.io when --region= /
-# REGION env was not supplied. Format: lowercase `<country>-<city3>` to
-# match existing tags (`pl-waw`, `ru-msk`, `us-east`). Failure leaves
-# REGION empty — backend stores NULL and excludes the node from
-# region-aware turn pool ordering, which is fine for first-boot.
-_detect_region() {
-	local payload cc city
-	payload=$(curl -fsS --max-time 3 "https://ipinfo.io/${PUBLIC_IP}/json" 2>/dev/null || true)
-	[[ -z "$payload" ]] && return 1
-	cc=$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("country") or "").lower())' 2>/dev/null || true)
-	city=$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d.get("city") or "").lower())' 2>/dev/null || true)
-	[[ -z "$cc" || -z "$city" ]] && return 1
-	# strip non-ascii-letters from city, take first 3 chars
-	city=$(printf '%s' "$city" | tr -cd 'a-z' | cut -c1-3)
-	[[ -z "$city" ]] && return 1
-	printf '%s-%s' "$cc" "$city"
-}
-if [[ -z "$REGION" ]]; then
-	if REGION=$(_detect_region); then
-		log "  region auto-detected: $REGION"
-	else
-		REGION=""
-		warn "  region auto-detect failed (ipinfo.io unreachable or missing fields) — registering with NULL region"
-	fi
-else
-	log "  region (override): $REGION"
-fi
+network_run
 
 # Detect local checkout directory for template files (used in Steps 5 and 9).
 # When invoked via `curl ... | bash`, BASH_SOURCE is unset and `set -u` would error;
@@ -1239,7 +1189,7 @@ RELAY_JWT_SECRET=$(json_get relay_jwt_secret "$tmp_cfg")
 # env var and SFU_EDGES relay_api_url for cascade relay to work.
 [[ -z "$RELAY_JWT_SECRET" ]] && RELAY_JWT_SECRET=$(openssl rand -hex 32)
 # Phase 7 M4.A6 — note: SFU_PUBLIC_IP is rendered into docker-compose.yml from
-# the $PUBLIC_IP autodetected at line ~174 via the existing {{PUBLIC_IP}}
+# the $PUBLIC_IP autodetected by network_run via the existing {{PUBLIC_IP}}
 # template substitution. We do NOT json_get a public_ip from the registration
 # response (the API doesn't return one — public_ip is sent UP, not down). The
 # autodetect chain (cloud metadata → ipify → ifconfig.me) is the source of
