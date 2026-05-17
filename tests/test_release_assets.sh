@@ -74,3 +74,15 @@ setup() {
 @test "release.yml uploads install-network.sh to GitHub release" {
     grep -A14 'gh release upload' .github/workflows/release.yml | grep -q 'install-network.sh'
 }
+
+@test "release.yml stages lib/install-healthcheck.sh as install-healthcheck.sh asset" {
+  grep -qE 'cp[[:space:]]+lib/install-healthcheck\.sh[[:space:]]+install-healthcheck\.sh' .github/workflows/release.yml
+}
+
+@test "release.yml SHA256SUMS line covers install-healthcheck.sh (Phase 4.6)" {
+  grep -A20 -E 'sha256sum' .github/workflows/release.yml | grep -q 'install-healthcheck.sh'
+}
+
+@test "release.yml uploads install-healthcheck.sh to GitHub release" {
+  grep -A20 'gh release upload' .github/workflows/release.yml | grep -q 'install-healthcheck.sh'
+}
