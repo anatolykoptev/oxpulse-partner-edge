@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.33](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.32...partner-edge-v0.12.33) (2026-05-17)
+
+
+### Features
+
+* **channels:** edge-side channels-health reporter (M2.6a) ([#159](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/159)) ([6873794](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/6873794d5d22c810035e9cea05519e68ac69ba29))
+* **healthcheck:** add authed probe for /api/partner/hy2-credentials (check 19) ([#157](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/157)) ([e9403cb](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e9403cba84e7bc0283ba98574b0ae3ed072dde96))
+
 ## [0.12.32](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.31...partner-edge-v0.12.32) (2026-05-17)
 
 
