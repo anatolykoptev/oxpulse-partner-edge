@@ -5,6 +5,19 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.30](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.29...partner-edge-v0.12.30) (2026-05-17)
+
+
+### Features
+
+* **release:** publish install.sh as one-command installer asset ([#141](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/141)) ([b45e5c3](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/b45e5c3418aa72de540569aa8e40962e0d68996f))
+* **shell:** phase 1 — render dedupe across install/hydrate/update ([#139](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/139)) ([e09693d](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e09693d37412632264531e43492e9e9ac7f15f3d))
+
+
+### Bug Fixes
+
+* **install:** fetch channel-render-lib.sh in source block, not just Step 8 ([#142](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/142)) ([7673b80](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7673b805bea9135cbbd8efc2c62c10d5c26a6787))
+
 ## [0.12.29](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.28...partner-edge-v0.12.29) (2026-05-16)
 
 
