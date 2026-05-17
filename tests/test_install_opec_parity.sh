@@ -253,3 +253,19 @@ mirror_install_exports() {
     awk '/OPEC_SECRETS_SFU_KEY/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
         | grep -qE 'warn.*OPEC_SECRETS_SFU_KEY=0|warn.*sfu-signing-key'
 }
+
+# ---------------------------------------------------------------------------
+# Phase 4.6 — healthcheck module delegation
+# ---------------------------------------------------------------------------
+
+@test "install.sh sources lib/install-healthcheck.sh module" {
+    grep -qE '_install_lib_source[[:space:]]+install-healthcheck\.sh' install.sh
+}
+
+@test "install.sh calls healthcheck_run instead of inline [7/10]" {
+    grep -qE '^[[:space:]]*healthcheck_run([[:space:]]|$)' install.sh
+}
+
+@test "install.sh no longer inlines [7/10] healthcheck log call" {
+    ! grep -qE 'log.*\[7/10\].*waiting for healthcheck' install.sh
+}
