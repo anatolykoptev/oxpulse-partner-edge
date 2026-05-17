@@ -34,13 +34,20 @@ for _arg in "$@"; do [[ "$_arg" == "--check" ]] && _PRESCAN_CHECK=1 && break; do
 unset _arg
 
 # partner-cli is required for Reality x25519 keypair generation (M6 slice 2b).
-# It ships with oxpulse-chat releases; install from the partner-edge release
-# bundle or build from the oxpulse-chat source (crates/partner-cli).
+# Ships as a prebuilt static binary in the oxpulse-partner-edge release assets.
 if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v partner-cli >/dev/null 2>&1; then
-	die "partner-cli not found on PATH.
-Install it from the oxpulse-chat release artifacts (partner-cli binary) or build
-from source: cd ~/src/oxpulse-chat && cargo build -p partner-cli --release.
-Then place the binary in /usr/local/bin/ and re-run install.sh."
+	_machine=$(uname -m)
+	case "$_machine" in
+		x86_64)  _cli_arch=amd64 ;;
+		aarch64) _cli_arch=arm64 ;;
+		*) die "partner-cli: unsupported architecture: $_machine (need x86_64 or aarch64)" ;;
+	esac
+	_cli_url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/partner-cli-${_cli_arch}"
+	log "partner-cli not found -- downloading from release assets ($_cli_arch)"
+	curl -fsSL --max-time 60 "$_cli_url" -o /usr/local/bin/partner-cli \
+		|| die "failed to download partner-cli from $_cli_url\nInstall manually and re-run."
+	chmod +x /usr/local/bin/partner-cli
+	unset _machine _cli_arch _cli_url
 fi
 
 # Best-effort install of `wg`/`wg-quick` for keygen and conf rendering. The

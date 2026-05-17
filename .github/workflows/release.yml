@@ -168,13 +168,67 @@ jobs:
               "$IMG:v$V-amd64" "$IMG:v$V-arm64"
           done
 
+
+  build-partner-cli:
+    needs: extract-version
+    strategy:
+      fail-fast: true
+      matrix:
+        arch:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: partner-cli-amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: partner-cli-arm64
+    runs-on: ${{ matrix.arch.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workdir: crates/partner-cli
+          shared-key: "partner-cli-${{ matrix.arch.asset }}"
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+
+      - name: Build partner-cli (${{ matrix.arch.asset }})
+        run: |
+          cargo build -p partner-cli --release \
+            --target ${{ matrix.arch.target }}
+          cp target/${{ matrix.arch.target }}/release/partner-cli \
+            ${{ matrix.arch.asset }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.arch.asset }}
+          path: ${{ matrix.arch.asset }}
+          retention-days: 1
+
   attach-release-assets:
-    needs: [extract-version, build-and-push, merge-manifests]
+    needs: [extract-version, build-and-push, merge-manifests, build-partner-cli]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: partner-cli-amd64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: partner-cli-arm64
 
       - name: Stage artifacts
         env:
@@ -183,10 +237,13 @@ jobs:
           cp install.sh     partner-edge-installer.sh
           cp upgrade.sh     partner-edge-upgrade.sh
           cp healthcheck.sh partner-edge-healthcheck.sh
+          chmod +x partner-cli-amd64 partner-cli-arm64
           sha256sum \
             partner-edge-installer.sh \
             partner-edge-upgrade.sh \
             partner-edge-healthcheck.sh \
+            partner-cli-amd64 \
+            partner-cli-arm64 \
             > SHA256SUMS
 
       - name: Upload release assets
@@ -204,5 +261,8 @@ jobs:
             partner-edge-installer.sh \
             partner-edge-upgrade.sh \
             partner-edge-healthcheck.sh \
+            partner-cli-amd64 \
+            partner-cli-arm64 \
             SHA256SUMS \
             --clobber
+
