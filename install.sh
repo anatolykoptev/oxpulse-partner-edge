@@ -987,25 +987,48 @@ else
 	# pubkey every time.
 	AWG_PRIV_PATH="$PREFIX_ETC/awg-private.key"
 	AWG_PUB_PATH="$PREFIX_ETC/awg-public.key"
-	if [[ $DRY_RUN -eq 0 ]]; then
-		install -d -m 0700 "$PREFIX_ETC"
-		if [[ ! -s "$AWG_PRIV_PATH" ]]; then
-			# wg genkey is the same binary across wg-tools and amneziawg-tools
-			# (just calls into the kernel CSPRNG); we use whichever is on PATH.
-			# wg-tools is dnf-installable on every supported edge OS, so we
-			# can rely on it being available before the awg-go binaries are.
+	if [[ "${OPEC_SECRETS_AWG_KEYGEN:-1}" == "1" ]] && command -v opec >/dev/null 2>&1; then
+		if [[ $DRY_RUN -eq 1 ]]; then
+			warn "  [dry-run] would invoke: opec secrets awg-keygen --out-dir $PREFIX_ETC$([[ $FORCE_KEYGEN -eq 1 ]] && echo ' --rotate')"
+			AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
+		else
+			log "  awg keypair: delegating to opec secrets awg-keygen"
+			install -d -m 0700 "$PREFIX_ETC"
 			if ! command -v wg >/dev/null 2>&1; then
 				install_wg_tools_for_keygen
 			fi
-			umask 077
-			wg genkey > "$AWG_PRIV_PATH"
-			chmod 0600 "$AWG_PRIV_PATH"
+			_opec_args=(secrets awg-keygen --out-dir "$PREFIX_ETC")
+			[[ $FORCE_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
+			if ! opec "${_opec_args[@]}"; then
+				die "opec secrets awg-keygen failed — re-run with OPEC_SECRETS_AWG_KEYGEN=0 to fall back to bash path"
+			fi
+			AWG_PUBKEY="$(cat "$AWG_PUB_PATH")" \
+				|| die "post-awg-keygen: failed to read $AWG_PUB_PATH"
+			log "  awg pubkey: $AWG_PUBKEY"
+			unset _opec_args
 		fi
-		wg pubkey < "$AWG_PRIV_PATH" > "$AWG_PUB_PATH"
-		AWG_PUBKEY=$(cat "$AWG_PUB_PATH")
-		log "  awg pubkey: $AWG_PUBKEY"
 	else
-		AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
+		# === Legacy bash path (Phase 4.3b fallback). Preserved for rollback. ===
+		if [[ $DRY_RUN -eq 0 ]]; then
+			install -d -m 0700 "$PREFIX_ETC"
+			if [[ ! -s "$AWG_PRIV_PATH" ]]; then
+				# wg genkey is the same binary across wg-tools and amneziawg-tools
+				# (just calls into the kernel CSPRNG); we use whichever is on PATH.
+				# wg-tools is dnf-installable on every supported edge OS, so we
+				# can rely on it being available before the awg-go binaries are.
+				if ! command -v wg >/dev/null 2>&1; then
+					install_wg_tools_for_keygen
+				fi
+				umask 077
+				wg genkey > "$AWG_PRIV_PATH"
+				chmod 0600 "$AWG_PRIV_PATH"
+			fi
+			wg pubkey < "$AWG_PRIV_PATH" > "$AWG_PUB_PATH"
+			AWG_PUBKEY=$(cat "$AWG_PUB_PATH")
+			log "  awg pubkey: $AWG_PUBKEY"
+		else
+			AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
+		fi
 	fi
 	# Build body via python so we (1) omit `region` cleanly when empty,
 	# (2) inline `branding` as a parsed object, and (3) assemble a
