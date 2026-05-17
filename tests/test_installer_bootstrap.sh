@@ -15,8 +15,9 @@ setup() {
 }
 
 @test "install.sh Step 8 install of channel-render-lib.sh handles tmp-fetched lib" {
-  # Step 8 must use $_chan_lib_tmp when set (avoids re-fetching).
-  grep -qE 'install -m 0644 "\$_chan_lib_tmp"' install.sh
+  # Step 8 logic moved to lib/install-systemd.sh (Phase 4.7).
+  # The module must handle $_chan_lib_tmp when set (avoids re-fetching).
+  grep -qE 'install -m 0644 "\$_chan_lib_tmp"' lib/install-systemd.sh
 }
 
 @test "install.sh fetches opec binary from release assets if missing" {
