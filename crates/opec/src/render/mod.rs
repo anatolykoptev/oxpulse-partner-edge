@@ -6,9 +6,10 @@
 //! - multi-line values preserved verbatim (no escaping)
 //! - all other characters pass through unchanged
 //!
-//! Per-kind modules (xray, coturn, naive) add post-substitution validation
-//! (JSON shape, line-count sanity) and the public `render(tpl, out)` entry
-//! they expose to `crates/opec/src/main.rs`.
+//! Per-kind modules (xray, coturn, naive, compose, caddy) add post-substitution
+//! validation (JSON shape, realm directive, YAML parse, balanced-brace + site
+//! block) and the public `render(tpl, out)` entry they expose to
+//! `crates/opec/src/main.rs`.
 
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
@@ -20,6 +21,8 @@ use std::{
 };
 use thiserror::Error;
 
+pub mod caddy;
+pub mod compose;
 pub mod coturn;
 pub mod naive;
 pub mod xray;
