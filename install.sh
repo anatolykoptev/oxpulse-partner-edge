@@ -1484,12 +1484,18 @@ if [[ "${OPEC_SECRETS_SFU_KEY:-1}" == "1" ]] && command -v opec >/dev/null 2>&1;
 			--backend-api "$BACKEND_API" \
 			--out-file "$PREFIX_LIB/sfu-keys.env"; then
 			warn "  opec secrets sfu-signing-key failed — re-run with OPEC_SECRETS_SFU_KEY=0 to fall back to bash path"
-		fi
-		# Re-read the env-file to set SFU_SIGNING_PUBLIC_KEY in shell scope
-		# (downstream templates substitute {{SFU_SIGNING_PUBLIC_KEY}}).
-		if [[ -r "$PREFIX_LIB/sfu-keys.env" ]]; then
-			# shellcheck disable=SC1091
-			. "$PREFIX_LIB/sfu-keys.env"
+			# Skip sourcing — if opec aborted between tempfile create and persist,
+			# we don't trust whatever is on disk. Downstream falls back to empty
+			# SFU_SIGNING_PUBLIC_KEY (same observable as bash L1497 warn-path).
+		else
+			# Re-read the env-file to set SFU_SIGNING_PUBLIC_KEY in shell scope
+			# (downstream templates substitute {{SFU_SIGNING_PUBLIC_KEY}}).
+			# Note: opec's "empty key from backend" path Ok-returns WITHOUT writing
+			# the file, so the [[ -r ]] guard correctly skips it.
+			if [[ -r "$PREFIX_LIB/sfu-keys.env" ]]; then
+				# shellcheck disable=SC1091
+				. "$PREFIX_LIB/sfu-keys.env"
+			fi
 		fi
 	fi
 else
