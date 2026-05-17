@@ -29,3 +29,10 @@ setup() {
 @test "release.yml SHA256SUMS line covers partner-edge-installer.sh" {
   grep -A2 -E 'sha256sum' .github/workflows/release.yml | grep -q 'partner-edge-installer.sh'
 }
+
+@test "install.sh first line is bash shebang (guards against wrong-file rename)" {
+  # If anyone ever moves the installer to a different file (e.g. installer.py),
+  # release.yml would silently publish that as partner-edge-installer.sh.
+  # Shebang anchor guarantees we keep shipping a bash script.
+  head -1 install.sh | grep -qE '^#!/usr/bin/env bash$|^#!/bin/bash$'
+}
