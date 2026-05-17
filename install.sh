@@ -1464,7 +1464,7 @@ fetch_tpl xray-client.json.tpl   "$stage/xray.tpl"
 fetch_tpl coturn.conf.tpl        "$stage/coturn.tpl"
 # CH3/CH5 templates — fetched unconditionally so nodes have them ready.
 # Rendering is skipped unless HYSTERIA2_SERVER / NAIVE_SERVER are set.
-fetch_tpl hysteria2-client.yaml.tpl "$stage/hysteria2.tpl"
+fetch_tpl hysteria2-client.yaml.tpl "$stage/hysteria2-client.yaml.tpl"
 fetch_tpl naive-client.json.tpl     "$stage/naive.tpl"
 
 # Static assets bundle. cover/ is bind-mounted by docker-compose (./cover:/srv/cover:ro)
@@ -1557,7 +1557,7 @@ if declare -f re_render_hysteria2 >/dev/null 2>&1; then
 	HY2_AUTH_PASS="${HY2_AUTH_PASS:-${OXPULSE_HY2_AUTH_PASS:-}}"
 	HY2_OBFS_PASS="${HY2_OBFS_PASS:-${OXPULSE_HY2_OBFS_PASS:-}}"
 	if [[ -n "$HY2_AUTH_PASS" && -n "$HY2_OBFS_PASS" ]]; then
-		export HY2_AUTH_PASS HY2_OBFS_PASS
+		export HY2_AUTH_PASS HY2_OBFS_PASS OXPULSE_REPO_DIR="$stage"
 		re_render_hysteria2
 		COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
 		log "hy2 channel provisioned"
