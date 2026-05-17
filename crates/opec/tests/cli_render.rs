@@ -135,6 +135,7 @@ fn cli_render_caddy_byte_identical_to_fixture() {
 }
 
 #[test]
+#[serial]
 fn cli_render_unknown_kind_errors() {
     let mut cmd = Command::cargo_bin("opec").unwrap();
     cmd.args(["render", "bogus", "--tpl", "/tmp/x", "--out", "/tmp/y"])
