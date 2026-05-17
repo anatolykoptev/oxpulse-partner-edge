@@ -1,5 +1,6 @@
 //! Phase 2 Task 2 — opec render xray byte-identical parity vs bash render_template.
 
+use serial_test::serial;
 use std::{env, fs, path::PathBuf};
 
 fn fixture_dir() -> PathBuf {
@@ -47,6 +48,7 @@ fn set_frozen_env() {
 }
 
 #[test]
+#[serial]
 fn opec_render_xray_byte_identical_to_bash_render_template() {
     set_frozen_env();
     let dir = fixture_dir();
@@ -59,6 +61,7 @@ fn opec_render_xray_byte_identical_to_bash_render_template() {
 }
 
 #[test]
+#[serial]
 fn opec_render_xray_validates_json_after_substitution() {
     set_frozen_env();
     let dir = fixture_dir();
@@ -71,6 +74,7 @@ fn opec_render_xray_validates_json_after_substitution() {
 }
 
 #[test]
+#[serial]
 fn opec_render_xray_rejects_unparseable_substituted_output() {
     // Inject a non-numeric string into BACKEND_PORT which is used in a bare
     // number context ("port": {{BACKEND_PORT}}). After substitution the

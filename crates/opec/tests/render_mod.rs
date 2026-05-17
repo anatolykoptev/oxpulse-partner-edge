@@ -2,6 +2,7 @@
 //! Mirrors bats/test_render_template_golden.sh contracts.
 
 use opec::render::substitute_from_env;
+use serial_test::serial;
 use std::env;
 
 fn unset_test_vars() {
@@ -18,6 +19,7 @@ fn unset_test_vars() {
 }
 
 #[test]
+#[serial]
 fn substitutes_single_line_vars() {
     unset_test_vars();
     env::set_var("PARTNER_ID", "zvonilka");
@@ -34,6 +36,7 @@ fn substitutes_single_line_vars() {
 }
 
 #[test]
+#[serial]
 fn unset_vars_become_empty() {
     unset_test_vars();
     let tpl = "p={{PARTNER_ID}}";
@@ -42,6 +45,7 @@ fn unset_vars_become_empty() {
 }
 
 #[test]
+#[serial]
 fn preserves_dollar_and_percent_literals() {
     unset_test_vars();
     let tpl = "100% $HOME literal";
@@ -50,6 +54,7 @@ fn preserves_dollar_and_percent_literals() {
 }
 
 #[test]
+#[serial]
 fn preserves_multi_line_pem() {
     unset_test_vars();
     let pem = "-----BEGIN PUBLIC KEY-----\nLINE1\nLINE2\n-----END PUBLIC KEY-----";
@@ -60,6 +65,7 @@ fn preserves_multi_line_pem() {
 }
 
 #[test]
+#[serial]
 fn lowercase_placeholders_left_intact() {
     // Placeholder regex matches only [A-Z][A-Z0-9_]* — mirror bash render_template
     // (line in channel-render-lib.sh:42).
