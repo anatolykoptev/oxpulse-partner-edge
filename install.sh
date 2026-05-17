@@ -103,12 +103,31 @@ install_amneziawg() {
 		return 0
 	fi
 	log "  building amneziawg from source (one-time)"
+	# amneziawg-go go.mod requires Go >= 1.24. Ubuntu 22.04 apt ships golang 1.18,
+	# Debian 12 ships 1.19. Both too old. Install official Go tarball if existing
+	# /usr/local/go is missing or below 1.24 — leaves system golang package alone.
+	if ! /usr/local/go/bin/go version 2>/dev/null | grep -qE "go1\\.(2[4-9]|[3-9][0-9])"; then
+		log "    installing Go 1.24.4 (system golang too old for amneziawg-go)"
+		local _go_arch
+		case "$(uname -m)" in
+			x86_64)  _go_arch=amd64 ;;
+			aarch64) _go_arch=arm64 ;;
+			*) die "install_amneziawg: unsupported architecture: $(uname -m)" ;;
+		esac
+		curl -fsSL "https://go.dev/dl/go1.24.4.linux-${_go_arch}.tar.gz" -o /tmp/go-amneziawg.tgz \
+		  || die "Go 1.24 download failed (need internet at /tmp/go-amneziawg.tgz)"
+		rm -rf /usr/local/go
+		tar -C /usr/local -xzf /tmp/go-amneziawg.tgz || die "Go tarball extract failed"
+		rm -f /tmp/go-amneziawg.tgz
+		unset _go_arch
+	fi
+	export PATH="/usr/local/go/bin:$PATH"
 	if command -v dnf >/dev/null 2>&1; then
-		dnf install -y golang git make gcc >/dev/null 2>&1 || \
-		  die "dnf install of go/git/make/gcc failed — install manually then re-run"
+		dnf install -y git make gcc >/dev/null 2>&1 || \
+		  die "dnf install of git/make/gcc failed — install manually then re-run"
 	elif command -v apt-get >/dev/null 2>&1; then
-		apt-get install -y -q golang git make gcc >/dev/null 2>&1 || \
-		  die "apt-get install of go/git/make/gcc failed"
+		apt-get install -y -q git make gcc >/dev/null 2>&1 || \
+		  die "apt-get install of git/make/gcc failed"
 	else
 		die "no supported package manager for the awg build toolchain"
 	fi
