@@ -1,0 +1,30 @@
+[package]
+name = "partner-cli"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "Admin CLI for OxPulse partner edge-node tokens"
+
+[lib]
+name = "partner_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "partner-cli"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"] }
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+humantime = "2"
+anyhow = "1"
+regex = "1"
+once_cell = "1"
+zeroize = "1"
