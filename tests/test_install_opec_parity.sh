@@ -290,3 +290,19 @@ mirror_install_exports() {
 @test "install.sh no longer inlines [8/10] log" {
     ! grep -qE 'log[[:space:]]+"?\[8/10\] installing systemd unit' install.sh
 }
+
+# ---------------------------------------------------------------------------
+# Phase 4.9 — args parsing module delegation
+# ---------------------------------------------------------------------------
+
+@test "install.sh sources lib/install-args.sh module" {
+    grep -qE '_install_lib_source[[:space:]]+install-args\.sh' install.sh
+}
+
+@test "install.sh calls args_parse to process CLI arguments" {
+    grep -qE '^[[:space:]]*args_parse[[:space:]]+"\$@"' install.sh
+}
+
+@test "install.sh no longer inlines the while \$# -gt 0 arg-parser loop" {
+    ! grep -qE 'while[[:space:]]+\[\[[[:space:]]+\$#[[:space:]]+-gt[[:space:]]+0[[:space:]]+\]\]' install.sh
+}

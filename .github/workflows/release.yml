@@ -299,6 +299,7 @@ jobs:
           cp lib/install-network.sh       install-network.sh
           cp lib/install-healthcheck.sh   install-healthcheck.sh
           cp lib/install-systemd.sh       install-systemd.sh
+          cp lib/install-args.sh          install-args.sh
           chmod +x partner-cli-amd64 partner-cli-arm64
           chmod +x opec-amd64 opec-arm64
           sha256sum \
@@ -310,6 +311,7 @@ jobs:
             install-network.sh \
             install-healthcheck.sh \
             install-systemd.sh \
+            install-args.sh \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
@@ -336,6 +338,7 @@ jobs:
             install-network.sh \
             install-healthcheck.sh \
             install-systemd.sh \
+            install-args.sh \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
