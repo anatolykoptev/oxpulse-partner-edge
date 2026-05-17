@@ -5,6 +5,22 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.32](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.31...partner-edge-v0.12.32) (2026-05-17)
+
+
+### Features
+
+* **install:** persist service_token from register response with fail-loud strand mode (Follow-up [#2](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/2) PR-B) ([#152](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/152)) ([e36d949](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e36d949267cd0cfbaa3146f5f1080374aa118e09))
+* **install:** Phase 4.1 — extract preflight + deps into lib/ modules ([#153](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/153)) ([ed9978e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ed9978ec976616cc3af4bde82b79e5db73142181))
+* **install:** Phase 4.2 — extract IP + region detect into lib/install-network.sh ([#154](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/154)) ([75e6695](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/75e66955f236f5d3e5dc778d4b1daa276ba36c57))
+* **opec:** Phase 3 — absorb compose + caddy render into OPEC ([#151](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/151)) ([cf07e94](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/cf07e94b11aa8442487f4b0e8f7e493d4ec9964b))
+* **opec:** Phase 4.3a — opec secrets reality-keygen + env-gated install.sh delegation ([#155](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/155)) ([c252743](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c2527438464afed93e98d8ddfcce90e38ac24de0))
+
+
+### Bug Fixes
+
+* **install_amneziawg:** install Go 1.24 (system golang too old) ([#149](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/149)) ([24866d5](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/24866d55561dc21afcdfc08475037641ab188042))
+
 ## [0.12.31](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.30...partner-edge-v0.12.31) (2026-05-17)
 
 
