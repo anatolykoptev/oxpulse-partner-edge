@@ -18,13 +18,18 @@ pub fn keygen(out_dir: &Path, rotate: bool, wg: &Path) -> Result<(), SecretsErro
 
     let wg_resolved = resolve_wg(wg)?;
 
-    // Decide whether we need a fresh keygen.
-    let priv_exists_nonempty = match fs::metadata(&priv_path) {
-        Ok(m) => m.is_file() && m.len() > 0,
-        Err(_) => false,
-    };
+    // Decide whether we need a fresh keygen. Read the file and trim — a
+    // whitespace-only priv (e.g. "\n") would pass a bare m.len() > 0 check
+    // and then fail later with a cryptic `wg pubkey` stderr. Treat
+    // trimmed-empty as missing.
+    let priv_existing = fs::read_to_string(&priv_path).ok();
+    let priv_is_valid = priv_existing
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
 
-    if rotate || !priv_exists_nonempty {
+    let regenerated = rotate || !priv_is_valid;
+    if regenerated {
         let priv_key = run_wg(&wg_resolved, &["genkey"], None)?;
         let priv_trimmed = priv_key.trim();
         if priv_trimmed.is_empty() {
@@ -50,7 +55,12 @@ pub fn keygen(out_dir: &Path, rotate: bool, wg: &Path) -> Result<(), SecretsErro
     }
     write_atomic(&pub_path, pub_trimmed.as_bytes(), 0o644)?;
 
-    eprintln!("opec secrets awg-keygen: awg-public.key = {pub_trimmed}");
+    // Only log on regeneration — idempotent re-runs stay quiet, matching
+    // the bash path's behaviour (it logs `awg pubkey:` only after a real
+    // wg-genkey, not on every install.sh invocation).
+    if regenerated {
+        eprintln!("opec secrets awg-keygen: generated new keypair (pub={pub_trimmed})");
+    }
     Ok(())
 }
 

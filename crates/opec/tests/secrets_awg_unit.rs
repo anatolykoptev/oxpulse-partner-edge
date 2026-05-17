@@ -6,14 +6,23 @@ use tempfile::TempDir;
 
 /// Place a fake `wg` shim on the temp dir that emits canned keygen output.
 /// `wg genkey` → priv (44 chars base64, like the real binary)
-/// `wg pubkey` → pub (reads from stdin, emits canned pubkey)
+/// `wg pubkey` → pub (reads stdin, fails if no priv piped — catches a
+///                   regression where run_wg forgets to wire stdin)
 fn fake_wg(dir: &std::path::Path, priv_key: &str, pub_key: &str) -> PathBuf {
     let path = dir.join("wg");
     let script = format!(
         "#!/usr/bin/env bash\n\
          case \"$1\" in\n\
            genkey) echo '{priv_key}'; exit 0 ;;\n\
-           pubkey) cat >/dev/null; echo '{pub_key}'; exit 0 ;;\n\
+           pubkey)\n\
+             read -r piped_priv\n\
+             if [[ -z \"$piped_priv\" ]]; then\n\
+               echo 'fake wg pubkey: empty stdin — caller did not pipe priv' >&2\n\
+               exit 2\n\
+             fi\n\
+             echo '{pub_key}'\n\
+             exit 0\n\
+             ;;\n\
            *) echo 'fake wg: unsupported subcommand' >&2; exit 1 ;;\n\
          esac\n"
     );
@@ -99,4 +108,20 @@ fn awg_keygen_corrupted_priv_on_idempotent_path_regenerates() {
     awg::keygen(out.path(), false, &wg).expect("regenerates on empty");
     let priv_content = fs::read_to_string(out.path().join("awg-private.key")).unwrap();
     assert_eq!(priv_content.trim(), PRIV_44);
+}
+
+#[test]
+fn awg_keygen_whitespace_only_priv_treated_as_missing() {
+    let bin = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    let wg = fake_wg(bin.path(), PRIV_44, PUB_44);
+    // File exists with non-zero length but trims to empty — must regenerate.
+    fs::write(out.path().join("awg-private.key"), "   \n\t  \n").unwrap();
+    awg::keygen(out.path(), false, &wg).expect("regenerates on whitespace");
+    let priv_after = fs::read_to_string(out.path().join("awg-private.key")).unwrap();
+    assert_eq!(
+        priv_after.trim(),
+        PRIV_44,
+        "whitespace-only priv must trigger regeneration"
+    );
 }
