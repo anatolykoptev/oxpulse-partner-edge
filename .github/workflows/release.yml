@@ -287,15 +287,23 @@ jobs:
         env:
           VERSION: ${{ needs.extract-version.outputs.version }}
         run: |
-          cp install.sh     partner-edge-installer.sh
-          cp upgrade.sh     partner-edge-upgrade.sh
-          cp healthcheck.sh partner-edge-healthcheck.sh
+          cp install.sh                partner-edge-installer.sh
+          cp upgrade.sh                partner-edge-upgrade.sh
+          cp healthcheck.sh            partner-edge-healthcheck.sh
+          # Phase 4.1: install.sh sources lib/install-*.sh modules. Ship
+          # them as individual release assets so install.sh's
+          # _install_lib_source helper can fetch them from REPO_RAW (its
+          # tier-4 fallback) or from operator-staged /usr/local/lib/partner-edge.
+          cp lib/install-preflight.sh  install-preflight.sh
+          cp lib/install-deps.sh       install-deps.sh
           chmod +x partner-cli-amd64 partner-cli-arm64
           chmod +x opec-amd64 opec-arm64
           sha256sum \
             partner-edge-installer.sh \
             partner-edge-upgrade.sh \
             partner-edge-healthcheck.sh \
+            install-preflight.sh \
+            install-deps.sh \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
@@ -317,6 +325,8 @@ jobs:
             partner-edge-installer.sh \
             partner-edge-upgrade.sh \
             partner-edge-healthcheck.sh \
+            install-preflight.sh \
+            install-deps.sh \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \

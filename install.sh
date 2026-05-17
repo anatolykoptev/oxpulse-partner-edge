@@ -593,161 +593,51 @@ if [[ "$CHECK_MODE" -eq 1 ]]; then
 	exit $_rc
 fi
 
-# ---------- Step 1: preflight ----------
-log "[1/10] preflight checks"
-OS_ID=""; OS_FAMILY=""
-if [[ -r /etc/os-release ]]; then
-	# shellcheck source=/dev/null
-	. /etc/os-release
-	OS_ID="$ID"
-	case " $ID ${ID_LIKE:-} " in
-		*" debian "*|*" ubuntu "*) OS_FAMILY=debian ;;
-		*" rhel "*|*" fedora "*|*" centos "*|*" almalinux "*|*" rocky "*) OS_FAMILY=rhel ;;
-		*) die "unsupported OS: ID=$ID ID_LIKE=${ID_LIKE:-<empty>} (need Debian/Ubuntu/AlmaLinux/Rocky/RHEL)" ;;
-	esac
-fi
-log "  os=$OS_ID family=$OS_FAMILY"
-
-if [[ $DRY_RUN -eq 0 ]]; then
-	# Idempotency: if our own oxpulse-partner-* containers are already
-	# bound to the ports, treat preflight as a no-op (re-install path).
-	# Otherwise an unrelated process holding the port is still a hard fail.
-	owned_by_oxpulse=0
-	if command -v docker >/dev/null 2>&1 \
-		&& docker ps --filter 'name=oxpulse-partner-' --format '{{.Names}}' 2>/dev/null \
-		| grep -q .; then
-		owned_by_oxpulse=1
-	fi
-	check_port_free() {
-		local port=$1 proto=$2
-		ss -ln"${proto}" 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$" || return 0
-		if [[ $owned_by_oxpulse -eq 1 ]]; then
-			warn "port $port/$proto held by existing oxpulse-partner-* container — re-install path, continuing"
+# ---------- Phase 4.1: lib module loader ----------
+# Resolves a lib/install-*.sh module via lookup order:
+#   1. $INSTALL_LIB_DIR/<name>              (operator override / test)
+#   2. /usr/local/lib/partner-edge/<name>   (FHS default, set by release tarball)
+#   3. $(dirname "$0")/lib/<name>           (dev / running from checkout)
+#   4. fetch $REPO_RAW/lib/<name>           (curl|bash flow, no tarball on disk)
+_install_lib_source() {
+	local name=$1
+	local candidate
+	for candidate in \
+		"${INSTALL_LIB_DIR:-}/$name" \
+		"/usr/local/lib/partner-edge/$name" \
+		"$(dirname "$0")/lib/$name"; do
+		# Skip "/<name>" produced when INSTALL_LIB_DIR is empty/unset.
+		[[ -n "$candidate" && "$candidate" != "/$name" ]] || continue
+		if [[ -r "$candidate" ]]; then
+			# shellcheck source=/dev/null
+			. "$candidate"
 			return 0
 		fi
-		die "port $port/$proto is already in use — free it before installing"
-	}
-	for p in 80 443 3478 5349 "$SFU_METRICS_PORT"; do check_port_free "$p" t; done
-	check_port_free 3478 u
-	# M2.1: str0m SFU media port (UDP). Default 7878 avoids coturn's 3478.
-	check_port_free "$SFU_UDP_PORT" u
-	log "  ports 80/443/3478/5349/${SFU_UDP_PORT}(udp)/${SFU_METRICS_PORT}(tcp) preflight done (oxpulse-owned=${owned_by_oxpulse})"
-fi
-
-# ---------- Step 1b: firewall auto-open ----------
-# Without this, ACME HTTP-01 silently fails (port 80) and TURN/SFU media
-# never reach the host. Confirmed 2026-05-01 on a fresh CentOS Stream 9
-# install where firewalld was active by default.
-#
-# Supports two stacks (whichever is active):
-#   firewalld   — default on RHEL/CentOS/Rocky/Alma
-#   ufw         — common on Ubuntu/Debian when explicitly enabled
-#
-# If neither is active, assume operator runs an external SG / cloud
-# firewall and skip silently.
-fw_specs=(80/tcp 443/tcp 3478/tcp 3478/udp 5349/tcp \
-	"${SFU_UDP_PORT}/udp" "${SFU_METRICS_PORT}/tcp")
-
-if [[ $DRY_RUN -eq 0 ]] \
-	&& command -v firewall-cmd >/dev/null 2>&1 \
-	&& systemctl is-active --quiet firewalld; then
-	log "[1b] opening firewalld ports"
-	fw_added=0
-	for spec in "${fw_specs[@]}"; do
-		if ! firewall-cmd --query-port="$spec" >/dev/null 2>&1; then
-			firewall-cmd --add-port="$spec" --permanent >/dev/null
-			fw_added=1
-			log "  + $spec"
-		fi
 	done
-	if [[ $fw_added -eq 1 ]]; then
-		firewall-cmd --reload >/dev/null
-		log "  firewalld reloaded"
-	else
-		log "  all required ports already open"
+	local tmp
+	tmp=$(mktemp)
+	# Trap ensures the temp file is cleaned up even if the sourced module
+	# calls die/exit (e.g. preflight_run on unsupported OS) — otherwise
+	# every failing install leaves a stray /tmp/tmp.XXXX behind.
+	# Single-quoted so $tmp expands at signal time, not at trap definition
+	# (shellcheck SC2064). Safe either way in this scope, but the canonical
+	# idiom keeps the lint clean.
+	trap 'rm -f "$tmp"' RETURN
+	if curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
+		"${REPO_RAW}/lib/$name" -o "$tmp"; then
+		# shellcheck source=/dev/null
+		. "$tmp"
+		return 0
 	fi
-elif [[ $DRY_RUN -eq 0 ]] \
-	&& command -v ufw >/dev/null 2>&1 \
-	&& ufw status 2>/dev/null | head -1 | grep -qi 'Status: active'; then
-	log "[1b] opening ufw ports"
-	for spec in "${fw_specs[@]}"; do
-		# ufw allow takes "<port>/<proto>" directly; idempotent on identical rules.
-		ufw allow "$spec" >/dev/null
-		log "  + $spec"
-	done
-fi
+	die "lib module $name not found in INSTALL_LIB_DIR / /usr/local/lib/partner-edge / \$(dirname \$0)/lib and fetch from \$REPO_RAW failed"
+}
 
-# ---------- Step 1c: dnf cache sanity (rhel only) ----------
-# Some VPS providers (e.g. fvds.ru / hoztnode) ship images where every
-# `metalink=` and `baseurl=` line in /etc/yum.repos.d/centos.repo is
-# commented out, expecting the operator to wire in a private mirror.
-# `dnf install` then fails with the unhelpful "Cannot find a valid
-# baseurl for repo: baseos" deep inside get.docker.com — confusing and
-# hard to debug. Detect early and re-enable the official metalink.
-if [[ $DRY_RUN -eq 0 && $OS_FAMILY == rhel ]] && command -v dnf >/dev/null 2>&1; then
-	if ! dnf -q makecache --setopt=metadata_expire=0 >/dev/null 2>&1; then
-		warn "  dnf makecache failed — checking for commented metalinks in /etc/yum.repos.d"
-		repaired=0
-		for f in /etc/yum.repos.d/centos.repo /etc/yum.repos.d/centos-addons.repo; do
-			[[ -f "$f" ]] || continue
-			if grep -q '^#metalink=https://mirrors.centos.org' "$f"; then
-				sed -i 's|^#metalink=https://mirrors.centos.org|metalink=https://mirrors.centos.org|g' "$f"
-				log "  re-enabled metalinks in $f"
-				repaired=1
-			fi
-		done
-		if [[ $repaired -eq 1 ]]; then
-			dnf -q makecache --setopt=metadata_expire=0 >/dev/null 2>&1 \
-				|| die "dnf still broken after metalink re-enable — inspect /etc/yum.repos.d/ manually"
-			log "  dnf cache rebuilt"
-		else
-			die "dnf makecache failed and no commented-metalink pattern matched — inspect /etc/yum.repos.d/ and DNS"
-		fi
-	fi
-fi
+_install_lib_source install-preflight.sh
+_install_lib_source install-deps.sh
 
-# ---------- Step 1b: runtime deps (jq, curl) ----------
-# jq is required by oxpulse-partner-edge-refresh.sh for JSON parsing.
-# curl is required by install.sh itself and the refresh script.
-# Install both unconditionally so systemd-managed refresh runs succeed even
-# on minimal OS images (e.g. CentOS Stream 9 / AlmaLinux without extras).
-if [[ $DRY_RUN -eq 0 ]]; then
-	for _pkg in jq curl; do
-		if ! command -v "$_pkg" >/dev/null 2>&1; then
-			log "  installing missing runtime dep: $_pkg"
-			if [[ $OS_FAMILY == rhel ]]; then
-				dnf install -y "$_pkg" >/dev/null 2>&1 \
-					|| die "dnf install $_pkg failed — install manually then re-run"
-			else
-				apt-get install -y -q "$_pkg" >/dev/null 2>&1 \
-					|| die "apt-get install $_pkg failed"
-			fi
-		fi
-	done
-	unset _pkg
-fi
+preflight_run
 
-# ---------- Step 2: Docker ----------
-log "[2/10] ensuring docker + compose plugin"
-if [[ $DRY_RUN -eq 0 ]]; then
-	if ! command -v docker >/dev/null 2>&1; then
-		log "  docker not found — installing via get.docker.com"
-		curl -fsSL --proto '=https' --tlsv1.2 https://get.docker.com -o /tmp/get-docker.sh
-		sh /tmp/get-docker.sh
-		rm -f /tmp/get-docker.sh
-	fi
-	if ! docker compose version >/dev/null 2>&1; then
-		if [[ $OS_FAMILY == debian ]]; then
-			apt-get update -q && apt-get install -y -q docker-compose-plugin dnsutils
-		else
-			dnf install -y docker-compose-plugin bind-utils || dnf install -y docker-compose bind-utils
-		fi
-	fi
-	systemctl enable --now docker
-	log "  docker $(docker --version | awk '{print $3}' | tr -d ,) ready"
-else
-	warn "  [dry-run] skipping docker install"
-fi
+deps_install
 
 # ---------- Step 3: public/private IP autodetect ----------
 log "[3/10] detecting IPs"
