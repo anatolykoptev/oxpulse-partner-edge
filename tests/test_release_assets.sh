@@ -74,3 +74,15 @@ setup() {
 @test "release.yml uploads install-network.sh to GitHub release" {
     grep -A14 'gh release upload' .github/workflows/release.yml | grep -q 'install-network.sh'
 }
+
+@test "release.yml stages lib/install-runtime.sh as install-runtime.sh asset" {
+    grep -qE 'cp[[:space:]]+lib/install-runtime\.sh[[:space:]]+install-runtime\.sh' .github/workflows/release.yml
+}
+
+@test "release.yml SHA256SUMS line covers install-runtime.sh" {
+    grep -A16 -E 'sha256sum' .github/workflows/release.yml | grep -q 'install-runtime.sh'
+}
+
+@test "release.yml uploads install-runtime.sh to GitHub release" {
+    grep -A16 'gh release upload' .github/workflows/release.yml | grep -q 'install-runtime.sh'
+}

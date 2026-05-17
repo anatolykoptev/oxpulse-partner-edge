@@ -297,6 +297,7 @@ jobs:
           cp lib/install-preflight.sh  install-preflight.sh
           cp lib/install-deps.sh       install-deps.sh
           cp lib/install-network.sh    install-network.sh
+          cp lib/install-runtime.sh    install-runtime.sh
           chmod +x partner-cli-amd64 partner-cli-arm64
           chmod +x opec-amd64 opec-arm64
           sha256sum \
@@ -306,6 +307,7 @@ jobs:
             install-preflight.sh \
             install-deps.sh \
             install-network.sh \
+            install-runtime.sh \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
@@ -330,6 +332,7 @@ jobs:
             install-preflight.sh \
             install-deps.sh \
             install-network.sh \
+            install-runtime.sh \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
