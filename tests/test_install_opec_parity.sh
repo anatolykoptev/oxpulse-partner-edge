@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Phase 2 Task 6 — install.sh must expose render_with_opec_or_fallback() and
+# Phase 2 Task 6 — install.sh must expose render_with_opec() and
 # use it for xray/coturn/naive call sites. The fallback branch (opec NOT on
 # PATH) must produce byte-identical output to the Phase-1 golden fixtures.
 
@@ -66,47 +66,51 @@ mirror_install_exports() {
          HY2_SERVER HY2_AUTH_PASS HY2_OBFS_PASS HY2_LOCAL_LISTEN HY2_REMOTE_BACKEND
 }
 
-@test "install.sh exposes render_with_opec_or_fallback helper" {
-  grep -qE 'render_with_opec_or_fallback\(\)' install.sh
+@test "install.sh exposes render_with_opec helper" {
+  grep -qE 'render_with_opec\(\)' install.sh
 }
 
-@test "install.sh calls render_with_opec_or_fallback for xray" {
-  grep -qE 'render_with_opec_or_fallback[[:space:]]+xray' install.sh
+@test "install.sh calls render_with_opec for xray" {
+  grep -qE 'render_with_opec[[:space:]]+xray' install.sh
 }
 
-@test "install.sh calls render_with_opec_or_fallback for coturn" {
-  grep -qE 'render_with_opec_or_fallback[[:space:]]+coturn' install.sh
+@test "install.sh calls render_with_opec for coturn" {
+  grep -qE 'render_with_opec[[:space:]]+coturn' install.sh
 }
 
-@test "install.sh calls render_with_opec_or_fallback for naive" {
-  grep -qE 'render_with_opec_or_fallback[[:space:]]+naive' install.sh
+@test "install.sh calls render_with_opec for naive" {
+  grep -qE 'render_with_opec[[:space:]]+naive' install.sh
 }
 
-@test "install.sh calls render_with_opec_or_fallback for compose" {
-  grep -qE 'render_with_opec_or_fallback[[:space:]]+compose' install.sh
+@test "install.sh calls render_with_opec for compose" {
+  grep -qE 'render_with_opec[[:space:]]+compose' install.sh
 }
 
-@test "install.sh calls render_with_opec_or_fallback for caddy" {
-  grep -qE 'render_with_opec_or_fallback[[:space:]]+caddy' install.sh
+@test "install.sh calls render_with_opec for caddy" {
+  grep -qE 'render_with_opec[[:space:]]+caddy' install.sh
 }
 
 @test "install.sh no longer has bare render_template calls for stage templates" {
   ! grep -qE 'render_template[[:space:]]+"\$stage/' install.sh
 }
 
-# Fallback branch (opec NOT on PATH) — byte-identical to pre-Phase-2 behaviour.
-# Sources the helper body from install.sh, strips opec PATH, exercises fallback.
-@test "fallback branch produces byte-identical xray output" {
+# Phase 4.4 removed the bash render_template fallback branch entirely.
+# `render_with_opec` now die's loudly if `opec` is not on PATH.
+@test "render_with_opec hard-fails without opec on PATH" {
   set_frozen_vars
   mirror_install_exports
-  # Extract and source render_with_opec_or_fallback from install.sh
-  eval "$(awk '/^render_with_opec_or_fallback\(\) \{/,/^\}/' install.sh)"
+  eval "$(awk '/^render_with_opec\(\) \{/,/^\}/' install.sh)"
+  # Provide a die stub so the test can observe the exit instead of inheriting bats' set -e.
+  die() { echo "die: $*" >&2; return 1; }
   out=$(mktemp)
-  # PATH without opec forces the fallback branch
-  PATH=/usr/bin:/bin render_with_opec_or_fallback xray \
-    tests/fixtures/install-render/xray.tpl "$out"
-  diff -u tests/fixtures/install-render/expected/xray.txt "$out"
+  run env PATH=/usr/bin:/bin bash -c "
+    die() { echo \"die: \$*\" >&2; exit 1; }
+    $(awk '/^render_with_opec\(\) \{/,/^\}/' install.sh)
+    render_with_opec xray '$BATS_TEST_DIRNAME/fixtures/install-render/xray.tpl' '$out'
+  "
   rm -f "$out"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"opec binary not on PATH"* ]]
 }
 
 @test "install.sh sources lib/install-preflight.sh module" {

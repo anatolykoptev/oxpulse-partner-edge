@@ -67,16 +67,16 @@ if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v partner-cli >/dev/null 2>&1; then
 fi
 
 # opec is the typed render binary for all 5 stage templates (xray, coturn,
-# naive, compose, caddy — Phase 3 OPEC render absorption). Without it,
-# install.sh falls back to bash render_template — works but skips per-kind
-# validation (JSON / realm / YAML / balanced-brace) that OPEC adds.
-# Auto-fetch from release assets.
+# naive, compose, caddy) plus secrets bootstrap (reality-keygen, awg-keygen,
+# register, sfu-signing-key). Phase 4.4 made it a HARD requirement — there is
+# no bash fallback for render anymore. Auto-fetch from release assets here so a
+# fresh-install host needs only install.sh + a working network.
 if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v opec >/dev/null 2>&1; then
 	_machine=$(uname -m)
 	case "$_machine" in
 		x86_64)  _opec_arch=amd64 ;;
 		aarch64) _opec_arch=arm64 ;;
-		*) warn "opec: unsupported architecture: $_machine — render falls back to bash render_template" ;;
+		*) die "opec: unsupported architecture: $_machine — supply an opec binary on PATH or use INSTALL_OPEC_FROM_PATH=" ;;
 	esac
 	if [[ -n "${_opec_arch:-}" ]]; then
 		_opec_url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/opec-${_opec_arch}"
@@ -84,8 +84,8 @@ if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v opec >/dev/null 2>&1; then
 		if curl -fsSL --max-time 60 "$_opec_url" -o /usr/local/bin/opec 2>/dev/null; then
 			chmod +x /usr/local/bin/opec
 		else
-			warn "opec download failed from $_opec_url — render falls back to bash render_template"
 			rm -f /usr/local/bin/opec
+			die "opec download failed from $_opec_url — render is no longer optional (Phase 4.4 removed the bash fallback). Pre-stage /usr/local/bin/opec or check network connectivity to GitHub releases."
 		fi
 	fi
 	unset _machine _opec_arch _opec_url
@@ -1591,12 +1591,11 @@ if [[ $DRY_RUN -eq 1 ]]; then
 	coturn_out="$dryroot/coturn.conf"
 	cover_out_dir="$dryroot/cover"
 fi
-# render_template (channel-render-lib.sh) calls python3 as a subprocess and
-# reads template placeholders from ambient env. Every {{VAR}} placeholder in
-# the 6 .tpl files must therefore be exported. Co-located here so the export
-# list is easy to audit against the placeholder set. Previously these were
-# passed as `VAR=val python3 -c '...'` env prefix inside the deleted local
-# render() function.
+# `opec render` reads template placeholders from ambient env (it shares the
+# same {{VAR}} substitution semantics that the legacy bash render_template
+# used pre-Phase-4.4). Every placeholder in the 6 .tpl files must therefore be
+# exported. Co-located here so the export list is easy to audit against the
+# placeholder set.
 PARTNER_DOMAIN="$DOMAIN"
 # Caddy tunnel upstream vars — sourced from defaults.conf via channel-render-lib.sh.
 # Placeholder names in Caddyfile.tpl must match these var names exactly.
@@ -1613,27 +1612,28 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID \
        OTEL_EXPORTER_OTLP_ENDPOINT \
        SFU_SIGNING_PUBLIC_KEY RELAY_JWT_SECRET SIGNALING_SFU_SECRET
-# Phase 3 delegation complete: all 5 stage templates (compose, caddy, xray,
-# coturn, naive) now go through render_with_opec_or_fallback. OPEC adds
-# per-kind validation (JSON / YAML / balanced-brace / realm directive)
-# that catches corrupt renders before docker compose start. bash
-# render_template remains as the fallback when opec is not on PATH.
-render_with_opec_or_fallback() {
+# Phase 4.4: all 5 stage templates (compose, caddy, xray, coturn, naive) now go
+# through `opec render`. The bash render_template fallback is GONE — opec is a
+# hard requirement (auto-fetched at install.sh L60+; `partner-edge-installer.sh`
+# release asset ships a recent opec binary alongside). The per-kind validation
+# (JSON / YAML / balanced-brace / realm directive) is the whole point — without
+# it a corrupt render would slip through to `docker compose up` and fail
+# opaquely. Drop opec on PATH? install.sh die's loud at the first render below.
+render_with_opec() {
     local kind=$1 src=$2 dst=$3
-    if command -v opec >/dev/null 2>&1; then
-        opec render "$kind" --tpl "$src" --out "$dst"
-    else
-        render_template "$src" "$dst"
-    fi
+    command -v opec >/dev/null 2>&1 \
+        || die "opec binary not on PATH — Phase 4.4 made it a hard requirement (no bash fallback). Re-run install.sh from a fresh tarball or set INSTALL_OPEC_FROM_PATH=/path/to/opec."
+    opec render "$kind" --tpl "$src" --out "$dst" \
+        || die "opec render $kind failed for $src — see error above"
 }
-render_with_opec_or_fallback compose "$stage/compose.tpl" "$compose_out"
-render_with_opec_or_fallback caddy   "$stage/caddy.tpl"   "$caddy_out"
+render_with_opec compose "$stage/compose.tpl" "$compose_out"
+render_with_opec caddy   "$stage/caddy.tpl"   "$caddy_out"
 # Phase 1: compute sha256 of rendered Caddyfile and substitute __CADDYFILE_SHA__
 # placeholder so /canary/config-hash returns the actual hash at runtime.
 _rendered_sha=$(sha256sum "$caddy_out" | awk '{print $1}')
 sed -i "s|__CADDYFILE_SHA__|${_rendered_sha}|g" "$caddy_out"
-render_with_opec_or_fallback xray    "$stage/xray.tpl"    "$xray_out"
-render_with_opec_or_fallback coturn  "$stage/coturn.tpl"  "$coturn_out"
+render_with_opec xray    "$stage/xray.tpl"    "$xray_out"
+render_with_opec coturn  "$stage/coturn.tpl"  "$coturn_out"
 
 # AmneziaWG mesh setup — runs only when the central returned an awg block.
 # Builds amneziawg from source, writes /etc/amnezia/amneziawg/awg0.conf
@@ -1688,7 +1688,7 @@ if declare -f re_render_hysteria2 >/dev/null 2>&1; then
 	fi
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
-	render_with_opec_or_fallback naive "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"
+	render_with_opec naive "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"
 	chmod 0600 "$PREFIX_ETC/naive-client.json"
 	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch5"
 	log "  naive-client.json rendered (CH5 profile enabled)"
