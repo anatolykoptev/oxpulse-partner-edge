@@ -1889,6 +1889,20 @@ if [[ $DRY_RUN -eq 0 ]]; then
 			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
 		fi
 	done
+	# M2.6a: per-channel health reporter (60s timer → POST /api/partner/channel-health).
+	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-channels-health-report.sh" ]]; then
+		install -m 0755 "$src_dir/oxpulse-channels-health-report.sh" "$PREFIX_SBIN/oxpulse-channels-health-report"
+	else
+		curl -fsSL "$REPO_RAW/oxpulse-channels-health-report.sh" -o "$PREFIX_SBIN/oxpulse-channels-health-report"
+		chmod 0755 "$PREFIX_SBIN/oxpulse-channels-health-report"
+	fi
+	for unit in oxpulse-channels-health-report.service oxpulse-channels-health-report.timer; do
+		if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
+			install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
+		else
+			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+		fi
+	done
 	systemctl daemon-reload
 	if [ "$BAKE_MODE" = "0" ]; then
 		systemctl enable --now oxpulse-partner-edge.service
@@ -1897,6 +1911,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		systemctl enable --now oxpulse-partner-edge-sni-rotate.timer
 		systemctl enable --now oxpulse-xray-update.timer
 		systemctl enable --now oxpulse-geoip-refresh.timer
+		systemctl enable --now oxpulse-channels-health-report.timer
 	else
 		# Bake mode: enable hydrate so it fires on first boot after snapshot→clone.
 		# Do NOT start it now — secrets aren't present yet.
@@ -1905,6 +1920,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		systemctl enable oxpulse-partner-edge-sni-rotate.timer
 		systemctl enable oxpulse-xray-update.timer
 		systemctl enable oxpulse-geoip-refresh.timer
+		systemctl enable oxpulse-channels-health-report.timer
 		log "  [bake] units installed, daemon-reloaded; hydrate + refresh enabled for first boot"
 	fi
 else

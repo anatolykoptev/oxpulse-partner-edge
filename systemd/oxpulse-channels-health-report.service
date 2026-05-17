@@ -1,0 +1,10 @@
+[Unit]
+Description=Report partner-edge channel health to central
+After=network.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/oxpulse-channels-health-report
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
