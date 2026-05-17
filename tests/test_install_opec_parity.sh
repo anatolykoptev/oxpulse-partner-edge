@@ -144,3 +144,12 @@ mirror_install_exports() {
 @test "install.sh no longer inlines _detect_region" {
     ! grep -qE '^_detect_region\(\)' install.sh
 }
+
+@test "install.sh delegates reality-keygen to opec when OPEC_SECRETS_REALITY_KEYGEN!=0" {
+    grep -qE 'OPEC_SECRETS_REALITY_KEYGEN' install.sh
+    grep -qE 'opec[[:space:]]+secrets[[:space:]]+reality-keygen' install.sh
+}
+
+@test "install.sh preserves bash fallback for reality-keygen" {
+    grep -qE 'partner-cli[[:space:]]+keygen' install.sh
+}
