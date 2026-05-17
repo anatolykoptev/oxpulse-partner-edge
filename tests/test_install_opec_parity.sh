@@ -144,3 +144,28 @@ mirror_install_exports() {
 @test "install.sh no longer inlines _detect_region" {
     ! grep -qE '^_detect_region\(\)' install.sh
 }
+
+@test "install.sh delegates reality-keygen to opec when OPEC_SECRETS_REALITY_KEYGEN!=0" {
+    grep -qE 'OPEC_SECRETS_REALITY_KEYGEN' install.sh
+    grep -qE 'opec[[:space:]]+secrets[[:space:]]+reality-keygen' install.sh
+}
+
+@test "install.sh preserves bash fallback for reality-keygen" {
+    grep -qE 'partner-cli[[:space:]]+keygen' install.sh
+}
+
+@test "install.sh OPEC path honors DRY_RUN (no side-effect invocation)" {
+    # The OPEC dispatcher must not call 'opec secrets reality-keygen' in
+    # dry-run mode. Encoded as: there is a DRY_RUN check inside the OPEC branch
+    # block that precedes the actual invocation.
+    awk '/OPEC_SECRETS_REALITY_KEYGEN/,/^else$/' install.sh \
+        | grep -qE 'DRY_RUN[[:space:]]*-eq[[:space:]]*1'
+}
+
+@test "install.sh OPEC path maps FORCE_KEYGEN to --rotate" {
+    # --force-keygen / --rotate-identity flags set FORCE_KEYGEN=1; OPEC branch
+    # must translate that to the --rotate flag so operator rotation works
+    # regardless of which backend is active.
+    awk '/OPEC_SECRETS_REALITY_KEYGEN/,/^else$/' install.sh \
+        | grep -qE 'FORCE_KEYGEN[[:space:]]*-eq[[:space:]]*1.*--rotate|--rotate.*FORCE_KEYGEN'
+}
