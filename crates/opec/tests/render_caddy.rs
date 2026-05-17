@@ -47,6 +47,11 @@ fn set_frozen_env() {
     env::set_var("HY2_OBFS_PASS", "");
     env::set_var("HY2_LOCAL_LISTEN", "");
     env::set_var("HY2_REMOTE_BACKEND", "");
+    // Caddy tunnel_upstream snippet — refactored to take AWG/SFU-relay backend
+    // plus a hysteria2 fallback. Fixture encodes these literals.
+    env::set_var("AWG_MOTHERLY_IP", "10.9.0.2");
+    env::set_var("HY2_FALLBACK_HOST", "host.docker.internal");
+    env::set_var("HY2_FALLBACK_PORT", "18443");
 }
 
 #[test]
