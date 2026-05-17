@@ -33,11 +33,11 @@ BACKEND_URL="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
 BACKEND_URL="${BACKEND_URL%/}"
 LOG_FILE="${LOG_FILE:-/var/log/oxpulse-partner-edge-update.log}"
 
-# Template: prefer local checkout copy (dev/ci), then REPO_RAW network fetch.
-# OXPULSE_REPO_RAW can override to point at a local path (tests).
+# Script directory — used to locate channel-render-lib.sh from same checkout.
+# OXPULSE_REPO_RAW can override the template source in channel-render-lib.sh.
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-TPL_LOCAL="${_script_dir}/xray-client.json.tpl"
 REPO_RAW="${OXPULSE_REPO_RAW:-https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main}"
+export REPO_RAW  # consumed by channel-render-lib::re_render_xray
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -46,6 +46,22 @@ ts()   { date -Iseconds 2>/dev/null || date; }
 log()  { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG_FILE" 2>/dev/null || printf '%s %s\n' "$(ts)" "$*" >&2; }
 warn() { log "WARN $*"; }
 die()  { log "ERR  $*"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Source channel-render-lib.sh (owns re_render_xray and _esc helpers)
+# ---------------------------------------------------------------------------
+_chan_lib_local="${_script_dir}/channel-render-lib.sh"
+_chan_lib_installed="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
+if [[ -f "$_chan_lib_local" ]]; then
+    # shellcheck source=channel-render-lib.sh
+    source "$_chan_lib_local"
+elif [[ -f "$_chan_lib_installed" ]]; then
+    # shellcheck source=/dev/null
+    source "$_chan_lib_installed"
+else
+    die "channel-render-lib.sh not found (looked at $_chan_lib_local and $_chan_lib_installed)"
+fi
+unset _chan_lib_local _chan_lib_installed
 
 # ---------------------------------------------------------------------------
 # Dependency check
@@ -134,185 +150,15 @@ if [[ $_has_flat_fields -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 3: Acquire xray template
+# Steps 3-6: Render xray-client.json + atomic install + container restart
 #
-# Prefer local checkout copy (always fresh when deployed from git).
-# Fall back to network fetch from REPO_RAW.
+# Delegated to channel-render-lib::re_render_xray — the canonical
+# implementation shared by oxpulse-partner-edge-refresh.sh and upgrade.sh.
+# The lib reads NODE_CFG (already refreshed in Step 1), fetches/validates the
+# template, substitutes secrets (dual flat/channels[] schema), installs
+# atomically, and restarts the container.
 # ---------------------------------------------------------------------------
-_tpl=$(mktemp)
-trap 'rm -f "$_tpl"' EXIT
-
-if [[ -f "$TPL_LOCAL" ]]; then
-    cp "$TPL_LOCAL" "$_tpl"
-    log "using local xray-client.json.tpl"
-else
-    log "fetching xray-client.json.tpl from $REPO_RAW"
-    if ! curl -fsSL --max-time 30 "$REPO_RAW/xray-client.json.tpl" -o "$_tpl"; then
-        die "could not fetch xray-client.json.tpl from $REPO_RAW — cannot render"
-    fi
-fi
-
-# Verify template is non-empty
-[[ -s "$_tpl" ]] || die "xray-client.json.tpl is empty after fetch"
-
-# ---------------------------------------------------------------------------
-# Step 4: Read secrets from node-config.json
-#
-# Same dual-schema logic as channel-render-lib.sh::re_render_xray.
-# ---------------------------------------------------------------------------
-log "reading secrets from node-config.json"
-
-_read_field() {
-    local primary="$1"
-    local fallback="$2"
-    python3 -c "
-import json, sys
-d = json.load(open(sys.argv[1]))
-ch = d.get('channels', [])
-x = ch[0].get('xray', {}) if ch and ch[0].get('protocol', '') == 'vless-reality' else {}
-val = x.get('$primary', '') or d.get('$fallback', '')
-print(val if val is not None else '')
-" "$NODE_CFG" 2>/dev/null || true
-}
-
-_uuid=$(python3 -c "
-import json, sys; d = json.load(open(sys.argv[1]))
-ch = d.get('channels', [])
-x = ch[0].get('xray', {}) if ch and ch[0].get('protocol', '') == 'vless-reality' else {}
-print(x.get('uuid', '') or d.get('reality_uuid', ''))
-" "$NODE_CFG")
-
-_pub_key=$(python3 -c "
-import json, sys; d = json.load(open(sys.argv[1]))
-ch = d.get('channels', [])
-x = ch[0].get('xray', {}) if ch and ch[0].get('protocol', '') == 'vless-reality' else {}
-print(x.get('public_key', '') or d.get('reality_public_key', ''))
-" "$NODE_CFG")
-
-_enc=$(python3 -c "
-import json, sys; d = json.load(open(sys.argv[1]))
-ch = d.get('channels', [])
-x = ch[0].get('xray', {}) if ch and ch[0].get('protocol', '') == 'vless-reality' else {}
-print(x.get('encryption', '') or d.get('reality_encryption', '') or '')
-" "$NODE_CFG")
-
-_short_id=$(python3 -c "
-import json, sys; d = json.load(open(sys.argv[1]))
-ch = d.get('channels', [])
-x = ch[0].get('xray', {}) if ch and ch[0].get('protocol', '') == 'vless-reality' else {}
-print(x.get('short_id', '') or d.get('reality_short_id', ''))
-" "$NODE_CFG")
-
-_server_name=$(python3 -c "
-import json, sys; d = json.load(open(sys.argv[1]))
-ch = d.get('channels', [])
-x = ch[0].get('xray', {}) if ch and ch[0].get('protocol', '') == 'vless-reality' else {}
-names = x.get('server_names') or d.get('reality_server_names')
-print((names[0] if names else None) or x.get('server_name', '') or d.get('reality_server_name', 'www.samsung.com'))
-" "$NODE_CFG")
-
-_backend=$(python3 -c "
-import json, sys; d = json.load(open(sys.argv[1]))
-ch = d.get('channels', [])
-if ch and ch[0].get('protocol', '') == 'vless-reality':
-    c0 = ch[0]; print('{}:{}'.format(c0.get('host', ''), c0.get('port', '')))
-else:
-    print(d.get('backend_endpoint', ''))
-" "$NODE_CFG")
-
-# Validate required fields
-[[ -n "$_uuid" ]]     || die "reality_uuid missing from node-config.json"
-[[ -n "$_pub_key" ]]  || die "reality_public_key missing from node-config.json"
-[[ -n "$_backend" ]]  || die "backend_endpoint missing from node-config.json"
-
-# Fallback: read encryption from live xray-client.json if node-config has none
-if [[ -z "$_enc" && -f "$XRAY_CFG" ]]; then
-    _enc=$(python3 -c "
-import json, sys
-try:
-    c = json.load(open(sys.argv[1]))
-    u = c['outbounds'][0]['settings']['vnext'][0]['users'][0]
-    print(u.get('encryption', ''))
-except Exception:
-    print('')
-" "$XRAY_CFG" 2>/dev/null || true)
-fi
-[[ -z "$_enc" ]] && _enc="none"
-
-_backend_host="${_backend%:*}"
-_backend_port="${_backend##*:}"
-
-# ---------------------------------------------------------------------------
-# Step 5: Render xray-client.json from template
-# ---------------------------------------------------------------------------
-log "rendering xray-client.json (uuid=${_uuid:0:8}… pub=${_pub_key:0:8}… backend=$_backend)"
-
-# Escape sed replacement metacharacters (|, &, \)
-_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
-
-_out=$(mktemp)
-trap 'rm -f "$_tpl" "$_out"' EXIT
-
-sed \
-    -e "s|{{REALITY_UUID}}|$(_esc "$_uuid")|g" \
-    -e "s|{{REALITY_ENCRYPTION}}|$(_esc "$_enc")|g" \
-    -e "s|{{REALITY_PUBLIC_KEY}}|$(_esc "$_pub_key")|g" \
-    -e "s|{{REALITY_SHORT_ID}}|$(_esc "$_short_id")|g" \
-    -e "s|{{REALITY_SERVER_NAME}}|$(_esc "$_server_name")|g" \
-    -e "s|{{BACKEND_HOST}}|$(_esc "$_backend_host")|g" \
-    -e "s|{{BACKEND_PORT}}|$(_esc "$_backend_port")|g" \
-    -e "s|{{BACKEND_ENDPOINT}}|$(_esc "$_backend")|g" \
-    "$_tpl" > "$_out"
-
-# Validate rendered JSON
-if ! python3 -m json.tool "$_out" >/dev/null 2>&1; then
-    die "rendered xray-client.json is not valid JSON — template may be corrupt"
-fi
-
-# Verify mode field (fail-loud on template drift)
-_rendered_mode=$(python3 -c "
-import json, sys
-d = json.load(open(sys.argv[1]))
-for ob in d.get('outbounds', []):
-    s = ob.get('streamSettings', {}).get('xhttpSettings', {})
-    if s: print(s.get('mode', '')); sys.exit(0)
-print('')
-" "$_out" 2>/dev/null || true)
-
-if [[ -z "$_rendered_mode" ]]; then
-    warn "xhttpSettings.mode not found in rendered config — template structure unexpected"
-fi
-log "rendered config mode=$_rendered_mode"
-
-# Back up old config, install new one
-_xray_bak="${XRAY_CFG}.bak.$(date +%s)"
-[[ -f "$XRAY_CFG" ]] && cp -a "$XRAY_CFG" "$_xray_bak" 2>/dev/null || true
-
-install -d -m 0755 "$(dirname "$XRAY_CFG")"
-install -m 0600 "$_out" "$XRAY_CFG"
-rm -f "$_tpl" "$_out"
-trap - EXIT
-
-log "xray-client.json written to $XRAY_CFG"
-
-# ---------------------------------------------------------------------------
-# Step 6: Restart xray-client container with hard error capture
-# ---------------------------------------------------------------------------
-log "restarting xray-client container"
-COMPOSE_DIR="$PREFIX_ETC"
-
-_restart_log=$(mktemp)
-_restart_ok=0
-if (cd "$COMPOSE_DIR" && docker compose restart xray-client 2>&1 | tee "$_restart_log" | tee -a "$LOG_FILE"); then
-    _restart_ok=1
-fi
-rm -f "$_restart_log"
-
-if [[ $_restart_ok -eq 0 ]]; then
-    [[ -f "$_xray_bak" ]] && cp -a "$_xray_bak" "$XRAY_CFG" && log "restored backup $XRAY_CFG from $_xray_bak"
-    die "docker compose restart xray-client failed — backup restored, operator intervention required"
-fi
-log "xray-client container restarted"
+re_render_xray || die "re_render_xray failed — xray-client.json not updated"
 
 # ---------------------------------------------------------------------------
 # Step 7: Post-restart smoke test
@@ -355,8 +201,8 @@ if [[ $_smoke_ok -eq 0 ]]; then
     - reality_public_key in node-config.json does not match krolik server
     - krolik server privateKey changed and /api/partner/keys not yet updated
     - xray-client container image is incompatible with new protocol settings
-  Operator action required. Backup config at: $_xray_bak"
+  Operator action required. Backup config at: ${XRAY_CFG}.bak.* (see ls ${XRAY_CFG}.bak.*)"
 fi
 
 log "smoke test PASSED — Reality handshake OK, no real-cert leakage"
-log "update complete — xray-client serving traffic via mode=$_rendered_mode + Reality"
+log "update complete — xray-client.json refreshed and container restarted"
