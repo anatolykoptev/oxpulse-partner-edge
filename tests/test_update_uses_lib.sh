@@ -32,5 +32,7 @@ setup() {
 @test "update.sh post-flight compares pre/post hash for render freshness" {
   # Hash compare guards against re_render_xray soft-fail returning 0
   # without writing. Stale .bak.* would mask this; hash compare doesn't.
-  grep -qE '_pre_hash.*_post_hash|_post_hash.*_pre_hash' update.sh
+  # Anchor on the literal comparison '$_pre_hash" = "$_post_hash' so a
+  # refactor that removes the test but keeps the `unset` line still fails.
+  grep -qE '"\$_pre_hash"[[:space:]]*=[[:space:]]*"\$_post_hash"' update.sh
 }
