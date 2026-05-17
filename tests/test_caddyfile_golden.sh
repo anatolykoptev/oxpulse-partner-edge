@@ -30,10 +30,18 @@ TMP_RENDERED=$(mktemp)
 TMP_JSON=$(mktemp)
 trap 'rm -f "$TMP_RENDERED" "$TMP_JSON"' EXIT
 
-# Render template with test values
+# Render template with test values (use infrastructure defaults for new vars)
+AWG_MOTHERLY_IP_TEST="${AWG_MOTHERLY_IP_TEST:-10.9.0.2}"
+BACKEND_PORT_TEST="${BACKEND_PORT_TEST:-8907}"
+HY2_FALLBACK_HOST_TEST="${HY2_FALLBACK_HOST_TEST:-host.docker.internal}"
+HY2_FALLBACK_PORT_TEST="${HY2_FALLBACK_PORT_TEST:-18443}"
 sed \
   -e "s|{{PARTNER_DOMAIN}}|${PARTNER_DOMAIN}|g" \
   -e "s|{{TURNS_SUBDOMAIN}}|${TURNS_SUBDOMAIN}|g" \
+  -e "s|{{AWG_MOTHERLY_IP}}|${AWG_MOTHERLY_IP_TEST}|g" \
+  -e "s|{{BACKEND_PORT}}|${BACKEND_PORT_TEST}|g" \
+  -e "s|{{HY2_FALLBACK_HOST}}|${HY2_FALLBACK_HOST_TEST}|g" \
+  -e "s|{{HY2_FALLBACK_PORT}}|${HY2_FALLBACK_PORT_TEST}|g" \
   "$REPO_ROOT/Caddyfile.tpl" > "$TMP_RENDERED"
 
 # Produce canonical JSON via caddy adapt

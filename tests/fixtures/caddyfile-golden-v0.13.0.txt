@@ -236,3 +236,24 @@ http://127.0.0.1:9080 {
         respond `{"routes":["tunnel","sfu","relay","branding"]}` 200
     }
 }
+
+# =============================================================================
+# Phase 3: operator override slot — conf.d/*.caddy
+#
+# Files placed in /etc/oxpulse-partner-edge/conf.d/ are loaded AFTER the
+# rendered Caddyfile. They survive install.sh / update.sh / upgrade.sh reruns
+# because those scripts never touch files inside conf.d/.
+#
+# Use cases:
+#   - Per-tenant vhosts (e.g. cheburator.bot + www.cheburator.bot static sites)
+#   - Hand-crafted route additions (webhook proxies, emergency overrides)
+#   - Emergency patches that must survive the next scheduled upgrade
+#
+# File naming convention: <tenant>-<purpose>.caddy
+#   Example: cheburator-vhosts.caddy
+#
+# Empty directory: Caddy emits a warning but exits 0 (validated 2026-05-15).
+# Do NOT place secrets in conf.d/ files — they are world-readable by default.
+# See docs/runbooks/conf-d.md for full guidance.
+# =============================================================================
+import /etc/oxpulse-partner-edge/conf.d/*.caddy
