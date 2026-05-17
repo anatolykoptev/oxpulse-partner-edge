@@ -635,6 +635,7 @@ _install_lib_source() {
 _install_lib_source install-preflight.sh
 _install_lib_source install-deps.sh
 _install_lib_source install-network.sh
+_install_lib_source install-healthcheck.sh
 
 preflight_run
 
@@ -1799,57 +1800,7 @@ else
 fi
 
 # ---------- Step 7: healthcheck ----------
-log "[7/10] waiting for healthcheck (timeout ${HEALTHCHECK_TIMEOUT}s)"
-if [[ $DRY_RUN -eq 0 ]]; then
-	deadline=$(( $(date +%s) + HEALTHCHECK_TIMEOUT ))
-	hc_script="$PREFIX_SBIN/oxpulse-partner-edge-healthcheck"
-	# Ship healthcheck.sh into /usr/local/sbin too so systemd + manual runs both work.
-	if [[ -n "$src_dir" && -f "$src_dir/healthcheck.sh" ]]; then
-		install -m 0755 "$src_dir/healthcheck.sh" "$hc_script"
-	else
-		curl -fsSL "$REPO_RAW/healthcheck.sh" -o "$hc_script"
-		chmod 0755 "$hc_script"
-	fi
-	# coturn starts before Caddy finishes the ACME dance for the TURNS
-	# subdomain, so its TLS listener is disabled on first boot (cert file
-	# missing). Once Caddy obtains the cert the cert-watch.path sends
-	# SIGUSR2 for subsequent renewals, but the initial kick has to come
-	# from install.sh — otherwise :5349 stays silent until the first
-	# real renewal months later. Poll for the cert, then restart coturn.
-	turns_cert_dir="/var/lib/docker/volumes/oxpulse-partner-edge_caddy-data/_data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${TURNS_SUBDOMAIN}.${DOMAIN}"
-	turns_cert_deadline=$(( $(date +%s) + 180 ))
-	turns_cert_ready=0
-	while :; do
-		if [[ -s "$turns_cert_dir/${TURNS_SUBDOMAIN}.${DOMAIN}.crt" ]]; then
-			turns_cert_ready=1
-			break
-		fi
-		if (( $(date +%s) > turns_cert_deadline )); then
-			break
-		fi
-		sleep 3
-	done
-	if (( turns_cert_ready == 1 )); then
-		log "  TURNS cert ready → restarting coturn to enable :5349 TLS listener"
-		(cd "$PREFIX_ETC" && docker compose restart coturn >/dev/null 2>&1 || true)
-	else
-		warn "  TURNS cert not ready after 180s — coturn TLS listener may be disabled. Retry: 'docker compose -f $PREFIX_ETC/docker-compose.yml restart coturn' once Caddy obtains the cert"
-	fi
-
-	while :; do
-		if OXPULSE_EDGE_CONFIG_DIR="$PREFIX_ETC" "$hc_script" --local >/dev/null 2>&1; then
-			log "  healthcheck green"
-			break
-		fi
-		if (( $(date +%s) > deadline )); then
-			warn "  healthcheck still red after 120s — continuing, inspect with: $hc_script"
-			break
-		fi
-		sleep 3
-	done
-else
-	warn "  [dry-run] skipping healthcheck"
-fi
+healthcheck_run
 
 fi  # end BAKE_MODE=0 (hydrate path)
 
