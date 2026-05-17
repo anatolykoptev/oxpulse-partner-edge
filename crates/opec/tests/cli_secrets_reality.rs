@@ -23,3 +23,18 @@ fn opec_secrets_reality_keygen_requires_out_dir() {
         .failure()
         .stderr(predicates::str::contains("--out-dir"));
 }
+
+#[test]
+#[serial]
+fn opec_secrets_reality_keygen_partial_identity_fails() {
+    use std::fs;
+    let out_dir = tempfile::TempDir::new().unwrap();
+    fs::write(out_dir.path().join("reality.pub"), "stale").unwrap();
+    Command::cargo_bin("opec")
+        .unwrap()
+        .args(["secrets", "reality-keygen", "--out-dir"])
+        .arg(out_dir.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("PARTIAL identity"));
+}
