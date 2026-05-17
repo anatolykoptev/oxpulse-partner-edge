@@ -5,6 +5,20 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.31](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.30...partner-edge-v0.12.31) (2026-05-17)
+
+
+### Features
+
+* **opec:** phase 2 — render module + xray/coturn/naive subcommands + install.sh delegation ([#147](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/147)) ([4d6b9c8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4d6b9c8085d2ebdba211a9779004f95d761af392))
+* **release:** ship opec binary as release asset ([#148](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/148)) ([cd641a4](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/cd641a4542d049fed5836aa39eebdd5880b33bd6))
+* **release:** ship partner-cli prebuilt binaries as release assets ([#145](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/145)) ([564ff75](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/564ff7501a2c6d249dc3f1f6b0d00dcc255b97c6))
+
+
+### Bug Fixes
+
+* **install:** hy2 template path mismatch — channel-render-lib couldnt find it ([#143](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/143)) ([0ee890f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0ee890fa434b679bd33ad4854c9fe42062d3477f))
+
 ## [0.12.30](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.29...partner-edge-v0.12.30) (2026-05-17)
 
 
