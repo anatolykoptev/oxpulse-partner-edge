@@ -1,7 +1,17 @@
 #!/usr/bin/env bats
-# Phase 1 Task 3 — render_template() byte-identical to hydrate.sh's current
-# sed-based render() for ASCII inputs, AND closes PEM-newline bug class
-# (which the legacy sed render cannot handle).
+# Phase 1 Task 3 — render_template() consistency check on hydrate cloud-init
+# path + PEM bug-class closure.
+#
+# Tests 1-6: render_template output is stable across the 6 .tpl files used
+# by hydrate.sh's cloud-init first-boot. These are baseline regression tests
+# — fixtures generated via render_template itself. ASCII parity to install.sh's
+# deleted python3 render is independently validated by
+# tests/test_install_render_identical.sh (the algorithm is identical).
+#
+# Test 7: PEM bug-class closure — the deleted sed-based render in hydrate.sh
+# could not handle multi-line PEM values (would produce 'sed: unterminated
+# `s' command'). render_template handles them verbatim. This is the critical
+# spec proof for Task 3.
 
 setup() {
   cd "$BATS_TEST_DIRNAME/.."
@@ -36,7 +46,7 @@ set_frozen_vars() {
   HYSTERIA2_PORT=51822
   HYSTERIA2_AUTH=
   HYSTERIA2_OBFS=
-  HYSTERIA2_SOCKS_PORT=18891
+  # HYSTERIA2_SOCKS_PORT omitted (T3 NIT): no {{HYSTERIA2_SOCKS_PORT}} in any .tpl
   NAIVE_SERVER=
   NAIVE_PORT=44433
   NAIVE_USER=
@@ -68,7 +78,7 @@ mirror_hydrate_exports() {
          PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE \
          IMAGE_VERSION \
          RELAY_JWT_SECRET \
-         HYSTERIA2_SERVER HYSTERIA2_PORT HYSTERIA2_AUTH HYSTERIA2_OBFS HYSTERIA2_SOCKS_PORT \
+         HYSTERIA2_SERVER HYSTERIA2_PORT HYSTERIA2_AUTH HYSTERIA2_OBFS \
          NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT \
          SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID OTEL_EXPORTER_OTLP_ENDPOINT \
          SFU_SIGNING_PUBLIC_KEY SIGNALING_SFU_SECRET \
@@ -99,10 +109,17 @@ render_one() {
   export SFU_SIGNING_PUBLIC_KEY
   out=$(mktemp)
   render_template tests/fixtures/install-render/compose.tpl "$out"
-  # PEM block must appear verbatim with all 4 lines preserved
-  grep -F "BEGIN PUBLIC KEY" "$out"
-  grep -F "LINE1" "$out"
-  grep -F "LINE2" "$out"
-  grep -F "END PUBLIC KEY" "$out"
+  # Verbatim multi-line block compare — catches order shuffles or {{ residue
+  # that 4-line grep -F would miss. python3 -c extracts the first complete
+  # PEM block from the rendered file so the comparison is indentation-agnostic
+  # (the block may appear inside a yaml quoted string with leading whitespace).
+  expected=$'-----BEGIN PUBLIC KEY-----\nLINE1\nLINE2\n-----END PUBLIC KEY-----'
+  actual=$(python3 -c "
+import re, sys
+content = open(sys.argv[1]).read()
+m = re.search(r'(-----BEGIN PUBLIC KEY-----.*?-----END PUBLIC KEY-----)', content, re.DOTALL)
+print(m.group(1) if m else '', end='')
+" "$out")
+  [ "$actual" = "$expected" ]
   rm -f "$out"
 }

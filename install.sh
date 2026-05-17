@@ -1518,26 +1518,20 @@ install -m 0644 "$stage/cover/cover.html" "$cover_out_dir/cover.html"
 # service starts alongside the core stack (docker compose --profile ch3 up).
 COMPOSE_PROFILES_EXTRA=""
 if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
-	render_template "$stage/hysteria2.tpl" "$PREFIX_ETC/hysteria2-client.yaml"
-	chmod 0600 "$PREFIX_ETC/hysteria2-client.yaml"
+	# Dead early render removed (T2/T3 NIT): re_render_hysteria2 at ~L1555
+	# fetches HY2_AUTH_PASS/HY2_OBFS_PASS from the API then overwrites this
+	# file, so this first-pass output was never read by any service.
+	# channel-render-lib.sh is already sourced unconditionally at L766-776.
 	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
-	log "  hysteria2-client.yaml rendered (CH3 profile enabled)"
+	log "  hysteria2 CH3 profile enabled (credentials provisioned by re_render_hysteria2 below)"
 fi
 # Phase 1.7 — fetch shared hy2 credentials + render hysteria2-client.yaml.
 # For Phase 1 these are fleet-shared (per-edge identity = Phase 7).
 # Source: GET /api/partner/hy2-credentials returns JSON {auth_pass, obfs_pass}
 # Falls back to env if API not yet deployed (HTTP 404 / connection refused).
-# Source the channel render library to access re_render_hysteria2().
-_hy2_lib_local="${src_dir:+$src_dir/channel-render-lib.sh}"
-_hy2_lib_installed="/usr/local/sbin/channel-render-lib.sh"
-if [[ -n "${_hy2_lib_local:-}" && -f "${_hy2_lib_local}" ]]; then
-	# shellcheck source=channel-render-lib.sh
-	source "$_hy2_lib_local"
-elif [[ -f "$_hy2_lib_installed" ]]; then
-	# shellcheck source=/dev/null
-	source "$_hy2_lib_installed"
-fi
-unset _hy2_lib_local _hy2_lib_installed
+# channel-render-lib.sh (including re_render_hysteria2) is already in scope —
+# sourced unconditionally with die-on-missing at L766-776 (T2/T3 NIT: redundant
+# source block removed from here).
 if declare -f re_render_hysteria2 >/dev/null 2>&1; then
 	log "fetching hy2 credentials"
 	_hy2_creds_url="${BACKEND_API}/api/partner/hy2-credentials"

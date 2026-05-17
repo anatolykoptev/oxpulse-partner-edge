@@ -157,8 +157,50 @@ fi
 # The lib reads NODE_CFG (already refreshed in Step 1), fetches/validates the
 # template, substitutes secrets (dual flat/channels[] schema), installs
 # atomically, and restarts the container.
+#
+# IMPORTANT: re_render_xray uses soft-fail semantics (warn + return 0) for:
+#   - template fetch failure (curl error)
+#   - missing required fields in node-config.json
+#   - docker restart failure (|| true)
+# The lib ALSO skips JSON validation and backup rollback entirely.
+# Phase 1 mandate: preserve update.sh's original loud-fail semantics so the
+# daily timer continues to page the operator on real drift-heal failure.
+# Guards below are explicit; lib hardening is Phase 2 scope (also affects
+# oxpulse-partner-edge-refresh.sh and upgrade.sh).
 # ---------------------------------------------------------------------------
+
+# Snapshot xray-client.json hash so we can detect whether re_render_xray
+# actually wrote a new file (it returns 0 on soft-fail no-op paths).
+_pre_hash=""
+if [[ -f "$XRAY_CFG" ]]; then
+    _pre_hash=$(sha256sum "$XRAY_CFG" | awk '{print $1}')
+fi
+
 re_render_xray || die "re_render_xray failed — xray-client.json not updated"
+
+# Post-flight: verify a render actually happened. re_render_xray's soft-fail
+# paths (template fetch error, missing fields) return 0 without writing a
+# backup. A .bak.* file is ALWAYS created on successful render (line 157 of
+# channel-render-lib.sh). Absence of a fresh .bak.* proves the render was skipped.
+_post_hash=""
+if [[ -f "$XRAY_CFG" ]]; then
+    _post_hash=$(sha256sum "$XRAY_CFG" | awk '{print $1}')
+fi
+
+_latest_bak=$(find "$(dirname "$XRAY_CFG")" -maxdepth 1 -name "$(basename "$XRAY_CFG").bak.*" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | awk '{print $2}')
+if [[ -z "$_latest_bak" ]]; then
+    warn "no .bak.* created — re_render_xray likely soft-failed (template fetch or missing fields)"
+    die "update: xray render skipped silently — check journalctl for re_render_xray warnings"
+fi
+
+# Validate rendered JSON. If the render produced garbage, roll back from backup.
+if ! python3 -m json.tool "$XRAY_CFG" >/dev/null 2>&1; then
+    warn "rendered xray-client.json is not valid JSON — rolling back from $_latest_bak"
+    cp -a "$_latest_bak" "$XRAY_CFG"
+    die "update: invalid rendered JSON — restored backup"
+fi
+
+unset _pre_hash _post_hash _latest_bak
 
 # ---------------------------------------------------------------------------
 # Step 7: Post-restart smoke test
