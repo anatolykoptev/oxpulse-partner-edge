@@ -74,12 +74,8 @@
 # {args[0]} receives the path pattern from `import tunnel_upstream /api/*`.
 # A second snippet (tunnel_upstream_default) handles the no-path catch-all SPA
 # fallback where there is no route argument.
-# TODO(refactor/config): replace 10.9.0.2:8907 and host.docker.internal:18443 with
-# {{AWG_MOTHERLY_IP}}:{{BACKEND_PORT}} and host.docker.internal:{{HY2_LOCAL_PORT}} once
-# install.sh (in-progress refactor) exports OXPULSE_AWG_MOTHERLY_IP, OXPULSE_BACKEND_PORT,
-# and OXPULSE_HY2_LOCAL_LISTEN from config/defaults.conf via render_template env exports.
 (tunnel_upstream) {
-    reverse_proxy {args[0]} 10.9.0.2:8907 host.docker.internal:18443 {
+    reverse_proxy {args[0]} {{AWG_MOTHERLY_IP}}:{{BACKEND_PORT}} {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} {
         lb_policy first
         lb_try_duration 5s
         lb_try_interval 250ms
@@ -97,7 +93,7 @@
 }
 
 (tunnel_upstream_default) {
-    reverse_proxy 10.9.0.2:8907 host.docker.internal:18443 {
+    reverse_proxy {{AWG_MOTHERLY_IP}}:{{BACKEND_PORT}} {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} {
         lb_policy first
         lb_try_duration 5s
         lb_try_interval 250ms
