@@ -36,3 +36,11 @@ setup() {
   # Shebang anchor guarantees we keep shipping a bash script.
   head -1 install.sh | grep -qE '^#!/usr/bin/env bash$|^#!/bin/bash$'
 }
+
+@test "release.yml stages opec-amd64" {
+  grep -qE 'opec-amd64' .github/workflows/release.yml
+}
+
+@test "release.yml stages opec-arm64" {
+  grep -qE 'opec-arm64' .github/workflows/release.yml
+}

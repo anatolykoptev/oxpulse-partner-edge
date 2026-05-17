@@ -214,8 +214,53 @@ jobs:
           path: ${{ matrix.arch.asset }}
           retention-days: 1
 
+  build-opec:
+    needs: extract-version
+    strategy:
+      fail-fast: true
+      matrix:
+        arch:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: opec-amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: opec-arm64
+    runs-on: ${{ matrix.arch.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workdir: crates/opec
+          shared-key: "opec-${{ matrix.arch.asset }}"
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+
+      - name: Build opec (${{ matrix.arch.asset }})
+        run: |
+          cargo build -p opec --release \
+            --target ${{ matrix.arch.target }}
+          cp target/${{ matrix.arch.target }}/release/opec \
+            ${{ matrix.arch.asset }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.arch.asset }}
+          path: ${{ matrix.arch.asset }}
+          retention-days: 1
+
   attach-release-assets:
-    needs: [extract-version, build-and-push, merge-manifests, build-partner-cli]
+    needs: [extract-version, build-and-push, merge-manifests, build-partner-cli, build-opec]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -230,6 +275,14 @@ jobs:
         with:
           name: partner-cli-arm64
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: opec-amd64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: opec-arm64
+
       - name: Stage artifacts
         env:
           VERSION: ${{ needs.extract-version.outputs.version }}
@@ -238,12 +291,15 @@ jobs:
           cp upgrade.sh     partner-edge-upgrade.sh
           cp healthcheck.sh partner-edge-healthcheck.sh
           chmod +x partner-cli-amd64 partner-cli-arm64
+          chmod +x opec-amd64 opec-arm64
           sha256sum \
             partner-edge-installer.sh \
             partner-edge-upgrade.sh \
             partner-edge-healthcheck.sh \
             partner-cli-amd64 \
             partner-cli-arm64 \
+            opec-amd64 \
+            opec-arm64 \
             > SHA256SUMS
 
       - name: Upload release assets
@@ -263,6 +319,8 @@ jobs:
             partner-edge-healthcheck.sh \
             partner-cli-amd64 \
             partner-cli-arm64 \
+            opec-amd64 \
+            opec-arm64 \
             SHA256SUMS \
             --clobber
 

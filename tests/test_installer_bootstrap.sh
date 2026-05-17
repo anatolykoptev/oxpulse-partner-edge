@@ -18,3 +18,7 @@ setup() {
   # Step 8 must use $_chan_lib_tmp when set (avoids re-fetching).
   grep -qE 'install -m 0644 "\$_chan_lib_tmp"' install.sh
 }
+
+@test "install.sh fetches opec binary from release assets if missing" {
+  grep -qE 'releases/latest/download/opec-' install.sh
+}
