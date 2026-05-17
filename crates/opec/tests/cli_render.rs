@@ -59,6 +59,12 @@ fn frozen_env() -> Vec<(&'static str, &'static str)> {
         ("HY2_OBFS_PASS", ""),
         ("HY2_LOCAL_LISTEN", ""),
         ("HY2_REMOTE_BACKEND", ""),
+        // Caddy tunnel upstream pair — added when (tunnel_upstream) snippet was
+        // refactored to take both the AWG/SFU-relay backend AND a hysteria2
+        // fallback. Fixture at expected/caddy.txt encodes these literals.
+        ("AWG_MOTHERLY_IP", "10.9.0.2"),
+        ("HY2_FALLBACK_HOST", "host.docker.internal"),
+        ("HY2_FALLBACK_PORT", "18443"),
     ]
 }
 
