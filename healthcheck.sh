@@ -244,6 +244,48 @@ if [[ "$_hy2_running" -gt 0 ]]; then
 	'
 fi
 
+# --- 19. service-token authed probe → 2xx ---
+# Catches "token rot": file missing, malformed, or revoked server-side.
+# Skip-on-legacy: if no token file AND OXPULSE_SERVICE_TOKEN not set, node
+# predates service-token provisioning — emit INFO and treat as pass.
+echo -n "  19. service-token authed probe → 2xx:             "
+_tok_file="$CONF_DIR/token"
+_tok_env="${OXPULSE_SERVICE_TOKEN:-}"
+if [[ ! -e "$_tok_file" && -z "$_tok_env" ]]; then
+	echo "INFO (legacy node — no service token persisted)"
+else
+	# Read token: prefer token lib if installed, fall back to direct cat.
+	_tok_lib="/usr/local/sbin/oxpulse-token-lib.sh"
+	if [[ -r "$_tok_lib" ]]; then
+		# shellcheck source=/dev/null
+		_svc_token=$(PARTNER_EDGE_PREFIX_ETC="$CONF_DIR" \
+			bash -c "source '$_tok_lib' && read_service_token" 2>/dev/null || true)
+	else
+		_svc_token=$(cat "$_tok_file" 2>/dev/null || true)
+	fi
+	if [[ -z "$_svc_token" ]]; then
+		echo -e "\033[31mFAIL\033[0m (could not read token from $_tok_file — missing or empty)"
+		FAIL=$((FAIL + 1))
+	else
+		_backend="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
+		_http_code=$(curl -fsS --max-time 8 \
+			-H "Authorization: Bearer $_svc_token" \
+			"${_backend%/}/api/partner/hy2-credentials" \
+			-o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+		if [[ "$_http_code" == "200" || "$_http_code" == "503" ]]; then
+			echo -e "\033[32mOK\033[0m (HTTP $_http_code — auth accepted)"
+		else
+			echo -e "\033[31mFAIL\033[0m (HTTP $_http_code — token rejected or endpoint unreachable)"
+			echo "    Recovery: docker exec oxpulse-chat partner-cli rotate-service-token --node-id ${NODE_ID:-<NODE_ID>} --force"
+			echo "    Then: scp the new value to this edge at /etc/oxpulse-partner-edge/token (mode 0600)"
+			FAIL=$((FAIL + 1))
+		fi
+		unset _http_code _backend
+	fi
+	unset _svc_token _tok_lib
+fi
+unset _tok_file _tok_env
+
 if [[ $FAIL -eq 0 ]]; then
 	echo "All checks passed."
 	exit 0
