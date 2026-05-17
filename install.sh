@@ -1189,7 +1189,7 @@ RELAY_JWT_SECRET=$(json_get relay_jwt_secret "$tmp_cfg")
 # env var and SFU_EDGES relay_api_url for cascade relay to work.
 [[ -z "$RELAY_JWT_SECRET" ]] && RELAY_JWT_SECRET=$(openssl rand -hex 32)
 # Phase 7 M4.A6 — note: SFU_PUBLIC_IP is rendered into docker-compose.yml from
-# the $PUBLIC_IP autodetected at line ~174 via the existing {{PUBLIC_IP}}
+# the $PUBLIC_IP autodetected by network_run via the existing {{PUBLIC_IP}}
 # template substitution. We do NOT json_get a public_ip from the registration
 # response (the API doesn't return one — public_ip is sent UP, not down). The
 # autodetect chain (cloud metadata → ipify → ifconfig.me) is the source of
