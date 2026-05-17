@@ -44,3 +44,21 @@ setup() {
 @test "release.yml stages opec-arm64" {
   grep -qE 'opec-arm64' .github/workflows/release.yml
 }
+
+@test "release.yml stages lib/install-preflight.sh as install-preflight.sh asset" {
+  grep -qE 'cp[[:space:]]+lib/install-preflight\.sh[[:space:]]+install-preflight\.sh' .github/workflows/release.yml
+}
+
+@test "release.yml stages lib/install-deps.sh as install-deps.sh asset" {
+  grep -qE 'cp[[:space:]]+lib/install-deps\.sh[[:space:]]+install-deps\.sh' .github/workflows/release.yml
+}
+
+@test "release.yml SHA256SUMS line covers lib modules" {
+  grep -A12 -E 'sha256sum' .github/workflows/release.yml | grep -q 'install-preflight.sh'
+  grep -A12 -E 'sha256sum' .github/workflows/release.yml | grep -q 'install-deps.sh'
+}
+
+@test "release.yml uploads lib modules to GitHub release" {
+  grep -A12 'gh release upload' .github/workflows/release.yml | grep -q 'install-preflight.sh'
+  grep -A12 'gh release upload' .github/workflows/release.yml | grep -q 'install-deps.sh'
+}
