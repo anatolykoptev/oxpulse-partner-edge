@@ -23,6 +23,22 @@ NODE_CFG="${NODE_CFG:-$PREFIX_ETC/node-config.json}"
 XRAY_CFG="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main}"
 
+# Source fleet-wide infrastructure defaults.
+# Lookup order: repo root (dev/test) → installed share dir → sbin-relative.
+# Operator can export OXPULSE_* vars before sourcing this file to override.
+_defaults_local="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/config/defaults.conf"
+_defaults_installed="/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+if [[ -f "$_defaults_local" ]]; then
+    # shellcheck source=config/defaults.conf
+    source "$_defaults_local"
+elif [[ -f "$_defaults_installed" ]]; then
+    # shellcheck source=/dev/null
+    source "$_defaults_installed"
+else
+    : # defaults not found — callers set explicit vars or fall through to per-var defaults below
+fi
+unset _defaults_local _defaults_installed
+
 # Generic mustache-style template renderer — Phase 1 dedupe target.
 # Substitutes every {{NAME}} placeholder in $src with the matching env var,
 # empty string when unset. Multi-line values (PEM keys, ML-KEM blobs) preserved
@@ -107,7 +123,7 @@ import json,sys; d=json.load(open(sys.argv[1]))
 ch=d.get('channels',[])
 x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
 names=x.get('server_names') or d.get('reality_server_names')
-print((names[0] if names else None) or x.get('server_name','') or d.get('reality_server_name','www.samsung.com'))" "$NODE_CFG")
+print((names[0] if names else None) or x.get('server_name','') or d.get('reality_server_name','') or os.environ.get('OXPULSE_REALITY_SERVER_NAME','www.samsung.com'))" "$NODE_CFG")
     backend=$(python3 -c "
 import json,sys; d=json.load(open(sys.argv[1]))
 ch=d.get('channels',[])
@@ -195,9 +211,9 @@ re_render_hysteria2() {
     local out="${HY2_OUTPUT_PATH:-/etc/oxpulse-partner-edge/hysteria2-client.yaml}"
     local backup
     backup="${out}.bak.$(date +%s)"
-    local server="${HY2_SERVER:-192.9.243.148:51822}"
-    local listen="${HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
-    local backend="${HY2_REMOTE_BACKEND:-127.0.0.1:8907}"
+    local server="${HY2_SERVER:-${OXPULSE_HY2_SERVER:-192.9.243.148:51822}}"
+    local listen="${HY2_LOCAL_LISTEN:-${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}}"
+    local backend="${HY2_REMOTE_BACKEND:-${OXPULSE_HY2_REMOTE_BACKEND:-127.0.0.1:8907}}"
 
     if [[ ! -f "$tpl" ]]; then
         echo "ERR re_render_hysteria2: template not found: $tpl" >&2
