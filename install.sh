@@ -1505,7 +1505,13 @@ fi
 # passed as `VAR=val python3 -c '...'` env prefix inside the deleted local
 # render() function.
 PARTNER_DOMAIN="$DOMAIN"
+# Caddy tunnel upstream vars — sourced from defaults.conf via channel-render-lib.sh.
+# Placeholder names in Caddyfile.tpl must match these var names exactly.
+AWG_MOTHERLY_IP="${OXPULSE_AWG_MOTHERLY_IP}"
+HY2_FALLBACK_HOST="${OXPULSE_HY2_FALLBACK_HOST}"
+HY2_FALLBACK_PORT="${OXPULSE_HY2_FALLBACK_PORT}"
 export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
+       AWG_MOTHERLY_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
        TURN_SECRET \
        REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
        REALITY_ENCRYPTION TURNS_SUBDOMAIN \
