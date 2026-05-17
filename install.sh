@@ -50,9 +50,11 @@ if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v partner-cli >/dev/null 2>&1; then
 	unset _machine _cli_arch _cli_url
 fi
 
-# opec is the typed render binary for xray/coturn/naive (Phase 2 OPEC render).
-# Without it, install.sh falls back to bash render_template — works but skips
-# JSON / realm validation that OPEC adds. Auto-fetch from release assets.
+# opec is the typed render binary for all 5 stage templates (xray, coturn,
+# naive, compose, caddy — Phase 3 OPEC render absorption). Without it,
+# install.sh falls back to bash render_template — works but skips per-kind
+# validation (JSON / realm / YAML / balanced-brace) that OPEC adds.
+# Auto-fetch from release assets.
 if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v opec >/dev/null 2>&1; then
 	_machine=$(uname -m)
 	case "$_machine" in
