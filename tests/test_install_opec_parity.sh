@@ -189,3 +189,45 @@ mirror_install_exports() {
     awk '/OPEC_SECRETS_AWG_KEYGEN/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
         | grep -qE 'FORCE_KEYGEN[[:space:]]*-eq[[:space:]]*1.*--rotate|--rotate.*FORCE_KEYGEN'
 }
+
+# ---------------------------------------------------------------------------
+# Phase 4.3c Task 4 — register POST delegation
+# ---------------------------------------------------------------------------
+
+@test "install.sh delegates register to opec when OPEC_SECRETS_REGISTER!=0" {
+    grep -qE 'OPEC_SECRETS_REGISTER' install.sh
+    grep -qE 'opec[[:space:]]+secrets[[:space:]]+register' install.sh
+}
+
+@test "install.sh preserves bash fallback for register" {
+    grep -qE '/api/partner/register' install.sh
+}
+
+@test "install.sh OPEC register path sets NODE_ID from env-file" {
+    awk '/OPEC_SECRETS_REGISTER/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
+        | grep -qE '\. "\$tmp_cfg\.env"|source[[:space:]]+"\$tmp_cfg\.env"'
+}
+
+@test "install.sh OPEC register path honors DRY_RUN" {
+    awk '/OPEC_SECRETS_REGISTER/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
+        | grep -qE 'DRY_RUN[[:space:]]*-eq[[:space:]]*1'
+}
+
+@test "install.sh MANUAL_CONFIG bypasses OPEC register" {
+    # MANUAL_CONFIG branch must precede OPEC_SECRETS_REGISTER dispatch
+    grep -nE 'MANUAL_CONFIG|OPEC_SECRETS_REGISTER' install.sh \
+        | awk -F: 'NR==1{first=$2} END{exit (first ~ /MANUAL_CONFIG/) ? 0 : 1}'
+}
+
+@test "install.sh AWG keygen block precedes register dispatch" {
+    # AWG_PRIV_PATH assignment (or OPEC_SECRETS_AWG_KEYGEN gate) must appear
+    # before OPEC_SECRETS_REGISTER block so AWG_PUB_PATH is ready for both paths.
+    local awg_line reg_line
+    awg_line=$(grep -nE 'AWG_PRIV_PATH="\$PREFIX_ETC' install.sh | head -1 | cut -d: -f1)
+    reg_line=$(grep -nE 'OPEC_SECRETS_REGISTER' install.sh | head -1 | cut -d: -f1)
+    [[ -n "$awg_line" && -n "$reg_line" && "$awg_line" -lt "$reg_line" ]]
+}
+
+@test "install.sh json_get block skipped when OPEC_REGISTER_USED is set" {
+    grep -qE 'OPEC_REGISTER_USED' install.sh
+}
