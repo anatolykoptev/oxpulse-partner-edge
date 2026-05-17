@@ -11,6 +11,15 @@ fn fixture_dir() -> PathBuf {
         .join("render")
 }
 
+fn fixture_dir_install_render() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("fixtures")
+        .join("install-render")
+}
+
 fn frozen_env() -> Vec<(&'static str, &'static str)> {
     vec![
         ("PARTNER_ID", "zvonilka"),
@@ -45,6 +54,11 @@ fn frozen_env() -> Vec<(&'static str, &'static str)> {
         ("NAIVE_USER", ""),
         ("NAIVE_PASS", ""),
         ("NAIVE_SOCKS_PORT", "18892"),
+        ("HY2_SERVER", ""),
+        ("HY2_AUTH_PASS", ""),
+        ("HY2_OBFS_PASS", ""),
+        ("HY2_LOCAL_LISTEN", ""),
+        ("HY2_REMOTE_BACKEND", ""),
     ]
 }
 
@@ -74,9 +88,57 @@ fn cli_render_xray_byte_identical_to_fixture() {
 
 #[test]
 #[serial]
+fn cli_render_compose_byte_identical_to_fixture() {
+    let dir = fixture_dir_install_render();
+    let tpl = dir.join("compose.tpl");
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("docker-compose.yml");
+
+    let mut cmd = Command::cargo_bin("opec").unwrap();
+    for (k, v) in frozen_env() {
+        cmd.env(k, v);
+    }
+    cmd.args(["render", "compose", "--tpl"])
+        .arg(&tpl)
+        .args(["--out"])
+        .arg(&out)
+        .assert()
+        .success();
+
+    let actual = fs::read_to_string(&out).unwrap();
+    let expected = fs::read_to_string(dir.join("expected").join("compose.txt")).unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+#[serial]
+fn cli_render_caddy_byte_identical_to_fixture() {
+    let dir = fixture_dir_install_render();
+    let tpl = dir.join("caddy.tpl");
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("Caddyfile");
+
+    let mut cmd = Command::cargo_bin("opec").unwrap();
+    for (k, v) in frozen_env() {
+        cmd.env(k, v);
+    }
+    cmd.args(["render", "caddy", "--tpl"])
+        .arg(&tpl)
+        .args(["--out"])
+        .arg(&out)
+        .assert()
+        .success();
+
+    let actual = fs::read_to_string(&out).unwrap();
+    let expected = fs::read_to_string(dir.join("expected").join("caddy.txt")).unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+#[serial]
 fn cli_render_unknown_kind_errors() {
     let mut cmd = Command::cargo_bin("opec").unwrap();
-    cmd.args(["render", "compose", "--tpl", "/tmp/x", "--out", "/tmp/y"])
+    cmd.args(["render", "bogus", "--tpl", "/tmp/x", "--out", "/tmp/y"])
         .assert()
         .failure();
 }
