@@ -5,6 +5,20 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.34](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.33...partner-edge-v0.12.34) (2026-05-17)
+
+
+### Features
+
+* **install:** Phase 4.4 — remove bash render fallback (opec now hard requirement) ([#164](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/164)) ([7f63d3a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7f63d3a53a22791556fd0a5c0319f141d3c2a132))
+* **install:** Phase 4.4 — remove bash render fallback (opec now hard requirement) ([#165](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/165)) ([d6b17c0](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d6b17c0776756b8b900450ef18c30e33e87dd0e8))
+* **install:** Phase 4.6 — extract healthcheck (TURNS cert wait + poll) into lib/ ([#166](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/166)) ([9fcb170](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/9fcb170cfa80e08133e908fbe583054ab4b9d6cd))
+* **install:** Phase 4.7 — extract systemd unit installation into lib/ ([#167](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/167)) ([a933ce4](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a933ce4600b9722092c13703f96b27603aa88e6e))
+* **install:** Phase 4.7-4.9 — systemd extract + retire fallbacks + args extract ([#169](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/169)) ([b8312fa](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/b8312faf875c2fd4f2cf5ccf3a3350e2a093069e))
+* **install:** Phase 4.8 — retire bash fallbacks for opec secrets ([#168](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/168)) ([0dbda30](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0dbda30707c0ded12452ed4f6f3e6578ebd587c2))
+* **opec:** Phase 4.3c — opec secrets register (HTTP POST + env-file) ([#161](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/161)) ([e830314](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e830314585557dfb53aee6d9c81b7c97c9186561))
+* **opec:** Phase 4.3d — opec secrets sfu-signing-key ([#163](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/163)) ([082b9b4](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/082b9b42b240968718b98dce3e40f8b9f910cc54))
+
 ## [0.12.33](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.32...partner-edge-v0.12.33) (2026-05-17)
 
 
