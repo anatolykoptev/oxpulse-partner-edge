@@ -1,0 +1,74 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "tunnel-edge",
+      "port": 3080,
+      "listen": "0.0.0.0",
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1",
+        "port": 8907,
+        "network": "tcp",
+        "followRedirect": false
+      },
+      "sniffing": {
+        "enabled": false
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "vless-tunnel",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "192.9.243.148",
+            "port": 5349,
+            "users": [
+              {
+                "id": "d529dee6-3cdd-4079-95d1-f8801722147c",
+                "encryption": "mlkem768x25519plus.native.0rtt.fXgOoxcW",
+                "flow": ""
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "/xh",
+          "mode": "packet-up",
+          "xmux": {
+            "maxConcurrency": 1,
+            "cMaxReuseTimes": 64,
+            "cMaxLifetimeMs": 15000
+          },
+          "extra": {
+            "xPaddingBytes": "100-1000"
+          }
+        },
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "www.samsung.com",
+          "publicKey": "U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk",
+          "shortId": "abcd1234",
+          "fingerprint": "randomized"
+        }
+      }
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["tunnel-edge"],
+        "outboundTag": "vless-tunnel"
+      }
+    ]
+  }
+}
