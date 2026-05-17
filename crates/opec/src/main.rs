@@ -73,6 +73,8 @@ enum RenderKind {
     Xray,
     Coturn,
     Naive,
+    Compose,
+    Caddy,
 }
 
 #[derive(Subcommand)]
@@ -148,6 +150,8 @@ fn main() {
             RenderKind::Xray => opec::render::xray::render(&tpl, &out),
             RenderKind::Coturn => opec::render::coturn::render(&tpl, &out),
             RenderKind::Naive => opec::render::naive::render(&tpl, &out),
+            RenderKind::Compose => opec::render::compose::render(&tpl, &out),
+            RenderKind::Caddy => opec::render::caddy::render(&tpl, &out),
         },
     };
 
