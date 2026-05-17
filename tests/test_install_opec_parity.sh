@@ -82,10 +82,16 @@ mirror_install_exports() {
   grep -qE 'render_with_opec_or_fallback[[:space:]]+naive' install.sh
 }
 
-@test "install.sh keeps render_template for compose and caddy" {
-  # Phase 2 scope: compose + caddy stay on bash render_template.
-  grep -qE 'render_template[[:space:]]+"\$stage/compose\.tpl"' install.sh
-  grep -qE 'render_template[[:space:]]+"\$stage/caddy\.tpl"' install.sh
+@test "install.sh calls render_with_opec_or_fallback for compose" {
+  grep -qE 'render_with_opec_or_fallback[[:space:]]+compose' install.sh
+}
+
+@test "install.sh calls render_with_opec_or_fallback for caddy" {
+  grep -qE 'render_with_opec_or_fallback[[:space:]]+caddy' install.sh
+}
+
+@test "install.sh no longer has bare render_template calls for stage templates" {
+  ! grep -qE 'render_template[[:space:]]+"\$stage/' install.sh
 }
 
 # Fallback branch (opec NOT on PATH) — byte-identical to pre-Phase-2 behaviour.
