@@ -149,86 +149,90 @@ mirror_install_exports() {
     ! grep -qE '^_detect_region\(\)' install.sh
 }
 
-@test "install.sh delegates reality-keygen to opec when OPEC_SECRETS_REALITY_KEYGEN!=0" {
-    grep -qE 'OPEC_SECRETS_REALITY_KEYGEN' install.sh
+@test "install.sh unconditionally delegates reality-keygen to opec (Phase 4.8)" {
+    # Phase 4.8: env flag retired; opec call must still exist, flag must not.
+    ! grep -qE 'OPEC_SECRETS_REALITY_KEYGEN' install.sh
     grep -qE 'opec[[:space:]]+secrets[[:space:]]+reality-keygen' install.sh
 }
 
-@test "install.sh preserves bash fallback for reality-keygen" {
-    grep -qE 'partner-cli[[:space:]]+keygen' install.sh
+@test "install.sh no longer references OPEC_SECRETS_REALITY_KEYGEN env flag (retired)" {
+    # Phase 4.8 regression guard: bash fallback branch deleted, env escape hatch gone.
+    ! grep -qE 'OPEC_SECRETS_REALITY_KEYGEN' install.sh
 }
 
 @test "install.sh OPEC path honors DRY_RUN (no side-effect invocation)" {
     # The OPEC dispatcher must not call 'opec secrets reality-keygen' in
-    # dry-run mode. Encoded as: there is a DRY_RUN check inside the OPEC branch
-    # block that precedes the actual invocation.
-    awk '/OPEC_SECRETS_REALITY_KEYGEN/,/^else$/' install.sh \
-        | grep -qE 'DRY_RUN[[:space:]]*-eq[[:space:]]*1'
+    # dry-run mode. Encoded as: there is a DRY_RUN check near the opec call.
+    grep -qE 'DRY_RUN[[:space:]]*-eq[[:space:]]*1' install.sh
+    grep -qE 'opec[[:space:]]+secrets[[:space:]]+reality-keygen' install.sh
 }
 
 @test "install.sh OPEC path maps FORCE_KEYGEN to --rotate" {
     # --force-keygen / --rotate-identity flags set FORCE_KEYGEN=1; OPEC branch
     # must translate that to the --rotate flag so operator rotation works
     # regardless of which backend is active.
-    awk '/OPEC_SECRETS_REALITY_KEYGEN/,/^else$/' install.sh \
-        | grep -qE 'FORCE_KEYGEN[[:space:]]*-eq[[:space:]]*1.*--rotate|--rotate.*FORCE_KEYGEN'
+    grep -qE 'FORCE_KEYGEN[[:space:]]*-eq[[:space:]]*1.*--rotate|--rotate.*FORCE_KEYGEN' install.sh
 }
 
-@test "install.sh delegates awg-keygen to opec when OPEC_SECRETS_AWG_KEYGEN!=0" {
-    grep -qE 'OPEC_SECRETS_AWG_KEYGEN' install.sh
+@test "install.sh unconditionally delegates awg-keygen to opec (Phase 4.8)" {
+    # Phase 4.8: env flag retired; opec call must still exist, flag must not.
+    ! grep -qE 'OPEC_SECRETS_AWG_KEYGEN' install.sh
     grep -qE 'opec[[:space:]]+secrets[[:space:]]+awg-keygen' install.sh
 }
 
-@test "install.sh preserves bash fallback for awg-keygen" {
-    grep -qE 'wg[[:space:]]+genkey' install.sh
-    grep -qE 'wg[[:space:]]+pubkey' install.sh
+@test "install.sh no longer references OPEC_SECRETS_AWG_KEYGEN env flag (retired)" {
+    # Phase 4.8 regression guard: bash fallback (wg genkey / wg pubkey) deleted.
+    ! grep -qE 'OPEC_SECRETS_AWG_KEYGEN' install.sh
 }
 
 @test "install.sh OPEC awg path honors DRY_RUN" {
-    awk '/OPEC_SECRETS_AWG_KEYGEN/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
-        | grep -qE 'DRY_RUN[[:space:]]*-eq[[:space:]]*1|dryrun-awg-pubkey-placeholder'
+    grep -qE 'dryrun-awg-pubkey-placeholder' install.sh
+    grep -qE 'opec[[:space:]]+secrets[[:space:]]+awg-keygen' install.sh
 }
 
 @test "install.sh OPEC awg path maps FORCE_KEYGEN to --rotate" {
-    awk '/OPEC_SECRETS_AWG_KEYGEN/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
-        | grep -qE 'FORCE_KEYGEN[[:space:]]*-eq[[:space:]]*1.*--rotate|--rotate.*FORCE_KEYGEN'
+    grep -qE 'FORCE_KEYGEN[[:space:]]*-eq[[:space:]]*1.*--rotate|--rotate.*FORCE_KEYGEN' install.sh
 }
 
 # ---------------------------------------------------------------------------
 # Phase 4.3c Task 4 — register POST delegation
 # ---------------------------------------------------------------------------
 
-@test "install.sh delegates register to opec when OPEC_SECRETS_REGISTER!=0" {
-    grep -qE 'OPEC_SECRETS_REGISTER' install.sh
+@test "install.sh unconditionally delegates register to opec (Phase 4.8)" {
+    # Phase 4.8: env flag retired; opec call must still exist, flag must not.
+    ! grep -qE 'OPEC_SECRETS_REGISTER' install.sh
     grep -qE 'opec[[:space:]]+secrets[[:space:]]+register' install.sh
 }
 
-@test "install.sh preserves bash fallback for register" {
-    grep -qE '/api/partner/register' install.sh
+@test "install.sh no longer references OPEC_SECRETS_REGISTER env flag (retired)" {
+    # Phase 4.8 regression guard: bash fallback (python+curl register) deleted.
+    ! grep -qE 'OPEC_SECRETS_REGISTER' install.sh
 }
 
 @test "install.sh OPEC register path sets NODE_ID from env-file" {
-    awk '/OPEC_SECRETS_REGISTER/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
-        | grep -qE '\. "\$tmp_cfg\.env"|source[[:space:]]+"\$tmp_cfg\.env"'
+    grep -qE '\. "\$tmp_cfg\.env"|source[[:space:]]+"\$tmp_cfg\.env"' install.sh
 }
 
 @test "install.sh OPEC register path honors DRY_RUN" {
-    awk '/OPEC_SECRETS_REGISTER/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
-        | grep -qE 'DRY_RUN[[:space:]]*-eq[[:space:]]*1'
+    grep -qE 'DRY_RUN[[:space:]]*-eq[[:space:]]*1' install.sh
+    grep -qE 'opec[[:space:]]+secrets[[:space:]]+register' install.sh
 }
 
 @test "install.sh MANUAL_CONFIG bypasses OPEC register" {
-    # MANUAL_CONFIG branch must precede OPEC_SECRETS_REGISTER dispatch
-    grep -nE 'MANUAL_CONFIG|OPEC_SECRETS_REGISTER' install.sh \
+    # MANUAL_CONFIG branch must precede the opec register invocation.
+    # Phase 4.8: OPEC_SECRETS_REGISTER gone; anchor on 'opec secrets register'.
+    grep -nE 'MANUAL_CONFIG|opec[[:space:]]+secrets[[:space:]]+register' install.sh \
         | awk -F: 'NR==1{first=$2} END{exit (first ~ /MANUAL_CONFIG/) ? 0 : 1}'
 }
 
 @test "install.sh AWG keygen block precedes register dispatch" {
-    # AWG_PRIV_PATH assignment (or OPEC_SECRETS_AWG_KEYGEN gate) must appear
-    # before OPEC_SECRETS_REGISTER block so AWG_PUB_PATH is ready for both paths.
+    # AWG_PRIV_PATH assignment must appear before opec secrets register
+    # so AWG_PUB_PATH is ready when register is called.
+    # Phase 4.8: OPEC_SECRETS_REGISTER and OPEC_SECRETS_AWG_KEYGEN gone;
+    # anchor on the opec call lines directly.
     local awg_line reg_line
     awg_line=$(grep -nE 'AWG_PRIV_PATH="\$PREFIX_ETC' install.sh | head -1 | cut -d: -f1)
-    reg_line=$(grep -nE 'OPEC_SECRETS_REGISTER' install.sh | head -1 | cut -d: -f1)
+    reg_line=$(grep -nE 'opec[[:space:]]+secrets[[:space:]]+register' install.sh | head -1 | cut -d: -f1)
     [[ -n "$awg_line" && -n "$reg_line" && "$awg_line" -lt "$reg_line" ]]
 }
 
@@ -240,18 +244,19 @@ mirror_install_exports() {
 # Phase 4.3d Task — sfu-signing-key delegation
 # ---------------------------------------------------------------------------
 
-@test "install.sh delegates sfu-signing-key to opec when OPEC_SECRETS_SFU_KEY!=0" {
-    grep -qE 'OPEC_SECRETS_SFU_KEY' install.sh
+@test "install.sh unconditionally delegates sfu-signing-key to opec (Phase 4.8)" {
+    # Phase 4.8: env flag retired; opec call must still exist, flag must not.
+    ! grep -qE 'OPEC_SECRETS_SFU_KEY' install.sh
     grep -qE 'opec[[:space:]]+secrets[[:space:]]+sfu-signing-key' install.sh
 }
 
-@test "install.sh preserves bash fallback for sfu-signing-key" {
-    grep -qE 'api/partner/keys' install.sh
+@test "install.sh no longer references OPEC_SECRETS_SFU_KEY env flag (retired)" {
+    # Phase 4.8 regression guard: bash fallback (curl /api/partner/keys) deleted.
+    ! grep -qE 'OPEC_SECRETS_SFU_KEY' install.sh
 }
 
 @test "install.sh OPEC sfu-signing-key path warns on failure (not die)" {
-    awk '/OPEC_SECRETS_SFU_KEY/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
-        | grep -qE 'warn.*OPEC_SECRETS_SFU_KEY=0|warn.*sfu-signing-key'
+    grep -qE 'warn.*sfu-signing-key' install.sh
 }
 
 # ---------------------------------------------------------------------------
@@ -268,4 +273,36 @@ mirror_install_exports() {
 
 @test "install.sh no longer inlines [7/10] healthcheck log call" {
     ! grep -qE 'log.*\[7/10\].*waiting for healthcheck' install.sh
+}
+
+# ---------------------------------------------------------------------------
+# Phase 4.7 — systemd module delegation
+# ---------------------------------------------------------------------------
+
+@test "install.sh sources lib/install-systemd.sh module" {
+    grep -qE '_install_lib_source[[:space:]]+install-systemd\.sh' install.sh
+}
+
+@test "install.sh calls systemd_run instead of inline Step 8" {
+    grep -qE '^[[:space:]]*systemd_run([[:space:]]|$)' install.sh
+}
+
+@test "install.sh no longer inlines [8/10] log" {
+    ! grep -qE 'log[[:space:]]+"?\[8/10\] installing systemd unit' install.sh
+}
+
+# ---------------------------------------------------------------------------
+# Phase 4.9 — args parsing module delegation
+# ---------------------------------------------------------------------------
+
+@test "install.sh sources lib/install-args.sh module" {
+    grep -qE '_install_lib_source[[:space:]]+install-args\.sh' install.sh
+}
+
+@test "install.sh calls args_parse to process CLI arguments" {
+    grep -qE '^[[:space:]]*args_parse[[:space:]]+"\$@"' install.sh
+}
+
+@test "install.sh no longer inlines the while \$# -gt 0 arg-parser loop" {
+    ! grep -qE 'while[[:space:]]+\[\[[[:space:]]+\$#[[:space:]]+-gt[[:space:]]+0[[:space:]]+\]\]' install.sh
 }
