@@ -108,3 +108,23 @@ mirror_install_exports() {
   diff -u tests/fixtures/install-render/expected/xray.txt "$out"
   rm -f "$out"
 }
+
+@test "install.sh sources lib/install-preflight.sh module" {
+    grep -qE '_install_lib_source[[:space:]]+install-preflight\.sh' install.sh
+}
+
+@test "install.sh sources lib/install-deps.sh module" {
+    grep -qE '_install_lib_source[[:space:]]+install-deps\.sh' install.sh
+}
+
+@test "install.sh calls preflight_run instead of inline Step 1" {
+    grep -qE '^preflight_run$' install.sh
+}
+
+@test "install.sh calls deps_install instead of inline Step 2" {
+    grep -qE '^deps_install$' install.sh
+}
+
+@test "install.sh no longer inlines OS_FAMILY detection" {
+    ! grep -qE '\*\" debian \"\*\|\*\" ubuntu \"\*\) OS_FAMILY=debian' install.sh
+}
