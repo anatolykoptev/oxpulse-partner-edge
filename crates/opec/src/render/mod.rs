@@ -42,8 +42,7 @@ pub enum RenderError {
 ///
 /// Pure function — no I/O.
 pub fn substitute_from_env(tpl: &str) -> String {
-    static PATTERN: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"\{\{([A-Z][A-Z0-9_]*)\}\}").unwrap());
+    static PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new(r"\{\{([A-Z][A-Z0-9_]*)\}\}").unwrap());
 
     PATTERN
         .replace_all(tpl, |caps: &regex::Captures| {
@@ -68,8 +67,8 @@ pub fn render_to_file(src: &Path, dst: &Path) -> Result<String> {
         return Err(RenderError::DstDirMissing(dst_dir.to_path_buf()).into());
     }
 
-    let tpl = fs::read_to_string(src)
-        .with_context(|| format!("reading template {}", src.display()))?;
+    let tpl =
+        fs::read_to_string(src).with_context(|| format!("reading template {}", src.display()))?;
     let rendered = substitute_from_env(&tpl);
 
     let mut tmp = tempfile::Builder::new()

@@ -157,10 +157,11 @@ fn write_env_file(path: &std::path::Path, encoded_key: &str) -> Result<(), Secre
             source: e,
         })?;
 
-    tmp.write_all(content.as_bytes()).map_err(|e| SecretsError::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+    tmp.write_all(content.as_bytes())
+        .map_err(|e| SecretsError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
 
     // fsync before persist to survive crash between rename and sync.
     tmp.as_file().sync_all().map_err(|e| SecretsError::Io {

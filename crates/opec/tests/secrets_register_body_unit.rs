@@ -7,7 +7,11 @@ use tempfile::TempDir;
 fn body_required_fields_only() {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join("reality.pub"), "REALITY_PUB_44_CHARS=\n").unwrap();
-    fs::write(tmp.path().join("reality.uuid"), "11111111-2222-3333-4444-555555555555\n").unwrap();
+    fs::write(
+        tmp.path().join("reality.uuid"),
+        "11111111-2222-3333-4444-555555555555\n",
+    )
+    .unwrap();
     fs::write(tmp.path().join("awg.pub"), "AWG_PUB_KEY_BASE64\n").unwrap();
 
     let body = register::build_body(&register::BodyInputs {
@@ -32,14 +36,21 @@ fn body_required_fields_only() {
     assert_eq!(v["reality_uuid"], "11111111-2222-3333-4444-555555555555");
     assert_eq!(v["awg_pubkey"], "AWG_PUB_KEY_BASE64");
     assert!(v.get("region").is_none(), "region absent when not provided");
-    assert!(v.get("branding").is_none(), "branding absent when not provided");
+    assert!(
+        v.get("branding").is_none(),
+        "branding absent when not provided"
+    );
 }
 
 #[test]
 fn body_with_region() {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join("a.pub"), "X\n").unwrap();
-    fs::write(tmp.path().join("a.uuid"), "11111111-2222-3333-4444-555555555555\n").unwrap();
+    fs::write(
+        tmp.path().join("a.uuid"),
+        "11111111-2222-3333-4444-555555555555\n",
+    )
+    .unwrap();
     fs::write(tmp.path().join("b.pub"), "Y\n").unwrap();
 
     let body = register::build_body(&register::BodyInputs {
@@ -62,7 +73,11 @@ fn body_with_region() {
 fn body_with_branding_config_file() {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join("a.pub"), "X\n").unwrap();
-    fs::write(tmp.path().join("a.uuid"), "11111111-2222-3333-4444-555555555555\n").unwrap();
+    fs::write(
+        tmp.path().join("a.uuid"),
+        "11111111-2222-3333-4444-555555555555\n",
+    )
+    .unwrap();
     fs::write(tmp.path().join("b.pub"), "Y\n").unwrap();
     let branding = r#"{"display_name":"Test","logo":{"light":"/l.svg","dark":"/d.svg"}}"#;
     fs::write(tmp.path().join("brand.json"), branding).unwrap();
@@ -88,7 +103,11 @@ fn body_with_branding_config_file() {
 fn body_invalid_branding_json_errors() {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join("a.pub"), "X\n").unwrap();
-    fs::write(tmp.path().join("a.uuid"), "11111111-2222-3333-4444-555555555555\n").unwrap();
+    fs::write(
+        tmp.path().join("a.uuid"),
+        "11111111-2222-3333-4444-555555555555\n",
+    )
+    .unwrap();
     fs::write(tmp.path().join("b.pub"), "Y\n").unwrap();
     fs::write(tmp.path().join("brand.json"), "not-json").unwrap();
 
