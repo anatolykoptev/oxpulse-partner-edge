@@ -169,3 +169,23 @@ mirror_install_exports() {
     awk '/OPEC_SECRETS_REALITY_KEYGEN/,/^else$/' install.sh \
         | grep -qE 'FORCE_KEYGEN[[:space:]]*-eq[[:space:]]*1.*--rotate|--rotate.*FORCE_KEYGEN'
 }
+
+@test "install.sh delegates awg-keygen to opec when OPEC_SECRETS_AWG_KEYGEN!=0" {
+    grep -qE 'OPEC_SECRETS_AWG_KEYGEN' install.sh
+    grep -qE 'opec[[:space:]]+secrets[[:space:]]+awg-keygen' install.sh
+}
+
+@test "install.sh preserves bash fallback for awg-keygen" {
+    grep -qE 'wg[[:space:]]+genkey' install.sh
+    grep -qE 'wg[[:space:]]+pubkey' install.sh
+}
+
+@test "install.sh OPEC awg path honors DRY_RUN" {
+    awk '/OPEC_SECRETS_AWG_KEYGEN/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
+        | grep -qE 'DRY_RUN[[:space:]]*-eq[[:space:]]*1|dryrun-awg-pubkey-placeholder'
+}
+
+@test "install.sh OPEC awg path maps FORCE_KEYGEN to --rotate" {
+    awk '/OPEC_SECRETS_AWG_KEYGEN/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
+        | grep -qE 'FORCE_KEYGEN[[:space:]]*-eq[[:space:]]*1.*--rotate|--rotate.*FORCE_KEYGEN'
+}
