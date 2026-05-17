@@ -34,6 +34,12 @@ rendered=$(sed \
     -e 's/{{BACKEND_HOST}}/192.0.2.1/g' \
     -e 's/{{BACKEND_PORT}}/5349/g' \
     -e 's/{{BACKEND_ENDPOINT}}/192.0.2.1:5349/g' \
+    -e 's/{{XRAY_XHTTP_MODE}}/packet-up/g' \
+    -e 's/{{XRAY_XHTTP_PATH}}/\/xh/g' \
+    -e 's/{{XRAY_XHTTP_XMUX_MAX_CONCURRENCY}}/1/g' \
+    -e 's/{{XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES}}/64/g' \
+    -e 's/{{XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS}}/15000/g' \
+    -e 's/{{XRAY_XHTTP_X_PADDING_BYTES}}/100-1000/g' \
     "$TPL")
 
 echo "$rendered" | python3 -m json.tool >/dev/null 2>&1 \
