@@ -603,7 +603,10 @@ _install_lib_source() {
 	# Trap ensures the temp file is cleaned up even if the sourced module
 	# calls die/exit (e.g. preflight_run on unsupported OS) — otherwise
 	# every failing install leaves a stray /tmp/tmp.XXXX behind.
-	trap "rm -f '$tmp'" RETURN
+	# Single-quoted so $tmp expands at signal time, not at trap definition
+	# (shellcheck SC2064). Safe either way in this scope, but the canonical
+	# idiom keeps the lint clean.
+	trap 'rm -f "$tmp"' RETURN
 	if curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
 		"${REPO_RAW}/lib/$name" -o "$tmp"; then
 		# shellcheck source=/dev/null
