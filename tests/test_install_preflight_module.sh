@@ -4,13 +4,6 @@
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
     TMPMOD="$(mktemp -d)"
-    log()  { :; }
-    warn() { :; }
-    die()  { echo "die: $*" >&2; return 1; }
-    export -f log warn die
-    DRY_RUN=1
-    SFU_UDP_PORT=7878
-    SFU_METRICS_PORT=9317
 }
 
 teardown() {
@@ -81,7 +74,7 @@ EOF
         SFU_METRICS_PORT=9317
         log()  { :; }
         warn() { :; }
-        die()  { echo die: \"\$*\" >&2; return 1; }
+        die()  { echo die: \"\$*\" >&2; exit 1; }
         preflight_run
     "
     [ "$status" -ne 0 ]

@@ -24,7 +24,7 @@ preflight_run() {
 		case " $ID ${ID_LIKE:-} " in
 			*" debian "*|*" ubuntu "*) OS_FAMILY=debian ;;
 			*" rhel "*|*" fedora "*|*" centos "*|*" almalinux "*|*" rocky "*) OS_FAMILY=rhel ;;
-			*) die "unsupported OS: ID=$ID ID_LIKE=${ID_LIKE:-<empty>} (need Debian/Ubuntu/AlmaLinux/Rocky/RHEL)" || return 1 ;;
+			*) die "unsupported OS: ID=$ID ID_LIKE=${ID_LIKE:-<empty>} (need Debian/Ubuntu/AlmaLinux/Rocky/RHEL)" ;;
 		esac
 	fi
 	log "  os=$OS_ID family=$OS_FAMILY"
