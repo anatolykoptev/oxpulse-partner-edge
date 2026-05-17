@@ -28,3 +28,9 @@ setup() {
 @test "update.sh shell syntax is valid" {
   bash -n update.sh
 }
+
+@test "update.sh post-flight compares pre/post hash for render freshness" {
+  # Hash compare guards against re_render_xray soft-fail returning 0
+  # without writing. Stale .bak.* would mask this; hash compare doesn't.
+  grep -qE '_pre_hash.*_post_hash|_post_hash.*_pre_hash' update.sh
+}

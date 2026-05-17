@@ -179,18 +179,29 @@ fi
 re_render_xray || die "re_render_xray failed — xray-client.json not updated"
 
 # Post-flight: verify a render actually happened. re_render_xray's soft-fail
-# paths (template fetch error, missing fields) return 0 without writing a
-# backup. A .bak.* file is ALWAYS created on successful render (line 157 of
-# channel-render-lib.sh). Absence of a fresh .bak.* proves the render was skipped.
+# paths (template fetch error, missing fields) return 0 without rewriting
+# xray-client.json. On Day 2+ daily-timer runs, yesterday's .bak.* persists,
+# so backup presence is NOT a reliable freshness signal. Use hash compare instead.
 _post_hash=""
 if [[ -f "$XRAY_CFG" ]]; then
     _post_hash=$(sha256sum "$XRAY_CFG" | awk '{print $1}')
 fi
 
 _latest_bak=$(find "$(dirname "$XRAY_CFG")" -maxdepth 1 -name "$(basename "$XRAY_CFG").bak.*" -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | awk '{print $2}')
-if [[ -z "$_latest_bak" ]]; then
-    warn "no .bak.* created — re_render_xray likely soft-failed (template fetch or missing fields)"
+
+# Post-flight: verify a render actually happened. re_render_xray returns 0
+# on soft-fail paths (template fetch / missing fields / restart error)
+# WITHOUT rewriting xray-client.json. Stale .bak.* from yesterday's
+# successful run would make a "did .bak get created?" check silently pass.
+# Compare pre/post hash — change == real render; identical == soft-fail.
+if [[ -n "$_pre_hash" && "$_pre_hash" = "$_post_hash" ]]; then
+    warn "xray-client.json hash unchanged before/after re_render_xray — likely soft-failed"
+    warn "  pre:  $_pre_hash"
+    warn "  post: $_post_hash"
     die "update: xray render skipped silently — check journalctl for re_render_xray warnings"
+fi
+if [[ -z "$_pre_hash" && -z "$_post_hash" ]]; then
+    die "update: xray-client.json missing both before and after re_render_xray"
 fi
 
 # Validate rendered JSON. If the render produced garbage, roll back from backup.
