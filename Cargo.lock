@@ -1614,10 +1614,12 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "clap",
+ "once_cell",
  "regex",
  "serde",
  "serde_json",
  "serde_yml",
+ "serial_test",
  "tempfile",
  "thiserror 1.0.69",
 ]

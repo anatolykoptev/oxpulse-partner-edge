@@ -48,6 +48,31 @@ enum Commands {
         #[command(subcommand)]
         action: TenantCommands,
     },
+    /// Render a partner-edge config template (xray | coturn | naive).
+    ///
+    /// Substitutes {{NAME}} placeholders from env vars (NAME = [A-Z][A-Z0-9_]*),
+    /// writes atomically, and validates the rendered file per-kind. Mirrors
+    /// channel-render-lib.sh::render_template semantics for the three template
+    /// kinds it owns; the bash function stays in place for callers that don't
+    /// have opec on PATH (Phase 2 fallback in install.sh — Task 6).
+    Render {
+        /// Template kind. Each kind has its own post-substitution validation.
+        #[arg(value_enum)]
+        kind: RenderKind,
+        /// Path to the template file.
+        #[arg(long)]
+        tpl: PathBuf,
+        /// Path to the rendered output file.
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum RenderKind {
+    Xray,
+    Coturn,
+    Naive,
 }
 
 #[derive(Subcommand)]
@@ -119,6 +144,11 @@ fn main() {
 
     let result = match cli.command {
         Commands::Tenant { action } => run_tenant(action),
+        Commands::Render { kind, tpl, out } => match kind {
+            RenderKind::Xray => opec::render::xray::render(&tpl, &out),
+            RenderKind::Coturn => opec::render::coturn::render(&tpl, &out),
+            RenderKind::Naive => opec::render::naive::render(&tpl, &out),
+        },
     };
 
     if let Err(e) = result {
