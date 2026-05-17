@@ -62,3 +62,15 @@ setup() {
   grep -A12 'gh release upload' .github/workflows/release.yml | grep -q 'install-preflight.sh'
   grep -A12 'gh release upload' .github/workflows/release.yml | grep -q 'install-deps.sh'
 }
+
+@test "release.yml stages lib/install-network.sh as install-network.sh asset" {
+    grep -qE 'cp[[:space:]]+lib/install-network\.sh[[:space:]]+install-network\.sh' .github/workflows/release.yml
+}
+
+@test "release.yml SHA256SUMS line covers install-network.sh" {
+    grep -A14 -E 'sha256sum' .github/workflows/release.yml | grep -q 'install-network.sh'
+}
+
+@test "release.yml uploads install-network.sh to GitHub release" {
+    grep -A14 'gh release upload' .github/workflows/release.yml | grep -q 'install-network.sh'
+}
