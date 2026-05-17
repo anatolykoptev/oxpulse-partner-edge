@@ -286,6 +286,27 @@ else
 fi
 unset _tok_file _tok_env
 
+# --- 20. channels-health-report.timer loaded and active (M2.6a) ---
+# Skip-on-legacy: unit file absent = pre-M2.6a install; run install.sh to add.
+echo -n "  20. channels-health-report.timer loaded:           "
+_chr_unit="$SYSTEMD_DIR/oxpulse-channels-health-report.timer"
+if [[ ! -f "$_chr_unit" ]]; then
+	echo "SKIP (unit absent — pre-M2.6a install; re-run install.sh to enable)"
+else
+	_chr_state=$(systemctl show oxpulse-channels-health-report.timer \
+		--property=LoadState --value 2>/dev/null || echo "unknown")
+	_chr_active=$(systemctl show oxpulse-channels-health-report.timer \
+		--property=ActiveState --value 2>/dev/null || echo "unknown")
+	if [[ "$_chr_state" == "loaded" && ("$_chr_active" == "active" || "$_chr_active" == "waiting") ]]; then
+		echo -e "\033[32mOK\033[0m (${_chr_active})"
+	else
+		echo -e "\033[31mFAIL\033[0m (LoadState=${_chr_state} ActiveState=${_chr_active})"
+		echo "    Recovery: systemctl enable --now oxpulse-channels-health-report.timer"
+		FAIL=$((FAIL + 1))
+	fi
+fi
+unset _chr_unit _chr_state _chr_active
+
 if [[ $FAIL -eq 0 ]]; then
 	echo "All checks passed."
 	exit 0

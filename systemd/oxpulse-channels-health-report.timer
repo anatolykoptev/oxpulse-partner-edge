@@ -1,0 +1,11 @@
+[Unit]
+Description=Run partner-edge channel health report every 60s
+After=network.target
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
