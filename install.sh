@@ -776,180 +776,29 @@ REALITY_PRIV_PATH="$PREFIX_ETC/reality.priv"
 REALITY_PUB_PATH="$PREFIX_ETC/reality.pub"
 REALITY_UUID_PATH="$PREFIX_ETC/reality.uuid"
 
-# Phase 4.3a: OPEC_SECRETS_REALITY_KEYGEN (default=1) gates delegation to
-# 'opec secrets reality-keygen'. Set OPEC_SECRETS_REALITY_KEYGEN=0 to fall
-# back to the bash path during canary rollback. Phase 4.8 removes the bash
-# fallback after ≥4 live edges soak the OPEC path without incident.
-if [[ "${OPEC_SECRETS_REALITY_KEYGEN:-1}" == "1" ]] && command -v opec >/dev/null 2>&1; then
-	# Dry-run contract: OPEC path must be side-effect-free, same as bash branch.
-	if [[ $DRY_RUN -eq 1 ]]; then
-		warn "  [dry-run] would invoke: opec secrets reality-keygen --out-dir $PREFIX_ETC$([[ $FORCE_KEYGEN -eq 1 ]] && echo ' --rotate')"
-		REALITY_PUBKEY="DRYRUN-reality-pubkey-placeholder"
-		REALITY_UUID="00000000-0000-0000-0000-000000000000"
-	else
-		log "  reality keypair: delegating to opec secrets reality-keygen"
-		# Map operator-facing --force-keygen / --rotate-identity (FORCE_KEYGEN=1)
-		# to the OPEC --rotate flag. Array form avoids unquoted-expansion fragility.
-		_opec_args=(secrets reality-keygen --out-dir "$PREFIX_ETC")
-		[[ $FORCE_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
-		if ! opec "${_opec_args[@]}"; then
-			die "opec secrets reality-keygen failed — re-run with OPEC_SECRETS_REALITY_KEYGEN=0 to fall back to bash path"
-		fi
-		REALITY_PUBKEY="$(cat "$REALITY_PUB_PATH")" \
-			|| die "post-keygen: failed to read $REALITY_PUB_PATH"
-		REALITY_UUID="$(cat "$REALITY_UUID_PATH")" \
-			|| die "post-keygen: failed to read $REALITY_UUID_PATH"
-		log "  reality_public_key: $REALITY_PUBKEY"
-		log "  reality_uuid: $REALITY_UUID"
-		unset _opec_args
-	fi
+# Phase 4.8: opec is a hard requirement (Phase 4.4). Unconditionally delegate
+# reality keypair generation to opec secrets reality-keygen.
+# Dry-run contract: OPEC path must be side-effect-free.
+if [[ $DRY_RUN -eq 1 ]]; then
+	warn "  [dry-run] would invoke: opec secrets reality-keygen --out-dir $PREFIX_ETC$([[ $FORCE_KEYGEN -eq 1 ]] && echo ' --rotate')"
+	REALITY_PUBKEY="DRYRUN-reality-pubkey-placeholder"
+	REALITY_UUID="00000000-0000-0000-0000-000000000000"
 else
-	# === Legacy bash path (Phase 4.3a fallback). Preserved verbatim for rollback. ===
-	# Activate by: OPEC_SECRETS_REALITY_KEYGEN=0 bash install.sh ...
-	# Phase 4.8 will remove this block after canary soak.
-
-	if [[ $DRY_RUN -eq 1 ]]; then
-		# Dry-run: show what keygen would produce / reuse, but do NOT write files.
-		# No partner-cli invocation — dry-run must be side-effect-free.
-		_dry_count=0
-		for _f in "$REALITY_PRIV_PATH" "$REALITY_PUB_PATH" "$REALITY_UUID_PATH"; do
-			[[ -s "$_f" ]] && _dry_count=$((_dry_count + 1))
-		done
-		unset _f
-		if [[ $FORCE_KEYGEN -eq 1 ]]; then
-			warn "  [dry-run] --force-keygen: would backup existing identity files and invoke partner-cli keygen"
-			REALITY_PUBKEY="DRYRUN-pub"
-			REALITY_UUID="DRYRUN-uuid-00000000-0000-0000-0000-000000000000"
-		elif [[ $_dry_count -eq 3 ]]; then
-			warn "  [dry-run] reality keypair already exists — would reuse (idempotent re-install)"
-			REALITY_PUBKEY=$(cat "$REALITY_PUB_PATH")
-			REALITY_UUID=$(cat "$REALITY_UUID_PATH")
-			warn "  [dry-run] reality_public_key: $REALITY_PUBKEY"
-			warn "  [dry-run] reality_uuid: $REALITY_UUID"
-		elif [[ $_dry_count -gt 0 ]]; then
-			warn "  [dry-run] PARTIAL identity files detected ($_dry_count/3) — would abort on real run"
-			REALITY_PUBKEY="DRYRUN-pub"
-			REALITY_UUID="DRYRUN-uuid-00000000-0000-0000-0000-000000000000"
-		else
-			warn "  [dry-run] would invoke: partner-cli keygen → $REALITY_PRIV_PATH $REALITY_PUB_PATH $REALITY_UUID_PATH"
-			warn "  [dry-run] would write $REALITY_PRIV_PATH (mode 0600, not written)"
-			warn "  [dry-run] would write $REALITY_PUB_PATH  (mode 0644, not written)"
-			warn "  [dry-run] would write $REALITY_UUID_PATH (mode 0644, not written)"
-			REALITY_PUBKEY="DRYRUN-pub"
-			REALITY_UUID="DRYRUN-uuid-00000000-0000-0000-0000-000000000000"
-		fi
-		unset _dry_count
-	else
-		install -d -m 0700 "$PREFIX_ETC"
-		# ---------- Idempotency guard (incident §13, 2026-05-14) ----------
-		# All three files (reality.priv + reality.pub + reality.uuid) form ONE atomic
-		# identity unit. Re-runs MUST reuse the existing identity to prevent silent
-		# breakage of all distributed VLESS links.
-		#
-		# Decision tree:
-		#   FORCE_KEYGEN=1 (--force-keygen / --rotate-identity)
-		#     → backup existing files, then generate fresh identity
-		#   All three present and non-empty
-		#     → skip keygen; reuse existing identity; echo UUID to stdout
-		#   Exactly one or two present (partial state)
-		#     → ABORT loudly; no files modified; operator must resolve manually
-		#   None present (fresh install)
-		#     → generate fresh identity; echo UUID to stdout
-		_reality_all_present=0
-		_reality_partial=0
-		_reality_count=0
-		for _f in "$REALITY_PRIV_PATH" "$REALITY_PUB_PATH" "$REALITY_UUID_PATH"; do
-			[[ -s "$_f" ]] && _reality_count=$((_reality_count + 1))
-		done
-		[[ $_reality_count -eq 3 ]] && _reality_all_present=1
-		[[ $_reality_count -gt 0 && $_reality_count -lt 3 ]] && _reality_partial=1
-
-		if [[ $FORCE_KEYGEN -eq 1 ]]; then
-			# Explicit operator-initiated rotation (slice 3 contract). Back up any
-			# existing files before overwriting so a botched rotation is recoverable.
-			log "  --force-keygen: backing up existing identity files (if present)"
-			_bak_epoch=$(date +%s)
-			for _f in reality.priv reality.pub reality.uuid; do
-				if [[ -f "$PREFIX_ETC/$_f" ]]; then
-					cp "$PREFIX_ETC/$_f" "$PREFIX_ETC/$_f.bak.$_bak_epoch"
-					log "    backed up $PREFIX_ETC/$_f → $PREFIX_ETC/$_f.bak.$_bak_epoch"
-				fi
-			done
-			unset _bak_epoch _f
-			log "  generating Reality x25519 keypair via partner-cli keygen (forced rotation)"
-			_do_keygen=1
-		elif [[ $_reality_all_present -eq 1 ]]; then
-			# All three files present — idempotent re-install or re-deploy.
-			# Reuse existing identity; distributed VLESS links remain valid.
-			log "  reality keypair: reusing existing identity (all three files present)"
-			_do_keygen=0
-		elif [[ $_reality_partial -eq 1 ]]; then
-			# Partial state detected — this is not a clean fresh install.
-			# Silent regeneration would silently rotate the UUID and break VLESS links.
-			# Abort loudly so the operator can make an explicit decision.
-			die "install: PARTIAL identity files detected ($_reality_count/3 reality.* files present).
-	Manual recovery required — choose one option:
-	  Option 1 (fresh identity): remove all reality.* files and re-run install.sh
-	    sudo rm -f $PREFIX_ETC/reality.priv $PREFIX_ETC/reality.pub $PREFIX_ETC/reality.uuid
-	  Option 2 (explicit rotation): run with --force-keygen to rotate and backup
-	    sudo bash install.sh --force-keygen <other-flags>
-	  Option 3 (restore from backup): copy reality.{priv,pub,uuid}.bak.* back to their originals
-	Aborting to prevent silent UUID rotation and VLESS link breakage."
-		else
-			# All three absent — fresh install.
-			log "  reality keypair: fresh install, generating new identity"
-			_do_keygen=1
-		fi
-		unset _reality_all_present _reality_partial _reality_count
-
-		if [[ ${_do_keygen:-0} -eq 1 ]]; then
-			log "  generating Reality x25519 keypair via partner-cli keygen"
-			_keygen_out=$(partner-cli keygen)
-			_reality_priv=$(printf '%s' "$_keygen_out" | grep '^private_key:' | awk '{print $2}')
-			_reality_pub=$(printf '%s' "$_keygen_out"  | grep '^public_key:'  | awk '{print $2}')
-			[[ -n "$_reality_priv" && -n "$_reality_pub" ]] || \
-				die "partner-cli keygen produced unexpected output — cannot parse private_key/public_key"
-			# Edge-side length validation before persisting.
-			# Server-side validate_reality_pubkey enforces the same 43-char constraint,
-			# but catching it here gives a clearer error message at install time.
-			[[ ${#_reality_priv} -eq 43 && ${#_reality_pub} -eq 43 ]] || \
-				die "partner-cli keygen output malformed (expected 43-char base64url private + public; got ${#_reality_priv} + ${#_reality_pub})"
-			# Write private key (mode 0600).
-			# bash cannot zero memory; unset != memset(0). Slice 1 partner-cli uses
-			# Zeroizing<String> to clear the private key post-print at the source.
-			# This script's exposure window is the install duration only — operator
-			# should re-run install.sh on a fresh shell after rotation.
-			_reality_priv_tmp=$(mktemp "$PREFIX_ETC/.reality.priv.XXXXXX")
-			chmod 0600 "$_reality_priv_tmp"
-			printf '%s\n' "$_reality_priv" >"$_reality_priv_tmp"
-			mv "$_reality_priv_tmp" "$REALITY_PRIV_PATH"
-			# Write public key (mode 0644 — explicit, not umask-dependent).
-			_reality_pub_tmp=$(mktemp "$PREFIX_ETC/.reality.pub.XXXXXX")
-			chmod 0644 "$_reality_pub_tmp"
-			printf '%s\n' "$_reality_pub" >"$_reality_pub_tmp"
-			mv "$_reality_pub_tmp" "$REALITY_PUB_PATH"
-			unset _keygen_out _reality_priv _reality_pub _reality_priv_tmp _reality_pub_tmp
-			# Generate UUID and write (mode 0644 — explicit, not umask-dependent).
-			if ! command -v uuidgen >/dev/null 2>&1; then
-				die "uuidgen not found — install uuid-runtime (Debian/Ubuntu) or util-linux (RHEL) and retry"
-			fi
-			_uuid=$(uuidgen | tr '[:upper:]' '[:lower:]')
-			# Validate format: 8-4-4-4-12 hex groups separated by dashes.
-			if ! printf '%s' "$_uuid" | grep -qE \
-				'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
-				die "uuidgen produced unexpected output: $_uuid"
-			fi
-			_uuid_tmp=$(mktemp "$PREFIX_ETC/.reality.uuid.XXXXXX")
-			chmod 0644 "$_uuid_tmp"
-			printf '%s\n' "$_uuid" >"$_uuid_tmp"
-			mv "$_uuid_tmp" "$REALITY_UUID_PATH"
-			unset _uuid _uuid_tmp _do_keygen
-		fi
-		REALITY_PUBKEY=$(cat "$REALITY_PUB_PATH")
-		REALITY_UUID=$(cat "$REALITY_UUID_PATH")
-		log "  reality_public_key: $REALITY_PUBKEY"
-		log "  reality_uuid: $REALITY_UUID"
+	log "  reality keypair: delegating to opec secrets reality-keygen"
+	# Map operator-facing --force-keygen / --rotate-identity (FORCE_KEYGEN=1)
+	# to the OPEC --rotate flag. Array form avoids unquoted-expansion fragility.
+	_opec_args=(secrets reality-keygen --out-dir "$PREFIX_ETC")
+	[[ $FORCE_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
+	if ! opec "${_opec_args[@]}"; then
+		die "opec secrets reality-keygen failed"
 	fi
+	REALITY_PUBKEY="$(cat "$REALITY_PUB_PATH")" \
+		|| die "post-keygen: failed to read $REALITY_PUB_PATH"
+	REALITY_UUID="$(cat "$REALITY_UUID_PATH")" \
+		|| die "post-keygen: failed to read $REALITY_UUID_PATH"
+	log "  reality_public_key: $REALITY_PUBKEY"
+	log "  reality_uuid: $REALITY_UUID"
+	unset _opec_args
 fi
 
 # AmneziaWG keypair — generated locally so the private key never leaves
@@ -962,58 +811,33 @@ fi
 # available to both the OPEC and bash register paths.
 AWG_PRIV_PATH="$PREFIX_ETC/awg-private.key"
 AWG_PUB_PATH="$PREFIX_ETC/awg-public.key"
-if [[ "${OPEC_SECRETS_AWG_KEYGEN:-1}" == "1" ]] && command -v opec >/dev/null 2>&1; then
-	if [[ $DRY_RUN -eq 1 ]]; then
-		warn "  [dry-run] would invoke: opec secrets awg-keygen --out-dir $PREFIX_ETC$([[ $FORCE_KEYGEN -eq 1 ]] && echo ' --rotate')"
-		AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
-	else
-		log "  awg keypair: delegating to opec secrets awg-keygen"
-		install -d -m 0700 "$PREFIX_ETC"
-		if ! command -v wg >/dev/null 2>&1; then
-			install_wg_tools_for_keygen
-		fi
-		_opec_args=(secrets awg-keygen --out-dir "$PREFIX_ETC")
-		[[ $FORCE_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
-		if ! opec "${_opec_args[@]}"; then
-			die "opec secrets awg-keygen failed — re-run with OPEC_SECRETS_AWG_KEYGEN=0 to fall back to bash path"
-		fi
-		AWG_PUBKEY="$(cat "$AWG_PUB_PATH")" \
-			|| die "post-awg-keygen: failed to read $AWG_PUB_PATH"
-		log "  awg pubkey: $AWG_PUBKEY"
-		unset _opec_args
-	fi
+# Phase 4.8: opec is a hard requirement. Unconditionally delegate AWG keypair
+# generation to opec secrets awg-keygen.
+if [[ $DRY_RUN -eq 1 ]]; then
+	warn "  [dry-run] would invoke: opec secrets awg-keygen --out-dir $PREFIX_ETC$([[ $FORCE_KEYGEN -eq 1 ]] && echo ' --rotate')"
+	AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
 else
-	# === Legacy bash path (Phase 4.3b fallback). Preserved for rollback. ===
-	if [[ $DRY_RUN -eq 0 ]]; then
-		install -d -m 0700 "$PREFIX_ETC"
-		if [[ ! -s "$AWG_PRIV_PATH" ]]; then
-			# wg genkey is the same binary across wg-tools and amneziawg-tools
-			# (just calls into the kernel CSPRNG); we use whichever is on PATH.
-			# wg-tools is dnf-installable on every supported edge OS, so we
-			# can rely on it being available before the awg-go binaries are.
-			if ! command -v wg >/dev/null 2>&1; then
-				install_wg_tools_for_keygen
-			fi
-			umask 077
-			wg genkey > "$AWG_PRIV_PATH"
-			chmod 0600 "$AWG_PRIV_PATH"
-		fi
-		wg pubkey < "$AWG_PRIV_PATH" > "$AWG_PUB_PATH"
-		AWG_PUBKEY=$(cat "$AWG_PUB_PATH")
-		log "  awg pubkey: $AWG_PUBKEY"
-	else
-		AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
+	log "  awg keypair: delegating to opec secrets awg-keygen"
+	install -d -m 0700 "$PREFIX_ETC"
+	if ! command -v wg >/dev/null 2>&1; then
+		install_wg_tools_for_keygen
 	fi
+	_opec_args=(secrets awg-keygen --out-dir "$PREFIX_ETC")
+	[[ $FORCE_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
+	if ! opec "${_opec_args[@]}"; then
+		die "opec secrets awg-keygen failed"
+	fi
+	AWG_PUBKEY="$(cat "$AWG_PUB_PATH")" \
+		|| die "post-awg-keygen: failed to read $AWG_PUB_PATH"
+	log "  awg pubkey: $AWG_PUBKEY"
+	unset _opec_args
 fi
 
 if [[ -n "$MANUAL_CONFIG" ]]; then
 	[[ -r "$MANUAL_CONFIG" ]] || die "manual-config file not readable: $MANUAL_CONFIG"
 	cp "$MANUAL_CONFIG" "$tmp_cfg"
 	log "  using manual config: $MANUAL_CONFIG"
-elif [[ "${OPEC_SECRETS_REGISTER:-1}" == "1" ]] && command -v opec >/dev/null 2>&1; then
-	# Phase 4.3c: OPEC_SECRETS_REGISTER (default=1) gates delegation to
-	# 'opec secrets register'. Set OPEC_SECRETS_REGISTER=0 to fall back
-	# to the legacy bash python+curl path below.
+else
 	if [[ $DRY_RUN -eq 1 ]]; then
 		warn "  [dry-run] would invoke: opec secrets register --registry-url $BACKEND_API ..."
 		# Synthesize a placeholder env-file with the same shape downstream
@@ -1058,7 +882,7 @@ DRYENV
 		[[ -n "$REGION" ]] && _opec_register_args+=(--region "$REGION")
 		[[ -n "$BRANDING_CONFIG" ]] && _opec_register_args+=(--branding-config "$BRANDING_CONFIG")
 		if ! opec "${_opec_register_args[@]}"; then
-			die "opec secrets register failed — re-run with OPEC_SECRETS_REGISTER=0 to fall back to bash path"
+			die "opec secrets register failed"
 		fi
 		# Source the env-file so downstream steps see NODE_ID, BACKEND_ENDPOINT, etc.
 		set -a
@@ -1068,195 +892,6 @@ DRYENV
 		unset _opec_register_args
 		# Mark to skip json_get section below.
 		OPEC_REGISTER_USED=1
-	fi
-elif [[ $DRY_RUN -eq 1 ]]; then
-	warn "  [dry-run] skipping POST $BACKEND_API/api/partner/register"
-	# Synthesize a placeholder node config so Step 5 templates render without
-	# leaking real secrets. reality_public_key + reality_uuid use the values
-	# generated/reused by the Reality keygen block above (real per-edge values).
-	# Other secrets remain obvious sentinels (DRYRUN-…).
-	cat >"$tmp_cfg" <<DRYJSON
-{
-  "node_id": "${PARTNER_ID}-DRYRUN",
-  "backend_endpoint": "https://api.oxpulse.chat",
-  "turn_secret": "DRYRUN-turn-secret",
-  "reality_uuid": "${REALITY_UUID}",
-  "reality_public_key": "${REALITY_PUBKEY}",
-  "reality_short_id": "0123456789abcdef",
-  "reality_server_name": "www.cloudflare.com",
-  "reality_encryption": "",
-  "relay_jwt_secret": "DRYRUN-relay-jwt-secret",
-  "turns_subdomain": "${TURNS_SUBDOMAIN}"
-}
-DRYJSON
-else
-	log "  POST $BACKEND_API/api/partner/register"
-	[[ -n "$BRANDING_CONFIG" ]] && log "  shipping branding-config: $BRANDING_CONFIG"
-	[[ $brand_flag_set -eq 1 ]] && log "  shipping branding from --brand-* shorthand flags"
-
-	# Build body via python so we (1) omit `region` cleanly when empty,
-	# (2) inline `branding` as a parsed object, and (3) assemble a
-	# minimal BrandingConfig from --brand-* flags when they are set
-	# (and --branding-config is not). The backend column is nullable
-	# and the register handler treats absent + null + "" as
-	# Option::None — see register.rs.
-	register_body=$(
-		REG_PARTNER="$PARTNER_ID" REG_DOMAIN="$DOMAIN" REG_TOKEN="$TOKEN" \
-		REG_PUBLIC_IP="$PUBLIC_IP" REG_REGION="$REGION" \
-		REG_BRANDING_FILE="$BRANDING_CONFIG" \
-		REG_AWG_PUBKEY="$AWG_PUBKEY" \
-		REG_REALITY_PUBKEY="$REALITY_PUBKEY" \
-		REG_REALITY_UUID="$REALITY_UUID" \
-		REG_BRAND_DISPLAY_NAME="$BRAND_DISPLAY_NAME" \
-		REG_BRAND_DESCRIPTION="$BRAND_DESCRIPTION" \
-		REG_BRAND_COLOR_PRIMARY="$BRAND_COLOR_PRIMARY" \
-		REG_BRAND_COLOR_SECONDARY="$BRAND_COLOR_SECONDARY" \
-		REG_BRAND_COLOR_ACCENT="$BRAND_COLOR_ACCENT" \
-		REG_BRAND_COLOR_ON_PRIMARY="$BRAND_COLOR_ON_PRIMARY" \
-		REG_BRAND_LOGO_LIGHT="$BRAND_LOGO_LIGHT" \
-		REG_BRAND_LOGO_DARK="$BRAND_LOGO_DARK" \
-		REG_BRAND_FAVICON="$BRAND_FAVICON" \
-		REG_BRAND_OG_IMAGE="$BRAND_OG_IMAGE" \
-		REG_BRAND_CO_BRAND="$BRAND_CO_BRAND" \
-		REG_BRAND_CANONICAL="$BRAND_CANONICAL" \
-		REG_BRAND_WORDMARK="$BRAND_WORDMARK" \
-		REG_BRAND_HERO_TITLE="$BRAND_HERO_TITLE" \
-		REG_BRAND_HERO_TITLE_RU="$BRAND_HERO_TITLE_RU" \
-		REG_BRAND_HERO_TITLE_EN="$BRAND_HERO_TITLE_EN" \
-		REG_BRAND_HERO_TITLE_ZH="$BRAND_HERO_TITLE_ZH" \
-		REG_BRAND_HERO_TITLE_FA="$BRAND_HERO_TITLE_FA" \
-		REG_BRAND_CTA_URL="$BRAND_CTA_URL" \
-		REG_BRAND_CTA_TEXT="$BRAND_CTA_TEXT" \
-		REG_BRAND_CTA_URL_RU="$BRAND_CTA_URL_RU" \
-		REG_BRAND_CTA_URL_EN="$BRAND_CTA_URL_EN" \
-		REG_BRAND_CTA_URL_ZH="$BRAND_CTA_URL_ZH" \
-		REG_BRAND_CTA_URL_FA="$BRAND_CTA_URL_FA" \
-		REG_BRAND_CTA_TEXT_RU="$BRAND_CTA_TEXT_RU" \
-		REG_BRAND_CTA_TEXT_EN="$BRAND_CTA_TEXT_EN" \
-		REG_BRAND_CTA_TEXT_ZH="$BRAND_CTA_TEXT_ZH" \
-		REG_BRAND_CTA_TEXT_FA="$BRAND_CTA_TEXT_FA" \
-		REG_BRAND_LEGAL_ENTITY="$BRAND_LEGAL_ENTITY" \
-		REG_BRAND_LEGAL_COUNTRY="$BRAND_LEGAL_COUNTRY" \
-		REG_BRAND_LEGAL_CONTACT="$BRAND_LEGAL_CONTACT" \
-		python3 -c '
-import json, os
-
-def env(name, default=""):
-    return os.environ.get(name, default).strip()
-
-body = {
-    "partner_id": env("REG_PARTNER"),
-    "domain":     env("REG_DOMAIN"),
-    "token":      env("REG_TOKEN"),
-    "public_ip":  env("REG_PUBLIC_IP"),
-}
-region = env("REG_REGION")
-if region:
-    body["region"] = region
-awg_pubkey = env("REG_AWG_PUBKEY")
-if awg_pubkey:
-    body["awg_pubkey"] = awg_pubkey
-reality_pubkey = env("REG_REALITY_PUBKEY")
-if reality_pubkey:
-    body["reality_public_key"] = reality_pubkey
-reality_uuid = env("REG_REALITY_UUID")
-if reality_uuid:
-    body["reality_uuid"] = reality_uuid
-
-branding_path = env("REG_BRANDING_FILE")
-if branding_path:
-    with open(branding_path) as f:
-        body["branding"] = json.load(f)
-else:
-    # Assemble a BrandingConfig from --brand-* flags. Only fields with
-    # non-empty values are emitted; the backend deserializer rejects a
-    # payload that lacks BrandingConfig required keys, so we pre-fill
-    # sensible defaults (display_name="OxPulse" + co_brand=$PARTNER_ID,
-    # the same shape the resolver synthesises for NULL rows) when ANY
-    # brand flag is set.
-    brand_keys = [
-        "DISPLAY_NAME","DESCRIPTION","COLOR_PRIMARY","COLOR_SECONDARY",
-        "COLOR_ACCENT","COLOR_ON_PRIMARY","LOGO_LIGHT","LOGO_DARK",
-        "FAVICON","OG_IMAGE","CO_BRAND","CANONICAL","WORDMARK",
-        "HERO_TITLE","HERO_TITLE_RU","HERO_TITLE_EN","HERO_TITLE_ZH","HERO_TITLE_FA",
-        "CTA_URL","CTA_TEXT","CTA_URL_RU","CTA_URL_EN","CTA_URL_ZH","CTA_URL_FA",
-        "CTA_TEXT_RU","CTA_TEXT_EN","CTA_TEXT_ZH","CTA_TEXT_FA",
-        "LEGAL_ENTITY","LEGAL_COUNTRY","LEGAL_CONTACT",
-    ]
-    any_set = any(env("REG_BRAND_"+k) for k in brand_keys)
-    if any_set:
-        b = {
-            "partner_id":   body["partner_id"],
-            "domains":      [body["domain"]],
-            "display_name": env("REG_BRAND_DISPLAY_NAME") or "OxPulse",
-            "description":  env("REG_BRAND_DESCRIPTION") or "End-to-end encrypted video calls. Free, anonymous, no account.",
-            "logo": {
-                "light": env("REG_BRAND_LOGO_LIGHT") or "/logo-light.svg",
-                "dark":  env("REG_BRAND_LOGO_DARK")  or "/logo-dark.svg",
-            },
-            "favicon":   env("REG_BRAND_FAVICON")  or "/favicon.svg",
-            "og_image":  env("REG_BRAND_OG_IMAGE") or "/og-image.png",
-            "colors": {
-                "primary":   env("REG_BRAND_COLOR_PRIMARY")   or "#C9A96E",
-                "secondary": env("REG_BRAND_COLOR_SECONDARY") or "#1E293B",
-            },
-            "copy": {},
-            "co_brand_partner": env("REG_BRAND_CO_BRAND") or body["partner_id"],
-            "canonical_override": env("REG_BRAND_CANONICAL") or "https://oxpulse.chat/",
-        }
-        accent = env("REG_BRAND_COLOR_ACCENT")
-        if accent: b["colors"]["accent"] = accent
-        on_primary = env("REG_BRAND_COLOR_ON_PRIMARY")
-        if on_primary: b["colors"]["on_primary"] = on_primary
-        wordmark = env("REG_BRAND_WORDMARK")
-        if wordmark: b["partner_wordmark"] = wordmark
-
-        # hero_title — single value populates ru+en; per-locale wins.
-        hero_short = env("REG_BRAND_HERO_TITLE")
-        for loc in ("ru","en","zh","fa"):
-            specific = env(f"REG_BRAND_HERO_TITLE_{loc.upper()}")
-            value = specific or (hero_short if loc in ("ru","en") else "")
-            if value:
-                b["copy"][f"hero_title_{loc}"] = value
-
-        # affiliate CTA — short flags populate ru+en; per-locale wins.
-        cta_url_short  = env("REG_BRAND_CTA_URL")
-        cta_text_short = env("REG_BRAND_CTA_TEXT")
-        cta_urls, cta_texts = {}, {}
-        for loc in ("ru","en","zh","fa"):
-            url  = env(f"REG_BRAND_CTA_URL_{loc.upper()}")  or (cta_url_short  if loc in ("ru","en") else "")
-            txt  = env(f"REG_BRAND_CTA_TEXT_{loc.upper()}") or (cta_text_short if loc in ("ru","en") else "")
-            if url:  cta_urls[loc]  = url
-            if txt:  cta_texts[loc] = txt
-        if cta_urls or cta_texts:
-            # BrandingConfig::AffiliateConfig requires both maps. Fall
-            # back to first available locale to preserve schema validity.
-            if cta_urls and not cta_texts:
-                cta_texts = {next(iter(cta_urls)): "Try VPN"}
-            if cta_texts and not cta_urls:
-                cta_urls = {next(iter(cta_texts)): "https://example.com/"}
-            b["affiliate"] = {"vpn_cta_url": cta_urls, "vpn_cta_text": cta_texts}
-
-        legal_entity  = env("REG_BRAND_LEGAL_ENTITY")
-        legal_country = env("REG_BRAND_LEGAL_COUNTRY")
-        legal_contact = env("REG_BRAND_LEGAL_CONTACT")
-        if legal_entity or legal_country or legal_contact:
-            b["legal"] = {
-                "partner_entity":  legal_entity  or body["partner_id"],
-                "partner_country": legal_country or "unknown",
-                "partner_contact": legal_contact or "partnerships@oxpulse.chat",
-            }
-
-        body["branding"] = b
-
-print(json.dumps(body, ensure_ascii=False))
-')
-	if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
-		-X POST "$BACKEND_API/api/partner/register" \
-		-H 'Content-Type: application/json' \
-		-d "$register_body" \
-		-o "$tmp_cfg"; then
-		die "registration failed — endpoint may not yet be implemented (Task 4). Retry with --manual-config=<path>"
 	fi
 fi
 
@@ -1476,55 +1111,29 @@ fi
 # Phase 4.3d: Fetch Ed25519 SFU signing public key from /api/partner/keys at
 # install time so the SFU container starts with the correct key on day 1
 # (the daily refresh timer fires later; install must not leave it empty).
-if [[ "${OPEC_SECRETS_SFU_KEY:-1}" == "1" ]] && command -v opec >/dev/null 2>&1; then
-	if [[ $DRY_RUN -eq 1 ]]; then
-		warn "  [dry-run] would invoke: opec secrets sfu-signing-key --backend-api $BACKEND_API --out-file $PREFIX_LIB/sfu-keys.env"
-	else
-		log "  sfu-signing-key: delegating to opec secrets sfu-signing-key"
-		install -d -m 0700 "$PREFIX_LIB"
-		if ! opec secrets sfu-signing-key \
-			--backend-api "$BACKEND_API" \
-			--out-file "$PREFIX_LIB/sfu-keys.env"; then
-			warn "  opec secrets sfu-signing-key failed — re-run with OPEC_SECRETS_SFU_KEY=0 to fall back to bash path"
-			# Skip sourcing — if opec aborted between tempfile create and persist,
-			# we don't trust whatever is on disk. Downstream falls back to empty
-			# SFU_SIGNING_PUBLIC_KEY (same observable as bash L1497 warn-path).
-		else
-			# Re-read the env-file to set SFU_SIGNING_PUBLIC_KEY in shell scope
-			# (downstream templates substitute {{SFU_SIGNING_PUBLIC_KEY}}).
-			# Note: opec's "empty key from backend" path Ok-returns WITHOUT writing
-			# the file, so the [[ -r ]] guard correctly skips it.
-			if [[ -r "$PREFIX_LIB/sfu-keys.env" ]]; then
-				# shellcheck disable=SC1091
-				. "$PREFIX_LIB/sfu-keys.env"
-			fi
-		fi
-	fi
+# Phase 4.8: opec is a hard requirement. Unconditionally delegate SFU signing
+# key fetch to opec secrets sfu-signing-key.
+if [[ $DRY_RUN -eq 1 ]]; then
+	warn "  [dry-run] would invoke: opec secrets sfu-signing-key --backend-api $BACKEND_API --out-file $PREFIX_LIB/sfu-keys.env"
 else
-	# === Legacy bash path (Phase 4.3d fallback). Preserved verbatim for rollback. ===
-	log "  fetching sfu_signing_public_key from $BACKEND_API/api/partner/keys"
-	SFU_SIGNING_PUBLIC_KEY=""
-	_keys_resp=$(curl -sS --max-time 10 -fL "$BACKEND_API/api/partner/keys" 2>/dev/null || true)
-	if [[ -n "$_keys_resp" ]]; then
-		SFU_SIGNING_PUBLIC_KEY=$(printf '%s' "$_keys_resp" | jq -r '.sfu_signing_public_key // empty' 2>/dev/null || true)
-	fi
-	# Backend returns PEM with embedded newlines. Escape them as literal \n so the
-	# rendered docker-compose.yml stays a valid YAML inline string. The YAML parser
-	# then converts \n back to real newlines when the SFU container reads its env.
-	if [[ -n "$SFU_SIGNING_PUBLIC_KEY" ]]; then
-		SFU_SIGNING_PUBLIC_KEY="${SFU_SIGNING_PUBLIC_KEY//$'\n'/\\n}"
-	fi
-	if [[ -n "$SFU_SIGNING_PUBLIC_KEY" ]]; then
-		log "  sfu_signing_public_key obtained"
-		if [[ $DRY_RUN -eq 0 ]]; then
-			install -d -m 0700 "$PREFIX_LIB"
-			printf 'SFU_SIGNING_PUBLIC_KEY=%s\n' "$SFU_SIGNING_PUBLIC_KEY" > "$PREFIX_LIB/sfu-keys.env"
-			chmod 0600 "$PREFIX_LIB/sfu-keys.env"
-		fi
+	log "  sfu-signing-key: delegating to opec secrets sfu-signing-key"
+	install -d -m 0700 "$PREFIX_LIB"
+	if ! opec secrets sfu-signing-key \
+		--backend-api "$BACKEND_API" \
+		--out-file "$PREFIX_LIB/sfu-keys.env"; then
+		warn "  opec secrets sfu-signing-key failed — SFU_SIGNING_PUBLIC_KEY will be empty"
+		# Skip sourcing — if opec aborted between tempfile create and persist,
+		# we do not trust whatever is on disk.
 	else
-		warn "  sfu_signing_public_key not available from /api/partner/keys (signaling may need updating; SFU relay JWT auth will fall back to RELAY_JWT_SECRET)"
+		# Re-read the env-file to set SFU_SIGNING_PUBLIC_KEY in shell scope
+		# (downstream templates substitute {{SFU_SIGNING_PUBLIC_KEY}}).
+		# Note: opec's "empty key from backend" path Ok-returns WITHOUT writing
+		# the file, so the [[ -r ]] guard correctly skips it.
+		if [[ -r "$PREFIX_LIB/sfu-keys.env" ]]; then
+			# shellcheck disable=SC1091
+			. "$PREFIX_LIB/sfu-keys.env"
+		fi
 	fi
-	unset _keys_resp
 fi
 
 # Split backend_endpoint "host:port" into host + port for xray config.
