@@ -15,11 +15,9 @@ use super::{render_to_file, RenderError};
 /// want a clean rollback. This mirrors bash `render_template` semantics.
 pub fn render(src: &Path, dst: &Path) -> Result<()> {
     let rendered = render_to_file(src, dst)?;
-    serde_json::from_str::<serde_json::Value>(&rendered).map_err(|e| {
-        RenderError::Validation {
-            kind: "xray",
-            reason: format!("rendered file is not valid JSON: {e}"),
-        }
+    serde_json::from_str::<serde_json::Value>(&rendered).map_err(|e| RenderError::Validation {
+        kind: "xray",
+        reason: format!("rendered file is not valid JSON: {e}"),
     })?;
     Ok(())
 }

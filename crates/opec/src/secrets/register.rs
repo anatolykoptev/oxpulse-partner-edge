@@ -70,7 +70,11 @@ pub fn build_body(inputs: &BodyInputs) -> Result<String, SecretsError> {
             let parsed: serde_json::Value =
                 serde_json::from_str(&content).map_err(|e| SecretsError::InvalidBranding {
                     path: p.clone(),
-                    reason: format!("not valid JSON: {} bytes, error kind: {}", content.len(), e.classify_kind()),
+                    reason: format!(
+                        "not valid JSON: {} bytes, error kind: {}",
+                        content.len(),
+                        e.classify_kind()
+                    ),
                 })?;
             Some(parsed)
         }

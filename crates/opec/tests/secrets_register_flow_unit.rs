@@ -6,7 +6,11 @@ use tempfile::TempDir;
 
 fn make_files(tmp: &std::path::Path) {
     fs::write(tmp.join("reality.pub"), "REALITY_PUB_VALUE\n").unwrap();
-    fs::write(tmp.join("reality.uuid"), "11111111-2222-3333-4444-555555555555\n").unwrap();
+    fs::write(
+        tmp.join("reality.uuid"),
+        "11111111-2222-3333-4444-555555555555\n",
+    )
+    .unwrap();
     fs::write(tmp.join("awg.pub"), "AWG_PUB_VALUE\n").unwrap();
 }
 
@@ -129,7 +133,10 @@ fn register_missing_required_field_errors() {
     make_files(tmp.path());
     let err = register::run(args_for(tmp.path(), server.url())).expect_err("must error");
     assert!(
-        matches!(err, SecretsError::MissingResponseField { .. } | SecretsError::Http { .. }),
+        matches!(
+            err,
+            SecretsError::MissingResponseField { .. } | SecretsError::Http { .. }
+        ),
         "expected MissingResponseField or Http parse error, got {err:?}"
     );
 }

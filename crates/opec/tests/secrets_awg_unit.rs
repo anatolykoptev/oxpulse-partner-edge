@@ -38,7 +38,7 @@ fn fake_wg(dir: &std::path::Path, priv_key: &str, pub_key: &str) -> PathBuf {
 }
 
 const PRIV_44: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQR="; // 44 chars (43 + '=')
-const PUB_44: &str  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefgh=";
+const PUB_44: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefgh=";
 
 #[test]
 fn awg_keygen_fresh_writes_both_files() {
@@ -52,7 +52,10 @@ fn awg_keygen_fresh_writes_both_files() {
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(out.path().join("awg-private.key"))
-            .unwrap().permissions().mode() & 0o777;
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600, "awg-private.key must be 0600");
     }
     let pub_content = fs::read_to_string(out.path().join("awg-public.key")).unwrap();
@@ -79,7 +82,11 @@ fn awg_keygen_rotate_regenerates_priv() {
     let wg1 = fake_wg(bin.path(), PRIV_44, PUB_44);
     awg::keygen(out.path(), false, &wg1).expect("first");
     let pub_first = fs::read_to_string(out.path().join("awg-public.key")).unwrap();
-    let wg2 = fake_wg(bin.path(), "DIFFERENT_PRIV_KEY_44CHARS_xxxxxxxxxxxxxx=", "DIFFERENT_PUB_44CHARS_xxxxxxxxxxxxxxxxxxxxxx=");
+    let wg2 = fake_wg(
+        bin.path(),
+        "DIFFERENT_PRIV_KEY_44CHARS_xxxxxxxxxxxxxx=",
+        "DIFFERENT_PUB_44CHARS_xxxxxxxxxxxxxxxxxxxxxx=",
+    );
     awg::keygen(out.path(), true, &wg2).expect("rotate");
     let pub_second = fs::read_to_string(out.path().join("awg-public.key")).unwrap();
     assert_ne!(pub_first, pub_second, "--rotate must regenerate");

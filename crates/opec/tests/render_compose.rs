@@ -20,10 +20,16 @@ fn set_frozen_env() {
     env::set_var("BACKEND_PORT", "5349");
     env::set_var("TURN_SECRET", "test-turn-secret-deadbeef");
     env::set_var("REALITY_UUID", "d529dee6-3cdd-4079-95d1-f8801722147c");
-    env::set_var("REALITY_PUBLIC_KEY", "U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk");
+    env::set_var(
+        "REALITY_PUBLIC_KEY",
+        "U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk",
+    );
     env::set_var("REALITY_SHORT_ID", "abcd1234");
     env::set_var("REALITY_SERVER_NAME", "www.samsung.com");
-    env::set_var("REALITY_ENCRYPTION", "mlkem768x25519plus.native.0rtt.fXgOoxcW");
+    env::set_var(
+        "REALITY_ENCRYPTION",
+        "mlkem768x25519plus.native.0rtt.fXgOoxcW",
+    );
     env::set_var("TURNS_SUBDOMAIN", "api-test01");
     env::set_var("PUBLIC_IP", "157.22.204.190");
     env::set_var("PRIVATE_IP", "");
