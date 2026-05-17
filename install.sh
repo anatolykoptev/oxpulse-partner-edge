@@ -765,6 +765,7 @@ unset _ghcr_lib_local _ghcr_lib_installed
 
 _chan_lib_local="${src_dir:-.}/channel-render-lib.sh"
 _chan_lib_installed="$PREFIX_SBIN/channel-render-lib.sh"
+_chan_lib_tmp=""
 if [[ -f "$_chan_lib_local" ]]; then
 	# shellcheck source=channel-render-lib.sh
 	source "$_chan_lib_local"
@@ -772,9 +773,20 @@ elif [[ -f "$_chan_lib_installed" ]]; then
 	# shellcheck source=/dev/null
 	source "$_chan_lib_installed"
 else
-	die "channel-render-lib.sh not found (looked at $_chan_lib_local and $_chan_lib_installed)"
+	# Fresh one-command install via curl: only install.sh was downloaded,
+	# the lib isn't on disk yet. Fetch it from REPO_RAW the same way Step 5
+	# fetches .tpl files. Step 8 (systemd install) reuses $_chan_lib_tmp
+	# to copy the lib to $PREFIX_SBIN.
+	_chan_lib_tmp=$(mktemp)
+	if ! curl -fsSL "$REPO_RAW/channel-render-lib.sh" -o "$_chan_lib_tmp"; then
+		rm -f "$_chan_lib_tmp"
+		die "channel-render-lib.sh not found locally and could not fetch from $REPO_RAW"
+	fi
+	# shellcheck source=/dev/null
+	source "$_chan_lib_tmp"
 fi
 unset _chan_lib_local _chan_lib_installed
+# NOTE: do NOT unset _chan_lib_tmp here — Step 8 install needs it.
 
 if [[ -n "${GHCR_TOKEN_FLAG:-}" ]] && declare -f ghcr_configure_token >/dev/null 2>&1; then
 	ghcr_configure_token "$GHCR_TOKEN_FLAG" \
@@ -1740,6 +1752,9 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	# Shared channel render library (sourced by upgrade.sh + refresh.sh).
 	if [[ -n "$src_dir" && -f "$src_dir/channel-render-lib.sh" ]]; then
 		install -m 0644 "$src_dir/channel-render-lib.sh" "$PREFIX_SBIN/channel-render-lib.sh"
+	elif [[ -n "${_chan_lib_tmp:-}" && -f "$_chan_lib_tmp" ]]; then
+		install -m 0644 "$_chan_lib_tmp" "$PREFIX_SBIN/channel-render-lib.sh"
+		rm -f "$_chan_lib_tmp"
 	else
 		curl -fsSL "$REPO_RAW/channel-render-lib.sh" -o "$PREFIX_SBIN/channel-render-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/channel-render-lib.sh"
