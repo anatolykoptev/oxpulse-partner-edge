@@ -22,7 +22,10 @@ fn sfu_key_fetch_success_writes_file() {
     let _mock = server
         .mock("GET", "/api/partner/keys")
         .with_status(200)
-        .with_body(format!(r#"{{"sfu_signing_public_key": {}}}"#, serde_json::to_string(pem).unwrap()))
+        .with_body(format!(
+            r#"{{"sfu_signing_public_key": {}}}"#,
+            serde_json::to_string(pem).unwrap()
+        ))
         .create();
 
     let tmp = TempDir::new().unwrap();
@@ -70,7 +73,10 @@ fn sfu_key_fetch_empty_key_warns_does_not_fail() {
 
     let tmp = TempDir::new().unwrap();
     let result = sfu_key::fetch(args_for(tmp.path(), server.url()));
-    assert!(result.is_ok(), "empty key must be Ok (warn semantics), got: {result:?}");
+    assert!(
+        result.is_ok(),
+        "empty key must be Ok (warn semantics), got: {result:?}"
+    );
     assert!(
         !tmp.path().join("sfu-keys.env").exists(),
         "file must NOT be created when key is empty"
@@ -89,7 +95,10 @@ fn sfu_key_fetch_missing_field_warns_does_not_fail() {
 
     let tmp = TempDir::new().unwrap();
     let result = sfu_key::fetch(args_for(tmp.path(), server.url()));
-    assert!(result.is_ok(), "missing field must be Ok (warn semantics), got: {result:?}");
+    assert!(
+        result.is_ok(),
+        "missing field must be Ok (warn semantics), got: {result:?}"
+    );
     assert!(
         !tmp.path().join("sfu-keys.env").exists(),
         "file must NOT be created when field is missing"
