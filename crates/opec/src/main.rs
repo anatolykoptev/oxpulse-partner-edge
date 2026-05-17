@@ -48,6 +48,12 @@ enum Commands {
         #[command(subcommand)]
         action: TenantCommands,
     },
+    /// Bootstrap partner-edge secrets (Reality identity, registry credentials,
+    /// SFU signing key). Phase 4.3 absorbs install.sh Step 4.
+    Secrets {
+        #[command(subcommand)]
+        action: opec::secrets::SecretsCommands,
+    },
     /// Render a partner-edge config template (xray | coturn | naive).
     ///
     /// Substitutes {{NAME}} placeholders from env vars (NAME = [A-Z][A-Z0-9_]*),
@@ -146,6 +152,7 @@ fn main() {
 
     let result = match cli.command {
         Commands::Tenant { action } => run_tenant(action),
+        Commands::Secrets { action } => opec::secrets::dispatch(action),
         Commands::Render { kind, tpl, out } => match kind {
             RenderKind::Xray => opec::render::xray::render(&tpl, &out),
             RenderKind::Coturn => opec::render::coturn::render(&tpl, &out),
