@@ -193,7 +193,7 @@ except Exception:
         jq_tmp=$(mktemp)
         jq 'del(.outbounds[].streamSettings.xhttpSettings.xmux)' "$out" > "$jq_tmp" \
             && mv "$jq_tmp" "$out" \
-            || { warn "jq xmux strip failed — leaving xmux in config"; rm -f "$jq_tmp"; }
+            || { rm -f "$jq_tmp"; die "jq xmux strip failed — refusing to install half-stripped config"; }
     fi
     rm -f "$tpl"
 
