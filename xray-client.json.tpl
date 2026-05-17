@@ -41,15 +41,15 @@
       "streamSettings": {
         "network": "xhttp",
         "xhttpSettings": {
-          "path": "/xh",
-          "mode": "packet-up",
+          "path": "{{XRAY_XHTTP_PATH}}",
+          "mode": "{{XRAY_XHTTP_MODE}}",
           "xmux": {
-            "maxConcurrency": 1,
-            "cMaxReuseTimes": 64,
-            "cMaxLifetimeMs": 15000
+            "maxConcurrency": {{XRAY_XHTTP_XMUX_MAX_CONCURRENCY}},
+            "cMaxReuseTimes": {{XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES}},
+            "cMaxLifetimeMs": {{XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS}}
           },
           "extra": {
-            "xPaddingBytes": "100-1000"
+            "xPaddingBytes": "{{XRAY_XHTTP_X_PADDING_BYTES}}"
           }
         },
         "security": "reality",

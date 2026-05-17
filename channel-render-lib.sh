@@ -157,6 +157,19 @@ except Exception:
 
     local out
     out=$(mktemp)
+    # Read xhttp transport settings from node-config.json (server is source of truth).
+    # Helper is co-installed in the same directory as this lib (PREFIX_SBIN).
+    local _lib_dir
+    _lib_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" 2>/dev/null && pwd)"
+    local _read_xhttp="${_lib_dir}/read-xhttp.py"
+    local xhttp_mode xhttp_path xmux_max_concurrency xmux_c_max_reuse_times xmux_c_max_lifetime_ms x_padding_bytes
+    xhttp_mode=$("$_read_xhttp" "$NODE_CFG" mode --default stream-one 2>/dev/null || echo "stream-one")
+    xhttp_path=$("$_read_xhttp" "$NODE_CFG" path --default /xh 2>/dev/null || echo "/xh")
+    xmux_max_concurrency=$("$_read_xhttp" "$NODE_CFG" xmux_concurrency --default 1 --type int 2>/dev/null || echo "1")
+    xmux_c_max_reuse_times=$("$_read_xhttp" "$NODE_CFG" xmux_reuse --default 64 --type int 2>/dev/null || echo "64")
+    xmux_c_max_lifetime_ms=$("$_read_xhttp" "$NODE_CFG" xmux_lifetime --default 15000 --type int 2>/dev/null || echo "15000")
+    x_padding_bytes=$("$_read_xhttp" "$NODE_CFG" padding --default 100-1000 2>/dev/null || echo "100-1000")
+
     sed \
         -e "s|{{REALITY_UUID}}|$(_esc "$uuid")|g" \
         -e "s|{{REALITY_ENCRYPTION}}|$(_esc "$enc")|g" \
@@ -166,7 +179,22 @@ except Exception:
         -e "s|{{BACKEND_HOST}}|$(_esc "$backend_host")|g" \
         -e "s|{{BACKEND_PORT}}|$(_esc "$backend_port")|g" \
         -e "s|{{BACKEND_ENDPOINT}}|$(_esc "$backend")|g" \
+        -e "s|{{XRAY_XHTTP_MODE}}|$(_esc "$xhttp_mode")|g" \
+        -e "s|{{XRAY_XHTTP_PATH}}|$(_esc "$xhttp_path")|g" \
+        -e "s|{{XRAY_XHTTP_XMUX_MAX_CONCURRENCY}}|$(_esc "$xmux_max_concurrency")|g" \
+        -e "s|{{XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES}}|$(_esc "$xmux_c_max_reuse_times")|g" \
+        -e "s|{{XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS}}|$(_esc "$xmux_c_max_lifetime_ms")|g" \
+        -e "s|{{XRAY_XHTTP_X_PADDING_BYTES}}|$(_esc "$x_padding_bytes")|g" \
         "$tpl" > "$out"
+
+    # Strip xmux block when mode != packet-up.
+    if [[ "$xhttp_mode" != "packet-up" ]]; then
+        local jq_tmp
+        jq_tmp=$(mktemp)
+        jq 'del(.outbounds[].streamSettings.xhttpSettings.xmux)' "$out" > "$jq_tmp" \
+            && mv "$jq_tmp" "$out" \
+            || { rm -f "$jq_tmp"; die "jq xmux strip failed — refusing to install half-stripped config"; }
+    fi
     rm -f "$tpl"
 
     # Backup old config, install new one (0600 — contains secrets).
