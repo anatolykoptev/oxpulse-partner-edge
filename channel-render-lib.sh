@@ -23,6 +23,47 @@ NODE_CFG="${NODE_CFG:-$PREFIX_ETC/node-config.json}"
 XRAY_CFG="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main}"
 
+# Generic mustache-style template renderer — Phase 1 dedupe target.
+# Substitutes every {{NAME}} placeholder in $src with the matching env var,
+# empty string when unset. Multi-line values (PEM keys, ML-KEM blobs) preserved
+# verbatim. Python3-based — avoids sed PEM-newline corruption.
+#
+# Single source of truth — install.sh, hydrate.sh, update.sh all call this.
+#
+# Args:
+#   $1 src — template file path (must exist)
+#   $2 dst — output file path (created/overwritten atomically)
+#
+# Returns: 0 on success; 1 + warn on read/write/parse error.
+render_template() {
+    local src=$1 dst=$2
+    [[ -f "$src" ]] || { warn "render_template: source not found: $src"; return 1; }
+    local dst_dir
+    dst_dir=$(dirname "$dst")
+    [[ -d "$dst_dir" ]] || { warn "render_template: dest dir missing: $dst_dir"; return 1; }
+    local tmp
+    tmp=$(mktemp --tmpdir="$dst_dir" ".$(basename "$dst").XXXXXX.tmp") || {
+        warn "render_template: mktemp failed in $dst_dir"
+        return 1
+    }
+    if ! python3 -c '
+import os, sys, re
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f: tpl = f.read()
+out = re.sub(r"\{\{([A-Z][A-Z0-9_]*)\}\}", lambda m: os.environ.get(m.group(1), ""), tpl)
+with open(dst, "w") as f: f.write(out)
+' "$src" "$tmp"; then
+        warn "render_template: python3 substitution failed for $src"
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! mv -f "$tmp" "$dst"; then
+        warn "render_template: mv failed: $dst"
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
 # Re-render xray-client.json from the upstream template, preserving secrets
 # from node-config.json. Called on every upgrade so structural changes
 # (e.g. flow, mode, padding) are applied without requiring reinstall.

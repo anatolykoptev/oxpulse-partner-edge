@@ -1,0 +1,21 @@
+# Rendered by oxpulse-partner-edge install.sh / update.sh.
+# Phase 1.7 — hy2 as 2nd partner-edge control-plane channel.
+server: ""
+
+auth: ""
+
+obfs:
+  type: salamander
+  salamander:
+    password: ""
+
+tls:
+  insecure: true
+
+bandwidth:
+  up: 50 mbps
+  down: 200 mbps
+
+tcpForwarding:
+  - listen: 
+    remote: 

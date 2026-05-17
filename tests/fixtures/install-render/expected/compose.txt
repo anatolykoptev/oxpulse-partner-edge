@@ -1,0 +1,200 @@
+# Rendered by install.sh → /etc/oxpulse-partner-edge/docker-compose.yml
+# DO NOT EDIT DIRECTLY — regenerated on reinstall / upgrade.
+#
+# Placeholders (all substituted at install time):
+#   zvonilka zvonilka.net 203.0.113.10:5349
+#   test-turn-secret-deadbeef d529dee6-3cdd-4079-95d1-f8801722147c U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk abcd1234
+#   www.samsung.com 157.22.204.190  stable
+#   7878 9317 -----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAZiwaWp+FJ1sGprGGS69mq+sB6nhwOMi24xGSGfgdXNo=\n-----END PUBLIC KEY-----\n
+#   test-signaling-sfu-secret
+
+name: oxpulse-partner-edge
+
+services:
+  caddy:
+    image: ghcr.io/anatolykoptev/partner-edge-caddy:stable
+    container_name: oxpulse-partner-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      # Phase 1 canary endpoints: host-only bind so healthcheck.sh can reach them.
+      - "127.0.0.1:9080:9080"
+    environment:
+      PARTNER_DOMAIN: "zvonilka.net"
+      PARTNER_ID: "zvonilka"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+      # Cover page for R1 Layer 2 active-probing defense (Task 3.1).
+      # Partners can override by mounting their own cover/ directory.
+      - ./cover:/srv/cover:ro
+      # M2b.2: DB-IP mmdb for maxmind_geolocation country lookup.
+      # Provisioned by install.sh; refreshed monthly by geoip-refresh.timer.
+      # Read-only — Caddy only needs to read the file.
+      - /var/lib/geoip:/var/lib/geoip:ro
+    depends_on:
+      xray-client:
+        condition: service_started
+    networks:
+      - edge
+    extra_hosts:
+      # host-gateway resolves to the bridge gateway IP (172.18.0.1 on the
+      # default oxpulse-partner-edge_edge net) so caddy-l4 can reach
+      # coturn:5349 — coturn runs in network_mode: host and binds every
+      # host interface including the bridge gw. See Caddyfile.tpl.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--header=Host: localhost", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  xray-client:
+    image: ghcr.io/anatolykoptev/partner-edge-xray:stable
+    container_name: oxpulse-partner-xray
+    restart: unless-stopped
+    volumes:
+      - ./xray-client.json:/etc/xray/config.json:ro
+    networks:
+      - edge
+    # xray dokodemo-door on :3080 reachable only via docker network
+    expose:
+      - "3080"
+    healthcheck:
+      test: ["CMD-SHELL", "ss -ltn | grep -q ':3080' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  coturn:
+    image: ghcr.io/anatolykoptev/partner-edge-coturn:stable
+    container_name: oxpulse-partner-coturn
+    restart: unless-stopped
+    network_mode: host        # TURN needs real public IP + UDP relay ports
+    environment:
+      TURN_SECRET: "test-turn-secret-deadbeef"
+      REALM: "zvonilka.net"
+      PUBLIC_IPV4: "157.22.204.190"
+      PRIVATE_IPV4: ""
+      PARTNER_ID: "zvonilka"
+    volumes:
+      - ./coturn.conf:/etc/coturn/turnserver.conf:ro
+      - coturn-log:/var/log/turnserver
+      # Read-only share of Caddy's ACME cert storage. coturn.conf.tpl references
+      # /data/caddy/certificates/.../turns-sub.DOMAIN.crt from this mount.
+      # Caddy container sets $XDG_DATA_HOME=/data, so the volume root holds
+      # `caddy/certificates/...` — mount at /data (not /data/caddy) so the
+      # in-container path mirrors Caddy's view. Renewals trigger systemd path
+      # unit → docker exec coturn kill -USR2 1 (Task 2A.5 wires that).
+      - caddy-data:/data:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep turnserver >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # M2.1: str0m-based SFU co-located with coturn on partner-edge. Host
+  # networking mirrors coturn — UDP media wants the real public IP and no NAT
+  # translation. Media port defaults to 7878/udp (avoids coturn's 3478); the
+  # Prometheus /metrics endpoint listens on 8878/tcp (rendered via healthcheck).
+  sfu:
+    image: ghcr.io/anatolykoptev/partner-edge-sfu:stable
+    container_name: oxpulse-partner-sfu
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - caddy
+    environment:
+      SFU_BIND_ADDRESS: "0.0.0.0"
+      SFU_UDP_PORT: "7878"
+      SFU_METRICS_PORT: "9317"
+      # Per-edge label baked into every Prometheus series via the SFU's
+      # const_label registry. Empty → "local" (default), which collides
+      # with other edges in the central Prom view. Convention: <partner>1.
+      SFU_EDGE_ID: "zvonilka1"
+      # OpenTelemetry trace export — empty / unset = exporter disabled at SFU
+      # init (zero overhead). When set by install.sh from the central's awg
+      # response (typical: http://10.9.0.2:4317), spans flow through awg0
+      # to the central Jaeger.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      RUST_LOG: "info"
+      RELAY_JWT_SECRET: "test-relay-jwt-secret"
+      SFU_RELAY_API_PORT: "8912"
+      PARTNER_ID: "zvonilka"
+      # Phase 2: Ed25519 public key for asymmetric relay JWT verification.
+      # Fetched from /api/partner/keys at install time; refreshed daily by
+      # oxpulse-partner-edge-refresh.sh (written to sfu-keys.env).
+      SFU_SIGNING_PUBLIC_KEY: "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAZiwaWp+FJ1sGprGGS69mq+sB6nhwOMi24xGSGfgdXNo=\n-----END PUBLIC KEY-----\n"
+      # Phase 7 M4.A5 — client-facing WS endpoint /sfu/ws/{room_id}.
+      # Caddy reverse_proxies to host.docker.internal:8920 (see Caddyfile).
+      # The endpoint binds only when SIGNALING_SFU_SECRET is non-empty —
+      # without an HS256 secret the SFU has no way to verify browser
+      # room JWTs and refuses to expose an unauthenticated entry point.
+      SFU_CLIENT_WS_PORT: "8920"
+      SIGNALING_SFU_SECRET: "test-signaling-sfu-secret"
+      # Phase 7 M4.A6 — public IP advertised in WebRTC host candidates.
+      # Without this the SFU emits `0.0.0.0:N` host candidates (the bind
+      # address) and off-box browsers cannot complete ICE. The value
+      # comes from install.sh `$PUBLIC_IP` autodetect (cloud metadata →
+      # ipify → ifconfig.me). Operators may override at compose render
+      # time via OXPULSE_PUBLIC_IP. Falls back to bind address when empty.
+      SFU_PUBLIC_IP: "157.22.204.190"
+    # 2026-05-06 post-mortem: probe all three planes (metrics, client_ws,
+    # relay API). Previously only /metrics on 9317 was
+    # checked; that listener starts independently of feature gates so
+    # the container stayed green for 8 weeks while client_ws on :8920
+    # was silently disabled (SIGNALING_SFU_SECRET unset). The TCP probes
+    # use `nc -z` from netcat-openbsd, added to the runtime image in
+    # the same bundle (images/Dockerfile.sfu).
+    #
+    # Round-2 review fix: gate the client_ws / relay-API probes on the
+    # same env vars main.rs gates the listeners on, and honour
+    # SFU_CLIENT_WS_PORT / SFU_RELAY_API_PORT env overrides. CMD-SHELL
+    # is a /bin/sh -c context, so $VAR expands at container runtime
+    # against the service's environment block.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9317/metrics >/dev/null 2>&1 && { [ -z \"$SIGNALING_SFU_SECRET\" ] || nc -z 127.0.0.1 \"${SFU_CLIENT_WS_PORT:-8920}\"; } && { [ -z \"$RELAY_JWT_SECRET\" ] || nc -z 127.0.0.1 \"${SFU_RELAY_API_PORT:-8912}\"; } || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── CH3 Hysteria2 client (fallback) ─────────────────────────────────────
+  # Started only when install.sh renders hysteria2-client.yaml (backend
+  # provisioned CH3). Activated via `docker compose --profile ch3 up -d`.
+  # Traffic: QUIC + salamander obfuscation → looks like random UDP noise.
+  # tcpForwarding listener on 127.0.0.1:18443 for local proxying.
+  hysteria2-client:
+    image: tobyxdd/hysteria:v2.8.2
+    container_name: oxpulse-partner-hysteria2
+    profiles: [ch3]
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./hysteria2-client.yaml:/etc/hysteria/config.yaml:ro
+    command: ["client", "--config", "/etc/hysteria/config.yaml"]
+    healthcheck:
+      # Probe the local tcpForwarding listener that Hysteria2 exposes.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 18443 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      oxpulse.channel: "hy2"
+      oxpulse.phase: "1.7"
+
+  # CH5 NaiveProxy client: deferred — klzgrad/naiveproxy is not published as a
+  # Docker image. CH5 will be re-added once the edge-side wiring lands (see
+  # plans/2026-05-16-multi-channel-partner-edge.md §Phase 2).
+
+volumes:
+  caddy-data:
+  caddy-config:
+  coturn-log:
+
+networks:
+  edge:
+    driver: bridge
