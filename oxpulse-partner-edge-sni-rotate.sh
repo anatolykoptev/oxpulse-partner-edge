@@ -14,6 +14,14 @@ NODE_CFG="$PREFIX_ETC/node-config.json"
 XRAY_CFG="$PREFIX_ETC/xray-client.json"
 LOG=/var/log/oxpulse-partner-edge-sni-rotate.log
 
+# Source fleet-wide infrastructure defaults.
+_defaults_installed="/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+if [[ -f "$_defaults_installed" ]]; then
+    # shellcheck source=/dev/null
+    source "$_defaults_installed"
+fi
+unset _defaults_installed
+
 ts()  { date -Iseconds; }
 log() { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG"; }
 
@@ -23,9 +31,9 @@ log() { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG"; }
 # Read SNI pool from node-config.json.
 # Prefers reality_server_names array; falls back to single reality_server_name.
 POOL=$(python3 -c "
-import json, sys
+import json, os, sys
 d = json.load(open(sys.argv[1]))
-names = d.get('reality_server_names') or [d.get('reality_server_name', 'www.samsung.com')]
+names = d.get('reality_server_names') or [d.get('reality_server_name', '') or os.environ.get('OXPULSE_REALITY_SERVER_NAME', 'www.samsung.com')]
 names = [n for n in names if n]
 print('\n'.join(names))
 " "$NODE_CFG")

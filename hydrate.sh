@@ -40,6 +40,20 @@ mkdir -p "$PREFIX_LIB" "$PREFIX_ETC"
 # shellcheck source=/dev/null
 source "$HYDRATE_ENV"
 
+# Source fleet-wide infrastructure defaults (after hydrate.env so operator
+# overrides in hydrate.env take precedence via already-exported OXPULSE_* vars).
+SCRIPT_DIR_HYDRATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_defaults_local="${SCRIPT_DIR_HYDRATE}/config/defaults.conf"
+_defaults_installed="/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+if [[ -f "$_defaults_local" ]]; then
+    # shellcheck source=config/defaults.conf
+    source "$_defaults_local"
+elif [[ -f "$_defaults_installed" ]]; then
+    # shellcheck source=/dev/null
+    source "$_defaults_installed"
+fi
+unset _defaults_local _defaults_installed SCRIPT_DIR_HYDRATE
+
 [[ -n "${OXPULSE_PARTNER_DOMAIN:-}" ]]       || die "OXPULSE_PARTNER_DOMAIN not set in $HYDRATE_ENV"
 [[ -n "${OXPULSE_PARTNER_ID:-}" ]]           || die "OXPULSE_PARTNER_ID not set in $HYDRATE_ENV"
 [[ -n "${OXPULSE_REGISTRATION_TOKEN:-}" ]]   || die "OXPULSE_REGISTRATION_TOKEN not set in $HYDRATE_ENV"
@@ -150,7 +164,7 @@ NAIVE_PASS=$(jq_get naive_pass)
 [[ -n "$REALITY_UUID" ]]        || die "reality_uuid missing from registration response"
 [[ -n "$REALITY_PUBLIC_KEY" ]]  || die "reality_public_key missing from registration response"
 [[ -n "$REALITY_SHORT_ID" ]]    || die "reality_short_id missing from registration response"
-[[ -z "$REALITY_SERVER_NAME" ]] && REALITY_SERVER_NAME="www.samsung.com"
+[[ -z "$REALITY_SERVER_NAME" ]] && REALITY_SERVER_NAME="${OXPULSE_REALITY_SERVER_NAME:-www.samsung.com}"
 # Empty encryption means legacy (non-PQ) tunnel — xray requires literal "none".
 [[ -z "$REALITY_ENCRYPTION" ]] && REALITY_ENCRYPTION="none"
 
