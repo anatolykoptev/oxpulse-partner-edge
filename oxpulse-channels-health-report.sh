@@ -215,17 +215,20 @@ fi
 _AUTH_FAIL=0
 
 for _chan in "${_PROVISIONED[@]}"; do
+    # Channel ids in node-config may carry a node-specific suffix (e.g. "ch1-zvonilka").
+    # Match on prefix: ch1* = Reality/VLESS, ch2* = AmneziaWG, ch3* = Hysteria2.
+    # The server expects canonical names ch1/ch2/ch3, not the local variant.
     case "$_chan" in
-        ch1|ch1-reality)
+        ch1*)
             _payload=$(probe_ch1 2>/dev/null || printf '{"channel_name":"ch1","channel_handshake_ok":false}')
             ;;
-        ch2|ch2-awg)
+        ch2*)
             _payload=$(probe_ch2 2>/dev/null || printf '{"channel_name":"ch2","channel_handshake_ok":false}')
             ;;
-        ch3|ch3-hy2)
+        ch3*)
             _payload=$(probe_ch3 2>/dev/null || printf '{"channel_name":"ch3","channel_rtt_ms":0}')
             ;;
-        ch4|ch4-shadowtls|ch5|ch5-naive|ch6|ch6-tuic)
+        ch4*|ch5*|ch6*)
             log "$_chan not yet wired on edge — skipping"
             continue
             ;;
