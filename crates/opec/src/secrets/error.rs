@@ -30,4 +30,19 @@ pub enum SecretsError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("HTTP {status}: {body}")]
+    Http { status: u16, body: String },
+
+    #[error("transport error: {source}")]
+    Transport {
+        #[source]
+        source: Box<ureq::Error>,
+    },
+
+    #[error("missing required response field: {name}")]
+    MissingResponseField { name: &'static str },
+
+    #[error("stale registry response: reality_encryption is empty but reality_public_key is set — refusing to write known-broken xray-client config")]
+    StaleRegistry,
 }
