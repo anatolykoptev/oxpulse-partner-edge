@@ -1471,32 +1471,53 @@ fi
 [[ -z "$REALITY_ENCRYPTION" ]] && REALITY_ENCRYPTION="none"
 [[ -n "$REGISTER_TURNS_SUBDOMAIN" ]] && TURNS_SUBDOMAIN="$REGISTER_TURNS_SUBDOMAIN"
 
-# Phase 2: Fetch Ed25519 SFU signing public key from /api/partner/keys at
+# Phase 4.3d: Fetch Ed25519 SFU signing public key from /api/partner/keys at
 # install time so the SFU container starts with the correct key on day 1
 # (the daily refresh timer fires later; install must not leave it empty).
-log "  fetching sfu_signing_public_key from $BACKEND_API/api/partner/keys"
-SFU_SIGNING_PUBLIC_KEY=""
-_keys_resp=$(curl -sS --max-time 10 -fL "$BACKEND_API/api/partner/keys" 2>/dev/null || true)
-if [[ -n "$_keys_resp" ]]; then
-	SFU_SIGNING_PUBLIC_KEY=$(printf '%s' "$_keys_resp" | jq -r '.sfu_signing_public_key // empty' 2>/dev/null || true)
-fi
-# Backend returns PEM with embedded newlines. Escape them as literal \n so the
-# rendered docker-compose.yml stays a valid YAML inline string. The YAML parser
-# then converts \n back to real newlines when the SFU container reads its env.
-if [[ -n "$SFU_SIGNING_PUBLIC_KEY" ]]; then
-	SFU_SIGNING_PUBLIC_KEY="${SFU_SIGNING_PUBLIC_KEY//$'\n'/\\n}"
-fi
-if [[ -n "$SFU_SIGNING_PUBLIC_KEY" ]]; then
-	log "  sfu_signing_public_key obtained"
-	if [[ $DRY_RUN -eq 0 ]]; then
+if [[ "${OPEC_SECRETS_SFU_KEY:-1}" == "1" ]] && command -v opec >/dev/null 2>&1; then
+	if [[ $DRY_RUN -eq 1 ]]; then
+		warn "  [dry-run] would invoke: opec secrets sfu-signing-key --backend-api $BACKEND_API --out-file $PREFIX_LIB/sfu-keys.env"
+	else
+		log "  sfu-signing-key: delegating to opec secrets sfu-signing-key"
 		install -d -m 0700 "$PREFIX_LIB"
-		printf 'SFU_SIGNING_PUBLIC_KEY=%s\n' "$SFU_SIGNING_PUBLIC_KEY" > "$PREFIX_LIB/sfu-keys.env"
-		chmod 0600 "$PREFIX_LIB/sfu-keys.env"
+		if ! opec secrets sfu-signing-key \
+			--backend-api "$BACKEND_API" \
+			--out-file "$PREFIX_LIB/sfu-keys.env"; then
+			warn "  opec secrets sfu-signing-key failed — re-run with OPEC_SECRETS_SFU_KEY=0 to fall back to bash path"
+		fi
+		# Re-read the env-file to set SFU_SIGNING_PUBLIC_KEY in shell scope
+		# (downstream templates substitute {{SFU_SIGNING_PUBLIC_KEY}}).
+		if [[ -r "$PREFIX_LIB/sfu-keys.env" ]]; then
+			# shellcheck disable=SC1091
+			. "$PREFIX_LIB/sfu-keys.env"
+		fi
 	fi
 else
-	warn "  sfu_signing_public_key not available from /api/partner/keys (signaling may need updating; SFU relay JWT auth will fall back to RELAY_JWT_SECRET)"
+	# === Legacy bash path (Phase 4.3d fallback). Preserved verbatim for rollback. ===
+	log "  fetching sfu_signing_public_key from $BACKEND_API/api/partner/keys"
+	SFU_SIGNING_PUBLIC_KEY=""
+	_keys_resp=$(curl -sS --max-time 10 -fL "$BACKEND_API/api/partner/keys" 2>/dev/null || true)
+	if [[ -n "$_keys_resp" ]]; then
+		SFU_SIGNING_PUBLIC_KEY=$(printf '%s' "$_keys_resp" | jq -r '.sfu_signing_public_key // empty' 2>/dev/null || true)
+	fi
+	# Backend returns PEM with embedded newlines. Escape them as literal \n so the
+	# rendered docker-compose.yml stays a valid YAML inline string. The YAML parser
+	# then converts \n back to real newlines when the SFU container reads its env.
+	if [[ -n "$SFU_SIGNING_PUBLIC_KEY" ]]; then
+		SFU_SIGNING_PUBLIC_KEY="${SFU_SIGNING_PUBLIC_KEY//$'\n'/\\n}"
+	fi
+	if [[ -n "$SFU_SIGNING_PUBLIC_KEY" ]]; then
+		log "  sfu_signing_public_key obtained"
+		if [[ $DRY_RUN -eq 0 ]]; then
+			install -d -m 0700 "$PREFIX_LIB"
+			printf 'SFU_SIGNING_PUBLIC_KEY=%s\n' "$SFU_SIGNING_PUBLIC_KEY" > "$PREFIX_LIB/sfu-keys.env"
+			chmod 0600 "$PREFIX_LIB/sfu-keys.env"
+		fi
+	else
+		warn "  sfu_signing_public_key not available from /api/partner/keys (signaling may need updating; SFU relay JWT auth will fall back to RELAY_JWT_SECRET)"
+	fi
+	unset _keys_resp
 fi
-unset _keys_resp
 
 # Split backend_endpoint "host:port" into host + port for xray config.
 BACKEND_HOST="${BACKEND_ENDPOINT%:*}"
