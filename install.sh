@@ -50,6 +50,29 @@ if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v partner-cli >/dev/null 2>&1; then
 	unset _machine _cli_arch _cli_url
 fi
 
+# opec is the typed render binary for xray/coturn/naive (Phase 2 OPEC render).
+# Without it, install.sh falls back to bash render_template — works but skips
+# JSON / realm validation that OPEC adds. Auto-fetch from release assets.
+if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v opec >/dev/null 2>&1; then
+	_machine=$(uname -m)
+	case "$_machine" in
+		x86_64)  _opec_arch=amd64 ;;
+		aarch64) _opec_arch=arm64 ;;
+		*) warn "opec: unsupported architecture: $_machine — render falls back to bash render_template" ;;
+	esac
+	if [[ -n "${_opec_arch:-}" ]]; then
+		_opec_url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/opec-${_opec_arch}"
+		log "opec not found -- downloading from release assets ($_opec_arch)"
+		if curl -fsSL --max-time 60 "$_opec_url" -o /usr/local/bin/opec 2>/dev/null; then
+			chmod +x /usr/local/bin/opec
+		else
+			warn "opec download failed from $_opec_url — render falls back to bash render_template"
+			rm -f /usr/local/bin/opec
+		fi
+	fi
+	unset _machine _opec_arch _opec_url
+fi
+
 # Best-effort install of `wg`/`wg-quick` for keygen and conf rendering. The
 # AmneziaWG userspace binary (`amneziawg-go` + `awg`/`awg-quick`) is built
 # from source in install_amneziawg() below; this helper only ensures the
