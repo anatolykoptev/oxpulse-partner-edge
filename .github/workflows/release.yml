@@ -180,7 +180,7 @@ jobs:
         env:
           VERSION: ${{ needs.extract-version.outputs.version }}
         run: |
-          cp bootstrap.sh   partner-edge-installer.sh
+          cp install.sh     partner-edge-installer.sh
           cp upgrade.sh     partner-edge-upgrade.sh
           cp healthcheck.sh partner-edge-healthcheck.sh
           sha256sum \
