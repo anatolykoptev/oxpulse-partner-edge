@@ -13,12 +13,16 @@ trap 'rm -f "$RENDERED"' EXIT
 # Source the render library to get re_render_hysteria2()
 source "$REPO_ROOT/channel-render-lib.sh"
 
-# Set fixture values
-KROLIK_SERVER="203.0.113.10:51822"
+# Load defaults so $OXPULSE_* vars are available in this test.
+# shellcheck source=../config/defaults.conf
+[[ -f "$REPO_ROOT/config/defaults.conf" ]] && source "$REPO_ROOT/config/defaults.conf"
+
+# Set fixture values — pin explicit literals for byte-identical golden comparison.
+KROLIK_SERVER="${OXPULSE_HY2_SERVER:-203.0.113.10:51822}"
 HY2_AUTH_PASS="GOLDEN_AUTH_PASS_FIXTURE"
 HY2_OBFS_PASS="GOLDEN_OBFS_PASS_FIXTURE"
-HY2_LOCAL_LISTEN="0.0.0.0:18443"
-HY2_REMOTE_BACKEND="127.0.0.1:8907"
+HY2_LOCAL_LISTEN="${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
+HY2_REMOTE_BACKEND="${OXPULSE_HY2_REMOTE_BACKEND:-127.0.0.1:8907}"
 
 # Render
 _render_hysteria2_to "$TPL" "$RENDERED" \
@@ -41,11 +45,11 @@ trap 'rm -rf "$out_dir"' EXIT
 
 HY2_OUTPUT_PATH="$out_dir/hysteria2-client.yaml"
 export OXPULSE_REPO_DIR="$REPO_ROOT"
-export HY2_SERVER="203.0.113.10:51822"
+export HY2_SERVER="${OXPULSE_HY2_SERVER:-203.0.113.10:51822}"
 export HY2_AUTH_PASS="public-test-auth"
 export HY2_OBFS_PASS="public-test-obfs"
-export HY2_LOCAL_LISTEN="0.0.0.0:18443"
-export HY2_REMOTE_BACKEND="127.0.0.1:8907"
+export HY2_LOCAL_LISTEN="${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
+export HY2_REMOTE_BACKEND="${OXPULSE_HY2_REMOTE_BACKEND:-127.0.0.1:8907}"
 
 # First call — no pre-existing file (no backup expected yet).
 HY2_OUTPUT_PATH="$HY2_OUTPUT_PATH" re_render_hysteria2
