@@ -1,6 +1,6 @@
 # Phase 4 — install.sh Decomposition Roadmap
 
-**Status:** active (Phase 3 merged at #151, cf07e94 on main)
+**Status:** **COMPLETE** as of 2026-05-17 (PR #169 merged, install.sh = 1088 LoC). Phase 4.10 (AWG kmod build) deferred; Phase 5 (partner-cli absorption) deferred.
 **Owner:** krolik
 **Target:** install.sh `1991 → ~300 LoC` orchestrator across 9 sub-phases
 
@@ -32,12 +32,14 @@ Siblings of `render`/`tenant`, NOT god-subcommand `opec install <step>`. Phase 5
 | 4.1 | Step 1+1b+1c+1b'+Step 2 | `lib/install-preflight.sh` + `lib/install-deps.sh` | 155 | 1836 |
 | 4.2 | Step 3 IP detect + 3b pre-pull | `lib/install-network.sh` | 133 | 1703 |
 | 4.3 | Step 4 hydrate (secrets fetch + crypto + synthesis) | `opec secrets` subcommand | 616 | 1167 |
-| 4.4 | Step 5 — delete bash render_template fallback bodies | OPEC-only render | 196 | 971 |
-| 4.5 | Step 5b mmdb + Step 6 compose start | `lib/install-runtime.sh` | 57 | 914 |
-| 4.6 | Step 7 healthcheck loop | `lib/install-healthcheck.sh` | 54 | 860 |
-| 4.7 | Step 8 systemd unit heredocs | `opec systemd` subcommand | 147 | 713 |
-| 4.8 | Remove `OPEC_SECRETS=0` + `OPEC_SYSTEMD=0` fallback shims | — | 110 | 603 |
-| 4.9 | Step 10 report + arg parsing collapse | `lib/install-args.sh` | 300 | ~300 ✓ |
+| 4.4 | Delete bash render_template fallback inside install.sh; opec now hard requirement | OPEC-only render | actual 30 | 1840→1810 |
+| 4.5 | Step 5b mmdb + Step 6 compose start | `lib/install-runtime.sh` | actual 55 | 2073→2018 |
+| 4.6 | Step 7 healthcheck loop | `lib/install-healthcheck.sh` | actual 51 | 2024→1855 |
+| 4.7 | Step 8 systemd unit installation (re-scoped: bash module, NOT opec — code is file-copy, not heredoc templates) | `lib/install-systemd.sh` | actual 169 | 2024→1855 |
+| 4.8 | Retire OPEC_SECRETS_{REALITY_KEYGEN,AWG_KEYGEN,REGISTER,SFU_KEY} env-gated bash fallbacks | — | actual 391 | 1855→1464 |
+| 4.9 | Args parsing + token resolve + branding-config + brand-flag composition | `lib/install-args.sh` | actual 376 | 1464→**1088** ✓ |
+
+**Final: install.sh 1991 → 1088 LoC (−903, −45%).** Original architect target was ~300 LoC; reality landed at ~1090 because per-Step wrappers + helpers don't compress further without absorbing the orchestration itself into OPEC (Phase 5+ territory).
 
 ## Out of scope
 
@@ -62,8 +64,32 @@ Siblings of `render`/`tenant`, NOT god-subcommand `opec install <step>`. Phase 5
 | OPEC version skew on live edges | 4.4 | install.sh sniffs `opec --version` at boot, refuses if older |
 | Rollback path narrowing after Phase 4.8 | 4.8 | tag prior release `partner-edge-vX.Y.Z-rescue` |
 
-## Reference
+## Reference — merged PRs
 
-- Phase 3 closing: PR #151, `cf07e94` on main
-- Phase 4.1 plan: `docs/superpowers/plans/2026-05-17-phase4-1-preflight-deps.md`
-- Architect transcript: this doc IS the saved transcript (no separate output file)
+| Phase | PR | Commit on main | Per-phase plan doc |
+|-------|----|----------------|--------------------|
+| 3 closing | #151 | cf07e94 | (Phase 3) |
+| 4.1 | #153 | ed9978e | `2026-05-17-phase4-1-preflight-deps.md` |
+| 4.2 | #154 | 75e6695 | `2026-05-17-phase4-2-network.md` |
+| 4.3a | #155 | c252743 | `2026-05-17-phase4-3a-opec-secrets-reality-keygen.md` |
+| 4.3b | #156 | 8151c13 | `2026-05-17-phase4-3b-opec-secrets-awg-keygen.md` |
+| 4.3c | #161 | e830314 | `2026-05-17-phase4-3c-opec-secrets-register.md` |
+| 4.3d | #163 | 082b9b4 | (plan inline in PR body) |
+| 4.4 | #164 | 7f63d3a | (plan inline in PR body) |
+| 4.5 | #165 | d6b17c0 | (plan inline in PR body) |
+| 4.6 | #166 | 9fcb170 | (plan inline in PR body) |
+| 4.7-4.9 | #169 | b8312fa | (plan inline in PR body; PR #167 + #168 squash-merge failed silently, recovered via cherry-pick) |
+
+## Lessons learned (post-execution)
+
+- **Plan was a compass.** Architect's per-phase LoC estimates landed within 20% on small phases (4.1-4.2) but architect mis-predicted Phase 4.7 ("opec systemd subcommand with askama") — reality was file-copy boilerplate, bash module fit instead. **Re-scope when reading the actual code contradicts the roadmap.**
+- **Quality reviewer ловил каждую security regression.** Phase 4.3c alone had: JSON-error leak vector, env-file `$()` injection, env-file newline injection, dry-run flag regression, host-DoS chmod /tmp. Each caught BEFORE merge, fixed via implementer re-dispatch.
+- **GitHub API squash merge can silently fail.** PR #167 + #168 returned `"merged":true` but trees were empty (likely "branch not up-to-date" rejected merge but API returned success). **Always verify** `git diff base..HEAD --stat` after API merge.
+- **Wrapper overhead before compression.** install.sh grew +33 LoC across Phase 4.1-4.6 (wrappers cost more than extractions saved). Real compression hit at Phase 4.7-4.9 once fallbacks retired and big arg-parsing block extracted.
+
+## Out of scope / next phases
+
+- **Phase 4.10 — AWG kmod build extraction** (`install_amneziawg`, ~400 LoC kernel module compile). Needs dedicated bats matrix per distro (RHEL/Debian/Ubuntu). High complexity, deferred.
+- **Phase 5 — partner-cli absorption.** Pull native x25519/signing/JWT into OPEC, retire partner-cli binary. Weeks of work.
+- **update.sh / upgrade.sh** — eventually share `lib/install-*.sh` modules; free win when those scripts touched next.
+- **Caddy fixture drift followup** — fixed in this hygiene PR (added AWG_MOTHERLY_IP + HY2_FALLBACK_* to frozen_env).
