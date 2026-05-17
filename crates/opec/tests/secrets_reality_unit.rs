@@ -138,3 +138,28 @@ fn keygen_invalid_key_length_errors() {
         "expected InvalidKeyFormat, got: {err:?}"
     );
 }
+
+#[test]
+fn keygen_idempotent_rejects_corrupted_uuid_file() {
+    let out_dir = TempDir::new().unwrap();
+    // Plant all three files: keys valid (43-char), uuid garbage.
+    fs::write(
+        out_dir.path().join("reality.priv"),
+        "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG\n",
+    )
+    .unwrap();
+    fs::write(
+        out_dir.path().join("reality.pub"),
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefg\n",
+    )
+    .unwrap();
+    fs::write(out_dir.path().join("reality.uuid"), "not-a-uuid\n").unwrap();
+    // partner-cli intentionally bogus — must NOT be reached (validate fails first).
+    let pc = PathBuf::from("/nonexistent/partner-cli-must-not-be-called");
+    let err = reality::keygen(out_dir.path(), false, &pc)
+        .expect_err("corrupted uuid in idempotent state must error");
+    assert!(
+        matches!(err, SecretsError::InvalidKeyFormat { ref path, .. } if path.ends_with("reality.uuid")),
+        "expected InvalidKeyFormat on reality.uuid, got: {err:?}"
+    );
+}

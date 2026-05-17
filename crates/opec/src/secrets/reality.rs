@@ -115,6 +115,7 @@ fn grep_field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn validate_existing(out_dir: &Path) -> Result<(), SecretsError> {
+    // Keys: 43-char base64url length check.
     for (file, must_len) in [
         ("reality.priv", REALITY_KEY_LEN),
         ("reality.pub", REALITY_KEY_LEN),
@@ -131,6 +132,21 @@ fn validate_existing(out_dir: &Path) -> Result<(), SecretsError> {
                 actual_len: trimmed.len(),
             });
         }
+    }
+    // UUID: parse-check — mirrors install.sh L902-906 hex-regex validation.
+    // Without this, a corrupted reality.uuid silently passes the idempotent
+    // path despite the keys being intact.
+    let uuid_path = out_dir.join("reality.uuid");
+    let uuid_content = fs::read_to_string(&uuid_path).map_err(|e| SecretsError::Io {
+        path: uuid_path.clone(),
+        source: e,
+    })?;
+    let uuid_trimmed = uuid_content.trim();
+    if uuid::Uuid::parse_str(uuid_trimmed).is_err() {
+        return Err(SecretsError::InvalidKeyFormat {
+            path: uuid_path,
+            actual_len: uuid_trimmed.len(),
+        });
     }
     Ok(())
 }
