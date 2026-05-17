@@ -36,43 +36,15 @@ render_from_fixture() {
     local out
     out=$(mktemp)
 
-    # Read all xhttp fields from fixture (mirrors update.sh Step 4b)
+    # Read all xhttp fields from fixture via shared helper (mirrors update.sh Step 4b)
+    local _read_xhttp="${REPO_ROOT}/scripts/read-xhttp.py"
     local xhttp_mode xhttp_path xmux_max_concurrency xmux_c_max_reuse_times xmux_c_max_lifetime_ms x_padding_bytes
-
-    xhttp_mode=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-xhttp=x.get('xhttp',{})
-print(xhttp.get('mode','') or x.get('mode','stream-one'))" "$fixture_node_cfg" 2>/dev/null || echo "stream-one")
-    xhttp_path=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-print(x.get('xhttp',{}).get('path','/xh'))" "$fixture_node_cfg" 2>/dev/null || echo "/xh")
-    xmux_max_concurrency=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-xm=x.get('xhttp',{}).get('xmux') or x.get('xmux') or {}
-print(xm.get('maxConcurrency',1))" "$fixture_node_cfg" 2>/dev/null || echo "1")
-    xmux_c_max_reuse_times=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-xm=x.get('xhttp',{}).get('xmux') or x.get('xmux') or {}
-print(xm.get('cMaxReuseTimes',64))" "$fixture_node_cfg" 2>/dev/null || echo "64")
-    xmux_c_max_lifetime_ms=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-xm=x.get('xhttp',{}).get('xmux') or x.get('xmux') or {}
-print(xm.get('cMaxLifetimeMs',15000))" "$fixture_node_cfg" 2>/dev/null || echo "15000")
-    x_padding_bytes=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-print(x.get('xhttp',{}).get('extra',{}).get('xPaddingBytes','100-1000'))" "$fixture_node_cfg" 2>/dev/null || echo "100-1000")
+    xhttp_mode=$("$_read_xhttp" "$fixture_node_cfg" mode --default stream-one 2>/dev/null || echo "stream-one")
+    xhttp_path=$("$_read_xhttp" "$fixture_node_cfg" path --default /xh 2>/dev/null || echo "/xh")
+    xmux_max_concurrency=$("$_read_xhttp" "$fixture_node_cfg" xmux_concurrency --default 1 --type int 2>/dev/null || echo "1")
+    xmux_c_max_reuse_times=$("$_read_xhttp" "$fixture_node_cfg" xmux_reuse --default 64 --type int 2>/dev/null || echo "64")
+    xmux_c_max_lifetime_ms=$("$_read_xhttp" "$fixture_node_cfg" xmux_lifetime --default 15000 --type int 2>/dev/null || echo "15000")
+    x_padding_bytes=$("$_read_xhttp" "$fixture_node_cfg" padding --default 100-1000 2>/dev/null || echo "100-1000")
 
     _esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 

@@ -158,41 +158,17 @@ except Exception:
     local out
     out=$(mktemp)
     # Read xhttp transport settings from node-config.json (server is source of truth).
+    # Helper is co-installed in the same directory as this lib (PREFIX_SBIN).
+    local _lib_dir
+    _lib_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" 2>/dev/null && pwd)"
+    local _read_xhttp="${_lib_dir}/read-xhttp.py"
     local xhttp_mode xhttp_path xmux_max_concurrency xmux_c_max_reuse_times xmux_c_max_lifetime_ms x_padding_bytes
-    xhttp_mode=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-xhttp=x.get('xhttp',{})
-print(xhttp.get('mode','') or x.get('mode','stream-one'))" "$NODE_CFG" 2>/dev/null || echo "stream-one")
-    xhttp_path=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-print(x.get('xhttp',{}).get('path','/xh'))" "$NODE_CFG" 2>/dev/null || echo "/xh")
-    xmux_max_concurrency=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-xm=x.get('xhttp',{}).get('xmux') or x.get('xmux') or {}
-print(xm.get('maxConcurrency',1))" "$NODE_CFG" 2>/dev/null || echo "1")
-    xmux_c_max_reuse_times=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-xm=x.get('xhttp',{}).get('xmux') or x.get('xmux') or {}
-print(xm.get('cMaxReuseTimes',64))" "$NODE_CFG" 2>/dev/null || echo "64")
-    xmux_c_max_lifetime_ms=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-xm=x.get('xhttp',{}).get('xmux') or x.get('xmux') or {}
-print(xm.get('cMaxLifetimeMs',15000))" "$NODE_CFG" 2>/dev/null || echo "15000")
-    x_padding_bytes=$(python3 -c "
-import json,sys; d=json.load(open(sys.argv[1]))
-ch=d.get('channels',[])
-x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-print(x.get('xhttp',{}).get('extra',{}).get('xPaddingBytes','100-1000'))" "$NODE_CFG" 2>/dev/null || echo "100-1000")
+    xhttp_mode=$("$_read_xhttp" "$NODE_CFG" mode --default stream-one 2>/dev/null || echo "stream-one")
+    xhttp_path=$("$_read_xhttp" "$NODE_CFG" path --default /xh 2>/dev/null || echo "/xh")
+    xmux_max_concurrency=$("$_read_xhttp" "$NODE_CFG" xmux_concurrency --default 1 --type int 2>/dev/null || echo "1")
+    xmux_c_max_reuse_times=$("$_read_xhttp" "$NODE_CFG" xmux_reuse --default 64 --type int 2>/dev/null || echo "64")
+    xmux_c_max_lifetime_ms=$("$_read_xhttp" "$NODE_CFG" xmux_lifetime --default 15000 --type int 2>/dev/null || echo "15000")
+    x_padding_bytes=$("$_read_xhttp" "$NODE_CFG" padding --default 100-1000 2>/dev/null || echo "100-1000")
 
     sed \
         -e "s|{{REALITY_UUID}}|$(_esc "$uuid")|g" \
