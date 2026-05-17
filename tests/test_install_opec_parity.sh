@@ -269,3 +269,19 @@ mirror_install_exports() {
 @test "install.sh no longer inlines [7/10] healthcheck log call" {
     ! grep -qE 'log.*\[7/10\].*waiting for healthcheck' install.sh
 }
+
+# ---------------------------------------------------------------------------
+# Phase 4.7 — systemd module delegation
+# ---------------------------------------------------------------------------
+
+@test "install.sh sources lib/install-systemd.sh module" {
+    grep -qE '_install_lib_source[[:space:]]+install-systemd\.sh' install.sh
+}
+
+@test "install.sh calls systemd_run instead of inline Step 8" {
+    grep -qE '^[[:space:]]*systemd_run([[:space:]]|$)' install.sh
+}
+
+@test "install.sh no longer inlines [8/10] log" {
+    ! grep -qE 'log[[:space:]]+"?\[8/10\] installing systemd unit' install.sh
+}
