@@ -214,9 +214,32 @@ else
 	echo "INFO (hy2 container not deployed — awg-only mode, Phase 1.7 hy2 not provisioned)"
 fi
 
-# --- 17. hy2 TCP forwarder listening on :18443 (only if container deployed) ---
+# --- 17. Service token file: present and mode 0600 ---
+# Skip-on-legacy: nodes predating Follow-up #2 PR-B won't have the file yet.
+# Pass:          file present + mode 0600.
+# Pass (legacy): file absent AND OXPULSE_SERVICE_TOKEN env not set.
+# Fail:          file present but mode is not 0600.
+echo -n "  17. service token file ($CONF_DIR/token):           "
+_tok_file="$CONF_DIR/token"
+_tok_env="${OXPULSE_SERVICE_TOKEN:-}"
+if [[ -e "$_tok_file" ]]; then
+	_tok_mode=$(stat -c '%a' "$_tok_file" 2>/dev/null || stat -f '%A' "$_tok_file" 2>/dev/null || echo "unknown")
+	if [[ "$_tok_mode" == "600" ]]; then
+		echo -e "\033[32mOK\033[0m"
+	else
+		echo -e "\033[31mFAIL\033[0m (mode=${_tok_mode}, expected 600 — fix: chmod 0600 $_tok_file)"
+		FAIL=$((FAIL + 1))
+	fi
+elif [[ -n "$_tok_env" ]]; then
+	echo "OK (env override — OXPULSE_SERVICE_TOKEN set)"
+else
+	echo "SKIP (no token file — legacy node or fresh node not yet registered)"
+fi
+unset _tok_file _tok_env _tok_mode
+
+# --- 18. hy2 TCP forwarder listening on :18443 (only if container deployed) ---
 if [[ "$_hy2_running" -gt 0 ]]; then
-	check "17. TCP 18443 listening (hy2 forwarder)" bash -c '
+	check "18. TCP 18443 listening (hy2 forwarder)" bash -c '
 		ss -ltnH 2>/dev/null | awk '"'"'{print $4}'"'"' | grep -qE ":18443$"
 	'
 fi
