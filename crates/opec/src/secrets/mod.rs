@@ -3,7 +3,7 @@
 //! Subcommands:
 //! - `reality-keygen` (Phase 4.3a) — x25519 keypair + UUID identity files.
 //! - `register` (Phase 4.3b) — POST to central registry, parse response.
-//! - `runtime` (Phase 4.3c) — fetch SFU signing key, synthesize JWT secret.
+//! - `sfu-signing-key` (Phase 4.3d) — GET signing key, write env-file.
 
 use clap::Subcommand;
 use std::path::PathBuf;
@@ -12,6 +12,7 @@ pub mod awg;
 pub mod error;
 pub mod reality;
 pub mod register;
+pub mod sfu_key;
 
 pub use error::SecretsError;
 
@@ -43,6 +44,21 @@ pub enum SecretsCommands {
         /// Override wg binary path (test hook).
         #[arg(long, default_value = "wg")]
         wg: PathBuf,
+    },
+    /// GET SFU signing public key from /api/partner/keys, write env-file.
+    SfuSigningKey {
+        /// Backend API base URL (e.g. https://api.example.com).
+        #[arg(long)]
+        backend_api: String,
+        /// Path to write SFU signing key env-file (single-quoted, 0600).
+        #[arg(long)]
+        out_file: PathBuf,
+        /// HTTP request timeout in seconds.
+        #[arg(long, default_value = "10")]
+        timeout_secs: u64,
+        /// Number of retries for 5xx responses.
+        #[arg(long, default_value = "3")]
+        retries: u32,
     },
     /// POST to backend /api/partner/register, write shell-sourceable env-file.
     Register {
@@ -77,6 +93,18 @@ pub enum SecretsCommands {
 
 pub fn dispatch(cmd: SecretsCommands) -> anyhow::Result<()> {
     match cmd {
+        SecretsCommands::SfuSigningKey {
+            backend_api,
+            out_file,
+            timeout_secs,
+            retries,
+        } => sfu_key::fetch(sfu_key::Args {
+            backend_api,
+            out_file,
+            timeout_secs,
+            retries,
+        })
+        .map_err(Into::into),
         SecretsCommands::RealityKeygen {
             out_dir,
             rotate,
