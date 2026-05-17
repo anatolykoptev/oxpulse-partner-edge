@@ -253,3 +253,19 @@ mirror_install_exports() {
     awk '/OPEC_SECRETS_SFU_KEY/,/^[[:space:]]*else[[:space:]]*$/' install.sh \
         | grep -qE 'warn.*OPEC_SECRETS_SFU_KEY=0|warn.*sfu-signing-key'
 }
+
+# ---------------------------------------------------------------------------
+# Phase 4.5 Task — runtime_run module
+# ---------------------------------------------------------------------------
+
+@test "install.sh sources lib/install-runtime.sh module" {
+    grep -qE '_install_lib_source[[:space:]]+install-runtime\.sh' install.sh
+}
+
+@test "install.sh calls runtime_run instead of inline Step 5b+6" {
+    grep -qE '^[[:space:]]*runtime_run([[:space:]]|$)' install.sh
+}
+
+@test "install.sh no longer inlines [5b/10] log" {
+    ! grep -qE 'log[[:space:]]+"\[5b/10\] provisioning DB-IP' install.sh
+}

@@ -635,6 +635,7 @@ _install_lib_source() {
 _install_lib_source install-preflight.sh
 _install_lib_source install-deps.sh
 _install_lib_source install-network.sh
+_install_lib_source install-runtime.sh
 
 preflight_run
 
@@ -1740,63 +1741,7 @@ else
 	warn "  [dry-run] would create $PREFIX_ETC/conf.d/ override slot"
 fi
 
-# ---------- Step 5b: provision DB-IP mmdb (M2b.2) ----------
-# Downloads dbip-country-lite-{YYYY-MM}.mmdb.gz from db-ip.com (CC-BY 4.0,
-# no API key required). Caddy's maxmind_geolocation handler reads this file
-# to inject X-Geo-Country into upstream requests (oxpulse-chat #748).
-# Non-fatal: if the download fails, Caddy starts without geolocation; the
-# Rust fallback chain (X-Client-Region → CF-IPCountry → in-process GeoDb)
-# covers the gap until the monthly timer succeeds.
-if [[ $DRY_RUN -eq 0 ]]; then
-	log "[5b/10] provisioning DB-IP mmdb"
-	if [[ -n "$src_dir" && -f "$src_dir/scripts/oxpulse-geoip-refresh.sh" ]]; then
-		install -m 0755 "$src_dir/scripts/oxpulse-geoip-refresh.sh" \
-			"$PREFIX_SBIN/oxpulse-geoip-refresh"
-	else
-		curl -fsSL "$REPO_RAW/scripts/oxpulse-geoip-refresh.sh" \
-			-o "$PREFIX_SBIN/oxpulse-geoip-refresh"
-		chmod 0755 "$PREFIX_SBIN/oxpulse-geoip-refresh"
-	fi
-	# Run initial download; warn-only on failure.
-	if "$PREFIX_SBIN/oxpulse-geoip-refresh"; then
-		log "  DB-IP mmdb provisioned → /var/lib/geoip/dbip-country-lite.mmdb"
-	else
-		warn "  DB-IP mmdb download failed — maxmind_geolocation will be a no-op until geoip-refresh.timer succeeds"
-	fi
-else
-	warn "  [dry-run] skipping DB-IP mmdb download"
-fi
-
-# Persist install state for upgrade.sh.
-if [[ $DRY_RUN -eq 0 ]]; then
-	cat > "$PREFIX_LIB/install.env" <<EOF
-PARTNER_ID=$PARTNER_ID
-PARTNER_DOMAIN=$DOMAIN
-NODE_ID=$NODE_ID
-TUNNEL=$TUNNEL
-IMAGE_VERSION=$IMAGE_VERSION
-TURNS_SUBDOMAIN=$TURNS_SUBDOMAIN
-INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-EOF
-	chmod 0600 "$PREFIX_LIB/install.env"
-	# Phase 1: record sha256 of rendered Caddyfile for drift detection.
-	# healthcheck.sh check 15 compares this against /canary/config-hash.
-	_caddy_sha="$_rendered_sha"  # reuse hash computed before substitution (drift-safe)
-	printf 'CADDYFILE_SHA=%s\n' "$_caddy_sha" >> "$PREFIX_LIB/install.env"
-fi
-
-# ---------- Step 6: start ----------
-log "[6/10] starting services"
-if [[ $DRY_RUN -eq 0 ]]; then
-	# Pass extra profiles (ch3, ch5) when bypass channels were provisioned.
-	if [[ -n "${COMPOSE_PROFILES_EXTRA:-}" ]]; then
-		(cd "$PREFIX_ETC" && COMPOSE_PROFILES="$COMPOSE_PROFILES_EXTRA" docker compose --profile "$COMPOSE_PROFILES_EXTRA" up -d)
-	else
-		(cd "$PREFIX_ETC" && docker compose up -d)
-	fi
-else
-	warn "  [dry-run] would: docker compose up -d (profiles: ${COMPOSE_PROFILES_EXTRA:-none})"
-fi
+runtime_run
 
 # ---------- Step 7: healthcheck ----------
 log "[7/10] waiting for healthcheck (timeout ${HEALTHCHECK_TIMEOUT}s)"
