@@ -779,15 +779,28 @@ REALITY_UUID_PATH="$PREFIX_ETC/reality.uuid"
 # back to the bash path during canary rollback. Phase 4.8 removes the bash
 # fallback after ≥4 live edges soak the OPEC path without incident.
 if [[ "${OPEC_SECRETS_REALITY_KEYGEN:-1}" == "1" ]] && command -v opec >/dev/null 2>&1; then
-	log "  reality keypair: delegating to opec secrets reality-keygen"
-	_opec_rotate_flag=""
-	[[ "${REALITY_ROTATE:-0}" == "1" ]] && _opec_rotate_flag="--rotate"
-	if ! opec secrets reality-keygen --out-dir "$PREFIX_ETC" $_opec_rotate_flag; then
-		die "opec secrets reality-keygen failed — re-run with OPEC_SECRETS_REALITY_KEYGEN=0 to fall back to bash path"
+	# Dry-run contract: OPEC path must be side-effect-free, same as bash branch.
+	if [[ $DRY_RUN -eq 1 ]]; then
+		warn "  [dry-run] would invoke: opec secrets reality-keygen --out-dir $PREFIX_ETC$([[ $FORCE_KEYGEN -eq 1 ]] && echo ' --rotate')"
+		REALITY_PUBKEY="DRYRUN-reality-pubkey-placeholder"
+		REALITY_UUID="00000000-0000-0000-0000-000000000000"
+	else
+		log "  reality keypair: delegating to opec secrets reality-keygen"
+		# Map operator-facing --force-keygen / --rotate-identity (FORCE_KEYGEN=1)
+		# to the OPEC --rotate flag. Array form avoids unquoted-expansion fragility.
+		_opec_args=(secrets reality-keygen --out-dir "$PREFIX_ETC")
+		[[ $FORCE_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
+		if ! opec "${_opec_args[@]}"; then
+			die "opec secrets reality-keygen failed — re-run with OPEC_SECRETS_REALITY_KEYGEN=0 to fall back to bash path"
+		fi
+		REALITY_PUBKEY="$(cat "$REALITY_PUB_PATH")" \
+			|| die "post-keygen: failed to read $REALITY_PUB_PATH"
+		REALITY_UUID="$(cat "$REALITY_UUID_PATH")" \
+			|| die "post-keygen: failed to read $REALITY_UUID_PATH"
+		log "  reality_public_key: $REALITY_PUBKEY"
+		log "  reality_uuid: $REALITY_UUID"
+		unset _opec_args
 	fi
-	REALITY_PUBKEY="$(cat "$PREFIX_ETC/reality.pub")"
-	REALITY_UUID="$(cat "$PREFIX_ETC/reality.uuid")"
-	unset _opec_rotate_flag
 else
 	# === Legacy bash path (Phase 4.3a fallback). Preserved verbatim for rollback. ===
 	# Activate by: OPEC_SECRETS_REALITY_KEYGEN=0 bash install.sh ...
