@@ -41,6 +41,9 @@ struct Cli {
     command: Commands,
 }
 
+// Secrets variant holds SecretsCommands inline; its Register sub-variant is
+// large due to 13 clap fields — boxing clap-derive fields is not idiomatic.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     /// Tenant management

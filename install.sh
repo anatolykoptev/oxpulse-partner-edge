@@ -950,10 +950,123 @@ else
 	fi
 fi
 
+# AmneziaWG keypair — generated locally so the private key never leaves
+# this host. Public key is sent UP at registration so the central can
+# pre-create the awg0 peer entry on motherly before we bring up our own
+# interface. Key persists at /etc/amnezia/amneziawg/private.key (mode
+# 0600) so re-runs of install.sh re-use it instead of churning a fresh
+# pubkey every time.
+# Moved above the register dispatcher (Phase 4.3c T4) so AWG_PUB_PATH is
+# available to both the OPEC and bash register paths.
+AWG_PRIV_PATH="$PREFIX_ETC/awg-private.key"
+AWG_PUB_PATH="$PREFIX_ETC/awg-public.key"
+if [[ "${OPEC_SECRETS_AWG_KEYGEN:-1}" == "1" ]] && command -v opec >/dev/null 2>&1; then
+	if [[ $DRY_RUN -eq 1 ]]; then
+		warn "  [dry-run] would invoke: opec secrets awg-keygen --out-dir $PREFIX_ETC$([[ $FORCE_KEYGEN -eq 1 ]] && echo ' --rotate')"
+		AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
+	else
+		log "  awg keypair: delegating to opec secrets awg-keygen"
+		install -d -m 0700 "$PREFIX_ETC"
+		if ! command -v wg >/dev/null 2>&1; then
+			install_wg_tools_for_keygen
+		fi
+		_opec_args=(secrets awg-keygen --out-dir "$PREFIX_ETC")
+		[[ $FORCE_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
+		if ! opec "${_opec_args[@]}"; then
+			die "opec secrets awg-keygen failed — re-run with OPEC_SECRETS_AWG_KEYGEN=0 to fall back to bash path"
+		fi
+		AWG_PUBKEY="$(cat "$AWG_PUB_PATH")" \
+			|| die "post-awg-keygen: failed to read $AWG_PUB_PATH"
+		log "  awg pubkey: $AWG_PUBKEY"
+		unset _opec_args
+	fi
+else
+	# === Legacy bash path (Phase 4.3b fallback). Preserved for rollback. ===
+	if [[ $DRY_RUN -eq 0 ]]; then
+		install -d -m 0700 "$PREFIX_ETC"
+		if [[ ! -s "$AWG_PRIV_PATH" ]]; then
+			# wg genkey is the same binary across wg-tools and amneziawg-tools
+			# (just calls into the kernel CSPRNG); we use whichever is on PATH.
+			# wg-tools is dnf-installable on every supported edge OS, so we
+			# can rely on it being available before the awg-go binaries are.
+			if ! command -v wg >/dev/null 2>&1; then
+				install_wg_tools_for_keygen
+			fi
+			umask 077
+			wg genkey > "$AWG_PRIV_PATH"
+			chmod 0600 "$AWG_PRIV_PATH"
+		fi
+		wg pubkey < "$AWG_PRIV_PATH" > "$AWG_PUB_PATH"
+		AWG_PUBKEY=$(cat "$AWG_PUB_PATH")
+		log "  awg pubkey: $AWG_PUBKEY"
+	else
+		AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
+	fi
+fi
+
 if [[ -n "$MANUAL_CONFIG" ]]; then
 	[[ -r "$MANUAL_CONFIG" ]] || die "manual-config file not readable: $MANUAL_CONFIG"
 	cp "$MANUAL_CONFIG" "$tmp_cfg"
 	log "  using manual config: $MANUAL_CONFIG"
+elif [[ "${OPEC_SECRETS_REGISTER:-1}" == "1" ]] && command -v opec >/dev/null 2>&1; then
+	# Phase 4.3c: OPEC_SECRETS_REGISTER (default=1) gates delegation to
+	# 'opec secrets register'. Set OPEC_SECRETS_REGISTER=0 to fall back
+	# to the legacy bash python+curl path below.
+	if [[ $DRY_RUN -eq 1 ]]; then
+		warn "  [dry-run] would invoke: opec secrets register --registry-url $BACKEND_API ..."
+		# Synthesize a placeholder env-file with the same shape downstream
+		# Step 5 consumes. reality_public_key + reality_uuid use the values
+		# generated/reused by the Reality keygen block above.
+		# NOTE: do NOT chmod the parent dir — mktemp already gives 0600 on
+		# the file, and chmod'ing /tmp would lock out every other process.
+		cat >"$tmp_cfg.env" <<DRYENV
+NODE_ID="${PARTNER_ID}-DRYRUN"
+BACKEND_ENDPOINT="https://api.oxpulse.chat"
+TURN_SECRET="DRYRUN-turn-secret"
+REALITY_UUID="${REALITY_UUID}"
+REALITY_PUBLIC_KEY="${REALITY_PUBKEY}"
+REALITY_SHORT_ID="0123456789abcdef"
+REALITY_SERVER_NAME="www.cloudflare.com"
+REALITY_ENCRYPTION=""
+RELAY_JWT_SECRET="DRYRUN-relay-jwt-secret"
+TURNS_SUBDOMAIN="${TURNS_SUBDOMAIN}"
+DRYENV
+		chmod 0600 "$tmp_cfg.env"
+		set -a
+		# shellcheck disable=SC1090
+		. "$tmp_cfg.env"
+		set +a
+		# Same flag as the real-exec path — env-file was sourced, json_get
+		# must NOT re-parse $tmp_cfg (which the dry-run never writes).
+		OPEC_REGISTER_USED=1
+	else
+		log "  register: delegating to opec secrets register"
+		_opec_register_args=(
+			secrets register
+			--registry-url "$BACKEND_API"
+			--partner-id "$PARTNER_ID"
+			--domain "$DOMAIN"
+			--token "$TOKEN"
+			--public-ip "$PUBLIC_IP"
+			--reality-pub-file "$REALITY_PUB_PATH"
+			--reality-uuid-file "$REALITY_UUID_PATH"
+			--awg-pub-file "$AWG_PUB_PATH"
+			--out-env "$tmp_cfg.env"
+		)
+		[[ -n "$REGION" ]] && _opec_register_args+=(--region "$REGION")
+		[[ -n "$BRANDING_CONFIG" ]] && _opec_register_args+=(--branding-config "$BRANDING_CONFIG")
+		if ! opec "${_opec_register_args[@]}"; then
+			die "opec secrets register failed — re-run with OPEC_SECRETS_REGISTER=0 to fall back to bash path"
+		fi
+		# Source the env-file so downstream steps see NODE_ID, BACKEND_ENDPOINT, etc.
+		set -a
+		# shellcheck disable=SC1090
+		. "$tmp_cfg.env"
+		set +a
+		unset _opec_register_args
+		# Mark to skip json_get section below.
+		OPEC_REGISTER_USED=1
+	fi
 elif [[ $DRY_RUN -eq 1 ]]; then
 	warn "  [dry-run] skipping POST $BACKEND_API/api/partner/register"
 	# Synthesize a placeholder node config so Step 5 templates render without
@@ -979,57 +1092,6 @@ else
 	[[ -n "$BRANDING_CONFIG" ]] && log "  shipping branding-config: $BRANDING_CONFIG"
 	[[ $brand_flag_set -eq 1 ]] && log "  shipping branding from --brand-* shorthand flags"
 
-	# AmneziaWG keypair — generated locally so the private key never leaves
-	# this host. Public key is sent UP at registration so the central can
-	# pre-create the awg0 peer entry on motherly before we bring up our own
-	# interface. Key persists at /etc/amnezia/amneziawg/private.key (mode
-	# 0600) so re-runs of install.sh re-use it instead of churning a fresh
-	# pubkey every time.
-	AWG_PRIV_PATH="$PREFIX_ETC/awg-private.key"
-	AWG_PUB_PATH="$PREFIX_ETC/awg-public.key"
-	if [[ "${OPEC_SECRETS_AWG_KEYGEN:-1}" == "1" ]] && command -v opec >/dev/null 2>&1; then
-		if [[ $DRY_RUN -eq 1 ]]; then
-			warn "  [dry-run] would invoke: opec secrets awg-keygen --out-dir $PREFIX_ETC$([[ $FORCE_KEYGEN -eq 1 ]] && echo ' --rotate')"
-			AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
-		else
-			log "  awg keypair: delegating to opec secrets awg-keygen"
-			install -d -m 0700 "$PREFIX_ETC"
-			if ! command -v wg >/dev/null 2>&1; then
-				install_wg_tools_for_keygen
-			fi
-			_opec_args=(secrets awg-keygen --out-dir "$PREFIX_ETC")
-			[[ $FORCE_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
-			if ! opec "${_opec_args[@]}"; then
-				die "opec secrets awg-keygen failed — re-run with OPEC_SECRETS_AWG_KEYGEN=0 to fall back to bash path"
-			fi
-			AWG_PUBKEY="$(cat "$AWG_PUB_PATH")" \
-				|| die "post-awg-keygen: failed to read $AWG_PUB_PATH"
-			log "  awg pubkey: $AWG_PUBKEY"
-			unset _opec_args
-		fi
-	else
-		# === Legacy bash path (Phase 4.3b fallback). Preserved for rollback. ===
-		if [[ $DRY_RUN -eq 0 ]]; then
-			install -d -m 0700 "$PREFIX_ETC"
-			if [[ ! -s "$AWG_PRIV_PATH" ]]; then
-				# wg genkey is the same binary across wg-tools and amneziawg-tools
-				# (just calls into the kernel CSPRNG); we use whichever is on PATH.
-				# wg-tools is dnf-installable on every supported edge OS, so we
-				# can rely on it being available before the awg-go binaries are.
-				if ! command -v wg >/dev/null 2>&1; then
-					install_wg_tools_for_keygen
-				fi
-				umask 077
-				wg genkey > "$AWG_PRIV_PATH"
-				chmod 0600 "$AWG_PRIV_PATH"
-			fi
-			wg pubkey < "$AWG_PRIV_PATH" > "$AWG_PUB_PATH"
-			AWG_PUBKEY=$(cat "$AWG_PUB_PATH")
-			log "  awg pubkey: $AWG_PUBKEY"
-		else
-			AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
-		fi
-	fi
 	# Build body via python so we (1) omit `region` cleanly when empty,
 	# (2) inline `branding` as a parsed object, and (3) assemble a
 	# minimal BrandingConfig from --brand-* flags when they are set
@@ -1211,6 +1273,9 @@ v=d.get(sys.argv[2])
 print(json.dumps(v) if v is not None else 'null')
 " "$file" "$key" 2>/dev/null || echo "null"
 }
+# When OPEC handled registration, env-file was already sourced above and
+# variables are already set. Skip json_get field extraction in that case.
+if [[ -z "${OPEC_REGISTER_USED:-}" ]]; then
 NODE_ID=$(json_get node_id "$tmp_cfg")
 BACKEND_ENDPOINT=$(json_get backend_endpoint "$tmp_cfg")
 TURN_SECRET=$(json_get turn_secret "$tmp_cfg")
@@ -1330,6 +1395,7 @@ fi
 [[ -z "$TURN_SECRET" ]]        && die "turn_secret missing from config"
 [[ -z "$REALITY_UUID" ]]       && die "reality_uuid missing from config"
 [[ -z "$REALITY_PUBLIC_KEY" ]] && die "reality_public_key missing from config"
+fi  # end: if [[ -z "${OPEC_REGISTER_USED:-}" ]]
 
 # Persist the resolved node config so oxpulse-partner-edge-refresh can
 # detect operator-side Reality keypair rotations and hot-update it.
