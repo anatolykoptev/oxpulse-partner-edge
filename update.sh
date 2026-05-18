@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # update.sh — idempotent self-healing update for a partner-edge node.
 #
+# WARNING: Phase 5.5 fail-soft NOT YET APPLIED here.
+# A render failure in this script CAN take down healthy channels via
+# `docker compose up -d --force-recreate` because render_channel_soft /
+# CHANNELS_FAILED and the compose-strip post-processor are not wired here.
+# See FOLLOWUPS.md — "Phase 5.5 fail-soft for hydrate/refresh/update".
+#
 # Heals xray-client.json drift caused by manual server config changes that
 # do NOT bump channels_version (bypassing the daily refresh script's check).
 # Run this explicitly when the operator knows the server config has changed.
