@@ -1,5 +1,25 @@
 # Follow-ups
 
+## Phase 5.5: opec render xray reads node-config.json natively
+
+Phase 5.4 (fix/install-bugs-3-4-live-edge) added env-export plumbing in
+`install.sh` to feed `XRAY_XHTTP_*` into `opec render xray`. This duplicates
+the responsibility of reading node-config that opec already owns for secrets
+subcommands.
+
+**Followup:** add `opec render xray --node-cfg <path>` that reads
+`channels[0].xray.xhttp` natively (mirror `scripts/read-xhttp.py` logic in
+Rust), then drop the `install.sh` env-export block (the six `python3 - ...`
+heredocs + the `export XRAY_XHTTP_*` line before `render_with_opec xray`).
+
+**Acceptance:** `install.sh` `render_with_opec xray` invocation needs no
+ambient `XRAY_XHTTP_*` env vars; opec reads node-config directly.
+
+**File:line:** `install.sh` (around the `render_with_opec xray` call),
+`crates/opec/src/render/` (add `--node-cfg` flag to xray subcommand).
+
+---
+
 ## awg_extract silent failure swallows JSON / python3 errors during install (2026-05-18)
 
 **Severity:** P1 — install completes "successfully" with empty `AWG_*` vars and a dead `awg-quick@awg0` service. No surfacing log; operator sees install OK but the edge is non-functional until they tail journalctl.
