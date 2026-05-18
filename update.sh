@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # update.sh — idempotent self-healing update for a partner-edge node.
 #
-# WARNING: Phase 5.5 fail-soft NOT YET APPLIED here.
-# A render failure in this script CAN take down healthy channels via
-# `docker compose up -d --force-recreate` because render_channel_soft /
-# CHANNELS_FAILED and the compose-strip post-processor are not wired here.
-# See FOLLOWUPS.md — "Phase 5.5 fail-soft for hydrate/refresh/update".
+# Phase 5.5 MAJOR 1 (PR feat/phase5-6-...): render_channel_soft + CHANNELS_FAILED
+# + compose_strip_failed_channels sourced from lib/render-channel-lib.sh.
+# update.sh's loud-fail-on-hash-unchanged semantics are preserved (Phase 1 mandate).
 #
 # Heals xray-client.json drift caused by manual server config changes that
 # do NOT bump channels_version (bypassing the daily refresh script's check).
@@ -68,6 +66,23 @@ else
     die "channel-render-lib.sh not found (looked at $_chan_lib_local and $_chan_lib_installed)"
 fi
 unset _chan_lib_local _chan_lib_installed
+
+# Phase 5.5 MAJOR 1: load fail-soft render helpers.
+_rl_local="${_script_dir}/lib/render-channel-lib.sh"
+_rl_sbin="${PREFIX_SBIN:-/usr/local/sbin}/render-channel-lib.sh"
+if [[ -f "$_rl_local" ]]; then
+    # shellcheck source=lib/render-channel-lib.sh
+    source "$_rl_local"
+elif [[ -f "$_rl_sbin" ]]; then
+    # shellcheck source=/dev/null
+    source "$_rl_sbin"
+else
+    warn "render-channel-lib.sh not found — render_channel_soft unavailable"
+    render_channel_soft() { warn "render_channel_soft: lib not found"; return 1; }
+    # shellcheck disable=SC2034
+    CHANNELS_FAILED=()
+fi
+unset _rl_local _rl_sbin
 
 # ---------------------------------------------------------------------------
 # Dependency check

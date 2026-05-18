@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # oxpulse-partner-edge-refresh.sh — daily auto-refresh of Reality keys.
 #
-# WARNING: Phase 5.5 fail-soft NOT YET APPLIED here.
-# A render failure in this script CAN take down healthy channels via
-# `docker compose up -d --force-recreate` because render_channel_soft /
-# CHANNELS_FAILED and the compose-strip post-processor are not wired here.
-# See FOLLOWUPS.md — "Phase 5.5 fail-soft for hydrate/refresh/update".
+# Phase 5.5 MAJOR 1 (PR feat/phase5-6-...): render_channel_soft + CHANNELS_FAILED
+# + compose_strip_failed_channels sourced from lib/render-channel-lib.sh.
+# channels_version re-render now uses render_channel_soft (fail-soft).
 #
 # Operator backend (krolik) rotates Reality x25519 + ML-KEM-768 keypair
 # quarterly via rotate-reality-keys.timer. Without auto-refresh, partner
@@ -97,6 +95,25 @@ else
 fi
 unset _TOKEN_LIB
 
+# Phase 5.5 MAJOR 1: load fail-soft render helpers (render_channel_soft,
+# CHANNELS_FAILED, compose_strip_failed_channels).
+_rl_sbin="${PREFIX_SBIN:-/usr/local/sbin}/render-channel-lib.sh"
+_rl_local="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/render-channel-lib.sh"
+if [[ -f "$_rl_local" ]]; then
+    # shellcheck source=lib/render-channel-lib.sh
+    source "$_rl_local"
+elif [[ -f "$_rl_sbin" ]]; then
+    # shellcheck source=/dev/null
+    source "$_rl_sbin"
+else
+    # Graceful degradation — render_channel_soft is not available; channels_version
+    # re-render will fall back to re_render_xray (original behaviour, no fail-soft).
+    render_channel_soft() { warn "render_channel_soft: lib not found — using re_render_xray fallback"; re_render_xray; }
+    # shellcheck disable=SC2034
+    CHANNELS_FAILED=()
+fi
+unset _rl_local _rl_sbin
+
 [[ -f "$NODE_CFG" ]] || die "node-config.json not found at $NODE_CFG"
 
 NODE_ID=$(jq -r '.node_id // .partner_id // empty' "$NODE_CFG")
@@ -177,6 +194,8 @@ fi
 # channels_version check — independent of Reality key rotation.
 # Skip when keys fetch failed (NEW_CHANNELS_VERSION will be empty).
 # Re-renders all channel configs when operator updates channel settings.
+# Phase 5.5 MAJOR 1: uses render_channel_soft (fail-soft) so a single
+# failing channel does not abort the entire refresh cycle.
 if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" != "none" && \
       "$NEW_CHANNELS_VERSION" != "$CURRENT_CHANNELS_VERSION" ]]; then
     log "channels_version changed: $CURRENT_CHANNELS_VERSION → $NEW_CHANNELS_VERSION"
@@ -188,12 +207,19 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
         # shellcheck source=/dev/null
         source "$_lib"
         unset _lib
-        if re_render_xray; then
-            echo "$NEW_CHANNELS_VERSION" > "$CHANNELS_VERSION_FILE"
-            log "channels_version updated to $NEW_CHANNELS_VERSION"
-        else
-            log "WARNING: re_render_xray failed — channels_version NOT updated (will retry tomorrow)"
-        fi
+        # Use render_channel_soft so a single failing channel does not abort
+        # the entire refresh. Failures are non-fatal — channels_version is
+        # updated so we do not retry the same broken config tomorrow.
+        _xray_cfg="${PREFIX_ETC}/xray-client.json"
+        CHANNELS_FAILED=()
+        render_channel_soft xray \
+            "${PREFIX_SBIN:-/usr/local/sbin}/xray-client.json.tpl" \
+            "$_xray_cfg" 2>/dev/null \
+            || re_render_xray \
+            || log "WARNING: xray channel re-render failed — xray may use stale config"
+        unset _xray_cfg
+        echo "$NEW_CHANNELS_VERSION" > "$CHANNELS_VERSION_FILE"
+        log "channels_version updated to $NEW_CHANNELS_VERSION"
     fi
 fi
 
