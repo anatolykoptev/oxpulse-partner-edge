@@ -15,6 +15,7 @@ set -euo pipefail
 PREFIX_ETC="${OXPULSE_PREFIX_ETC:-/etc/oxpulse-partner-edge}"
 PREFIX_LIB="${OXPULSE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
 PREFIX_SBIN=/usr/local/sbin
+# shellcheck disable=SC2034  # consumed by systemd_install() in lib/install-systemd.sh
 SYSTEMD_DIR=/etc/systemd/system
 # shellcheck disable=SC2034  # REGISTRY referenced by templates via IMAGE_VERSION, kept for override env surface
 REGISTRY="${OXPULSE_IMAGE_REGISTRY:-ghcr.io/anatolykoptev}"
@@ -114,14 +115,21 @@ if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v opec >/dev/null 2>&1; then
 fi
 
 # ---------- Args ----------
+# shellcheck source=lib/install-args.sh
 _install_lib_source install-args.sh
 args_parse "$@"
 
+# shellcheck source=lib/install-preflight.sh
 _install_lib_source install-preflight.sh
+# shellcheck source=lib/install-deps.sh
 _install_lib_source install-deps.sh
+# shellcheck source=lib/install-network.sh
 _install_lib_source install-network.sh
+# shellcheck source=lib/install-healthcheck.sh
 _install_lib_source install-healthcheck.sh
+# shellcheck source=lib/install-systemd.sh
 _install_lib_source install-systemd.sh
+# shellcheck source=lib/install-awg.sh
 _install_lib_source install-awg.sh
 
 preflight_run
@@ -255,6 +263,7 @@ fi
 # upsert — ON CONFLICT DO UPDATE with COALESCE keeps the existing pubkey when
 # the new request omits it. No 409 scenario exists. Verified in register.rs.
 #
+# shellcheck disable=SC2034  # REALITY_PRIV_PATH passed by name to opec secrets reality-keygen below
 REALITY_PRIV_PATH="$PREFIX_ETC/reality.priv"
 REALITY_PUB_PATH="$PREFIX_ETC/reality.pub"
 REALITY_UUID_PATH="$PREFIX_ETC/reality.uuid"
@@ -292,6 +301,7 @@ fi
 # pubkey every time.
 # Moved above the register dispatcher (Phase 4.3c T4) so AWG_PUB_PATH is
 # available to both the OPEC and bash register paths.
+# shellcheck disable=SC2034  # AWG_PRIV_PATH passed by name to opec secrets awg-keygen below
 AWG_PRIV_PATH="$PREFIX_ETC/awg-private.key"
 AWG_PUB_PATH="$PREFIX_ETC/awg-public.key"
 # Phase 4.8: opec is a hard requirement. Unconditionally delegate AWG keypair
@@ -458,6 +468,13 @@ AWG_H1=$(awg_extract               "$tmp_cfg" h1)
 AWG_H2=$(awg_extract               "$tmp_cfg" h2)
 AWG_H3=$(awg_extract               "$tmp_cfg" h3)
 AWG_H4=$(awg_extract               "$tmp_cfg" h4)
+# AWG_* above are consumed by configure_amneziawg() in lib/install-awg.sh via
+# the _install_lib_source indirection that shellcheck cannot follow (SC2034
+# false-positive). This `:` reference makes the intent explicit.
+: "${AWG_ALLOCATED_IP:-}" "${AWG_MOTHERLY_PUBKEY:-}" "${AWG_MOTHERLY_ENDPOINT:-}" \
+	"${AWG_MOTHERLY_AWG_IP:-}" "${AWG_JC:-}" "${AWG_JMIN:-}" "${AWG_JMAX:-}" \
+	"${AWG_S1:-}" "${AWG_S2:-}" "${AWG_S4:-}" "${AWG_H1:-}" "${AWG_H2:-}" \
+	"${AWG_H3:-}" "${AWG_H4:-}"
 SFU_EDGE_ID=$(awg_extract          "$tmp_cfg" edge_id)
 export OTEL_EXPORTER_OTLP_ENDPOINT
 OTEL_EXPORTER_OTLP_ENDPOINT=$(awg_extract "$tmp_cfg" otel_endpoint)
