@@ -5,8 +5,13 @@
 //! - Idempotent: all-three-valid → reuse; none → fresh keygen; partial → error
 //! - --rotate forces regeneration
 //! - base64url 43-char validation on private + public keys
+//!
+//! Phase 5.1: keygen is now native (x25519-dalek in-process) by default.
+//! Set `OPEC_REALITY_KEYGEN_LEGACY=1` to fall back to the partner-cli shell-out
+//! for one release cycle before full removal.
 
 use super::error::SecretsError;
+use super::x25519;
 use std::{fs, io::Write, path::Path, process::Command};
 use uuid::Uuid;
 
@@ -45,31 +50,58 @@ pub fn keygen(out_dir: &Path, rotate: bool, partner_cli: &Path) -> Result<(), Se
         }
     }
 
-    // Locate partner-cli binary.
-    let pc_resolved = resolve_partner_cli(partner_cli)?;
+    let (priv_key_owned, pub_key_owned);
 
-    // Invoke `partner-cli keygen`.
-    let output = Command::new(&pc_resolved)
-        .arg("keygen")
-        .output()
-        .map_err(|e| SecretsError::Io {
-            path: pc_resolved.clone(),
-            source: e,
-        })?;
-    if !output.status.success() {
-        return Err(SecretsError::PartnerCliFailed {
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
+    if std::env::var("OPEC_REALITY_KEYGEN_LEGACY").as_deref() == Ok("1") {
+        // Legacy fallback: shell out to partner-cli.
+        // Only used when OPEC_REALITY_KEYGEN_LEGACY=1 is set; remove in Phase 5.X cleanup.
+        let pc_resolved = resolve_partner_cli(partner_cli)?;
+        let output = Command::new(&pc_resolved)
+            .arg("keygen")
+            .output()
+            .map_err(|e| SecretsError::Io {
+                path: pc_resolved.clone(),
+                source: e,
+            })?;
+        if !output.status.success() {
+            return Err(SecretsError::PartnerCliFailed {
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let priv_str =
+            grep_field(&stdout, "private_key").ok_or_else(|| SecretsError::PartnerCliFailed {
+                stderr: format!("missing 'private_key:' line in keygen output: {stdout}"),
+            })?;
+        let pub_str =
+            grep_field(&stdout, "public_key").ok_or_else(|| SecretsError::PartnerCliFailed {
+                stderr: format!("missing 'public_key:' line in keygen output: {stdout}"),
+            })?;
+        if priv_str.len() != REALITY_KEY_LEN {
+            return Err(SecretsError::InvalidKeyFormat {
+                path: out_dir.join("reality.priv"),
+                actual_len: priv_str.len(),
+            });
+        }
+        if pub_str.len() != REALITY_KEY_LEN {
+            return Err(SecretsError::InvalidKeyFormat {
+                path: out_dir.join("reality.pub"),
+                actual_len: pub_str.len(),
+            });
+        }
+        priv_key_owned = priv_str.to_owned();
+        pub_key_owned = pub_str.to_owned();
+    } else {
+        // Native path (default): in-process x25519-dalek keygen, no subprocess.
+        let (priv_b64, pub_b64) = x25519::keygen_x25519();
+        priv_key_owned = priv_b64.as_str().to_owned();
+        pub_key_owned = pub_b64;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let priv_key =
-        grep_field(&stdout, "private_key").ok_or_else(|| SecretsError::PartnerCliFailed {
-            stderr: format!("missing 'private_key:' line in keygen output: {stdout}"),
-        })?;
-    let pub_key =
-        grep_field(&stdout, "public_key").ok_or_else(|| SecretsError::PartnerCliFailed {
-            stderr: format!("missing 'public_key:' line in keygen output: {stdout}"),
-        })?;
+
+    let priv_key = priv_key_owned.as_str();
+    let pub_key = pub_key_owned.as_str();
+
+    // Invariant: both keys must be 43-char base64url (post-keygen gate).
     if priv_key.len() != REALITY_KEY_LEN {
         return Err(SecretsError::InvalidKeyFormat {
             path: out_dir.join("reality.priv"),
