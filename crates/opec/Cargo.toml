@@ -25,6 +25,7 @@ tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 which = "6"
 ureq = { version = "2", default-features = false, features = ["tls"] }
+base64 = "0.22"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
 rand = "0.8"
