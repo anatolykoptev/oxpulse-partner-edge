@@ -50,8 +50,15 @@ pub fn keygen(out_dir: &Path, rotate: bool, partner_cli: &Path) -> Result<(), Se
         }
     }
 
-    let (priv_key_owned, pub_key_owned);
+    // priv_key_owned wrapped in Zeroizing so the heap copy is wiped on drop —
+    // x25519::keygen_x25519 returns Zeroizing<String> but to_owned()/format!
+    // would otherwise leak a plain String onto the heap.
+    let priv_key_owned: zeroize::Zeroizing<String>;
+    let pub_key_owned: String;
 
+    // OPEC_REALITY_KEYGEN_LEGACY accepts the literal "1" only — any other value
+    // (including "true", "yes", "0", or unset) takes the native default path.
+    // Deliberately narrow to avoid accidental opt-in from typos.
     if std::env::var("OPEC_REALITY_KEYGEN_LEGACY").as_deref() == Ok("1") {
         // Legacy fallback: shell out to partner-cli.
         // Only used when OPEC_REALITY_KEYGEN_LEGACY=1 is set; remove in Phase 5.X cleanup.
@@ -89,12 +96,12 @@ pub fn keygen(out_dir: &Path, rotate: bool, partner_cli: &Path) -> Result<(), Se
                 actual_len: pub_str.len(),
             });
         }
-        priv_key_owned = priv_str.to_owned();
+        priv_key_owned = zeroize::Zeroizing::new(priv_str.to_owned());
         pub_key_owned = pub_str.to_owned();
     } else {
         // Native path (default): in-process x25519-dalek keygen, no subprocess.
         let (priv_b64, pub_b64) = x25519::keygen_x25519();
-        priv_key_owned = priv_b64.as_str().to_owned();
+        priv_key_owned = priv_b64;
         pub_key_owned = pub_b64;
     }
 
