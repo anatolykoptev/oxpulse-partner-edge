@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.37](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.36...partner-edge-v0.12.37) (2026-05-18)
+
+
+### Bug Fixes
+
+* **install:** RETURN-trap unbound var + ship install-awg.sh in release ([#181](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/181)) ([ca0f4a7](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ca0f4a7127a39d535d4675d14d821aa3a7c947bb))
+
 ## [0.12.36](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.35...partner-edge-v0.12.36) (2026-05-18)
 
 
