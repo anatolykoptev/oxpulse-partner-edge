@@ -27,6 +27,8 @@ BACKEND_API="${BACKEND_API%/}"
 log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
+# Returns 0 if $1 is in the remaining arguments.  Used for CHANNELS_FAILED lookup.
+_in_array() { local needle=$1; shift; local el; for el in "$@"; do [[ "$el" == "$needle" ]] && return 0; done; return 1; }
 
 # ---------- Phase 4.1: lib module loader ----------
 # Resolves a lib/install-*.sh module via lookup order:
@@ -344,7 +346,7 @@ REALITY_SHORT_ID="0123456789abcdef"
 REALITY_SERVER_NAME="www.cloudflare.com"
 REALITY_ENCRYPTION=""
 RELAY_JWT_SECRET="DRYRUN-relay-jwt-secret"
-TURNS_SUBDOMAIN="${TURNS_SUBDOMAIN}"
+TURNS_SUBDOMAIN="${TURNS_SUBDOMAIN:-}"
 DRYENV
 		chmod 0600 "$tmp_cfg.env"
 		set -a
@@ -736,6 +738,27 @@ render_with_opec() {
     opec render "$kind" --tpl "$src" --out "$dst" \
         || die "opec render $kind failed for $src — see error above"
 }
+# Phase 5.5 — fail-soft render for bypass channels (xray, naive, hysteria2).
+# Chassis renders (compose, caddy, coturn) stay strict via render_with_opec.
+# On failure: logs a warning, appends channel name to CHANNELS_FAILED array,
+# returns non-zero. Callers must NOT die on non-zero — install continues and
+# the failed channel is excluded from the running compose stack.
+CHANNELS_FAILED=()
+render_channel_soft() {
+    local kind=$1 src=$2 dst=$3
+    if command -v opec >/dev/null 2>&1; then
+        if opec render "$kind" --tpl "$src" --out "$dst" 2>/tmp/opec-render-err-"$kind".txt; then
+            return 0
+        fi
+        warn "channel $kind render failed — will skip this channel"
+        warn "  opec error: $(cat /tmp/opec-render-err-"$kind".txt 2>/dev/null || echo '<no output>')"
+        rm -f /tmp/opec-render-err-"$kind".txt
+    else
+        warn "channel $kind render skipped — opec not on PATH"
+    fi
+    CHANNELS_FAILED+=("$kind")
+    return 1
+}
 render_with_opec compose "$stage/compose.tpl" "$compose_out"
 render_with_opec caddy   "$stage/caddy.tpl"   "$caddy_out"
 # Phase 1: compute sha256 of rendered Caddyfile and substitute __CADDYFILE_SHA__
@@ -837,7 +860,9 @@ export XRAY_XHTTP_MODE XRAY_XHTTP_PATH \
        XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES \
        XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS \
        XRAY_XHTTP_X_PADDING_BYTES
-render_with_opec xray    "$stage/xray.tpl"    "$xray_out"
+# Phase 5.5: xray is a bypass channel — render fail-soft.
+# render_channel_soft appends to CHANNELS_FAILED on error; does NOT die.
+render_channel_soft xray "$stage/xray.tpl" "$xray_out"
 render_with_opec coturn  "$stage/coturn.tpl"  "$coturn_out"
 
 # AmneziaWG mesh setup — runs only when the central returned an awg block.
@@ -888,17 +913,62 @@ if declare -f re_render_hysteria2 >/dev/null 2>&1; then
 		re_render_hysteria2
 		COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
 		log "hy2 channel provisioned"
+		# Phase 5.5: update channels-status.env — hysteria2 active
+		[[ $DRY_RUN -eq 0 && -f "$PREFIX_LIB/channels-status.env" ]] && \
+			sed -i 's/^hysteria2=skipped$/hysteria2=active/' "$PREFIX_LIB/channels-status.env"
 	else
 		warn "hy2 credentials unavailable — installing awg-only mode (hy2 will provision on next upgrade)"
 	fi
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
-	render_with_opec naive "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"
-	chmod 0600 "$PREFIX_ETC/naive-client.json"
-	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch5"
-	log "  naive-client.json rendered (CH5 profile enabled)"
+	# Phase 5.5: naive is a bypass channel — render fail-soft.
+	if render_channel_soft naive "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"; then
+		chmod 0600 "$PREFIX_ETC/naive-client.json"
+		COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch5"
+		log "  naive-client.json rendered (CH5 profile enabled)"
+	fi
 fi
 rm -rf "$stage"
+
+# Phase 5.5: all-channels-failed guard.
+# Bypass channels attempted: xray always; naive only when NAIVE_SERVER is set.
+# hysteria2 is provisioned by re_render_hysteria2 path (not tracked here yet).
+# If every attempted channel failed render → die with diagnostic.
+_CHANNELS_TOTAL=1  # xray always attempted
+[[ -n "${NAIVE_SERVER:-}" ]] && _CHANNELS_TOTAL=$((_CHANNELS_TOTAL + 1))
+CHANNELS_FAILED_COUNT=${#CHANNELS_FAILED[@]}
+if [[ $CHANNELS_FAILED_COUNT -ge $_CHANNELS_TOTAL && $_CHANNELS_TOTAL -gt 0 ]]; then
+	die "all channels failed render: ${CHANNELS_FAILED[*]:-<none>} — no bypass channel is usable; check opec and node-config"
+fi
+[[ $CHANNELS_FAILED_COUNT -gt 0 ]] && \
+	warn "  ${CHANNELS_FAILED_COUNT} channel(s) failed render (${CHANNELS_FAILED[*]:-}); continuing with remaining channels"
+unset _CHANNELS_TOTAL
+
+# Phase 5.5: write per-channel status to state file consumed by healthcheck.
+# Statuses: active|failed_at_render|skipped
+if [[ $DRY_RUN -eq 0 ]]; then
+	install -d -m 0700 "$PREFIX_LIB"
+	{
+		# xray is always attempted; naive only when NAIVE_SERVER is set
+		if _in_array xray "${CHANNELS_FAILED[@]:-}"; then
+			printf 'xray=%s\n' "failed_at_render"
+		else
+			printf 'xray=%s\n' "active"
+		fi
+		if [[ -n "${NAIVE_SERVER:-}" ]]; then
+			if _in_array naive "${CHANNELS_FAILED[@]:-}"; then
+				printf 'naive=%s\n' "failed_at_render"
+			else
+				printf 'naive=%s\n' "active"
+			fi
+		else
+			printf 'naive=%s\n' "skipped"
+		fi
+		# hysteria2 provisioning happens after this block; status updated below
+		printf 'hysteria2=%s\n' "skipped"
+	} > "$PREFIX_LIB/channels-status.env"
+	chmod 0644 "$PREFIX_LIB/channels-status.env"
+fi
 
 # Secrets-containing files → 0600.
 chmod 0600 "$xray_out" "$coturn_out" || true
