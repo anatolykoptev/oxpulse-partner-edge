@@ -5,6 +5,15 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.35](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.34...partner-edge-v0.12.35) (2026-05-18)
+
+
+### Features
+
+* **install:** Phase 4.10 — extract AWG kmod build/config to lib/install-awg.sh ([#172](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/172)) ([a9f9046](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a9f904647a0d87f3bad3661a7e5f8b8ea725573a))
+* **opec:** Phase 5.1 — native x25519 keygen for reality (retire partner-cli shell-out) ([#174](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/174)) ([9e8d36e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/9e8d36e569fd1e7ac33cea3f5ce658ef837aea9a))
+* **opec:** Phase 5.2 — native AWG/WireGuard keygen (retire wg-tools shell-out) ([#176](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/176)) ([a88ec05](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a88ec05df633ff082a4240c5698d59a0ec444d3a))
+
 ## [0.12.34](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.33...partner-edge-v0.12.34) (2026-05-17)
 
 
