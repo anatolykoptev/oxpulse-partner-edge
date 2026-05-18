@@ -300,6 +300,7 @@ jobs:
           cp lib/install-healthcheck.sh   install-healthcheck.sh
           cp lib/install-systemd.sh       install-systemd.sh
           cp lib/install-args.sh          install-args.sh
+          cp lib/install-awg.sh           install-awg.sh
           chmod +x partner-cli-amd64 partner-cli-arm64
           chmod +x opec-amd64 opec-arm64
           sha256sum \
@@ -312,6 +313,7 @@ jobs:
             install-healthcheck.sh \
             install-systemd.sh \
             install-args.sh \
+            install-awg.sh \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
@@ -339,6 +341,7 @@ jobs:
             install-healthcheck.sh \
             install-systemd.sh \
             install-args.sh \
+            install-awg.sh \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
