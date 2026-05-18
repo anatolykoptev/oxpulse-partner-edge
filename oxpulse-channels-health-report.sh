@@ -22,8 +22,10 @@ _TOKEN_LIB="${_TOKEN_LIB:-${_SBIN}/oxpulse-token-lib.sh}"
 _PREFIX_ETC="${PARTNER_EDGE_PREFIX_ETC:-/etc/oxpulse-partner-edge}"
 _NODE_CONFIG="${_NODE_CONFIG:-${_PREFIX_ETC}/node-config.json}"
 
-# Prefer installed defaults.conf; fall back to repo-relative for local testing.
-_DEFAULTS_CONF="${_DEFAULTS_CONF:-/etc/oxpulse-partner-edge/config/defaults.conf}"
+# Prefer installed defaults.conf (canonical share path — Bug 8 fix);
+# fall back to repo-relative for local testing.
+# install-systemd.sh installs this to /usr/local/share/oxpulse-partner-edge/config/.
+_DEFAULTS_CONF="${_DEFAULTS_CONF:-/usr/local/share/oxpulse-partner-edge/config/defaults.conf}"
 _DEFAULTS_CONF_LOCAL="${_DEFAULTS_CONF_LOCAL:-$(dirname "$0")/config/defaults.conf}"
 
 # ---------- flags ----------

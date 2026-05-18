@@ -91,6 +91,18 @@ _systemd_install_lib_scripts() {
 		curl -fsSL "$REPO_RAW/oxpulse-token-lib.sh" -o "$PREFIX_SBIN/oxpulse-token-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/oxpulse-token-lib.sh"
 	fi
+
+	# Fleet-wide infrastructure defaults (Bug 8 fix — install to canonical share path).
+	# channel-render-lib.sh and oxpulse-channels-health-report.sh both source this file
+	# from /usr/local/share/oxpulse-partner-edge/config/defaults.conf at runtime.
+	install -d -m 0755 "/usr/local/share/oxpulse-partner-edge/config"
+	if [[ -n "$src_dir" && -f "$src_dir/config/defaults.conf" ]]; then
+		install -m 0644 "$src_dir/config/defaults.conf" \
+			"/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+	else
+		curl -fsSL "$REPO_RAW/config/defaults.conf" \
+			-o "/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+	fi
 }
 
 # Install pre-made systemd unit files (no placeholder substitution).
