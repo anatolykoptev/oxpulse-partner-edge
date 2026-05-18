@@ -496,11 +496,15 @@ HYSTERIA2_SERVER=$(json_get hysteria2_server "$tmp_cfg")
 HYSTERIA2_PORT=$(json_get hysteria2_port "$tmp_cfg")
 HYSTERIA2_AUTH=$(json_get hysteria2_auth "$tmp_cfg")
 HYSTERIA2_OBFS=$(json_get hysteria2_obfs "$tmp_cfg")
-export NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS
+export NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT
 NAIVE_SERVER=$(json_get naive_server "$tmp_cfg")
 NAIVE_PORT=$(json_get naive_port "$tmp_cfg")
 NAIVE_USER=$(json_get naive_user "$tmp_cfg")
 NAIVE_PASS=$(json_get naive_pass "$tmp_cfg")
+# naive-client.json.tpl binds {{NAIVE_SOCKS_PORT}} for the local SOCKS listener.
+# Default 1080 matches naive's built-in default; override via node-config naive_socks_port.
+NAIVE_SOCKS_PORT=$(json_get naive_socks_port "$tmp_cfg")
+[[ -z "$NAIVE_SOCKS_PORT" ]] && NAIVE_SOCKS_PORT="1080"
 # channels[] — future-proof bypass channel array.
 # Empty if server is older than v0.12 (no channels field yet).
 CHANNELS_JSON=$(json_get_raw channels "$tmp_cfg")
