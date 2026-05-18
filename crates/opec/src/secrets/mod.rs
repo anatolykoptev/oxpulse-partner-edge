@@ -13,6 +13,7 @@ pub mod error;
 pub mod reality;
 pub mod register;
 pub mod sfu_key;
+pub mod wg_keypair;
 pub mod x25519;
 
 pub use error::SecretsError;
@@ -42,7 +43,7 @@ pub enum SecretsCommands {
         /// Force regeneration even when valid keypair exists.
         #[arg(long)]
         rotate: bool,
-        /// Override wg binary path (test hook).
+        /// wg binary path (deprecated — only used when OPEC_AWG_KEYGEN_LEGACY=1).
         #[arg(long, default_value = "wg")]
         wg: PathBuf,
     },
