@@ -24,6 +24,18 @@ deps_install() {
 			fi
 		done
 		unset _pkg
+		# PyYAML (python3 yaml module) — required by compose-strip logic (Phase 5.5
+		# BLOCKER 1 fix). Checked via import, not command -v, since it is a module.
+		if ! python3 -c "import yaml" 2>/dev/null; then
+			log "  installing missing runtime dep: python3-yaml (PyYAML)"
+			if [[ $OS_FAMILY == rhel ]]; then
+				dnf install -y python3-pyyaml >/dev/null 2>&1 \
+					|| die "dnf install python3-pyyaml failed — install manually then re-run"
+			else
+				apt-get install -y -q python3-yaml >/dev/null 2>&1 \
+					|| die "apt-get install python3-yaml failed"
+			fi
+		fi
 	fi
 
 	log "[2/10] ensuring docker + compose plugin"
