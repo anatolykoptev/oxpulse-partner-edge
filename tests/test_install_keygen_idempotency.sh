@@ -10,7 +10,7 @@
 # This test verifies the install.sh-level wiring:
 #   Case 1: reality keygen block invokes `opec secrets reality-keygen`
 #   Case 2: awg keygen block invokes `opec secrets awg-keygen`
-#   Case 3: --force-keygen / --rotate-identity maps to opec --rotate flag
+#   Case 3: --force-keygen / --rotate-identity maps to opec --rotate in both reality and AWG blocks
 #   Case 4: dry-run block mentions opec invocation (not partner-cli)
 #   Case 5: install.sh syntax check
 #
@@ -68,6 +68,10 @@ grep -qE -- '--force-keygen|--rotate-identity' "$INSTALL" \
 # The reality keygen block must pass --rotate to opec when FORCE_KEYGEN=1.
 grep -qE 'FORCE_KEYGEN.*--rotate|--rotate.*FORCE_KEYGEN' "$TMP/reality_block.txt" \
     || { echo "FAIL [case3]: reality keygen block does not pass --rotate to opec when FORCE_KEYGEN=1"; exit 1; }
+
+# The awg keygen block must pass --rotate to opec when FORCE_KEYGEN=1.
+grep -qE 'FORCE_KEYGEN.*--rotate|--rotate.*FORCE_KEYGEN' "$TMP/awg_block.txt" \
+    || { echo "FAIL [case3]: awg keygen block does not pass --rotate to opec when FORCE_KEYGEN=1"; exit 1; }
 
 # ── Case 4: Dry-run block references opec, not partner-cli ─────────────────
 grep -qiE 'dry.run.*opec|opec.*reality-keygen' "$TMP/reality_block.txt" \

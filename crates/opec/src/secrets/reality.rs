@@ -49,10 +49,10 @@ pub fn keygen(out_dir: &Path, rotate: bool) -> Result<(), SecretsError> {
         }
     }
 
-    // priv_key_owned wrapped in Zeroizing so the heap copy is wiped on drop —
-    // x25519::keygen_x25519 returns Zeroizing<String> but to_owned()/format!
-    // would otherwise leak a plain String onto the heap.
-    // Native path (unconditional since Phase 5.3): in-process x25519-dalek keygen.
+    // x25519::keygen_x25519 returns Zeroizing<String> for both keys.
+    // The private key stays inside Zeroizing<String> — priv_key_owned — until
+    // it is written to disk; it is never copied into a plain String, so the
+    // plaintext bytes are wiped on drop automatically.
     let (priv_key_owned, pub_key_owned) = x25519::keygen_x25519();
 
     let priv_key: &str = &priv_key_owned;

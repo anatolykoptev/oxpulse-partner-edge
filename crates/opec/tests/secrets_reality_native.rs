@@ -8,6 +8,77 @@ use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
 
+/// Empty reality.priv (all three files present) must return InvalidKeyFormat,
+/// not regenerate. Reality semantics differ from AWG by design — a corrupt
+/// or empty priv is not "missing"; the operator must manually remove all
+/// three identity files to request a fresh keygen.
+///
+/// Plants reality.priv="" + valid reality.pub + valid reality.uuid, calls
+/// keygen(rotate=false), expects Err(SecretsError::InvalidKeyFormat).
+#[test]
+#[serial]
+fn reality_keygen_empty_priv_file_returns_invalid_key_format() {
+    use opec::secrets::error::SecretsError;
+
+    let out_dir = TempDir::new().unwrap();
+    let dir = out_dir.path();
+
+    // Plant all three files: empty priv, valid pub (43 chars), valid uuid.
+    fs::write(dir.join("reality.priv"), "").unwrap();
+    fs::write(
+        dir.join("reality.pub"),
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("reality.uuid"),
+        "00000000-0000-0000-0000-000000000000\n",
+    )
+    .unwrap();
+
+    let result = reality::keygen(dir, false);
+    match result {
+        Err(SecretsError::InvalidKeyFormat { .. }) => {}
+        other => panic!(
+            "expected Err(InvalidKeyFormat) for empty priv, got: {:?}",
+            other
+        ),
+    }
+}
+
+/// Whitespace-only reality.priv (all three files present) must return
+/// InvalidKeyFormat, not regenerate. Same rationale as the empty-priv test.
+#[test]
+#[serial]
+fn reality_keygen_whitespace_only_priv_returns_invalid_key_format() {
+    use opec::secrets::error::SecretsError;
+
+    let out_dir = TempDir::new().unwrap();
+    let dir = out_dir.path();
+
+    // Plant all three files: whitespace-only priv, valid pub, valid uuid.
+    fs::write(dir.join("reality.priv"), "   \n\t  \n").unwrap();
+    fs::write(
+        dir.join("reality.pub"),
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("reality.uuid"),
+        "00000000-0000-0000-0000-000000000000\n",
+    )
+    .unwrap();
+
+    let result = reality::keygen(dir, false);
+    match result {
+        Err(SecretsError::InvalidKeyFormat { .. }) => {}
+        other => panic!(
+            "expected Err(InvalidKeyFormat) for whitespace-only priv, got: {:?}",
+            other
+        ),
+    }
+}
+
 /// Native path produces all three valid identity files with correct permissions
 /// and key format. Also verifies idempotent re-run leaves content unchanged.
 #[test]
