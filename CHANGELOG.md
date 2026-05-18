@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.36](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.35...partner-edge-v0.12.36) (2026-05-18)
+
+
+### Features
+
+* **opec:** Phase 5.3 — retire legacy keygen shell-outs ([#177](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/177)) ([5aad217](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/5aad217fcfaf99dc62ee616f38f76afc90a94778))
+
 ## [0.12.35](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.34...partner-edge-v0.12.35) (2026-05-18)
 
 
