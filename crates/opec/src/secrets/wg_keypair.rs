@@ -45,27 +45,28 @@ pub fn keygen_wg() -> (Zeroizing<String>, String) {
 /// - `priv_b64` is not valid standard base64.
 /// - The decoded bytes are not exactly 32 bytes.
 pub fn pub_from_priv_b64(priv_b64: &str) -> Result<String, SecretsError> {
-    let priv_bytes =
+    // Decoded bytes wrapped in Zeroizing so the heap allocation is wiped on
+    // drop, and the [u8; 32] copy is also Zeroizing-wrapped because [u8; 32]
+    // is Copy and StaticSecret::from would otherwise leave the raw priv
+    // lingering on the stack. Matches the Phase 5.1 lesson — same class of
+    // leak previously caught in reality.rs's keygen path.
+    let priv_bytes: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(
         STANDARD
             .decode(priv_b64.trim())
             .map_err(|_| SecretsError::InvalidKeyFormat {
                 path: std::path::PathBuf::from("<wg-private-key>"),
                 actual_len: priv_b64.trim().len(),
-            })?;
+            })?,
+    );
     if priv_bytes.len() != 32 {
         return Err(SecretsError::InvalidKeyFormat {
             path: std::path::PathBuf::from("<wg-private-key>"),
             actual_len: priv_bytes.len(),
         });
     }
-    let priv_array: [u8; 32] =
-        priv_bytes
-            .try_into()
-            .map_err(|_| SecretsError::InvalidKeyFormat {
-                path: std::path::PathBuf::from("<wg-private-key>"),
-                actual_len: 0,
-            })?;
-    let secret = StaticSecret::from(priv_array);
+    let mut priv_array: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new([0u8; 32]);
+    priv_array.copy_from_slice(&priv_bytes);
+    let secret = StaticSecret::from(*priv_array);
     let public = PublicKey::from(&secret);
     Ok(STANDARD.encode(public.as_bytes()))
 }

@@ -11,6 +11,7 @@ use tempfile::TempDir;
 /// On the native path (default, no OPEC_AWG_KEYGEN_LEGACY=1), a fresh keygen
 /// must create both files with correct permissions and valid 44-char standard
 /// base64 content — even when the wg binary path is a nonexistent path.
+#[serial_test::serial]
 #[test]
 fn awg_keygen_native_path_produces_valid_files() {
     // Ensure legacy gate is OFF for this test.
@@ -77,6 +78,7 @@ fn awg_keygen_native_path_produces_valid_files() {
 
 /// On the native path, idempotent re-run (rotate=false) with an existing valid
 /// priv must derive the pub without touching the priv — even with a fake wg path.
+#[serial_test::serial]
 #[test]
 fn awg_keygen_native_idempotent_reuse() {
     unsafe { std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY") };
@@ -128,6 +130,7 @@ fn awg_keygen_native_idempotent_reuse() {
 /// With a nonexistent wg path, it must return a WgMissing / PartnerCliMissing error.
 ///
 /// This test verifies the env gate is wired — not the wg binary itself.
+#[serial_test::serial]
 #[test]
 fn awg_keygen_legacy_env_gate_invokes_wg() {
     // SAFETY: nextest runs each test in an isolated process.
