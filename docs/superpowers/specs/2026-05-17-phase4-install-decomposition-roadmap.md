@@ -1,6 +1,6 @@
 # Phase 4 — install.sh Decomposition Roadmap
 
-**Status:** **COMPLETE** as of 2026-05-17 (PR #169 merged, install.sh = 1088 LoC). Phase 4.10 (AWG kmod build) deferred; Phase 5 (partner-cli absorption) deferred.
+**Status:** **COMPLETE** as of 2026-05-18 (Phase 4.10 shipped, install.sh = 982 LoC). Phase 5 (partner-cli absorption) deferred.
 **Owner:** krolik
 **Target:** install.sh `1991 → ~300 LoC` orchestrator across 9 sub-phases
 
@@ -38,14 +38,14 @@ Siblings of `render`/`tenant`, NOT god-subcommand `opec install <step>`. Phase 5
 | 4.7 | Step 8 systemd unit installation (re-scoped: bash module, NOT opec — code is file-copy, not heredoc templates) | `lib/install-systemd.sh` | actual 169 | 2024→1855 |
 | 4.8 | Retire OPEC_SECRETS_{REALITY_KEYGEN,AWG_KEYGEN,REGISTER,SFU_KEY} env-gated bash fallbacks | — | actual 391 | 1855→1464 |
 | 4.9 | Args parsing + token resolve + branding-config + brand-flag composition | `lib/install-args.sh` | actual 376 | 1464→**1088** ✓ |
+| 4.10 | install_amneziawg + configure_amneziawg + awg_extract | `lib/install-awg.sh` | actual 105 | 1088→**982** ✓ |
 
-**Final: install.sh 1991 → 1088 LoC (−903, −45%).** Original architect target was ~300 LoC; reality landed at ~1090 because per-Step wrappers + helpers don't compress further without absorbing the orchestration itself into OPEC (Phase 5+ territory).
+**Final: install.sh 1991 → 982 LoC (−1009, −51%).** Original architect target was ~300 LoC; reality landed at ~980 because per-Step wrappers + helpers don't compress further without absorbing the orchestration itself into OPEC (Phase 5+ territory).
 
 ## Out of scope
 
-- **AWG provisioning** (`install_amneziawg`, ~400 LoC of kmod build) — separate Phase 4.10 with dedicated bats matrix (RHEL/Debian/Ubuntu kernels)
 - **partner-cli absorption** — Phase 5
-- **update.sh** — shares `lib/install-*.sh` modules once they exist (free win)
+- **update.sh / upgrade.sh** — share `lib/install-*.sh` modules once those scripts are touched next (free win; update.sh likely benefits most from install-awg.sh reuse)
 
 ## Phase invariants (every sub-phase)
 
@@ -79,6 +79,7 @@ Siblings of `render`/`tenant`, NOT god-subcommand `opec install <step>`. Phase 5
 | 4.5 | #165 | d6b17c0 | (plan inline in PR body) |
 | 4.6 | #166 | 9fcb170 | (plan inline in PR body) |
 | 4.7-4.9 | #169 | b8312fa | (plan inline in PR body; PR #167 + #168 squash-merge failed silently, recovered via cherry-pick) |
+| 4.10 | pending | feat/phase4-10-awg-kmod-extract | `2026-05-17-phase4-install-decomposition-roadmap.md` (this doc) |
 
 ## Lessons learned (post-execution)
 
@@ -89,7 +90,8 @@ Siblings of `render`/`tenant`, NOT god-subcommand `opec install <step>`. Phase 5
 
 ## Out of scope / next phases
 
-- **Phase 4.10 — AWG kmod build extraction** (`install_amneziawg`, ~400 LoC kernel module compile). Needs dedicated bats matrix per distro (RHEL/Debian/Ubuntu). High complexity, deferred.
 - **Phase 5 — partner-cli absorption.** Pull native x25519/signing/JWT into OPEC, retire partner-cli binary. Weeks of work.
-- **update.sh / upgrade.sh** — eventually share `lib/install-*.sh` modules; free win when those scripts touched next.
-- **Caddy fixture drift followup** — fixed in this hygiene PR (added AWG_MOTHERLY_IP + HY2_FALLBACK_* to frozen_env).
+- **update.sh / upgrade.sh** — eventually share `lib/install-*.sh` modules (including install-awg.sh); free win when those scripts touched next.
+- **Caddy fixture drift followup** — fixed in hygiene PR (added AWG_MOTHERLY_IP + HY2_FALLBACK_* to frozen_env).
+- **Phase 4.10 lesson: AWG not "kmod-heavy".** Spec said "~400 LoC kernel module compile" — actual extraction was 105 LoC (3 functions, no kmod). AWG userspace build is pure Go + git + make, not kmod. Spec language "kmod build" was misleading; actual complexity was in test mocking (host go 1.26 bypasses version-check path, PATH isolation for pkg-manager check). Scope was correct, LoC estimate was off 4×.
+- **Test-hook naming matters.** Adding `AWG_GO_BIN_PATH` to the module (injectable go binary path) was essential for the version-check tests. Without it, the host's `/usr/local/go/bin/go 1.26` silently bypassed the entire go-download code path in all tests.

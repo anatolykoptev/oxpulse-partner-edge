@@ -6,6 +6,7 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TPL="$REPO_ROOT/docker-compose.yml.tpl"
 INSTALL="$REPO_ROOT/install.sh"
+PREFLIGHT="$REPO_ROOT/lib/install-preflight.sh"
 DOCKERFILE="$REPO_ROOT/images/Dockerfile.sfu"
 
 # 1. sfu service block exists with expected container name.
@@ -49,16 +50,19 @@ grep -q 'SFU_EDGE_ID' "$INSTALL" \
 grep -q '/metrics' "$TPL" \
     || { echo "FAIL: sfu healthcheck does not probe /metrics"; exit 1; }
 
-# 6. install.sh preflight includes the new ports (parameterized via SFU_UDP_PORT / SFU_METRICS_PORT).
-grep -qE 'check_port_free "\$SFU_UDP_PORT" u' "$INSTALL" \
-    || { echo "FAIL: install.sh does not preflight \$SFU_UDP_PORT/udp"; exit 1; }
-grep -qE 'for p in 80 443 3478 5349 "\$SFU_METRICS_PORT"' "$INSTALL" \
-    || { echo "FAIL: install.sh does not include \$SFU_METRICS_PORT in preflight loop"; exit 1; }
-# 6b. SFU_UDP_PORT / SFU_METRICS_PORT are declared and passed to the render() sed chain.
-grep -qE 'SFU_UDP_PORT=.*7878' "$INSTALL" \
-    || { echo "FAIL: install.sh does not declare SFU_UDP_PORT default 7878"; exit 1; }
-grep -qE 'SFU_METRICS_PORT=.*9317' "$INSTALL" \
-    || { echo "FAIL: install.sh does not declare SFU_METRICS_PORT default 9317"; exit 1; }
+# 6. preflight (Phase 4.1 extracted from install.sh to lib/install-preflight.sh)
+#    includes the new ports (parameterized via SFU_UDP_PORT / SFU_METRICS_PORT).
+grep -qE '_preflight_check_port_free "\$SFU_UDP_PORT" u' "$PREFLIGHT" \
+    || { echo "FAIL: lib/install-preflight.sh does not preflight \$SFU_UDP_PORT/udp"; exit 1; }
+grep -qE 'for p in 80 443 3478 5349 "\$SFU_METRICS_PORT"' "$PREFLIGHT" \
+    || { echo "FAIL: lib/install-preflight.sh does not include \$SFU_METRICS_PORT in preflight loop"; exit 1; }
+# 6b. SFU_UDP_PORT / SFU_METRICS_PORT declared in lib/install-args.sh (Phase 4.9
+#     extracted args+token+branding from install.sh) and consumed in render().
+ARGS="$REPO_ROOT/lib/install-args.sh"
+grep -qE 'SFU_UDP_PORT=.*7878' "$ARGS" \
+    || { echo "FAIL: lib/install-args.sh does not declare SFU_UDP_PORT default 7878"; exit 1; }
+grep -qE 'SFU_METRICS_PORT=.*9317' "$ARGS" \
+    || { echo "FAIL: lib/install-args.sh does not declare SFU_METRICS_PORT default 9317"; exit 1; }
 grep -q '{{SFU_UDP_PORT}}' "$TPL" \
     || { echo "FAIL: compose template does not use {{SFU_UDP_PORT}} placeholder"; exit 1; }
 # 6c. depends_on: caddy present in sfu service block.
