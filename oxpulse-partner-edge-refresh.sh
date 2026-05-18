@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # oxpulse-partner-edge-refresh.sh — daily auto-refresh of Reality keys.
 #
+# WARNING: Phase 5.5 fail-soft NOT YET APPLIED here.
+# A render failure in this script CAN take down healthy channels via
+# `docker compose up -d --force-recreate` because render_channel_soft /
+# CHANNELS_FAILED and the compose-strip post-processor are not wired here.
+# See FOLLOWUPS.md — "Phase 5.5 fail-soft for hydrate/refresh/update".
+#
 # Operator backend (krolik) rotates Reality x25519 + ML-KEM-768 keypair
 # quarterly via rotate-reality-keys.timer. Without auto-refresh, partner
 # edges installed before the rotation keep running with old keys and

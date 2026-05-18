@@ -9,6 +9,12 @@
 # Usage:
 #   hydrate.sh             Normal run (idempotent; exits 0 if already hydrated).
 #   hydrate.sh --reseed    Tear down containers, rm sentinel, re-hydrate.
+#
+# WARNING: Phase 5.5 fail-soft NOT YET APPLIED here.
+# A render failure in this script CAN take down healthy channels via
+# `docker compose up -d` because render_channel_soft / CHANNELS_FAILED and
+# the compose-strip post-processor are not wired in hydrate.sh.
+# See FOLLOWUPS.md — "Phase 5.5 fail-soft for hydrate/refresh/update".
 set -euo pipefail
 
 # ---------- Constants ----------

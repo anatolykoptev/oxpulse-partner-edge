@@ -307,6 +307,54 @@ else
 fi
 unset _chr_unit _chr_state _chr_active
 
+# --- 21. Per-channel status (Phase 5.5 resilient install) ---
+# Reads channels-status.env written by install.sh / update.sh.
+# overall = healthy  when all channels active
+# overall = degraded when some channels failed but ≥1 active
+# overall = failed   when zero channels active (no bypass path)
+# Exit 0 for healthy/degraded; contributes to FAIL for all-failed.
+_chs_file="$STATE_DIR/channels-status.env"
+echo -n "  21. channel status:                                "
+if [[ ! -f "$_chs_file" ]]; then
+	echo "SKIP (channels-status.env absent — pre-Phase-5.5 install)"
+else
+	_ch_active_count=0
+	_ch_failed_count=0
+	_ch_total=0
+	while IFS='=' read -r _ch_name _ch_status || [[ -n "$_ch_name" ]]; do
+		[[ -z "$_ch_name" || "$_ch_name" =~ ^# ]] && continue
+		# MEDIUM 3 fix: validate line format — name must be [a-z][a-z0-9_-]* and
+		# status must be non-empty.  "xray active" (missing =) would yield
+		# _ch_name='xray active' _ch_status='' and fall into skipped silently.
+		if [[ ! "$_ch_name" =~ ^[a-z][a-z0-9_-]*$ ]] || [[ -z "$_ch_status" ]]; then
+			warn "channels-status.env: malformed line (name='${_ch_name}' status='${_ch_status:-<empty>}') — skipping"
+			continue
+		fi
+		_ch_total=$((_ch_total + 1))
+		case "$_ch_status" in
+			active)            _ch_active_count=$((_ch_active_count + 1)) ;;
+			failed_at_render|failed_at_start) _ch_failed_count=$((_ch_failed_count + 1)) ;;
+			skipped)           ;;  # not attempted — does not count toward failure
+			# MAJOR 4 fix: unknown/typo status (e.g. 'actived', 'provisioning') counts
+			# as failure rather than silently passing.  Schema drift → false-green prevented.
+			*) warn "channels-status.env: unknown status '${_ch_status}' for channel '${_ch_name}' — treating as failed"; _ch_failed_count=$((_ch_failed_count + 1)) ;;
+		esac
+	done < "$_chs_file"
+
+	if [[ $_ch_total -eq 0 ]]; then
+		echo "SKIP (no channel entries in channels-status.env)"
+	elif [[ $_ch_active_count -eq 0 && $_ch_failed_count -gt 0 ]]; then
+		echo -e "\033[31mFAIL\033[0m (overall=failed — zero channels active; failed: ${_ch_failed_count}/${_ch_total})"
+		FAIL=$((FAIL + 1))
+	elif [[ $_ch_failed_count -gt 0 ]]; then
+		echo -e "\033[33mWARN\033[0m (overall=degraded — active: ${_ch_active_count}, failed: ${_ch_failed_count}/${_ch_total})"
+	else
+		echo -e "\033[32mOK\033[0m (overall=healthy — active: ${_ch_active_count}/${_ch_total})"
+	fi
+	unset _ch_active_count _ch_failed_count _ch_total _ch_name _ch_status
+fi
+unset _chs_file
+
 if [[ $FAIL -eq 0 ]]; then
 	echo "All checks passed."
 	exit 0
