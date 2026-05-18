@@ -93,9 +93,12 @@ fn awg_keygen_idempotent_when_priv_present() {
 }
 
 #[test]
+#[serial]
 fn awg_keygen_rotate_regenerates_priv() {
     // Native path: two calls with rotate=false then rotate=true — pubs must differ.
     // The wg path arg is ignored on the native path, so any value works.
+    // #[serial] needed because env::remove_var below races with parallel
+    // tests setting OPEC_AWG_KEYGEN_LEGACY=1 — would push them off legacy.
     std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY");
     let out = TempDir::new().unwrap();
     let fake_wg_path = PathBuf::from("/nonexistent/wg");

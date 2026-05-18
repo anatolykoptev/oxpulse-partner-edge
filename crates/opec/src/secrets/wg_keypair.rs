@@ -50,14 +50,13 @@ pub fn pub_from_priv_b64(priv_b64: &str) -> Result<String, SecretsError> {
     // is Copy and StaticSecret::from would otherwise leave the raw priv
     // lingering on the stack. Matches the Phase 5.1 lesson — same class of
     // leak previously caught in reality.rs's keygen path.
-    let priv_bytes: zeroize::Zeroizing<Vec<u8>> = zeroize::Zeroizing::new(
-        STANDARD
-            .decode(priv_b64.trim())
-            .map_err(|_| SecretsError::InvalidKeyFormat {
+    let priv_bytes: zeroize::Zeroizing<Vec<u8>> =
+        zeroize::Zeroizing::new(STANDARD.decode(priv_b64.trim()).map_err(|_| {
+            SecretsError::InvalidKeyFormat {
                 path: std::path::PathBuf::from("<wg-private-key>"),
                 actual_len: priv_b64.trim().len(),
-            })?,
-    );
+            }
+        })?);
     if priv_bytes.len() != 32 {
         return Err(SecretsError::InvalidKeyFormat {
             path: std::path::PathBuf::from("<wg-private-key>"),
