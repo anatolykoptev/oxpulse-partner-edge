@@ -27,12 +27,14 @@
 #   AWG_BUILD_ROOT         default $(mktemp -d) — test hook to skip git clone
 #   AWG_INSTALL_PREFIX     default /usr/local — test hook to avoid root write
 #   AWG_CONF_DIR           default /etc/amnezia/amneziawg
-#   AWG_QUICK_BIN          default awg-quick — test hook to mock interface up
+#   AWG_QUICK_BIN          default /usr/bin/awg-quick — test hook for idempotency
+#                          gate (binary path; not the systemd unit name at L123).
 #   AWG_LISTEN_PORT        default $((43800 + RANDOM % 200)) — test hook for golden file
 
 install_amneziawg() {
 	local _prefix="${AWG_INSTALL_PREFIX:-/usr/local}"
-	if [[ -s "${_prefix}/bin/amneziawg-go" && -x /usr/bin/awg-quick ]]; then
+	local _quick="${AWG_QUICK_BIN:-/usr/bin/awg-quick}"
+	if [[ -s "${_prefix}/bin/amneziawg-go" && -x "${_quick}" ]]; then
 		log "  amneziawg already installed (skip)"
 		return 0
 	fi

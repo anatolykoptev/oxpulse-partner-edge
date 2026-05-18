@@ -44,19 +44,14 @@ _load_awg_globals() {
 # Test 1: install_amneziawg — idempotent skip when binaries present
 # ---------------------------------------------------------------------------
 @test "install_amneziawg skips build when binaries already present" {
-    # Create mock amneziawg-go at AWG_INSTALL_PREFIX and mock awg-quick in PATH.
+    # Real production idempotency gate now uses AWG_QUICK_BIN env hook
+    # (defaults to /usr/bin/awg-quick). Test injects writable shim path
+    # so we exercise the live skip branch without root or /usr/bin write.
     local prefix="$TMP/usr/local"
     mkdir -p "$prefix/bin"
     echo "fake" > "$prefix/bin/amneziawg-go"
-    # Mock /usr/bin/awg-quick via override PATH (module checks -x /usr/bin/awg-quick).
-    # We cannot write /usr/bin without root; mock by redefining the check condition
-    # using AWG_QUICK_CHECK env that the module's idempotency branch uses.
-    # Since the module hardcodes -x /usr/bin/awg-quick, create a fake via a PATH
-    # trick: place a mock 'awg-quick' in TMP/bin and override the specific path.
-    # Strategy: create a shim script at a writable location and patch PATH so
-    # install_amneziawg uses it. The module checks -x /usr/bin/awg-quick explicitly.
-    # We override by replacing install_amneziawg with a version that uses AWG_INSTALL_PREFIX
-    # for both binary checks (valid test for the skip logic).
+    echo '#!/bin/sh' > "$prefix/bin/awg-quick"
+    chmod +x "$prefix/bin/awg-quick"
     CALLS="$TMP/calls"
 
     run bash -c "
@@ -68,20 +63,8 @@ _load_awg_globals() {
         git()  { echo mock_git  >> '$CALLS'; }
         make() { echo mock_make >> '$CALLS'; }
 
-        # Patch the idempotency check: override install_amneziawg so both binary
-        # checks use AWG_INSTALL_PREFIX (normalises the test without root).
-        install_amneziawg() {
-            local _prefix=\"\${AWG_INSTALL_PREFIX:-/usr/local}\"
-            if [[ -s \"\${_prefix}/bin/amneziawg-go\" && -x \"\${_prefix}/bin/awg-quick\" ]]; then
-                log '  amneziawg already installed (skip)'
-                return 0
-            fi
-            die 'should not reach build path in idempotency test'
-        }
-        # Create awg-quick mock next to amneziawg-go
-        echo '#!/bin/sh' > '$prefix/bin/awg-quick'
-        chmod +x '$prefix/bin/awg-quick'
         AWG_INSTALL_PREFIX='$prefix'
+        AWG_QUICK_BIN='$prefix/bin/awg-quick'
         install_amneziawg
         echo EXIT=\$?
     "
