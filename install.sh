@@ -703,9 +703,15 @@ fi
 PARTNER_DOMAIN="$DOMAIN"
 # Caddy tunnel upstream vars — sourced from defaults.conf via channel-render-lib.sh.
 # Placeholder names in Caddyfile.tpl must match these var names exactly.
-AWG_MOTHERLY_IP="${OXPULSE_AWG_MOTHERLY_IP}"
-HY2_FALLBACK_HOST="${OXPULSE_HY2_FALLBACK_HOST}"
-HY2_FALLBACK_PORT="${OXPULSE_HY2_FALLBACK_PORT}"
+# Bug 3 (2026-05-18 live-edge): defaults.conf is sourced in Step 8 (systemd_install)
+# but Step 5 (render) fires first on a fresh install. Under set -u these bare
+# references abort. The inline defaults below mirror config/defaults.conf exactly
+# and act as a safety belt for the fresh-install path before defaults.conf loads.
+# DRIFT HAZARD: if defaults.conf changes these lines must change too (single truth
+# is defaults.conf; these are a fall-through guard only).
+AWG_MOTHERLY_IP="${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"
+HY2_FALLBACK_HOST="${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"
+HY2_FALLBACK_PORT="${OXPULSE_HY2_FALLBACK_PORT:-18443}"
 export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        AWG_MOTHERLY_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
        TURN_SECRET \
@@ -736,6 +742,101 @@ render_with_opec caddy   "$stage/caddy.tpl"   "$caddy_out"
 # placeholder so /canary/config-hash returns the actual hash at runtime.
 _rendered_sha=$(sha256sum "$caddy_out" | awk '{print $1}')
 sed -i "s|__CADDYFILE_SHA__|${_rendered_sha}|g" "$caddy_out"
+# Bug 4 (2026-05-18 live-edge): Phase 3 (#151) moved xray render to `opec render
+# xray` which is pure mustache env-substitution. Old bash re_render_xray in
+# channel-render-lib.sh read XRAY_XHTTP_* from node-config.json via
+# scripts/read-xhttp.py. After #151 install.sh never exported these vars — opec
+# rendered empty placeholders → invalid JSON → validation rejected → install
+# failed at Step 5. First production-surface: full wipe+reinstall of
+# ru.oxpulse.chat on v0.12.37 (first time Phase 3 render fired in real flow).
+#
+# Fix: read channels[0].xray.xhttp from node-config.json inline; export as
+# ambient env so opec render xray picks them up. Defaults match
+# channel-render-lib.sh:166-172 exactly. server is source of truth.
+#
+# Phase 5.5 followup (FOLLOWUPS.md): teach `opec render xray --node-cfg <path>`
+# to read xhttp natively, then drop this env-export block.
+XRAY_XHTTP_MODE=$(python3 - "${PREFIX_ETC}/node-config.json" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    ch = d.get("channels", []) or [{}]
+    x = ch[0].get("xray", {}) if ch[0].get("protocol", "") == "vless-reality" else {}
+    xhttp = x.get("xhttp", {})
+    v = xhttp.get("mode", "") or x.get("mode", "")
+    print(v if v else "stream-one")
+except Exception:
+    print("stream-one")
+PYEOF
+)
+XRAY_XHTTP_PATH=$(python3 - "${PREFIX_ETC}/node-config.json" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    ch = d.get("channels", []) or [{}]
+    x = ch[0].get("xray", {}) if ch[0].get("protocol", "") == "vless-reality" else {}
+    v = x.get("xhttp", {}).get("path", "")
+    print(v if v else "/xh")
+except Exception:
+    print("/xh")
+PYEOF
+)
+XRAY_XHTTP_XMUX_MAX_CONCURRENCY=$(python3 - "${PREFIX_ETC}/node-config.json" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    ch = d.get("channels", []) or [{}]
+    x = ch[0].get("xray", {}) if ch[0].get("protocol", "") == "vless-reality" else {}
+    xm = x.get("xhttp", {}).get("xmux") or x.get("xmux") or {}
+    v = xm.get("maxConcurrency")
+    print(v if v is not None else 1)
+except Exception:
+    print(1)
+PYEOF
+)
+XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES=$(python3 - "${PREFIX_ETC}/node-config.json" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    ch = d.get("channels", []) or [{}]
+    x = ch[0].get("xray", {}) if ch[0].get("protocol", "") == "vless-reality" else {}
+    xm = x.get("xhttp", {}).get("xmux") or x.get("xmux") or {}
+    v = xm.get("cMaxReuseTimes")
+    print(v if v is not None else 64)
+except Exception:
+    print(64)
+PYEOF
+)
+XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS=$(python3 - "${PREFIX_ETC}/node-config.json" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    ch = d.get("channels", []) or [{}]
+    x = ch[0].get("xray", {}) if ch[0].get("protocol", "") == "vless-reality" else {}
+    xm = x.get("xhttp", {}).get("xmux") or x.get("xmux") or {}
+    v = xm.get("cMaxLifetimeMs")
+    print(v if v is not None else 15000)
+except Exception:
+    print(15000)
+PYEOF
+)
+XRAY_XHTTP_X_PADDING_BYTES=$(python3 - "${PREFIX_ETC}/node-config.json" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    ch = d.get("channels", []) or [{}]
+    x = ch[0].get("xray", {}) if ch[0].get("protocol", "") == "vless-reality" else {}
+    v = x.get("xhttp", {}).get("extra", {}).get("xPaddingBytes", "")
+    print(v if v else "100-1000")
+except Exception:
+    print("100-1000")
+PYEOF
+)
+export XRAY_XHTTP_MODE XRAY_XHTTP_PATH \
+       XRAY_XHTTP_XMUX_MAX_CONCURRENCY \
+       XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES \
+       XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS \
+       XRAY_XHTTP_X_PADDING_BYTES
 render_with_opec xray    "$stage/xray.tpl"    "$xray_out"
 render_with_opec coturn  "$stage/coturn.tpl"  "$coturn_out"
 
