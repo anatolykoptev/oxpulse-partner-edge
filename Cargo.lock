@@ -1682,6 +1682,7 @@ dependencies = [
  "mockito",
  "once_cell",
  "predicates",
+ "rand 0.8.6",
  "regex",
  "serde",
  "serde_json",
@@ -1692,6 +1693,8 @@ dependencies = [
  "ureq",
  "uuid",
  "which",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

@@ -13,6 +13,7 @@ pub mod error;
 pub mod reality;
 pub mod register;
 pub mod sfu_key;
+pub mod x25519;
 
 pub use error::SecretsError;
 
