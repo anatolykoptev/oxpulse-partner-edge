@@ -83,27 +83,10 @@ read_service_token() {
 }
 
 # Pre-scan args for --check before any guard (--check is a diagnostic-only mode
-# that does not need partner-cli or docker).
+# that does not need docker).
 _PRESCAN_CHECK=0
 for _arg in "$@"; do [[ "$_arg" == "--check" ]] && _PRESCAN_CHECK=1 && break; done
 unset _arg
-
-# partner-cli is required for Reality x25519 keypair generation (M6 slice 2b).
-# Ships as a prebuilt static binary in the oxpulse-partner-edge release assets.
-if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v partner-cli >/dev/null 2>&1; then
-	_machine=$(uname -m)
-	case "$_machine" in
-		x86_64)  _cli_arch=amd64 ;;
-		aarch64) _cli_arch=arm64 ;;
-		*) die "partner-cli: unsupported architecture: $_machine (need x86_64 or aarch64)" ;;
-	esac
-	_cli_url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/partner-cli-${_cli_arch}"
-	log "partner-cli not found -- downloading from release assets ($_cli_arch)"
-	curl -fsSL --max-time 60 "$_cli_url" -o /usr/local/bin/partner-cli \
-		|| die "failed to download partner-cli from $_cli_url\nInstall manually and re-run."
-	chmod +x /usr/local/bin/partner-cli
-	unset _machine _cli_arch _cli_url
-fi
 
 # opec is the typed render binary for all 5 stage templates (xray, coturn,
 # naive, compose, caddy) plus secrets bootstrap (reality-keygen, awg-keygen,
@@ -129,24 +112,6 @@ if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v opec >/dev/null 2>&1; then
 	fi
 	unset _machine _opec_arch _opec_url
 fi
-
-# Best-effort install of `wg`/`wg-quick` for keygen and conf rendering. The
-# AmneziaWG userspace binary (`amneziawg-go` + `awg`/`awg-quick`) is built
-# from source in install_amneziawg() — see lib/install-awg.sh; this helper
-# only ensures the upstream wg-tools are present so we can `wg genkey |
-# wg pubkey` before the awg-go build completes.
-install_wg_tools_for_keygen() {
-	if command -v dnf >/dev/null 2>&1; then
-		dnf install -y wireguard-tools >/dev/null 2>&1 || \
-		  dnf install -y --enablerepo=epel wireguard-tools >/dev/null 2>&1 || \
-		  warn "could not install wireguard-tools via dnf — falling back"
-	elif command -v apt-get >/dev/null 2>&1; then
-		apt-get install -y -q wireguard-tools >/dev/null 2>&1 || \
-		  warn "could not install wireguard-tools via apt"
-	else
-		warn "no supported package manager — wg keygen will fail"
-	fi
-}
 
 # ---------- Args ----------
 _install_lib_source install-args.sh
@@ -290,9 +255,6 @@ fi
 # upsert — ON CONFLICT DO UPDATE with COALESCE keeps the existing pubkey when
 # the new request omits it. No 409 scenario exists. Verified in register.rs.
 #
-# partner-cli keygen output format (two lines, fixed labels):
-#   private_key: <43-char base64url>
-#   public_key:  <43-char base64url>
 REALITY_PRIV_PATH="$PREFIX_ETC/reality.priv"
 REALITY_PUB_PATH="$PREFIX_ETC/reality.pub"
 REALITY_UUID_PATH="$PREFIX_ETC/reality.uuid"
@@ -340,9 +302,6 @@ if [[ $DRY_RUN -eq 1 ]]; then
 else
 	log "  awg keypair: delegating to opec secrets awg-keygen"
 	install -d -m 0700 "$PREFIX_ETC"
-	if ! command -v wg >/dev/null 2>&1; then
-		install_wg_tools_for_keygen
-	fi
 	_opec_args=(secrets awg-keygen --out-dir "$PREFIX_ETC")
 	[[ $FORCE_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
 	if ! opec "${_opec_args[@]}"; then

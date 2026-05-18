@@ -31,9 +31,6 @@ pub enum SecretsCommands {
         /// Force regeneration even when valid identity exists.
         #[arg(long)]
         rotate: bool,
-        /// partner-cli path (deprecated — only used when OPEC_REALITY_KEYGEN_LEGACY=1).
-        #[arg(long, default_value = "partner-cli")]
-        partner_cli: PathBuf,
     },
     /// Generate or reuse AmneziaWG keypair (awg-private.key, awg-public.key).
     AwgKeygen {
@@ -43,9 +40,6 @@ pub enum SecretsCommands {
         /// Force regeneration even when valid keypair exists.
         #[arg(long)]
         rotate: bool,
-        /// wg binary path (deprecated — only used when OPEC_AWG_KEYGEN_LEGACY=1).
-        #[arg(long, default_value = "wg")]
-        wg: PathBuf,
     },
     /// GET SFU signing public key from /api/partner/keys, write env-file.
     SfuSigningKey {
@@ -107,16 +101,12 @@ pub fn dispatch(cmd: SecretsCommands) -> anyhow::Result<()> {
             retries,
         })
         .map_err(Into::into),
-        SecretsCommands::RealityKeygen {
-            out_dir,
-            rotate,
-            partner_cli,
-        } => reality::keygen(&out_dir, rotate, &partner_cli).map_err(Into::into),
-        SecretsCommands::AwgKeygen {
-            out_dir,
-            rotate,
-            wg,
-        } => awg::keygen(&out_dir, rotate, &wg).map_err(Into::into),
+        SecretsCommands::RealityKeygen { out_dir, rotate } => {
+            reality::keygen(&out_dir, rotate).map_err(Into::into)
+        }
+        SecretsCommands::AwgKeygen { out_dir, rotate } => {
+            awg::keygen(&out_dir, rotate).map_err(Into::into)
+        }
         SecretsCommands::Register {
             registry_url,
             partner_id,

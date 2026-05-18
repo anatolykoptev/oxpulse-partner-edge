@@ -1,28 +1,22 @@
-//! Phase 5.2 — integration tests for awg::keygen using the native wg_keypair path.
+//! Phase 5.3 — integration tests for awg::keygen using the native wg_keypair path.
 //!
-//! These tests exercise the native (default) code path without a real `wg` binary.
-//! The legacy env-gate path is tested in secrets_awg_unit.rs.
+//! All tests exercise the unconditional native (x25519-dalek) code path.
+//! The legacy wg-tools shell-out path was removed in Phase 5.3.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use opec::secrets::{awg, wg_keypair, SecretsError};
-use std::{fs, path::PathBuf};
+use opec::secrets::{awg, wg_keypair};
+use std::fs;
 use tempfile::TempDir;
 
-/// On the native path (default, no OPEC_AWG_KEYGEN_LEGACY=1), a fresh keygen
-/// must create both files with correct permissions and valid 44-char standard
-/// base64 content — even when the wg binary path is a nonexistent path.
+/// Fresh keygen must create both files with correct permissions and valid
+/// 44-char standard base64 content.
 #[serial_test::serial]
 #[test]
 fn awg_keygen_native_path_produces_valid_files() {
-    // Ensure legacy gate is OFF for this test.
-    // (SAFETY: tests run in separate processes via nextest — no env leak.)
-    unsafe { std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY") };
-
     let out = TempDir::new().unwrap();
-    let fake_wg = PathBuf::from("/nonexistent/wg");
 
     // rotate=true: forces fresh generation.
-    awg::keygen(out.path(), true, &fake_wg).expect("native keygen must succeed");
+    awg::keygen(out.path(), true).expect("native keygen must succeed");
 
     let priv_path = out.path().join("awg-private.key");
     let pub_path = out.path().join("awg-public.key");
@@ -76,15 +70,12 @@ fn awg_keygen_native_path_produces_valid_files() {
     );
 }
 
-/// On the native path, idempotent re-run (rotate=false) with an existing valid
-/// priv must derive the pub without touching the priv — even with a fake wg path.
+/// Idempotent re-run (rotate=false) with an existing valid priv must derive
+/// the pub without touching the priv.
 #[serial_test::serial]
 #[test]
 fn awg_keygen_native_idempotent_reuse() {
-    unsafe { std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY") };
-
     let out = TempDir::new().unwrap();
-    let fake_wg = PathBuf::from("/nonexistent/wg");
 
     // Plant a known-good 32-byte private key.
     let known_priv_bytes: [u8; 32] = [
@@ -104,7 +95,7 @@ fn awg_keygen_native_idempotent_reuse() {
     }
 
     // rotate=false: must reuse the planted priv.
-    awg::keygen(out.path(), false, &fake_wg).expect("idempotent native keygen must succeed");
+    awg::keygen(out.path(), false).expect("idempotent native keygen must succeed");
 
     let priv_after = fs::read_to_string(&priv_path).unwrap();
     assert_eq!(
@@ -126,28 +117,68 @@ fn awg_keygen_native_idempotent_reuse() {
     );
 }
 
-/// When OPEC_AWG_KEYGEN_LEGACY=1, keygen falls back to the wg binary.
-/// With a nonexistent wg path, it must return a WgMissing / PartnerCliMissing error.
-///
-/// This test verifies the env gate is wired — not the wg binary itself.
+/// Empty-priv file (zero bytes) must trigger regeneration just like a missing
+/// priv file. Coverage parity for legacy test awg_keygen_corrupted_priv_on_idempotent_path_regenerates.
 #[serial_test::serial]
 #[test]
-fn awg_keygen_legacy_env_gate_invokes_wg() {
-    // SAFETY: nextest runs each test in an isolated process.
-    unsafe { std::env::set_var("OPEC_AWG_KEYGEN_LEGACY", "1") };
-
+fn awg_keygen_empty_priv_triggers_regen() {
     let out = TempDir::new().unwrap();
-    let fake_wg = PathBuf::from("/nonexistent/wg-xyz-99");
+    let priv_path = out.path().join("awg-private.key");
 
-    let result = awg::keygen(out.path(), true, &fake_wg);
+    // Plant empty private key file.
+    fs::write(&priv_path, "").unwrap();
 
-    // Restore env before any assertion to avoid leaking into other tests if
-    // they run in the same process (shouldn't happen with nextest, but defensive).
-    unsafe { std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY") };
+    awg::keygen(out.path(), false).expect("regenerates on empty priv");
 
-    let err = result.expect_err("legacy path with nonexistent wg must fail");
+    let priv_content = fs::read_to_string(&priv_path).unwrap();
+    let priv_trimmed = priv_content.trim();
+
+    // Must have regenerated — non-empty, valid 44-char base64.
     assert!(
-        matches!(err, SecretsError::PartnerCliMissing(_)),
-        "expected PartnerCliMissing (wg not found), got: {err:?}"
+        !priv_trimmed.is_empty(),
+        "priv must be non-empty after regen from empty"
     );
+    assert_eq!(
+        priv_trimmed.len(),
+        44,
+        "regenerated priv must be 44 chars, got {}",
+        priv_trimmed.len()
+    );
+
+    // Pub file must also be written.
+    let pub_path = out.path().join("awg-public.key");
+    assert!(
+        pub_path.is_file(),
+        "awg-public.key must exist after regen from empty priv"
+    );
+}
+
+/// Whitespace-only priv (e.g. "\n\t  \n") must be treated as missing and trigger
+/// regeneration. Coverage parity for legacy test awg_keygen_whitespace_only_priv_treated_as_missing.
+#[serial_test::serial]
+#[test]
+fn awg_keygen_whitespace_only_priv_triggers_regen() {
+    let out = TempDir::new().unwrap();
+    let priv_path = out.path().join("awg-private.key");
+
+    // Plant whitespace-only private key file — non-zero length but empty after trim.
+    fs::write(&priv_path, "   \n\t  \n").unwrap();
+
+    awg::keygen(out.path(), false).expect("regenerates on whitespace-only priv");
+
+    let priv_content = fs::read_to_string(&priv_path).unwrap();
+    let priv_trimmed = priv_content.trim();
+
+    // Must have regenerated with a real key.
+    assert!(
+        priv_trimmed.len() == 44,
+        "regenerated priv must be 44 chars after whitespace-only priv, got: {}",
+        priv_trimmed.len()
+    );
+
+    // Verify the written value is valid base64 (decodes to 32 bytes).
+    let bytes = STANDARD
+        .decode(priv_trimmed)
+        .expect("regenerated priv must be valid base64");
+    assert_eq!(bytes.len(), 32, "regenerated priv must decode to 32 bytes");
 }
