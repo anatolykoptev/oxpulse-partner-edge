@@ -1,6 +1,11 @@
 //! Phase 4.3b — unit tests for awg::keygen with a fake wg binary.
+//!
+//! Tests that exercise the shell-out path require OPEC_AWG_KEYGEN_LEGACY=1
+//! (Phase 5.2: native wg_keypair is now the default). These tests are annotated
+//! with #[serial] because they mutate the process environment.
 
 use opec::secrets::{awg, SecretsError};
+use serial_test::serial;
 use std::{fs, path::PathBuf};
 use tempfile::TempDir;
 
@@ -41,11 +46,17 @@ const PRIV_44: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQR="; // 44 cha
 const PUB_44: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefgh=";
 
 #[test]
+#[serial]
 fn awg_keygen_fresh_writes_both_files() {
+    // This test exercises the legacy shell-out path with a fake wg binary.
+    // Set OPEC_AWG_KEYGEN_LEGACY=1 to activate the wg shell-out branch (Phase 5.2+).
+    std::env::set_var("OPEC_AWG_KEYGEN_LEGACY", "1");
     let bin = TempDir::new().unwrap();
     let out = TempDir::new().unwrap();
     let wg = fake_wg(bin.path(), PRIV_44, PUB_44);
-    awg::keygen(out.path(), false, &wg).expect("fresh keygen succeeds");
+    let result = awg::keygen(out.path(), false, &wg);
+    std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY");
+    result.expect("fresh keygen succeeds");
     assert!(out.path().join("awg-private.key").is_file());
     assert!(out.path().join("awg-public.key").is_file());
     #[cfg(unix)]
@@ -63,40 +74,47 @@ fn awg_keygen_fresh_writes_both_files() {
 }
 
 #[test]
+#[serial]
 fn awg_keygen_idempotent_when_priv_present() {
+    // Legacy path: both calls use wg binary; second call re-derives pub from priv.
+    std::env::set_var("OPEC_AWG_KEYGEN_LEGACY", "1");
     let bin = TempDir::new().unwrap();
     let out = TempDir::new().unwrap();
     let wg = fake_wg(bin.path(), PRIV_44, PUB_44);
-    awg::keygen(out.path(), false, &wg).expect("first call");
-    let pub_before = fs::read_to_string(out.path().join("awg-public.key")).unwrap();
+    let r1 = awg::keygen(out.path(), false, &wg);
+    let pub_before = fs::read_to_string(out.path().join("awg-public.key")).ok();
     // Second call must reuse priv (re-derives pub from existing priv).
-    awg::keygen(out.path(), false, &wg).expect("idempotent call");
-    let pub_after = fs::read_to_string(out.path().join("awg-public.key")).unwrap();
+    let r2 = awg::keygen(out.path(), false, &wg);
+    let pub_after = fs::read_to_string(out.path().join("awg-public.key")).ok();
+    std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY");
+    r1.expect("first call");
+    r2.expect("idempotent call");
     assert_eq!(pub_before, pub_after);
 }
 
 #[test]
 fn awg_keygen_rotate_regenerates_priv() {
-    let bin = TempDir::new().unwrap();
+    // Native path: two calls with rotate=false then rotate=true — pubs must differ.
+    // The wg path arg is ignored on the native path, so any value works.
+    std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY");
     let out = TempDir::new().unwrap();
-    let wg1 = fake_wg(bin.path(), PRIV_44, PUB_44);
-    awg::keygen(out.path(), false, &wg1).expect("first");
+    let fake_wg_path = PathBuf::from("/nonexistent/wg");
+    awg::keygen(out.path(), false, &fake_wg_path).expect("first");
     let pub_first = fs::read_to_string(out.path().join("awg-public.key")).unwrap();
-    let wg2 = fake_wg(
-        bin.path(),
-        "DIFFERENT_PRIV_KEY_44CHARS_xxxxxxxxxxxxxx=",
-        "DIFFERENT_PUB_44CHARS_xxxxxxxxxxxxxxxxxxxxxx=",
-    );
-    awg::keygen(out.path(), true, &wg2).expect("rotate");
+    awg::keygen(out.path(), true, &fake_wg_path).expect("rotate");
     let pub_second = fs::read_to_string(out.path().join("awg-public.key")).unwrap();
     assert_ne!(pub_first, pub_second, "--rotate must regenerate");
 }
 
 #[test]
+#[serial]
 fn awg_keygen_missing_wg_errors() {
+    // Legacy path: with OPEC_AWG_KEYGEN_LEGACY=1, a nonexistent wg binary must fail.
+    std::env::set_var("OPEC_AWG_KEYGEN_LEGACY", "1");
     let out = TempDir::new().unwrap();
     let nonexistent = PathBuf::from("/nonexistent/wg-xyz-123");
     let err = awg::keygen(out.path(), false, &nonexistent).expect_err("must error");
+    std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY");
     assert!(
         matches!(err, SecretsError::PartnerCliMissing(_)),
         "expected PartnerCliMissing, got: {err:?}"
@@ -106,25 +124,35 @@ fn awg_keygen_missing_wg_errors() {
 }
 
 #[test]
+#[serial]
 fn awg_keygen_corrupted_priv_on_idempotent_path_regenerates() {
+    // Legacy path: empty priv triggers regeneration via wg genkey.
+    std::env::set_var("OPEC_AWG_KEYGEN_LEGACY", "1");
     let bin = TempDir::new().unwrap();
     let out = TempDir::new().unwrap();
     let wg = fake_wg(bin.path(), PRIV_44, PUB_44);
     // Plant empty private key — idempotent check should detect & regenerate.
     fs::write(out.path().join("awg-private.key"), "").unwrap();
-    awg::keygen(out.path(), false, &wg).expect("regenerates on empty");
+    let result = awg::keygen(out.path(), false, &wg);
+    std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY");
+    result.expect("regenerates on empty");
     let priv_content = fs::read_to_string(out.path().join("awg-private.key")).unwrap();
     assert_eq!(priv_content.trim(), PRIV_44);
 }
 
 #[test]
+#[serial]
 fn awg_keygen_whitespace_only_priv_treated_as_missing() {
+    // Legacy path: whitespace-only priv triggers regeneration via wg genkey.
+    std::env::set_var("OPEC_AWG_KEYGEN_LEGACY", "1");
     let bin = TempDir::new().unwrap();
     let out = TempDir::new().unwrap();
     let wg = fake_wg(bin.path(), PRIV_44, PUB_44);
     // File exists with non-zero length but trims to empty — must regenerate.
     fs::write(out.path().join("awg-private.key"), "   \n\t  \n").unwrap();
-    awg::keygen(out.path(), false, &wg).expect("regenerates on whitespace");
+    let result = awg::keygen(out.path(), false, &wg);
+    std::env::remove_var("OPEC_AWG_KEYGEN_LEGACY");
+    result.expect("regenerates on whitespace");
     let priv_after = fs::read_to_string(out.path().join("awg-private.key")).unwrap();
     assert_eq!(
         priv_after.trim(),

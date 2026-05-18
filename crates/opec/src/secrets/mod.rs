@@ -43,7 +43,7 @@ pub enum SecretsCommands {
         /// Force regeneration even when valid keypair exists.
         #[arg(long)]
         rotate: bool,
-        /// Override wg binary path (test hook).
+        /// wg binary path (deprecated — only used when OPEC_AWG_KEYGEN_LEGACY=1).
         #[arg(long, default_value = "wg")]
         wg: PathBuf,
     },
