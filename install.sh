@@ -132,9 +132,9 @@ fi
 
 # Best-effort install of `wg`/`wg-quick` for keygen and conf rendering. The
 # AmneziaWG userspace binary (`amneziawg-go` + `awg`/`awg-quick`) is built
-# from source in install_amneziawg() below; this helper only ensures the
-# upstream wg-tools are present so we can `wg genkey | wg pubkey` before
-# the awg-go build completes.
+# from source in install_amneziawg() — see lib/install-awg.sh; this helper
+# only ensures the upstream wg-tools are present so we can `wg genkey |
+# wg pubkey` before the awg-go build completes.
 install_wg_tools_for_keygen() {
 	if command -v dnf >/dev/null 2>&1; then
 		dnf install -y wireguard-tools >/dev/null 2>&1 || \
@@ -148,110 +148,6 @@ install_wg_tools_for_keygen() {
 	fi
 }
 
-# Build amneziawg-go (userspace daemon) + amneziawg-tools (awg / awg-quick)
-# from the upstream Amnezia GitHub source. We don't ship pre-built binaries
-# because the project has no canonical Linux x86_64 release artifact today
-# (only Alpine + Ubuntu 22.04 zips and Windows). The build needs go + git +
-# make + gcc — install_build_deps_for_awg() handles that. Idempotent: if
-# /usr/local/bin/amneziawg-go exists with non-zero size, the build is skipped.
-install_amneziawg() {
-	if [[ -s /usr/local/bin/amneziawg-go && -x /usr/bin/awg-quick ]]; then
-		log "  amneziawg already installed (skip)"
-		return 0
-	fi
-	log "  building amneziawg from source (one-time)"
-	# amneziawg-go go.mod requires Go >= 1.24. Ubuntu 22.04 apt ships golang 1.18,
-	# Debian 12 ships 1.19. Both too old. Install official Go tarball if existing
-	# /usr/local/go is missing or below 1.24 — leaves system golang package alone.
-	if ! /usr/local/go/bin/go version 2>/dev/null | grep -qE "go1\\.(2[4-9]|[3-9][0-9])"; then
-		log "    installing Go 1.24.4 (system golang too old for amneziawg-go)"
-		local _go_arch
-		case "$(uname -m)" in
-			x86_64)  _go_arch=amd64 ;;
-			aarch64) _go_arch=arm64 ;;
-			*) die "install_amneziawg: unsupported architecture: $(uname -m)" ;;
-		esac
-		curl -fsSL "https://go.dev/dl/go1.24.4.linux-${_go_arch}.tar.gz" -o /tmp/go-amneziawg.tgz \
-		  || die "Go 1.24 download failed (need internet at /tmp/go-amneziawg.tgz)"
-		rm -rf /usr/local/go
-		tar -C /usr/local -xzf /tmp/go-amneziawg.tgz || die "Go tarball extract failed"
-		rm -f /tmp/go-amneziawg.tgz
-		unset _go_arch
-	fi
-	export PATH="/usr/local/go/bin:$PATH"
-	if command -v dnf >/dev/null 2>&1; then
-		dnf install -y git make gcc >/dev/null 2>&1 || \
-		  die "dnf install of git/make/gcc failed — install manually then re-run"
-	elif command -v apt-get >/dev/null 2>&1; then
-		apt-get install -y -q git make gcc >/dev/null 2>&1 || \
-		  die "apt-get install of git/make/gcc failed"
-	else
-		die "no supported package manager for the awg build toolchain"
-	fi
-	local build_root
-	build_root=$(mktemp -d)
-	(
-		cd "$build_root" && \
-		git clone --depth 1 -q https://github.com/amnezia-vpn/amneziawg-go.git && \
-		git clone --depth 1 -q https://github.com/amnezia-vpn/amneziawg-tools.git
-	) || die "amneziawg git clone failed"
-	(cd "$build_root/amneziawg-go" && make) >/dev/null 2>&1 || die "amneziawg-go build failed"
-	install -m 0755 "$build_root/amneziawg-go/amneziawg-go" /usr/local/bin/amneziawg-go
-	(cd "$build_root/amneziawg-tools/src" && make && make install) >/dev/null 2>&1 || \
-	  die "amneziawg-tools build failed"
-	rm -rf "$build_root"
-}
-
-# Render /etc/amnezia/amneziawg/awg0.conf from the register response and
-# bring the interface up. Reads AWG_* vars set by the json_get block after
-# registration, plus AWG_PRIV_PATH from earlier in install.sh.
-configure_amneziawg() {
-	local conf_path="/etc/amnezia/amneziawg/awg0.conf"
-	install -d -m 0700 /etc/amnezia/amneziawg
-	# ListenPort is intentionally a high random — outbound only, NAT-traversed
-	# via PersistentKeepalive, no inbound peer dials this edge directly. We
-	# pick a fresh port at install time so two edges on the same NAT don't
-	# collide.
-	local listen_port=$((43800 + RANDOM % 200))
-	cat > "$conf_path" <<-AWGCONF
-		[Interface]
-		PrivateKey = $(cat "$AWG_PRIV_PATH")
-		Address = ${AWG_ALLOCATED_IP}
-		ListenPort = ${listen_port}
-		Jc = ${AWG_JC}
-		Jmin = ${AWG_JMIN}
-		Jmax = ${AWG_JMAX}
-		S1 = ${AWG_S1}
-		S2 = ${AWG_S2}
-		S4 = ${AWG_S4}
-		H1 = ${AWG_H1}
-		H2 = ${AWG_H2}
-		H3 = ${AWG_H3}
-		H4 = ${AWG_H4}
-		Table = off
-		MTU = 1300
-
-		[Peer]
-		PublicKey = ${AWG_MOTHERLY_PUBKEY}
-		Endpoint = ${AWG_MOTHERLY_ENDPOINT}
-		AllowedIPs = ${AWG_MOTHERLY_AWG_IP}/32
-		PersistentKeepalive = 25
-	AWGCONF
-	chmod 0600 "$conf_path"
-	systemctl daemon-reload
-	systemctl enable --now awg-quick@awg0 >/dev/null 2>&1 || \
-	  warn "awg-quick@awg0 enable failed — see 'systemctl status awg-quick@awg0'"
-	# Sanity check: a successful handshake within 10s means the central
-	# pre-added our peer and iptables let UDP through. Don't die() — the
-	# rest of the install can still finish; operator can debug awg later.
-	sleep 8
-	if awg show awg0 2>/dev/null | grep -q "latest handshake"; then
-		log "  awg0 handshake confirmed with motherly"
-	else
-		warn "awg0 handshake not seen yet — central may still be adding the peer"
-	fi
-}
-
 # ---------- Args ----------
 _install_lib_source install-args.sh
 args_parse "$@"
@@ -261,6 +157,7 @@ _install_lib_source install-deps.sh
 _install_lib_source install-network.sh
 _install_lib_source install-healthcheck.sh
 _install_lib_source install-systemd.sh
+_install_lib_source install-awg.sh
 
 preflight_run
 
@@ -587,10 +484,7 @@ SIGNALING_SFU_SECRET=$(json_get signaling_sfu_secret "$tmp_cfg")
 # register handler returns the `awg` object only when motherly's awg pubkey
 # is configured AND we sent up our awg_pubkey). All fields are extracted
 # from the nested `awg` object via python — sed-based json_get only handles
-# top-level scalars.
-awg_extract() {
-	python3 -c "import json,sys; d=json.load(open(sys.argv[1])); a=d.get('awg') or {}; print(a.get(sys.argv[2],''))" "$1" "$2" 2>/dev/null
-}
+# top-level scalars. awg_extract() defined in lib/install-awg.sh.
 AWG_ALLOCATED_IP=$(awg_extract     "$tmp_cfg" allocated_ip)
 AWG_MOTHERLY_PUBKEY=$(awg_extract  "$tmp_cfg" motherly_pubkey)
 AWG_MOTHERLY_ENDPOINT=$(awg_extract "$tmp_cfg" motherly_endpoint)
