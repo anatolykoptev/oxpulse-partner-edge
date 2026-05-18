@@ -20,10 +20,9 @@ shell-out path behind a `OPEC_*_LEGACY=1` env gate for one release cycle, then r
 | Phase | What moves | Status | Env gate removed |
 |-------|-----------|--------|-----------------|
 | 5.1 | `partner-cli keygen` → native `x25519::keygen_x25519()` in OPEC | **DONE** (2026-05-18, commit `cea6f75`) | `OPEC_REALITY_KEYGEN_LEGACY=1` → remove in 5.X |
-| 5.2 | Ed25519 sfu-signing-key: absorb `partner-cli sfu-signing-key` logic (GET signing key, write env-file) into OPEC; same pattern as 5.1 | TODO | `OPEC_SFU_KEY_LEGACY=1` |
-| 5.3 | Register HKDF / JWT: absorb `partner-cli register` handshake into OPEC (HTTP POST, JWT token derivation, env-file write) | TODO | `OPEC_REGISTER_LEGACY=1` |
-| 5.X | Cleanup: remove all legacy env-gate branches and the `--partner-cli` / legacy CLI args from OPEC | TODO | — |
-| 5.N | Retire partner-cli binary from install.sh and the release asset (partner-cli is no longer invoked at runtime) | TODO | — |
+| 5.2 | `wg genkey`/`wg pubkey` → native `wg_keypair::keygen_wg()` + `pub_from_priv_b64()` in OPEC | **DONE** (2026-05-18, commits `411070d`+`88476d2`) | `OPEC_AWG_KEYGEN_LEGACY=1` → remove in 5.X |
+| 5.3 | Cleanup: remove all `LEGACY=1` env-gate branches + `--partner-cli` / `--wg` deprecated args from OPEC. Open partner-cli binary retirement (partner-cli no longer invoked by OPEC at runtime; can be removed from install.sh after one release cycle). | TODO | — |
+| 5.N | Retire partner-cli binary from install.sh and the release asset | TODO | — |
 
 ## Phase 5.1 detail
 
@@ -37,13 +36,47 @@ shell-out path behind a `OPEC_*_LEGACY=1` env gate for one release cycle, then r
 
 **Test delta:** 117 → 122 (+5 new tests: 3 x25519 unit, 2 native/legacy integration).
 
-## Phase 5.2 preview (Ed25519 sfu-signing-key)
+## Phase 5.2 detail
 
-The pattern is identical to 5.1 and will be very small:
-- `partner-cli sfu-signing-key` currently fetches a GET endpoint and writes an env-file.
-- OPEC already has `opec secrets sfu-signing-key` (`crates/opec/src/secrets/sfu_key.rs`).
-- The native absorption is: add `ed25519-dalek` dep, copy signing key derivation into
-  `crates/opec/src/secrets/ed25519.rs`, and make `sfu_key.rs` use it directly.
+**What changed:** absorbed `wg genkey` / `wg pubkey` shell-outs from
+`crates/opec/src/secrets/awg.rs` into a new native `wg_keypair` module.
+WireGuard keys are x25519 keypairs (RFC 7748) with standard base64 + `=` padding
+(44 chars), matching `wg` output exactly.
+
+**Files changed:**
+- `crates/opec/Cargo.toml` — added `base64 = "0.22"` (RFC 4648 §4 standard encoding)
+- `crates/opec/src/secrets/wg_keypair.rs` — new: `keygen_wg()` + `pub_from_priv_b64()`;
+  5 unit tests (format, randomness, round-trip, rejection)
+- `crates/opec/src/secrets/mod.rs` — wire `pub mod wg_keypair`; `--wg` arg help updated
+- `crates/opec/src/secrets/awg.rs` — native path by default; `OPEC_AWG_KEYGEN_LEGACY=1`
+  falls back to `Command::new(wg)` shell-out; `priv_key` is `Zeroizing<String>` end-to-end
+- `crates/opec/tests/secrets_awg_native.rs` — new: 3 integration tests (native fresh,
+  native idempotent, legacy env gate)
+- `crates/opec/tests/secrets_awg_unit.rs` — updated: shell-out tests now set
+  `OPEC_AWG_KEYGEN_LEGACY=1` + `#[serial]`; rotate test converted to native path
+
+**Test delta:** 122 → 130 (+8 tests: 5 wg_keypair unit, 3 native integration).
+
+**OPEC shell-out status after Phase 5.2:**
+- `opec secrets reality-keygen` → native (shell-out behind `OPEC_REALITY_KEYGEN_LEGACY=1`)
+- `opec secrets awg-keygen` → native (shell-out behind `OPEC_AWG_KEYGEN_LEGACY=1`)
+- `opec secrets sfu-signing-key` → direct HTTP (no shell-out, no absorption needed)
+- `opec secrets register` → direct HTTP POST (no shell-out, no absorption needed)
+
+**OPEC partner-cli surface is now empty** — no production code path in OPEC invokes
+`partner-cli` or `wg` binaries without a `LEGACY=1` env gate.
+
+## Phase 5.3 scope (cleanup)
+
+Remove all legacy fallback code after one release cycle:
+- Delete `OPEC_REALITY_KEYGEN_LEGACY=1` branch from `reality.rs`
+- Delete `OPEC_AWG_KEYGEN_LEGACY=1` branch from `awg.rs` (including `keygen_legacy`,
+  `run_wg`, `resolve_wg` helpers — ~50 LoC)
+- Remove `--partner-cli` arg from `SecretsCommands::RealityKeygen` (currently deprecated)
+- Remove `--wg` arg from `SecretsCommands::AwgKeygen` (currently deprecated)
+- Remove `which` dep from `crates/opec/Cargo.toml` if no other users remain
+- Open separate PR for partner-cli binary retirement from install.sh
+  (partner-cli is still used by central registry tooling — OPEC-only retirement)
 
 ## Phase invariants (every sub-phase)
 
