@@ -1,6 +1,10 @@
 //! Phase 4.3a — unit tests for reality::keygen against synthetic partner-cli output.
+//!
+//! Tests that exercise the shell-out path set OPEC_REALITY_KEYGEN_LEGACY=1 and are
+//! marked #[serial] so that concurrent tests don't observe each other's env changes.
 
 use opec::secrets::{reality, SecretsError};
+use serial_test::serial;
 use std::{fs, path::PathBuf};
 use tempfile::TempDir;
 
@@ -28,8 +32,12 @@ fn fake_partner_cli(dir: &std::path::Path, priv_key: &str, pub_key: &str) -> Pat
     path
 }
 
+/// Fresh keygen via legacy shell-out path produces the three identity files.
+/// Uses OPEC_REALITY_KEYGEN_LEGACY=1 to exercise the partner-cli branch.
 #[test]
+#[serial]
 fn keygen_fresh_writes_three_files() {
+    std::env::set_var("OPEC_REALITY_KEYGEN_LEGACY", "1");
     let bin_dir = TempDir::new().unwrap();
     let out_dir = TempDir::new().unwrap();
     let pc = fake_partner_cli(
@@ -37,7 +45,9 @@ fn keygen_fresh_writes_three_files() {
         "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG", // 43 chars
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefg", // 43 chars
     );
-    reality::keygen(out_dir.path(), false, &pc).expect("keygen succeeds");
+    let result = reality::keygen(out_dir.path(), false, &pc);
+    std::env::remove_var("OPEC_REALITY_KEYGEN_LEGACY");
+    result.expect("keygen succeeds");
     assert!(out_dir.path().join("reality.priv").is_file());
     assert!(out_dir.path().join("reality.pub").is_file());
     assert!(out_dir.path().join("reality.uuid").is_file());
@@ -51,8 +61,13 @@ fn keygen_fresh_writes_three_files() {
     }
 }
 
+/// Idempotent re-run reuses existing valid files without calling partner-cli.
+/// First call uses legacy gate to seed the files; second call uses native path
+/// (no legacy gate) to prove the idempotent path is path-independent.
 #[test]
+#[serial]
 fn keygen_idempotent_when_all_three_present_and_valid() {
+    std::env::set_var("OPEC_REALITY_KEYGEN_LEGACY", "1");
     let bin_dir = TempDir::new().unwrap();
     let out_dir = TempDir::new().unwrap();
     let pc = fake_partner_cli(
@@ -60,55 +75,48 @@ fn keygen_idempotent_when_all_three_present_and_valid() {
         "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefg",
     );
-    reality::keygen(out_dir.path(), false, &pc).expect("first call");
+    let result = reality::keygen(out_dir.path(), false, &pc);
+    std::env::remove_var("OPEC_REALITY_KEYGEN_LEGACY");
+    result.expect("first call");
     let pub_before = fs::read_to_string(out_dir.path().join("reality.pub")).unwrap();
-    // Second invocation must NOT call partner-cli — verify by removing it and re-running.
-    drop(pc); // partner-cli binary path still valid in bin_dir
+    // Second invocation uses native path; idempotent check must NOT regenerate.
+    let fake_nonexistent = PathBuf::from("/nonexistent/partner-cli-must-not-be-called");
     let pub_after = fs::read_to_string(out_dir.path().join("reality.pub")).unwrap();
     assert_eq!(
         pub_before, pub_after,
         "idempotent re-run must not mutate reality.pub"
     );
-    // Even with --rotate=false, second call should succeed without rewriting.
-    let pc2 = bin_dir.path().join("partner-cli");
-    let res = reality::keygen(out_dir.path(), false, &pc2);
+    let res = reality::keygen(out_dir.path(), false, &fake_nonexistent);
     assert!(res.is_ok(), "idempotent re-run should succeed: {:?}", res);
 }
 
+/// --rotate must regenerate even when existing files are valid.
+/// Uses native path (no legacy gate) for both calls; keys are random so they must differ.
 #[test]
+#[serial]
 fn keygen_rotate_regenerates_even_when_valid() {
-    let bin_dir = TempDir::new().unwrap();
+    std::env::remove_var("OPEC_REALITY_KEYGEN_LEGACY");
     let out_dir = TempDir::new().unwrap();
-    let pc1 = fake_partner_cli(
-        bin_dir.path(),
-        "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefg",
-    );
-    reality::keygen(out_dir.path(), false, &pc1).expect("first keygen");
+    let fake_cli = PathBuf::from("/nonexistent/partner-cli-must-not-be-called");
+
+    reality::keygen(out_dir.path(), false, &fake_cli).expect("first keygen");
     let pub_first = fs::read_to_string(out_dir.path().join("reality.pub")).unwrap();
 
-    // Replace partner-cli with one that emits a different pubkey.
-    let pc2 = fake_partner_cli(
-        bin_dir.path(),
-        "1234567890abcdefghijklmnopqrstuvwxyzABCDEFG",
-        "1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg",
-    );
-    reality::keygen(out_dir.path(), true, &pc2).expect("rotate keygen");
+    reality::keygen(out_dir.path(), true, &fake_cli).expect("rotate keygen");
     let pub_second = fs::read_to_string(out_dir.path().join("reality.pub")).unwrap();
+    // With true randomness the probability of collision is 2^-256 — effectively impossible.
     assert_ne!(pub_first, pub_second, "--rotate must regenerate");
 }
 
+/// Partial identity (only some files present) must error before reaching keygen.
 #[test]
+#[serial]
 fn keygen_partial_identity_errors() {
-    let bin_dir = TempDir::new().unwrap();
+    std::env::remove_var("OPEC_REALITY_KEYGEN_LEGACY");
     let out_dir = TempDir::new().unwrap();
     fs::write(out_dir.path().join("reality.pub"), "stale").unwrap();
-    // Only reality.pub present — partial.
-    let pc = fake_partner_cli(
-        bin_dir.path(),
-        "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefg",
-    );
+    // Only reality.pub present — partial identity, partner-cli must NOT be reached.
+    let pc = PathBuf::from("/nonexistent/partner-cli-must-not-be-called");
     let err = reality::keygen(out_dir.path(), false, &pc).expect_err("partial must error");
     assert!(
         matches!(err, SecretsError::PartialIdentity { .. }),
@@ -116,23 +124,35 @@ fn keygen_partial_identity_errors() {
     );
 }
 
+/// Legacy path: missing partner-cli binary must error with PartnerCliMissing.
+/// Requires OPEC_REALITY_KEYGEN_LEGACY=1 to exercise the shell-out branch.
 #[test]
+#[serial]
 fn keygen_missing_partner_cli_errors() {
+    std::env::set_var("OPEC_REALITY_KEYGEN_LEGACY", "1");
     let out_dir = TempDir::new().unwrap();
     let nonexistent = PathBuf::from("/nonexistent/partner-cli-xyz-123");
-    let err = reality::keygen(out_dir.path(), false, &nonexistent).expect_err("must error");
+    let result = reality::keygen(out_dir.path(), false, &nonexistent);
+    std::env::remove_var("OPEC_REALITY_KEYGEN_LEGACY");
+    let err = result.expect_err("must error");
     assert!(
         matches!(err, SecretsError::PartnerCliMissing(_)),
         "expected PartnerCliMissing, got: {err:?}"
     );
 }
 
+/// Legacy path: partner-cli emitting short keys must error with InvalidKeyFormat.
+/// Requires OPEC_REALITY_KEYGEN_LEGACY=1 to exercise the shell-out branch.
 #[test]
+#[serial]
 fn keygen_invalid_key_length_errors() {
+    std::env::set_var("OPEC_REALITY_KEYGEN_LEGACY", "1");
     let bin_dir = TempDir::new().unwrap();
     let out_dir = TempDir::new().unwrap();
     let pc = fake_partner_cli(bin_dir.path(), "tooshort", "alsoshort");
-    let err = reality::keygen(out_dir.path(), false, &pc).expect_err("len must error");
+    let result = reality::keygen(out_dir.path(), false, &pc);
+    std::env::remove_var("OPEC_REALITY_KEYGEN_LEGACY");
+    let err = result.expect_err("len must error");
     assert!(
         matches!(err, SecretsError::InvalidKeyFormat { .. }),
         "expected InvalidKeyFormat, got: {err:?}"
@@ -140,6 +160,7 @@ fn keygen_invalid_key_length_errors() {
 }
 
 #[test]
+#[serial]
 fn keygen_idempotent_rejects_corrupted_uuid_file() {
     let out_dir = TempDir::new().unwrap();
     // Plant all three files: keys valid (43-char), uuid garbage.

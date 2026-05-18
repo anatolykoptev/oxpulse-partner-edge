@@ -13,6 +13,7 @@ pub mod error;
 pub mod reality;
 pub mod register;
 pub mod sfu_key;
+pub mod x25519;
 
 pub use error::SecretsError;
 
@@ -29,7 +30,7 @@ pub enum SecretsCommands {
         /// Force regeneration even when valid identity exists.
         #[arg(long)]
         rotate: bool,
-        /// Override partner-cli binary path (test hook).
+        /// partner-cli path (deprecated — only used when OPEC_REALITY_KEYGEN_LEGACY=1).
         #[arg(long, default_value = "partner-cli")]
         partner_cli: PathBuf,
     },
