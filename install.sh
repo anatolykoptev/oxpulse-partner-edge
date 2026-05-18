@@ -27,12 +27,38 @@ BACKEND_API="${BACKEND_API%/}"
 log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
-# Returns 0 if $1 is in the remaining arguments.  Used for CHANNELS_FAILED lookup.
-_in_array() { local needle=$1; shift; local el; for el in "$@"; do [[ "$el" == "$needle" ]] && return 0; done; return 1; }
-# Phase 5.5 — global accumulator; MAJOR 2 fix: declared here at top-of-file so
-# it is never unbound when _in_array / ${CHANNELS_FAILED[@]:-} is evaluated even
-# if an early return path skips the render block.
-CHANNELS_FAILED=()
+# Phase 5.5 MAJOR 1: _in_array, CHANNELS_FAILED, render_channel_soft, and
+# compose_strip_failed_channels are now in lib/render-channel-lib.sh (extracted
+# so hydrate.sh, update.sh, and refresh.sh can share the same semantics).
+# Source it early — before any channel render logic — so the symbols are always
+# available even on early-exit code paths.
+_rl_local="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/render-channel-lib.sh"
+_rl_installed="${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/render-channel-lib.sh"
+_rl_sbin="${PREFIX_SBIN:-/usr/local/sbin}/render-channel-lib.sh"
+if [[ -f "$_rl_local" ]]; then
+	# shellcheck source=lib/render-channel-lib.sh
+	source "$_rl_local"
+elif [[ -f "$_rl_installed" ]]; then
+	# shellcheck source=/dev/null
+	source "$_rl_installed"
+elif [[ -f "$_rl_sbin" ]]; then
+	# shellcheck source=/dev/null
+	source "$_rl_sbin"
+else
+	# Inline fallback — keeps install.sh self-contained if lib is missing.
+	_in_array() { local needle=$1; shift; local el; for el in "$@"; do [[ "$el" == "$needle" ]] && return 0; done; return 1; }
+	CHANNELS_FAILED=()
+	render_channel_soft() {
+		local kind=$1
+		warn "render_channel_soft: lib/render-channel-lib.sh not found — channel $kind skipped"
+		CHANNELS_FAILED+=("$kind"); return 1
+	}
+	compose_strip_failed_channels() {
+		warn "compose_strip_failed_channels: lib/render-channel-lib.sh not found — compose not stripped"
+		return 1
+	}
+fi
+unset _rl_local _rl_installed _rl_sbin
 
 # ---------- Phase 4.1: lib module loader ----------
 # Resolves a lib/install-*.sh module via lookup order:
@@ -746,36 +772,9 @@ render_with_opec() {
     opec render "$kind" --tpl "$src" --out "$dst" \
         || die "opec render $kind failed for $src — see error above"
 }
-# Phase 5.5 — fail-soft render for bypass channels (xray, naive, hysteria2).
-# Chassis renders (compose, caddy, coturn) stay strict via render_with_opec.
-# On failure: logs a warning, appends channel name to CHANNELS_FAILED array,
-# returns non-zero. Callers must NOT die on non-zero — install continues and
-# the failed channel is excluded from the running compose stack.
-# CHANNELS_FAILED is declared at top-of-file (near _in_array) — MAJOR 2 fix.
-render_channel_soft() {
-    local kind=$1 src=$2 dst=$3
-    # MEDIUM 1: use a private tmp dir (0700) instead of world-readable /tmp so
-    # opec error fragments (which may contain REALITY_PRIVATE_KEY excerpts) are
-    # not readable by other local users.
-    local _rcs_tmpdir="${PREFIX_LIB:-/tmp}/tmp"
-    install -d -m 0700 "$_rcs_tmpdir" 2>/dev/null || _rcs_tmpdir=/tmp
-    local _rcs_err
-    _rcs_err=$(mktemp "$_rcs_tmpdir/opec-render-err-${kind}-XXXXXX")
-    # MEDIUM 2: trap ensures tmp file is removed on any exit path (RETURN or early die).
-    # shellcheck disable=SC2064
-    trap "rm -f '${_rcs_err}'" RETURN
-    if command -v opec >/dev/null 2>&1; then
-        if opec render "$kind" --tpl "$src" --out "$dst" 2>"$_rcs_err"; then
-            return 0
-        fi
-        warn "channel $kind render failed — will skip this channel"
-        warn "  opec error: $(cat "$_rcs_err" 2>/dev/null || echo '<no output>')"
-    else
-        warn "channel $kind render skipped — opec not on PATH"
-    fi
-    CHANNELS_FAILED+=("$kind")
-    return 1
-}
+# Phase 5.5 MAJOR 1: render_channel_soft is now provided by lib/render-channel-lib.sh
+# (sourced near the top of this file). The inline definition has been removed to
+# avoid duplicate definitions — channel-render-lib.sh is the single source of truth.
 render_with_opec compose "$stage/compose.tpl" "$compose_out"
 render_with_opec caddy   "$stage/caddy.tpl"   "$caddy_out"
 # Phase 1: compute sha256 of rendered Caddyfile and substitute __CADDYFILE_SHA__
@@ -1014,38 +1013,10 @@ log "  rendered → $compose_out (+ Caddyfile, xray-client.json, coturn.conf, co
 # file (e.g. xray-client.json) is missing, so `docker compose up` would fail on
 # the volume mount. Strip failed-channel service blocks + their depends_on refs now,
 # while CHANNELS_FAILED is finalised and compose_out is still on disk.
+# Phase 5.5 MAJOR 1: delegated to compose_strip_failed_channels() from
+# lib/render-channel-lib.sh (sourced at top-of-file).
 if [[ ${#CHANNELS_FAILED[@]} -gt 0 && -f "$compose_out" ]]; then
-	log "  stripping failed channels from compose: ${CHANNELS_FAILED[*]}"
-	python3 - "$compose_out" "${CHANNELS_FAILED[@]}" <<'PYEOF'
-import sys, yaml, pathlib
-compose_path = pathlib.Path(sys.argv[1])
-failed = set(sys.argv[2:])
-with compose_path.open() as f:
-    doc = yaml.safe_load(f)
-# Remove failed service blocks.
-for kind in failed:
-    doc.get('services', {}).pop(kind, None)
-# Remove depends_on references to failed services from remaining services.
-for _svc, conf in doc.get('services', {}).items():
-    deps = conf.get('depends_on')
-    if isinstance(deps, list):
-        conf['depends_on'] = [d for d in deps if d not in failed]
-        if not conf['depends_on']:
-            del conf['depends_on']
-    elif isinstance(deps, dict):
-        for d in list(deps):
-            if d in failed:
-                del deps[d]
-        if not deps:
-            del conf['depends_on']
-# Remove orphaned named volumes that were only used by stripped services.
-# (Safe to leave extras; docker compose tolerates unused volumes.)
-# Atomic write via tmp+rename.
-tmp = compose_path.with_suffix('.tmp')
-with tmp.open('w') as f:
-    yaml.safe_dump(doc, f, sort_keys=False, default_flow_style=False)
-tmp.replace(compose_path)
-PYEOF
+	compose_strip_failed_channels "$compose_out" "${CHANNELS_FAILED[@]}"
 fi
 
 # Phase 3: create conf.d/ override slot. mkdir -p only — never touch files inside.

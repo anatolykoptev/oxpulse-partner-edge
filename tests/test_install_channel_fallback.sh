@@ -38,17 +38,15 @@ pass "render_channel_soft() defined in install.sh"
 T2=$(mktemp -d)
 trap 'rm -rf "$T2"' EXIT
 
-# Source only the render_channel_soft + render_with_opec helpers from install.sh
-# by extracting and eval'ing the function bodies (avoid running the full script).
-# We override render_with_opec with a stub that fails for "xray".
-eval "$(sed -n '/^render_with_opec()/,/^}/p' "$REPO_ROOT/install.sh")" 2>/dev/null || true
-render_with_opec() {
-    local kind=$1
-    [[ "$kind" == "xray" ]] && return 1   # simulate xray render failure
-    return 0
-}
-eval "$(sed -n '/^render_channel_soft()/,/^}/p' "$REPO_ROOT/install.sh")" 2>/dev/null \
-    || fail "render_channel_soft not extractable from install.sh"
+# Source render_channel_soft from lib/render-channel-lib.sh (Phase 5.5 MAJOR 1:
+# extracted from install.sh so hydrate/update/refresh can share the same semantics).
+# Override opec with a stub that fails for "xray".
+opec() { return 1; }
+export -f opec
+PREFIX_LIB=/tmp
+export PREFIX_LIB
+eval "$(grep -A30 '^render_channel_soft()' "$REPO_ROOT/lib/render-channel-lib.sh" | head -40)" 2>/dev/null \
+    || fail "render_channel_soft not extractable from lib/render-channel-lib.sh"
 
 CHANNELS_FAILED=()
 render_channel_soft xray /tmp/xray.tpl /tmp/xray-client.json 2>/dev/null
@@ -203,11 +201,16 @@ grep -qE 'mktemp.*channels-status|mv.*channels-status' "$REPO_ROOT/install.sh" \
 pass "BLOCKER 3: channels-status.env written atomically via mktemp+mv"
 
 # ---------------------------------------------------------------------------
-# BLOCKER 1 — compose strip block present and references CHANNELS_FAILED
+# BLOCKER 1 — compose strip block present (in install.sh and/or lib/render-channel-lib.sh)
+# Phase 5.5 MAJOR 1: logic moved to lib/render-channel-lib.sh; install.sh calls
+# compose_strip_failed_channels() from that lib.
 # ---------------------------------------------------------------------------
-grep -q 'stripping failed channels from compose\|yaml.safe_load\|failed channels' "$REPO_ROOT/install.sh" \
-    || fail "BLOCKER 1: compose post-render strip block missing from install.sh"
-pass "BLOCKER 1: compose post-render strip block present"
+if grep -q 'stripping failed channels from compose\|yaml.safe_load\|failed channels' "$REPO_ROOT/install.sh" \
+        "$REPO_ROOT/lib/render-channel-lib.sh" 2>/dev/null; then
+    pass "BLOCKER 1: compose post-render strip block present"
+else
+    fail "BLOCKER 1: compose strip block missing from both install.sh and lib/render-channel-lib.sh"
+fi
 
 # ---------------------------------------------------------------------------
 # MAJOR 4 — healthcheck.sh case has default arm for unknown status
@@ -248,27 +251,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# MAJOR 1 — hydrate/refresh/update carry Phase 5.5 fail-soft warning comments
+# MAJOR 1 — hydrate/refresh/update are wired with render_channel_soft (Phase 5.5 MAJOR 1)
+# Phase 5.5 MAJOR 1 is now implemented: warning comments replaced by real wiring.
+# Check that ALL three scripts source lib/render-channel-lib.sh and use render_channel_soft.
 # ---------------------------------------------------------------------------
-grep -q 'Phase 5.5 fail-soft NOT YET APPLIED' "$REPO_ROOT/hydrate.sh" \
-    || fail "MAJOR 1: hydrate.sh missing Phase 5.5 fail-soft warning comment"
-grep -q 'Phase 5.5 fail-soft NOT YET APPLIED' "$REPO_ROOT/oxpulse-partner-edge-refresh.sh" \
-    || fail "MAJOR 1: oxpulse-partner-edge-refresh.sh missing Phase 5.5 fail-soft warning comment"
-grep -q 'Phase 5.5 fail-soft NOT YET APPLIED' "$REPO_ROOT/update.sh" \
-    || fail "MAJOR 1: update.sh missing Phase 5.5 fail-soft warning comment"
+grep -qE 'source.*render-channel-lib|\..*render-channel-lib' "$REPO_ROOT/hydrate.sh" \
+    || fail "MAJOR 1: hydrate.sh does not source lib/render-channel-lib.sh"
+grep -q 'render_channel_soft' "$REPO_ROOT/hydrate.sh" \
+    || fail "MAJOR 1: hydrate.sh does not call render_channel_soft"
+grep -qE 'source.*render-channel-lib|\..*render-channel-lib' "$REPO_ROOT/oxpulse-partner-edge-refresh.sh" \
+    || fail "MAJOR 1: refresh.sh does not source lib/render-channel-lib.sh"
+grep -q 'render_channel_soft' "$REPO_ROOT/oxpulse-partner-edge-refresh.sh" \
+    || fail "MAJOR 1: refresh.sh does not call render_channel_soft"
+grep -qE 'source.*render-channel-lib|\..*render-channel-lib' "$REPO_ROOT/update.sh" \
+    || fail "MAJOR 1: update.sh does not source lib/render-channel-lib.sh"
 grep -q 'Phase 5.5 fail-soft for hydrate' "$REPO_ROOT/FOLLOWUPS.md" \
     || fail "MAJOR 1: FOLLOWUPS.md missing Phase 5.5 fail-soft hydrate/refresh/update entry"
-pass "MAJOR 1: hydrate/refresh/update all carry fail-soft warning + FOLLOWUPS.md entry"
+pass "MAJOR 1: hydrate/refresh/update all source render-channel-lib.sh and use render_channel_soft"
 
 # ---------------------------------------------------------------------------
-# MAJOR 2 — CHANNELS_FAILED=() declared near top of install.sh (before render funcs)
+# MAJOR 2 — CHANNELS_FAILED=() declared in lib/render-channel-lib.sh
+# Phase 5.5 MAJOR 1: moved from install.sh top-of-file to lib/render-channel-lib.sh.
+# install.sh sources the lib early so it is still available before the render block.
 # ---------------------------------------------------------------------------
-# The declaration must appear before line 50 (well before the render block at ~L750).
-_cf_line=$(grep -n '^CHANNELS_FAILED=()' "$REPO_ROOT/install.sh" | head -1 | cut -d: -f1)
-[[ -n "$_cf_line" ]] || fail "MAJOR 2: CHANNELS_FAILED=() not found in install.sh"
-[[ "$_cf_line" -lt 50 ]] \
-    || fail "MAJOR 2: CHANNELS_FAILED=() declared at line $_cf_line (expected < 50 for top-of-file)"
-pass "MAJOR 2: CHANNELS_FAILED=() declared at top of install.sh (line $_cf_line)"
+# Accept declaration in either install.sh (legacy) or lib/render-channel-lib.sh (new).
+_cf_in_install=$(grep -n '^CHANNELS_FAILED=()' "$REPO_ROOT/install.sh" | head -1 | cut -d: -f1 || true)
+_cf_in_lib=$(grep -n '^CHANNELS_FAILED=()' "$REPO_ROOT/lib/render-channel-lib.sh" 2>/dev/null | head -1 | cut -d: -f1 || true)
+if [[ -n "$_cf_in_install" ]]; then
+    pass "MAJOR 2: CHANNELS_FAILED=() declared in install.sh (line $_cf_in_install)"
+elif [[ -n "$_cf_in_lib" ]]; then
+    pass "MAJOR 2: CHANNELS_FAILED=() declared in lib/render-channel-lib.sh (line $_cf_in_lib) — sourced early by install.sh"
+else
+    fail "MAJOR 2: CHANNELS_FAILED=() not found in install.sh or lib/render-channel-lib.sh"
+fi
 
 echo
 echo "All channel-fallback tests passed."

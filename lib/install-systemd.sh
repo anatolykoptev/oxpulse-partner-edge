@@ -75,6 +75,15 @@ _systemd_install_lib_scripts() {
 		chmod 0644 "$PREFIX_SBIN/channel-render-lib.sh"
 	fi
 
+	# Phase 5.5 MAJOR 1: fail-soft render helpers (render_channel_soft, CHANNELS_FAILED,
+	# compose_strip_failed_channels) — sourced by install.sh, hydrate.sh, update.sh, refresh.sh.
+	if [[ -n "$src_dir" && -f "$src_dir/lib/render-channel-lib.sh" ]]; then
+		install -m 0644 "$src_dir/lib/render-channel-lib.sh" "$PREFIX_SBIN/render-channel-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/lib/render-channel-lib.sh" -o "$PREFIX_SBIN/render-channel-lib.sh"
+		chmod 0644 "$PREFIX_SBIN/render-channel-lib.sh"
+	fi
+
 	# GHCR auth lib (sourced by upgrade.sh)
 	if [[ -n "$src_dir" && -f "$src_dir/ghcr-auth-lib.sh" ]]; then
 		install -m 0644 "$src_dir/ghcr-auth-lib.sh" "$PREFIX_SBIN/ghcr-auth-lib.sh"
