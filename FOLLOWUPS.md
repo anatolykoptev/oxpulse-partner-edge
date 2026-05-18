@@ -1,5 +1,31 @@
 # Follow-ups
 
+## awg_extract silent failure swallows JSON / python3 errors during install (2026-05-18)
+
+**Severity:** P1 — install completes "successfully" with empty `AWG_*` vars and a dead `awg-quick@awg0` service. No surfacing log; operator sees install OK but the edge is non-functional until they tail journalctl.
+
+**Investigation report:** `/home/krolik/deploy/krolik-server/reports/oxpulse-chat/investigations/2026-05-18-mesh-bridge-online-drop.md` (item 6).
+
+**Original code-quality-reviewer claim:** "`awg_extract` under `set -euo pipefail` aborts the install silently if JSON is malformed or python3 missing." → **REFUTED in letter, CONFIRMED in spirit.**
+
+**Actual mechanism (worse than original claim):** Under `set -euo pipefail`, bash exempts assignment right-hand-side from `set -e`. So a failing `$(awg_extract /nonexistent jc)` does NOT abort the script. Instead three layers swallow:
+
+1. `lib/install-awg.sh:137` — `python3 ... 2>/dev/null` discards python error output
+2. Assignment captures empty string into local var (RHS-exempt from `set -e`)
+3. Call sites at `install.sh:594-607` use `awg_extract` outputs to populate `AWG_*` env vars without checking for empty
+4. `configure_amneziawg` (line 208+) renders `awg0.conf` with empty values, then `awg-quick up awg0` either fails-soft or starts a broken interface
+
+Result: full install run reports OK exit, but `awg-quick@awg0.service` exits 1 silently. No `die` ever fires.
+
+**Suggested fix:**
+- Validate non-empty after each `awg_extract` call site (or batch-validate the 14 `AWG_*` vars before render)
+- Surface python3-missing as `die` (not silent fallback) — python3 is a build-deps invariant on Debian/RHEL/Ubuntu
+- Add a smoke-step after `configure_amneziawg` that checks `systemctl status awg-quick@awg0` exit 0 before declaring install success
+
+**File:line:** `lib/install-awg.sh:137`, `install.sh:594-607`, `lib/install-awg.sh:208+` (configure_amneziawg).
+
+---
+
 ## ~~GAUGE-LEAK: chat_relay_active_channels never decremented on disconnect~~
 
 ~~**Opened:** Phase 8 T10 review-fixes (commit following f6eb52d)~~
