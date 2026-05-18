@@ -5,12 +5,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SecretsError {
-    #[error("partner-cli not found at {0} — install partner-cli first or pass --partner-cli")]
-    PartnerCliMissing(PathBuf),
-
-    #[error("partner-cli keygen failed: {stderr}")]
-    PartnerCliFailed { stderr: String },
-
     #[error(
         "PARTIAL identity at {dir}: found {found:?}, missing {missing:?}. \
          Remove all reality.* files for a fresh identity, or restore the missing ones from backup."

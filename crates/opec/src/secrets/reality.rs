@@ -6,19 +6,18 @@
 //! - --rotate forces regeneration
 //! - base64url 43-char validation on private + public keys
 //!
-//! Phase 5.1: keygen is now native (x25519-dalek in-process) by default.
-//! Set `OPEC_REALITY_KEYGEN_LEGACY=1` to fall back to the partner-cli shell-out
-//! for one release cycle before full removal.
+//! Phase 5.3: legacy partner-cli shell-out removed. Keygen is unconditionally
+//! native (x25519-dalek in-process).
 
 use super::error::SecretsError;
 use super::x25519;
-use std::{fs, io::Write, path::Path, process::Command};
+use std::{fs, io::Write, path::Path};
 use uuid::Uuid;
 
 const FILES: &[&str] = &["reality.priv", "reality.pub", "reality.uuid"];
 const REALITY_KEY_LEN: usize = 43;
 
-pub fn keygen(out_dir: &Path, rotate: bool, partner_cli: &Path) -> Result<(), SecretsError> {
+pub fn keygen(out_dir: &Path, rotate: bool) -> Result<(), SecretsError> {
     // Detect existing identity state.
     let present: Vec<&'static str> = FILES
         .iter()
@@ -50,63 +49,14 @@ pub fn keygen(out_dir: &Path, rotate: bool, partner_cli: &Path) -> Result<(), Se
         }
     }
 
-    // priv_key_owned wrapped in Zeroizing so the heap copy is wiped on drop —
-    // x25519::keygen_x25519 returns Zeroizing<String> but to_owned()/format!
-    // would otherwise leak a plain String onto the heap.
-    let priv_key_owned: zeroize::Zeroizing<String>;
-    let pub_key_owned: String;
+    // x25519::keygen_x25519 returns Zeroizing<String> for both keys.
+    // The private key stays inside Zeroizing<String> — priv_key_owned — until
+    // it is written to disk; it is never copied into a plain String, so the
+    // plaintext bytes are wiped on drop automatically.
+    let (priv_key_owned, pub_key_owned) = x25519::keygen_x25519();
 
-    // OPEC_REALITY_KEYGEN_LEGACY accepts the literal "1" only — any other value
-    // (including "true", "yes", "0", or unset) takes the native default path.
-    // Deliberately narrow to avoid accidental opt-in from typos.
-    if std::env::var("OPEC_REALITY_KEYGEN_LEGACY").as_deref() == Ok("1") {
-        // Legacy fallback: shell out to partner-cli.
-        // Only used when OPEC_REALITY_KEYGEN_LEGACY=1 is set; remove in Phase 5.X cleanup.
-        let pc_resolved = resolve_partner_cli(partner_cli)?;
-        let output = Command::new(&pc_resolved)
-            .arg("keygen")
-            .output()
-            .map_err(|e| SecretsError::Io {
-                path: pc_resolved.clone(),
-                source: e,
-            })?;
-        if !output.status.success() {
-            return Err(SecretsError::PartnerCliFailed {
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            });
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let priv_str =
-            grep_field(&stdout, "private_key").ok_or_else(|| SecretsError::PartnerCliFailed {
-                stderr: format!("missing 'private_key:' line in keygen output: {stdout}"),
-            })?;
-        let pub_str =
-            grep_field(&stdout, "public_key").ok_or_else(|| SecretsError::PartnerCliFailed {
-                stderr: format!("missing 'public_key:' line in keygen output: {stdout}"),
-            })?;
-        if priv_str.len() != REALITY_KEY_LEN {
-            return Err(SecretsError::InvalidKeyFormat {
-                path: out_dir.join("reality.priv"),
-                actual_len: priv_str.len(),
-            });
-        }
-        if pub_str.len() != REALITY_KEY_LEN {
-            return Err(SecretsError::InvalidKeyFormat {
-                path: out_dir.join("reality.pub"),
-                actual_len: pub_str.len(),
-            });
-        }
-        priv_key_owned = zeroize::Zeroizing::new(priv_str.to_owned());
-        pub_key_owned = pub_str.to_owned();
-    } else {
-        // Native path (default): in-process x25519-dalek keygen, no subprocess.
-        let (priv_b64, pub_b64) = x25519::keygen_x25519();
-        priv_key_owned = priv_b64;
-        pub_key_owned = pub_b64;
-    }
-
-    let priv_key = priv_key_owned.as_str();
-    let pub_key = pub_key_owned.as_str();
+    let priv_key: &str = &priv_key_owned;
+    let pub_key: &str = &pub_key_owned;
 
     // Invariant: both keys must be 43-char base64url (post-keygen gate).
     if priv_key.len() != REALITY_KEY_LEN {
@@ -130,27 +80,6 @@ pub fn keygen(out_dir: &Path, rotate: bool, partner_cli: &Path) -> Result<(), Se
 
     eprintln!("opec secrets reality-keygen: generated new identity (uuid={uuid})");
     Ok(())
-}
-
-fn resolve_partner_cli(p: &Path) -> Result<std::path::PathBuf, SecretsError> {
-    if p.is_absolute() {
-        if p.is_file() {
-            Ok(p.to_path_buf())
-        } else {
-            Err(SecretsError::PartnerCliMissing(p.to_path_buf()))
-        }
-    } else {
-        which::which(p).map_err(|_| SecretsError::PartnerCliMissing(p.to_path_buf()))
-    }
-}
-
-fn grep_field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix(&format!("{name}:")) {
-            return Some(rest.trim());
-        }
-    }
-    None
 }
 
 fn validate_existing(out_dir: &Path) -> Result<(), SecretsError> {
