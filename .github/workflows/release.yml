@@ -301,6 +301,11 @@ jobs:
           cp lib/install-systemd.sh       install-systemd.sh
           cp lib/install-args.sh          install-args.sh
           cp lib/install-awg.sh           install-awg.sh
+          # Phase 5.5 MAJOR 1: fail-soft render helpers (sourced by install/hydrate/update/refresh).
+          cp lib/render-channel-lib.sh    render-channel-lib.sh
+          # Bug 8 fix: ship defaults.conf so install-systemd.sh can fetch it
+          # from REPO_RAW on fresh installs (tier-4 fallback path).
+          cp config/defaults.conf         config-defaults.conf
           chmod +x partner-cli-amd64 partner-cli-arm64
           chmod +x opec-amd64 opec-arm64
           sha256sum \
@@ -314,6 +319,8 @@ jobs:
             install-systemd.sh \
             install-args.sh \
             install-awg.sh \
+            render-channel-lib.sh \
+            config-defaults.conf \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
@@ -342,6 +349,8 @@ jobs:
             install-systemd.sh \
             install-args.sh \
             install-awg.sh \
+            render-channel-lib.sh \
+            config-defaults.conf \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \

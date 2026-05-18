@@ -10,11 +10,9 @@
 #   hydrate.sh             Normal run (idempotent; exits 0 if already hydrated).
 #   hydrate.sh --reseed    Tear down containers, rm sentinel, re-hydrate.
 #
-# WARNING: Phase 5.5 fail-soft NOT YET APPLIED here.
-# A render failure in this script CAN take down healthy channels via
-# `docker compose up -d` because render_channel_soft / CHANNELS_FAILED and
-# the compose-strip post-processor are not wired in hydrate.sh.
-# See FOLLOWUPS.md — "Phase 5.5 fail-soft for hydrate/refresh/update".
+# Phase 5.5 MAJOR 1 (PR feat/phase5-6-...): render_channel_soft + CHANNELS_FAILED
+# + compose_strip_failed_channels are now wired — channel render failures are
+# non-fatal; failed channels are stripped from compose before docker compose up.
 set -euo pipefail
 
 # ---------- Constants ----------
@@ -201,6 +199,24 @@ else
 fi
 unset _chan_lib_local _chan_lib_installed
 
+# Phase 5.5 MAJOR 1: load fail-soft render helpers (render_channel_soft,
+# _in_array, CHANNELS_FAILED, compose_strip_failed_channels).
+_rl_local="${SCRIPT_DIR}/lib/render-channel-lib.sh"
+_rl_sbin="${PREFIX_SBIN:-/usr/local/sbin}/render-channel-lib.sh"
+if [[ -f "$_rl_local" ]]; then
+    # shellcheck source=lib/render-channel-lib.sh
+    source "$_rl_local"
+elif [[ -f "$_rl_sbin" ]]; then
+    # shellcheck source=/dev/null
+    source "$_rl_sbin"
+else
+    warn "render-channel-lib.sh not found — channel render failures will be fatal"
+    # Stub: make render_channel_soft fall through to render_template (best-effort)
+    render_channel_soft() { render_template "$2" "$3"; }
+    CHANNELS_FAILED=()
+fi
+unset _rl_local _rl_sbin
+
 # ---------- Step 4: render templates ----------
 log "[4/7] rendering config templates"
 
@@ -237,19 +253,31 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        SFU_SIGNING_PUBLIC_KEY SIGNALING_SFU_SECRET \
        HY2_SERVER HY2_AUTH_PASS HY2_OBFS_PASS HY2_LOCAL_LISTEN HY2_REMOTE_BACKEND
 
+# Chassis renders — strict (must succeed or hydrate aborts).
 render_template "$(tpl_file docker-compose.yml.tpl)" "$PREFIX_ETC/docker-compose.yml"
 render_template "$(tpl_file Caddyfile.tpl)"          "$PREFIX_ETC/Caddyfile"
-render_template "$(tpl_file xray-client.json.tpl)"   "$PREFIX_ETC/xray-client.json"
 render_template "$(tpl_file coturn.conf.tpl)"        "$PREFIX_ETC/coturn.conf"
-# Render CH3 / CH5 if the backend provided the required vars.
+
+# Phase 5.5 MAJOR 1: bypass channel renders use render_channel_soft (fail-soft).
+# xray is always attempted; CH3/CH5 only when provisioned by backend.
+render_channel_soft xray "$(tpl_file xray-client.json.tpl)" "$PREFIX_ETC/xray-client.json" \
+    || warn "  xray render failed — continuing without xray channel"
 if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
     render_template "$(tpl_file hysteria2-client.yaml.tpl)" "$PREFIX_ETC/hysteria2-client.yaml"
     log "  hysteria2-client.yaml rendered"
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
-    render_template "$(tpl_file naive-client.json.tpl)" "$PREFIX_ETC/naive-client.json"
-    log "  naive-client.json rendered"
+    render_channel_soft naive "$(tpl_file naive-client.json.tpl)" "$PREFIX_ETC/naive-client.json" \
+        || warn "  naive render failed — continuing without naive channel"
 fi
+
+# Strip failed channel service blocks from compose so docker compose up
+# does not fail on missing volume mounts (Phase 5.5 MAJOR 1).
+if [[ ${#CHANNELS_FAILED[@]} -gt 0 && -f "$PREFIX_ETC/docker-compose.yml" ]]; then
+    compose_strip_failed_channels "$PREFIX_ETC/docker-compose.yml" "${CHANNELS_FAILED[@]}"
+fi
+[[ ${#CHANNELS_FAILED[@]} -gt 0 ]] \
+    && warn "  ${#CHANNELS_FAILED[@]} channel(s) failed render: ${CHANNELS_FAILED[*]} — node starting in degraded mode"
 
 # Static assets — Caddy DPI-probe cover served from ./cover bind-mount.
 # Missing file = silent 404 on partner root URL (regression fix 2026-04-20).
