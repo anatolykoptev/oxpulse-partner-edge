@@ -1,31 +1,21 @@
-//! Phase 5.1 — integration tests for reality::keygen native x25519 path.
+//! Phase 5.3 — integration tests for reality::keygen native x25519 path.
 //!
-//! These tests verify:
-//! 1. Native path (default) produces valid files without invoking partner-cli.
-//! 2. Legacy env gate (OPEC_REALITY_KEYGEN_LEGACY=1) invokes partner-cli and
-//!    errors with PartnerCliMissing when the binary is absent.
+//! These tests verify the unconditional native (x25519-dalek) code path.
+//! The legacy OPEC_REALITY_KEYGEN_LEGACY env-gate was removed in Phase 5.3.
 
-use opec::secrets::{reality, SecretsError};
+use opec::secrets::reality;
 use serial_test::serial;
 use std::fs;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
-/// Native path produces all three valid identity files.
-///
-/// Pass `/nonexistent/partner-cli` — if the native path accidentally falls
-/// through to the shell-out, the test will fail because that binary doesn't
-/// exist (it would surface as PartnerCliMissing or Io, not Ok).
+/// Native path produces all three valid identity files with correct permissions
+/// and key format. Also verifies idempotent re-run leaves content unchanged.
 #[test]
 #[serial]
 fn keygen_native_path_produces_three_valid_files() {
-    // Ensure legacy env gate is NOT set for this test.
-    std::env::remove_var("OPEC_REALITY_KEYGEN_LEGACY");
-
     let out_dir = TempDir::new().unwrap();
-    let fake_cli = std::path::PathBuf::from("/nonexistent/partner-cli-must-not-be-called");
 
-    reality::keygen(out_dir.path(), true, &fake_cli).expect("native keygen must succeed");
+    reality::keygen(out_dir.path(), true).expect("native keygen must succeed");
 
     // All three files must exist.
     let priv_path = out_dir.path().join("reality.priv");
@@ -92,7 +82,7 @@ fn keygen_native_path_produces_three_valid_files() {
     uuid::Uuid::parse_str(uuid_content.trim()).expect("reality.uuid must be a valid UUID");
 
     // Idempotent re-run with rotate=false must succeed (reuse path).
-    let result = reality::keygen(out_dir.path(), false, &fake_cli);
+    let result = reality::keygen(out_dir.path(), false);
     assert!(
         result.is_ok(),
         "idempotent re-run (rotate=false) must succeed: {:?}",
@@ -104,28 +94,5 @@ fn keygen_native_path_produces_three_valid_files() {
     assert_eq!(
         pub_content, pub_after,
         "idempotent re-run must not mutate reality.pub"
-    );
-}
-
-/// When OPEC_REALITY_KEYGEN_LEGACY=1 is set, reality::keygen must take the
-/// legacy branch (Command::new partner-cli) and fail with PartnerCliMissing
-/// for a nonexistent binary — proving it did NOT take the native path.
-#[test]
-#[serial]
-fn keygen_legacy_env_gate_invokes_partner_cli() {
-    std::env::set_var("OPEC_REALITY_KEYGEN_LEGACY", "1");
-
-    let out_dir = TempDir::new().unwrap();
-    let nonexistent = std::path::PathBuf::from("/nonexistent/partner-cli-legacy-test");
-
-    let result = reality::keygen(out_dir.path(), true, &nonexistent);
-
-    // Always clean up the env var before asserting so subsequent tests aren't poisoned.
-    std::env::remove_var("OPEC_REALITY_KEYGEN_LEGACY");
-
-    let err = result.expect_err("legacy path with nonexistent binary must error");
-    assert!(
-        matches!(err, SecretsError::PartnerCliMissing(_)),
-        "expected PartnerCliMissing (proves legacy branch was taken), got: {err:?}"
     );
 }
