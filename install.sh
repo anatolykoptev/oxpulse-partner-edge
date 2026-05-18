@@ -29,6 +29,10 @@ warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
 # Returns 0 if $1 is in the remaining arguments.  Used for CHANNELS_FAILED lookup.
 _in_array() { local needle=$1; shift; local el; for el in "$@"; do [[ "$el" == "$needle" ]] && return 0; done; return 1; }
+# Phase 5.5 — global accumulator; MAJOR 2 fix: declared here at top-of-file so
+# it is never unbound when _in_array / ${CHANNELS_FAILED[@]:-} is evaluated even
+# if an early return path skips the render block.
+CHANNELS_FAILED=()
 
 # ---------- Phase 4.1: lib module loader ----------
 # Resolves a lib/install-*.sh module via lookup order:
@@ -743,16 +747,25 @@ render_with_opec() {
 # On failure: logs a warning, appends channel name to CHANNELS_FAILED array,
 # returns non-zero. Callers must NOT die on non-zero — install continues and
 # the failed channel is excluded from the running compose stack.
-CHANNELS_FAILED=()
+# CHANNELS_FAILED is declared at top-of-file (near _in_array) — MAJOR 2 fix.
 render_channel_soft() {
     local kind=$1 src=$2 dst=$3
+    # MEDIUM 1: use a private tmp dir (0700) instead of world-readable /tmp so
+    # opec error fragments (which may contain REALITY_PRIVATE_KEY excerpts) are
+    # not readable by other local users.
+    local _rcs_tmpdir="${PREFIX_LIB:-/tmp}/tmp"
+    install -d -m 0700 "$_rcs_tmpdir" 2>/dev/null || _rcs_tmpdir=/tmp
+    local _rcs_err
+    _rcs_err=$(mktemp "$_rcs_tmpdir/opec-render-err-${kind}-XXXXXX")
+    # MEDIUM 2: trap ensures tmp file is removed on any exit path (RETURN or early die).
+    # shellcheck disable=SC2064
+    trap "rm -f '${_rcs_err}'" RETURN
     if command -v opec >/dev/null 2>&1; then
-        if opec render "$kind" --tpl "$src" --out "$dst" 2>/tmp/opec-render-err-"$kind".txt; then
+        if opec render "$kind" --tpl "$src" --out "$dst" 2>"$_rcs_err"; then
             return 0
         fi
         warn "channel $kind render failed — will skip this channel"
-        warn "  opec error: $(cat /tmp/opec-render-err-"$kind".txt 2>/dev/null || echo '<no output>')"
-        rm -f /tmp/opec-render-err-"$kind".txt
+        warn "  opec error: $(cat "$_rcs_err" 2>/dev/null || echo '<no output>')"
     else
         warn "channel $kind render skipped — opec not on PATH"
     fi
@@ -881,14 +894,6 @@ install -m 0644 "$stage/cover/cover.html" "$cover_out_dir/cover.html"
 # When rendered, activate the corresponding docker compose profile so the
 # service starts alongside the core stack (docker compose --profile ch3 up).
 COMPOSE_PROFILES_EXTRA=""
-if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
-	# Dead early render removed (T2/T3 NIT): re_render_hysteria2 at ~L1555
-	# fetches HY2_AUTH_PASS/HY2_OBFS_PASS from the API then overwrites this
-	# file, so this first-pass output was never read by any service.
-	# channel-render-lib.sh is already sourced unconditionally at L766-776.
-	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
-	log "  hysteria2 CH3 profile enabled (credentials provisioned by re_render_hysteria2 below)"
-fi
 # Phase 1.7 — fetch shared hy2 credentials + render hysteria2-client.yaml.
 # For Phase 1 these are fleet-shared (per-edge identity = Phase 7).
 # Source: GET /api/partner/hy2-credentials returns JSON {auth_pass, obfs_pass}
@@ -896,7 +901,17 @@ fi
 # channel-render-lib.sh (including re_render_hysteria2) is already in scope —
 # sourced unconditionally with die-on-missing at L766-776 (T2/T3 NIT: redundant
 # source block removed from here).
-if declare -f re_render_hysteria2 >/dev/null 2>&1; then
+#
+# MAJOR 3 fix: _hy2_status is determined here (not via post-hoc sed patch) and
+# written atomically to channels-status.env below.
+# BLOCKER 2 fix: hysteria2 is counted in _CHANNELS_TOTAL when HYSTERIA2_SERVER
+# is set, so an xray+naive fail does not kill an install where hy2 succeeds.
+_hy2_status="skipped"
+if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
+	# Mark as attempted so it counts toward _CHANNELS_TOTAL.
+	_hy2_status="failed_at_start"
+fi
+if [[ -n "${HYSTERIA2_SERVER:-}" ]] && declare -f re_render_hysteria2 >/dev/null 2>&1; then
 	log "fetching hy2 credentials"
 	_hy2_creds_url="${BACKEND_API}/api/partner/hy2-credentials"
 	_hy2_creds_json=$(curl -fsS --max-time 10 \
@@ -913,12 +928,18 @@ if declare -f re_render_hysteria2 >/dev/null 2>&1; then
 		re_render_hysteria2
 		COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
 		log "hy2 channel provisioned"
-		# Phase 5.5: update channels-status.env — hysteria2 active
-		[[ $DRY_RUN -eq 0 && -f "$PREFIX_LIB/channels-status.env" ]] && \
-			sed -i 's/^hysteria2=skipped$/hysteria2=active/' "$PREFIX_LIB/channels-status.env"
+		_hy2_status="active"
 	else
 		warn "hy2 credentials unavailable — installing awg-only mode (hy2 will provision on next upgrade)"
+		# _hy2_status stays "failed_at_start" — credentials missing is a provisioning failure
 	fi
+elif [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
+	warn "hy2 channel: re_render_hysteria2 not available — channel failed"
+	# _hy2_status stays "failed_at_start"
+fi
+if [[ "${_hy2_status}" == "active" ]]; then
+	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
+	log "  hysteria2 CH3 profile enabled"
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
 	# Phase 5.5: naive is a bypass channel — render fail-soft.
@@ -931,11 +952,14 @@ fi
 rm -rf "$stage"
 
 # Phase 5.5: all-channels-failed guard.
-# Bypass channels attempted: xray always; naive only when NAIVE_SERVER is set.
-# hysteria2 is provisioned by re_render_hysteria2 path (not tracked here yet).
-# If every attempted channel failed render → die with diagnostic.
+# BLOCKER 2 fix: count all three bypass channels when configured.
+# CHANNELS_FAILED tracks xray + naive render failures.
+# _hy2_status != active means hy2 failed when HYSTERIA2_SERVER was set.
 _CHANNELS_TOTAL=1  # xray always attempted
 [[ -n "${NAIVE_SERVER:-}" ]] && _CHANNELS_TOTAL=$((_CHANNELS_TOTAL + 1))
+[[ -n "${HYSTERIA2_SERVER:-}" ]] && _CHANNELS_TOTAL=$((_CHANNELS_TOTAL + 1))
+# Map hy2 failed_at_start into CHANNELS_FAILED so the count is unified.
+[[ "${_hy2_status}" == "failed_at_start" ]] && CHANNELS_FAILED+=("hysteria2")
 CHANNELS_FAILED_COUNT=${#CHANNELS_FAILED[@]}
 if [[ $CHANNELS_FAILED_COUNT -ge $_CHANNELS_TOTAL && $_CHANNELS_TOTAL -gt 0 ]]; then
 	die "all channels failed render: ${CHANNELS_FAILED[*]:-<none>} — no bypass channel is usable; check opec and node-config"
@@ -945,16 +969,21 @@ fi
 unset _CHANNELS_TOTAL
 
 # Phase 5.5: write per-channel status to state file consumed by healthcheck.
-# Statuses: active|failed_at_render|skipped
+# Statuses: active|failed_at_render|failed_at_start|skipped
+# BLOCKER 1 fix: compose strip applied BELOW this block, after statuses are final.
+# BLOCKER 3 fix: atomic tmp+rename so a mid-write crash leaves no partial file.
 if [[ $DRY_RUN -eq 0 ]]; then
 	install -d -m 0700 "$PREFIX_LIB"
+	_chs_tmp=$(mktemp "$PREFIX_LIB/.channels-status-XXXXXX.tmp")
 	{
+		printf '# Generated by install.sh — DO NOT EDIT\n'
 		# xray is always attempted; naive only when NAIVE_SERVER is set
 		if _in_array xray "${CHANNELS_FAILED[@]:-}"; then
 			printf 'xray=%s\n' "failed_at_render"
 		else
 			printf 'xray=%s\n' "active"
 		fi
+		printf 'hysteria2=%s\n' "${_hy2_status}"
 		if [[ -n "${NAIVE_SERVER:-}" ]]; then
 			if _in_array naive "${CHANNELS_FAILED[@]:-}"; then
 				printf 'naive=%s\n' "failed_at_render"
@@ -964,15 +993,56 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		else
 			printf 'naive=%s\n' "skipped"
 		fi
-		# hysteria2 provisioning happens after this block; status updated below
-		printf 'hysteria2=%s\n' "skipped"
-	} > "$PREFIX_LIB/channels-status.env"
-	chmod 0644 "$PREFIX_LIB/channels-status.env"
+	} > "$_chs_tmp"
+	chmod 0640 "$_chs_tmp"
+	mv -f "$_chs_tmp" "$PREFIX_LIB/channels-status.env"
+	unset _chs_tmp
 fi
+unset _hy2_status
 
 # Secrets-containing files → 0600.
 chmod 0600 "$xray_out" "$coturn_out" || true
 log "  rendered → $compose_out (+ Caddyfile, xray-client.json, coturn.conf, cover/cover.html)"
+
+# BLOCKER 1 fix — Phase 5.5: strip failed channels from rendered docker-compose.yml.
+# compose.tpl is rendered strictly (render_with_opec) and contains service blocks
+# for ALL channels (xray, hysteria2, naive). If a channel failed render its config
+# file (e.g. xray-client.json) is missing, so `docker compose up` would fail on
+# the volume mount. Strip failed-channel service blocks + their depends_on refs now,
+# while CHANNELS_FAILED is finalised and compose_out is still on disk.
+if [[ ${#CHANNELS_FAILED[@]} -gt 0 && -f "$compose_out" ]]; then
+	log "  stripping failed channels from compose: ${CHANNELS_FAILED[*]}"
+	python3 - "$compose_out" "${CHANNELS_FAILED[@]}" <<'PYEOF'
+import sys, yaml, pathlib
+compose_path = pathlib.Path(sys.argv[1])
+failed = set(sys.argv[2:])
+with compose_path.open() as f:
+    doc = yaml.safe_load(f)
+# Remove failed service blocks.
+for kind in failed:
+    doc.get('services', {}).pop(kind, None)
+# Remove depends_on references to failed services from remaining services.
+for _svc, conf in doc.get('services', {}).items():
+    deps = conf.get('depends_on')
+    if isinstance(deps, list):
+        conf['depends_on'] = [d for d in deps if d not in failed]
+        if not conf['depends_on']:
+            del conf['depends_on']
+    elif isinstance(deps, dict):
+        for d in list(deps):
+            if d in failed:
+                del deps[d]
+        if not deps:
+            del conf['depends_on']
+# Remove orphaned named volumes that were only used by stripped services.
+# (Safe to leave extras; docker compose tolerates unused volumes.)
+# Atomic write via tmp+rename.
+tmp = compose_path.with_suffix('.tmp')
+with tmp.open('w') as f:
+    yaml.safe_dump(doc, f, sort_keys=False, default_flow_style=False)
+tmp.replace(compose_path)
+PYEOF
+fi
 
 # Phase 3: create conf.d/ override slot. mkdir -p only — never touch files inside.
 # Operator-side *.caddy files survive install.sh reruns; Caddyfile.tpl imports them at the end.

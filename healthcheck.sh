@@ -323,11 +323,21 @@ else
 	_ch_total=0
 	while IFS='=' read -r _ch_name _ch_status || [[ -n "$_ch_name" ]]; do
 		[[ -z "$_ch_name" || "$_ch_name" =~ ^# ]] && continue
+		# MEDIUM 3 fix: validate line format — name must be [a-z][a-z0-9_-]* and
+		# status must be non-empty.  "xray active" (missing =) would yield
+		# _ch_name='xray active' _ch_status='' and fall into skipped silently.
+		if [[ ! "$_ch_name" =~ ^[a-z][a-z0-9_-]*$ ]] || [[ -z "$_ch_status" ]]; then
+			warn "channels-status.env: malformed line (name='${_ch_name}' status='${_ch_status:-<empty>}') — skipping"
+			continue
+		fi
 		_ch_total=$((_ch_total + 1))
 		case "$_ch_status" in
 			active)            _ch_active_count=$((_ch_active_count + 1)) ;;
 			failed_at_render|failed_at_start) _ch_failed_count=$((_ch_failed_count + 1)) ;;
 			skipped)           ;;  # not attempted — does not count toward failure
+			# MAJOR 4 fix: unknown/typo status (e.g. 'actived', 'provisioning') counts
+			# as failure rather than silently passing.  Schema drift → false-green prevented.
+			*) warn "channels-status.env: unknown status '${_ch_status}' for channel '${_ch_name}' — treating as failed"; _ch_failed_count=$((_ch_failed_count + 1)) ;;
 		esac
 	done < "$_chs_file"
 

@@ -1,5 +1,32 @@
 # Follow-ups
 
+## Phase 5.5 fail-soft for hydrate/refresh/update (MAJOR 1 deferred)
+
+`hydrate.sh`, `oxpulse-partner-edge-refresh.sh`, and `update.sh` do not use
+`render_channel_soft` / `CHANNELS_FAILED` and lack the compose-strip
+post-processor added to `install.sh` in PR #186.
+
+A render failure in these scripts can tear down healthy channels via
+`docker compose up -d [--force-recreate]` because the compose file still
+contains the failed channel's service block referencing a missing config file.
+
+**Followup:**
+- Extract `render_channel_soft` and the compose-strip python3 block into
+  `lib/channel-render-lib.sh` (or a new `lib/channel-fallback-lib.sh`) so
+  `hydrate.sh`, `refresh.sh`, and `update.sh` can source it.
+- Replace unconditional `docker compose up -d --force-recreate` in refresh with
+  surgical per-channel restart: only recreate containers whose channel was
+  re-rendered successfully.
+- Mirror `channels-status.env` atomic write in all three scripts.
+
+**Severity:** HIGH on refresh/hydrate paths (daily scheduled runs); MEDIUM on
+update.sh (operator-explicit only).
+
+**File:line:** `hydrate.sh:234–266`, `oxpulse-partner-edge-refresh.sh:185–238`,
+`update.sh` (compose-up call). Warning comments + this entry added in PR #186.
+
+---
+
 ## Phase 5.5: opec render xray reads node-config.json natively
 
 Phase 5.4 (fix/install-bugs-3-4-live-edge) added env-export plumbing in
