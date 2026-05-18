@@ -11,6 +11,7 @@ set -uo pipefail
 
 CONF_DIR="${OXPULSE_EDGE_CONFIG_DIR:-/etc/oxpulse-partner-edge}"
 STATE_DIR="${OXPULSE_EDGE_STATE_DIR:-/var/lib/oxpulse-partner-edge}"
+SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 COMPOSE_FILE="$CONF_DIR/docker-compose.yml"
 STATE_FILE="$STATE_DIR/install.env"
 
@@ -160,7 +161,7 @@ check "11. UDP ${SFU_UDP_PORT} listening (sfu media)" bash -c '
 '
 
 # --- 12. SFU /metrics responds 200 (M1.5 endpoint) ---
-SFU_METRICS_PORT="${SFU_METRICS_PORT:-8878}"
+SFU_METRICS_PORT="${SFU_METRICS_PORT:-9317}"
 check "12. SFU /metrics → 200" bash -c '
 	code=$(curl -fso /dev/null -w "%{http_code}" --max-time 5 \
 		"http://127.0.0.1:'"${SFU_METRICS_PORT}"'/metrics" || true)
