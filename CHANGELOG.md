@@ -5,6 +5,18 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.38](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.37...partner-edge-v0.12.38) (2026-05-18)
+
+
+### Features
+
+* Phase 5.5 — resilient multi-channel install with per-channel fail-soft ([#186](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/186)) ([808a993](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/808a99311d48b857b7412be82b37e119f41ab3c1))
+
+
+### Bug Fixes
+
+* **install:** bug 3+4 from live edge install on ru.oxpulse.chat ([#184](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/184)) ([054f919](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/054f9192dfb1f62283303d8c97e89de7f92e244f))
+
 ## [0.12.37](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.36...partner-edge-v0.12.37) (2026-05-18)
 
 
