@@ -306,6 +306,21 @@ jobs:
           # Bug 8 fix: ship defaults.conf so install-systemd.sh can fetch it
           # from REPO_RAW on fresh installs (tier-4 fallback path).
           cp config/defaults.conf         config-defaults.conf
+          # Phase 5.7 Item 3: regenerate lib-checksums.txt from the lib/*.sh
+          # files at release time so the integrity is pinned to this exact
+          # release. install.sh _install_lib_source validates tier-4 fetches
+          # against this file. Also copy the pre-committed file as a release asset.
+          (cd lib && sha256sum \
+            install-args.sh \
+            install-awg.sh \
+            install-deps.sh \
+            install-healthcheck.sh \
+            install-network.sh \
+            install-preflight.sh \
+            install-systemd.sh \
+            render-channel-lib.sh \
+          ) > lib/lib-checksums.txt
+          cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
           chmod +x opec-amd64 opec-arm64
           sha256sum \
@@ -320,6 +335,7 @@ jobs:
             install-args.sh \
             install-awg.sh \
             render-channel-lib.sh \
+            lib-checksums.txt \
             config-defaults.conf \
             partner-cli-amd64 \
             partner-cli-arm64 \
@@ -350,6 +366,7 @@ jobs:
             install-args.sh \
             install-awg.sh \
             render-channel-lib.sh \
+            lib-checksums.txt \
             config-defaults.conf \
             partner-cli-amd64 \
             partner-cli-arm64 \

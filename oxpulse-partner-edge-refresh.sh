@@ -196,6 +196,48 @@ fi
 # Re-renders all channel configs when operator updates channel settings.
 # Phase 5.5 MAJOR 1: uses render_channel_soft (fail-soft) so a single
 # failing channel does not abort the entire refresh cycle.
+#
+# Phase 5.7 Item 4: surgical per-channel restart after re-render.
+# Only containers whose rendered config actually changed (SHA256 diff) are
+# restarted. Healthy unchanged containers are left running. Failed channels
+# (from channels-status.env) are skipped entirely.
+
+# _restart_if_changed kind cfg_file sha_file compose_file container
+# Restarts a single docker compose service only when its config file hash
+# differs from the last persisted hash. Updates the sha file on success.
+# Consults channels-status.env: skips channels that are not active.
+_restart_if_changed() {
+    local kind="$1" cfg_file="$2" sha_file="$3" compose_file="$4" container="$5"
+
+    # Consult channels-status.env: skip non-active channels
+    local _ch_status=""
+    local _chs_env="${PREFIX_LIB}/channels-status.env"
+    if [[ -f "$_chs_env" ]]; then
+        _ch_status=$(grep "^${kind}=" "$_chs_env" 2>/dev/null | cut -d= -f2 || true)
+    fi
+    if [[ -n "$_ch_status" && "$_ch_status" != "active" ]]; then
+        log "  [surgical] channel $kind status=$_ch_status — skipping restart"
+        return 0
+    fi
+
+    [[ -f "$cfg_file" ]] || return 0
+    local _new_sha
+    _new_sha=$(sha256sum "$cfg_file" | awk '{print $1}')
+    local _old_sha
+    _old_sha=$(cat "$sha_file" 2>/dev/null || printf '')
+    if [[ "$_new_sha" != "$_old_sha" ]]; then
+        log "  [surgical] channel $kind config changed — restarting $container"
+        if docker compose -f "$compose_file" restart "$container" 2>>"$LOG_FILE"; then
+            printf '%s\n' "$_new_sha" > "$sha_file"
+            log "  [surgical] $container restarted OK"
+        else
+            log "WARNING: [surgical] docker restart $container failed — container may use stale config"
+        fi
+    else
+        log "  [surgical] channel $kind unchanged — no restart"
+    fi
+}
+
 if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" != "none" && \
       "$NEW_CHANNELS_VERSION" != "$CURRENT_CHANNELS_VERSION" ]]; then
     log "channels_version changed: $CURRENT_CHANNELS_VERSION → $NEW_CHANNELS_VERSION"
@@ -211,6 +253,7 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
         # the entire refresh. Failures are non-fatal — channels_version is
         # updated so we do not retry the same broken config tomorrow.
         _xray_cfg="${PREFIX_ETC}/xray-client.json"
+        # shellcheck disable=SC2034  # CHANNELS_FAILED consumed by render_channel_soft internals
         CHANNELS_FAILED=()
         render_channel_soft xray \
             "${PREFIX_SBIN:-/usr/local/sbin}/xray-client.json.tpl" \
@@ -221,6 +264,36 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
         echo "$NEW_CHANNELS_VERSION" > "$CHANNELS_VERSION_FILE"
         log "channels_version updated to $NEW_CHANNELS_VERSION"
     fi
+
+    # Phase 5.7 Item 4: surgical restart — only restart containers whose
+    # rendered config file actually changed vs. the persisted sha.
+    _compose="${PREFIX_ETC}/docker-compose.yml"
+    if [[ -f "$_compose" ]]; then
+        _restart_if_changed xray \
+            "${PREFIX_ETC}/xray-client.json" \
+            "${PREFIX_LIB}/xray-config.sha" \
+            "$_compose" \
+            oxpulse-partner-xray
+        # Naive channel (CH5) — skip when not deployed
+        if [[ -f "${PREFIX_ETC}/naive-client.json" ]]; then
+            _restart_if_changed naive \
+                "${PREFIX_ETC}/naive-client.json" \
+                "${PREFIX_LIB}/naive-config.sha" \
+                "$_compose" \
+                oxpulse-partner-naive
+        fi
+        # Hysteria2 channel (CH3) — skip when not deployed
+        if [[ -f "${PREFIX_ETC}/hysteria2-client.yaml" ]]; then
+            _restart_if_changed hysteria2 \
+                "${PREFIX_ETC}/hysteria2-client.yaml" \
+                "${PREFIX_LIB}/hysteria2-config.sha" \
+                "$_compose" \
+                oxpulse-partner-hysteria2
+        fi
+    else
+        log "WARNING: docker-compose.yml not found at $_compose — skipping surgical restart"
+    fi
+    unset _compose
 fi
 
 if [[ "$KEYS_OK" -eq 0 ]]; then

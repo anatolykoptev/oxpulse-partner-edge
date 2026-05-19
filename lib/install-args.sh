@@ -24,7 +24,7 @@
 #   BRAND_CTA_URL_RU, BRAND_CTA_URL_EN, BRAND_CTA_URL_ZH, BRAND_CTA_URL_FA,
 #   BRAND_CTA_TEXT_RU, BRAND_CTA_TEXT_EN, BRAND_CTA_TEXT_ZH, BRAND_CTA_TEXT_FA,
 #   BRAND_LEGAL_ENTITY, BRAND_LEGAL_COUNTRY, BRAND_LEGAL_CONTACT,
-#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN
+#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN, CLEAN_SBIN
 
 _args_usage() {
 	sed -n '2,18p' "$0" >&2
@@ -187,6 +187,9 @@ args_parse() {
 	# or --rotate-identity to override — this is the slice 3 contract for
 	# operator-initiated rotation. Requires explicit invocation; never auto-triggered.
 	FORCE_KEYGEN=0
+	# Phase 5.7 Item 5: when 1, remove stale sbin scripts not in EXPECTED_SBIN_FILES.
+	# Off by default — no surprise data-loss. Set to 1 via --clean-sbin.
+	CLEAN_SBIN=0
 
 	# GHCR PAT supplied via --ghcr-token=ghp_xxx or OXPULSE_GHCR_TOKEN env.
 	# Flag wins over env. Empty disables (anonymous pull / assume prior docker login).
@@ -240,6 +243,7 @@ args_parse() {
 			--dry-run)          DRY_RUN=1 ;;
 			--bake)             BAKE_MODE=1 ;;
 			--force-keygen|--rotate-identity) FORCE_KEYGEN=1 ;;
+			--clean-sbin)       CLEAN_SBIN=1 ;;
 			-h|--help)          _args_usage ;;
 			*) die "unknown arg: $1 (try --help)" ;;
 		esac

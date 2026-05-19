@@ -238,6 +238,59 @@ _systemd_enable_units() {
 	fi
 }
 
+# Phase 5.7 Item 5: known sbin files for this release.
+# Any file matching oxpulse-* in PREFIX_SBIN that is NOT in this list is a zombie
+# from a prior install version. sbin_cleanup_zombies() warns about them; with
+# CLEAN_SBIN=1 (--clean-sbin flag) it removes them.
+# IMPORTANT: update this list whenever a new sbin script is added or removed.
+EXPECTED_SBIN_FILES=(
+	oxpulse-partner-edge-upgrade
+	oxpulse-partner-edge-hydrate
+	oxpulse-partner-edge-refresh
+	oxpulse-partner-edge-sni-rotate
+	oxpulse-channels-health-report
+	oxpulse-geoip-refresh
+	oxpulse-xray-update.sh
+	ghcr-auth-lib.sh
+	channel-render-lib.sh
+	render-channel-lib.sh
+	oxpulse-token-lib.sh
+)
+
+# Scan PREFIX_SBIN for oxpulse-* files not in EXPECTED_SBIN_FILES.
+# Warns for all zombies; removes them only when CLEAN_SBIN=1.
+sbin_cleanup_zombies() {
+	local _zombies=()
+	local _f _base
+	for _f in "${PREFIX_SBIN}"/oxpulse-*; do
+		[[ -e "$_f" ]] || continue
+		_base="$(basename "$_f")"
+		local _known=0
+		local _e
+		for _e in "${EXPECTED_SBIN_FILES[@]}"; do
+			[[ "$_base" == "$_e" ]] && _known=1 && break
+		done
+		[[ $_known -eq 0 ]] && _zombies+=("$_base")
+	done
+	if [[ ${#_zombies[@]} -eq 0 ]]; then
+		return 0
+	fi
+	warn "  sbin zombie files found (not in expected list for this version):"
+	for _z in "${_zombies[@]}"; do
+		warn "    ${PREFIX_SBIN}/${_z}"
+	done
+	if [[ "${CLEAN_SBIN:-0}" -eq 1 ]]; then
+		warn "  --clean-sbin set: removing zombie files"
+		for _z in "${_zombies[@]}"; do
+			rm -f "${PREFIX_SBIN}/${_z}" 2>/dev/null \
+				|| warn "  could not remove: ${PREFIX_SBIN}/${_z}"
+		done
+	else
+		warn "  Run with --clean-sbin to remove automatically (no data loss risk — these are scripts, not config)."
+	fi
+	unset _zombies _f _base _known _e _z
+}
+
 # Public entry point — orchestrates the full Step 8 systemd install.
 systemd_run() {
 	log "[8/10] installing systemd unit"
@@ -248,6 +301,9 @@ systemd_run() {
 		_systemd_install_cert_watch_units
 		_systemd_install_xray_update_script
 		_systemd_enable_units
+		# Phase 5.7 Item 5: scan for zombie sbin scripts from prior versions.
+		# Requires CLEAN_SBIN (set by --clean-sbin) to actually remove.
+		sbin_cleanup_zombies
 	else
 		warn "  [dry-run] skipping systemd install"
 	fi
