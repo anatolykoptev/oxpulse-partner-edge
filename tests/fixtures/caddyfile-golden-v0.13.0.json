@@ -230,6 +230,9 @@
 																				"Host": [
 																					"oxpulse.chat"
 																				],
+																				"X-Channel-Tag": [
+																					"{http.reverse_proxy.upstream.hostport}"
+																				],
 																				"X-Forwarded-Host": [
 																					"test.example"
 																				],
@@ -286,6 +289,9 @@
 																			"set": {
 																				"Host": [
 																					"oxpulse.chat"
+																				],
+																				"X-Channel-Tag": [
+																					"{http.reverse_proxy.upstream.hostport}"
 																				],
 																				"X-Forwarded-Host": [
 																					"test.example"
@@ -344,6 +350,9 @@
 																				"Host": [
 																					"oxpulse.chat"
 																				],
+																				"X-Channel-Tag": [
+																					"{http.reverse_proxy.upstream.hostport}"
+																				],
 																				"X-Forwarded-Host": [
 																					"test.example"
 																				],
@@ -400,6 +409,9 @@
 																			"set": {
 																				"Host": [
 																					"oxpulse.chat"
+																				],
+																				"X-Channel-Tag": [
+																					"{http.reverse_proxy.upstream.hostport}"
 																				],
 																				"X-Forwarded-Host": [
 																					"test.example"

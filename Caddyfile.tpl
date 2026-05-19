@@ -94,6 +94,10 @@
         header_up X-Forwarded-Proto https
         header_up Host oxpulse.chat
         header_up X-Geo-Country {vars.maxmind_country_code}
+        # Phase 5.8 Task 4: propagate selected upstream as X-Channel-Tag header.
+        # Backend uses this for request attribution; Prometheus uses it as a
+        # label on caddy_reverse_proxy_upstreams_healthy{upstream=...} metrics.
+        header_up X-Channel-Tag {upstream_hostport}
     }
 }
 
@@ -112,6 +116,10 @@
         header_up X-Forwarded-Proto https
         header_up Host oxpulse.chat
         header_up X-Geo-Country {vars.maxmind_country_code}
+        # Phase 5.8 Task 4: propagate selected upstream as X-Channel-Tag header.
+        # Backend uses this for request attribution; Prometheus uses it as a
+        # label on caddy_reverse_proxy_upstreams_healthy{upstream=...} metrics.
+        header_up X-Channel-Tag {upstream_hostport}
     }
 }
 
