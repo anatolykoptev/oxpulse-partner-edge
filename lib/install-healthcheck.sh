@@ -67,6 +67,8 @@ _healthcheck_poll() {
 		fi
 		if (( $(date +%s) > deadline )); then
 			warn "  healthcheck still red after ${HEALTHCHECK_TIMEOUT}s — continuing, inspect with: $hc_script"
+			warn "  SFU containers commonly take 30-60s after first deploy; re-run '$hc_script' manually after 60s"
+			warn "  If your environment is consistently slow, re-install with --healthcheck-timeout=600"
 			break
 		fi
 		sleep 3
