@@ -290,9 +290,6 @@ jobs:
           cp install.sh                partner-edge-installer.sh
           cp upgrade.sh                partner-edge-upgrade.sh
           cp healthcheck.sh            partner-edge-healthcheck.sh
-          # Bug 15 fix: ship uninstall.sh as a release asset so operators can
-          # download and run it directly (e.g. curl | sudo bash uninstall.sh).
-          cp uninstall.sh              uninstall.sh
           # Phase 4.1 + 4.2: install.sh sources lib/install-*.sh modules. Ship
           # them as individual release assets so install.sh's
           # _install_lib_source helper can fetch them from REPO_RAW (its
