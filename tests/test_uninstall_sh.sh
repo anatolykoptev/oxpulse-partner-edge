@@ -256,3 +256,145 @@ FINDSHIM
 	# Step 6 must NOT report backup subtree as residuals
 	[[ "$output" != *"remaining files found"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Bug 16: --keep-backups must back up ALL 9 identity files with correct paths
+# ---------------------------------------------------------------------------
+# The correct set (verified against install.sh):
+#   $PREFIX_ETC/reality.priv        x25519 private key, never regenerated
+#   $PREFIX_ETC/reality.pub         x25519 public key, sent to backend on register
+#   $PREFIX_ETC/reality.uuid        persistent partner UUID
+#   $PREFIX_ETC/awg-private.key     AWG private key (was wrongly PREFIX_LIB before fix)
+#   $PREFIX_ETC/awg-public.key      AWG public key  (was wrongly PREFIX_LIB before fix)
+#   $PREFIX_ETC/token               backend service token
+#   $PREFIX_ETC/node-config.json    node identity config
+#   $PREFIX_LIB/install.env         persisted installer state
+#   $PREFIX_LIB/sfu-keys.env        SFU signing key state
+
+@test "Bug16: --keep-backups backs up reality.priv from PREFIX_ETC" {
+	echo "x25519privkey" > "$FAKE_ETC/reality.priv"
+	BACKUP_ROOT="$TMP/backups"
+	mkdir -p "$BACKUP_ROOT"
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		OXPULSE_BACKUP_ROOT='$BACKUP_ROOT' $(_env_args) bash '$UNINSTALL' --yes --keep-backups
+	"
+	[ "$status" -eq 0 ]
+	bdir=$(ls -d "$BACKUP_ROOT"/oxpulse-backup-* 2>/dev/null | head -1)
+	[ -n "$bdir" ]
+	[ -f "$bdir/reality.priv" ]
+}
+
+@test "Bug16: --keep-backups backs up reality.pub from PREFIX_ETC" {
+	echo "x25519pubkey" > "$FAKE_ETC/reality.pub"
+	BACKUP_ROOT="$TMP/backups"
+	mkdir -p "$BACKUP_ROOT"
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		OXPULSE_BACKUP_ROOT='$BACKUP_ROOT' $(_env_args) bash '$UNINSTALL' --yes --keep-backups
+	"
+	[ "$status" -eq 0 ]
+	bdir=$(ls -d "$BACKUP_ROOT"/oxpulse-backup-* 2>/dev/null | head -1)
+	[ -n "$bdir" ]
+	[ -f "$bdir/reality.pub" ]
+}
+
+@test "Bug16: --keep-backups backs up reality.uuid from PREFIX_ETC" {
+	echo "test-uuid-1234" > "$FAKE_ETC/reality.uuid"
+	BACKUP_ROOT="$TMP/backups"
+	mkdir -p "$BACKUP_ROOT"
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		OXPULSE_BACKUP_ROOT='$BACKUP_ROOT' $(_env_args) bash '$UNINSTALL' --yes --keep-backups
+	"
+	[ "$status" -eq 0 ]
+	bdir=$(ls -d "$BACKUP_ROOT"/oxpulse-backup-* 2>/dev/null | head -1)
+	[ -n "$bdir" ]
+	[ -f "$bdir/reality.uuid" ]
+}
+
+@test "Bug16: --keep-backups backs up awg-private.key from PREFIX_ETC (not PREFIX_LIB)" {
+	echo "awgprivkey" > "$FAKE_ETC/awg-private.key"
+	# Put a decoy in PREFIX_LIB to confirm wrong path is NOT the source
+	echo "wrong-location" > "$FAKE_LIB/awg-private.key"
+	BACKUP_ROOT="$TMP/backups"
+	mkdir -p "$BACKUP_ROOT"
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		OXPULSE_BACKUP_ROOT='$BACKUP_ROOT' $(_env_args) bash '$UNINSTALL' --yes --keep-backups
+	"
+	[ "$status" -eq 0 ]
+	bdir=$(ls -d "$BACKUP_ROOT"/oxpulse-backup-* 2>/dev/null | head -1)
+	[ -n "$bdir" ]
+	[ -f "$bdir/awg-private.key" ]
+	# Content must come from PREFIX_ETC, not PREFIX_LIB decoy
+	grep -q "awgprivkey" "$bdir/awg-private.key"
+}
+
+@test "Bug16: --keep-backups backs up awg-public.key from PREFIX_ETC (not PREFIX_LIB)" {
+	echo "awgpubkey" > "$FAKE_ETC/awg-public.key"
+	echo "wrong-location" > "$FAKE_LIB/awg-public.key"
+	BACKUP_ROOT="$TMP/backups"
+	mkdir -p "$BACKUP_ROOT"
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		OXPULSE_BACKUP_ROOT='$BACKUP_ROOT' $(_env_args) bash '$UNINSTALL' --yes --keep-backups
+	"
+	[ "$status" -eq 0 ]
+	bdir=$(ls -d "$BACKUP_ROOT"/oxpulse-backup-* 2>/dev/null | head -1)
+	[ -n "$bdir" ]
+	[ -f "$bdir/awg-public.key" ]
+	grep -q "awgpubkey" "$bdir/awg-public.key"
+}
+
+@test "Bug16: --keep-backups backs up sfu-keys.env from PREFIX_LIB" {
+	echo "SFUKEY=abc123" > "$FAKE_LIB/sfu-keys.env"
+	BACKUP_ROOT="$TMP/backups"
+	mkdir -p "$BACKUP_ROOT"
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		OXPULSE_BACKUP_ROOT='$BACKUP_ROOT' $(_env_args) bash '$UNINSTALL' --yes --keep-backups
+	"
+	[ "$status" -eq 0 ]
+	bdir=$(ls -d "$BACKUP_ROOT"/oxpulse-backup-* 2>/dev/null | head -1)
+	[ -n "$bdir" ]
+	[ -f "$bdir/sfu-keys.env" ]
+}
+
+@test "Bug16: --keep-backups backs up all 9 identity files in one run" {
+	# Plant all 9 identity files in canonical locations
+	echo "x25519priv"  > "$FAKE_ETC/reality.priv"
+	echo "x25519pub"   > "$FAKE_ETC/reality.pub"
+	echo "uuid-1234"   > "$FAKE_ETC/reality.uuid"
+	echo "awgpriv"     > "$FAKE_ETC/awg-private.key"
+	echo "awgpub"      > "$FAKE_ETC/awg-public.key"
+	echo "token-val"   > "$FAKE_ETC/token"
+	echo '{"nid":"t"}' > "$FAKE_ETC/node-config.json"
+	echo "INSTALL=1"   > "$FAKE_LIB/install.env"
+	echo "SFUKEY=xyz"  > "$FAKE_LIB/sfu-keys.env"
+	# Also plant junk that must NOT appear in backup (explicit whitelist)
+	echo "junk"        > "$FAKE_LIB/not-identity.txt"
+	echo "junk2"       > "$FAKE_ETC/unknown-file.dat"
+	BACKUP_ROOT="$TMP/backups"
+	mkdir -p "$BACKUP_ROOT"
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		OXPULSE_BACKUP_ROOT='$BACKUP_ROOT' $(_env_args) bash '$UNINSTALL' --yes --keep-backups
+	"
+	[ "$status" -eq 0 ]
+	bdir=$(ls -d "$BACKUP_ROOT"/oxpulse-backup-* 2>/dev/null | head -1)
+	[ -n "$bdir" ]
+	# All 9 required files must be present
+	[ -f "$bdir/reality.priv"       ]
+	[ -f "$bdir/reality.pub"        ]
+	[ -f "$bdir/reality.uuid"       ]
+	[ -f "$bdir/awg-private.key"    ]
+	[ -f "$bdir/awg-public.key"     ]
+	[ -f "$bdir/token"              ]
+	[ -f "$bdir/node-config.json"   ]
+	[ -f "$bdir/install.env"        ]
+	[ -f "$bdir/sfu-keys.env"       ]
+	# Junk files must NOT be in backup (explicit whitelist enforced)
+	[ ! -f "$bdir/not-identity.txt" ]
+	[ ! -f "$bdir/unknown-file.dat" ]
+}
