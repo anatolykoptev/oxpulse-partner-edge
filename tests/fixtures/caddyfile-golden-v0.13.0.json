@@ -230,6 +230,9 @@
 																				"Host": [
 																					"oxpulse.chat"
 																				],
+																				"X-Channel-Tag": [
+																					"{http.reverse_proxy.upstream.hostport}"
+																				],
 																				"X-Forwarded-Host": [
 																					"test.example"
 																				],
@@ -261,10 +264,13 @@
 																	},
 																	"upstreams": [
 																		{
-																			"dial": "10.9.0.2:8907"
+																			"dial": "xray-client:3080"
 																		},
 																		{
 																			"dial": "host.docker.internal:18443"
+																		},
+																		{
+																			"dial": "127.0.0.1:{{NAIVE_SOCKS_PORT}}"
 																		}
 																	]
 																}
@@ -287,6 +293,9 @@
 																				"Host": [
 																					"oxpulse.chat"
 																				],
+																				"X-Channel-Tag": [
+																					"{http.reverse_proxy.upstream.hostport}"
+																				],
 																				"X-Forwarded-Host": [
 																					"test.example"
 																				],
@@ -318,10 +327,13 @@
 																	},
 																	"upstreams": [
 																		{
-																			"dial": "10.9.0.2:8907"
+																			"dial": "xray-client:3080"
 																		},
 																		{
 																			"dial": "host.docker.internal:18443"
+																		},
+																		{
+																			"dial": "127.0.0.1:{{NAIVE_SOCKS_PORT}}"
 																		}
 																	]
 																}
@@ -344,6 +356,9 @@
 																				"Host": [
 																					"oxpulse.chat"
 																				],
+																				"X-Channel-Tag": [
+																					"{http.reverse_proxy.upstream.hostport}"
+																				],
 																				"X-Forwarded-Host": [
 																					"test.example"
 																				],
@@ -375,10 +390,13 @@
 																	},
 																	"upstreams": [
 																		{
-																			"dial": "10.9.0.2:8907"
+																			"dial": "xray-client:3080"
 																		},
 																		{
 																			"dial": "host.docker.internal:18443"
+																		},
+																		{
+																			"dial": "127.0.0.1:{{NAIVE_SOCKS_PORT}}"
 																		}
 																	]
 																}
@@ -401,6 +419,9 @@
 																				"Host": [
 																					"oxpulse.chat"
 																				],
+																				"X-Channel-Tag": [
+																					"{http.reverse_proxy.upstream.hostport}"
+																				],
 																				"X-Forwarded-Host": [
 																					"test.example"
 																				],
@@ -432,10 +453,13 @@
 																	},
 																	"upstreams": [
 																		{
-																			"dial": "10.9.0.2:8907"
+																			"dial": "xray-client:3080"
 																		},
 																		{
 																			"dial": "host.docker.internal:18443"
+																		},
+																		{
+																			"dial": "127.0.0.1:{{NAIVE_SOCKS_PORT}}"
 																		}
 																	]
 																}
@@ -642,7 +666,8 @@
 						"h2"
 					]
 				}
-			}
+			},
+			"metrics": {}
 		},
 		"tls": {
 			"automation": {

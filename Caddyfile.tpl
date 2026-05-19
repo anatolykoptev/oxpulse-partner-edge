@@ -38,6 +38,11 @@
     servers {
         # H3/QUIC disabled — ТСПУ entropy heuristic target (R1 Layer 0).
         protocols h1 h2
+        # Phase 5.8: expose Prometheus metrics on localhost:2019/metrics.
+        # Surfaces caddy_reverse_proxy_upstreams_healthy{upstream=...} for the
+        # observability sidecar to scrape (Task 5 wires Telegram alerts off
+        # this metric).
+        metrics
         listener_wrappers {
             layer4 {
                 @turns tls sni {{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}}
@@ -75,7 +80,7 @@
 # A second snippet (tunnel_upstream_default) handles the no-path catch-all SPA
 # fallback where there is no route argument.
 (tunnel_upstream) {
-    reverse_proxy {args[0]} xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} {
+    reverse_proxy {args[0]} xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
         lb_policy first
         lb_try_duration 5s
         lb_try_interval 250ms
@@ -89,11 +94,15 @@
         header_up X-Forwarded-Proto https
         header_up Host oxpulse.chat
         header_up X-Geo-Country {vars.maxmind_country_code}
+        # Phase 5.8 Task 4: propagate selected upstream as X-Channel-Tag header.
+        # Backend uses this for request attribution; Prometheus uses it as a
+        # label on caddy_reverse_proxy_upstreams_healthy{upstream=...} metrics.
+        header_up X-Channel-Tag {upstream_hostport}
     }
 }
 
 (tunnel_upstream_default) {
-    reverse_proxy xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} {
+    reverse_proxy xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
         lb_policy first
         lb_try_duration 5s
         lb_try_interval 250ms
@@ -107,6 +116,10 @@
         header_up X-Forwarded-Proto https
         header_up Host oxpulse.chat
         header_up X-Geo-Country {vars.maxmind_country_code}
+        # Phase 5.8 Task 4: propagate selected upstream as X-Channel-Tag header.
+        # Backend uses this for request attribution; Prometheus uses it as a
+        # label on caddy_reverse_proxy_upstreams_healthy{upstream=...} metrics.
+        header_up X-Channel-Tag {upstream_hostport}
     }
 }
 
