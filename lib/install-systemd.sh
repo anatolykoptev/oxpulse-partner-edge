@@ -77,11 +77,18 @@ _systemd_install_lib_scripts() {
 
 	# Phase 5.5 MAJOR 1: fail-soft render helpers (render_channel_soft, CHANNELS_FAILED,
 	# compose_strip_failed_channels) — sourced by install.sh, hydrate.sh, update.sh, refresh.sh.
+	# Bug 17 fix: install to BOTH PREFIX_SBIN (tier-3) and PREFIX_LIBDIR (tier-2) so that
+	# install.sh's top-of-file resolver finds the file at _rl_installed on staged/operator
+	# installs (where INSTALL_LIB_DIR=/usr/local/lib/partner-edge is pre-populated).
+	install -d -m 0755 "$PREFIX_LIBDIR"
 	if [[ -n "$src_dir" && -f "$src_dir/lib/render-channel-lib.sh" ]]; then
 		install -m 0644 "$src_dir/lib/render-channel-lib.sh" "$PREFIX_SBIN/render-channel-lib.sh"
+		install -m 0644 "$src_dir/lib/render-channel-lib.sh" "$PREFIX_LIBDIR/render-channel-lib.sh"
 	else
 		curl -fsSL "$REPO_RAW/lib/render-channel-lib.sh" -o "$PREFIX_SBIN/render-channel-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/render-channel-lib.sh"
+		curl -fsSL "$REPO_RAW/lib/render-channel-lib.sh" -o "$PREFIX_LIBDIR/render-channel-lib.sh"
+		chmod 0644 "$PREFIX_LIBDIR/render-channel-lib.sh"
 	fi
 
 	# GHCR auth lib (sourced by upgrade.sh)

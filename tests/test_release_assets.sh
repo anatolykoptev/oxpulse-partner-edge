@@ -110,3 +110,24 @@ setup() {
 @test "release.yml uploads install-args.sh to GitHub release" {
   grep -A30 'gh release upload' .github/workflows/release.yml | grep -q 'install-args.sh'
 }
+
+# ---------------------------------------------------------------------------
+# Bug 15: uninstall.sh must be staged, checksummed, and uploaded in release.yml
+# ---------------------------------------------------------------------------
+
+@test "Bug15: release.yml stages uninstall.sh as a release asset" {
+	# Must have a `cp uninstall.sh  uninstall.sh` line in Stage artifacts block
+	grep -qE 'cp[[:space:]]+uninstall\.sh[[:space:]]+uninstall\.sh' .github/workflows/release.yml
+}
+
+@test "Bug15: release.yml SHA256SUMS block covers uninstall.sh" {
+	# sha256sum block must list uninstall.sh
+	grep -q 'uninstall\.sh' .github/workflows/release.yml
+	# Verify it appears specifically in the sha256sum block context
+	awk '/sha256sum/,/> SHA256SUMS/' .github/workflows/release.yml | grep -q 'uninstall\.sh'
+}
+
+@test "Bug15: release.yml uploads uninstall.sh to GitHub release" {
+	# gh release upload block must include uninstall.sh
+	awk '/gh release upload/,/--clobber/' .github/workflows/release.yml | grep -q 'uninstall\.sh'
+}
