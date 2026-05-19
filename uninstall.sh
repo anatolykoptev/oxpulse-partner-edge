@@ -144,18 +144,23 @@ if [[ $OPT_KEEP_BACKUPS -eq 1 ]]; then
 	_actual_backup_dir="${BACKUP_ROOT}/oxpulse-backup-$(date +%s)"
 	log "[4/6] backing up identity files to $_actual_backup_dir"
 	mkdir -p "$_actual_backup_dir"
+	# Bug 16 fix: explicit whitelist of all non-operator-recoverable identity files.
+	# Previous loop had wrong paths for awg keys (PREFIX_LIB instead of PREFIX_ETC)
+	# and was missing reality.priv, reality.pub, reality.uuid, sfu-keys.env.
 	for _f in \
+		"$PREFIX_ETC/reality.priv" \
+		"$PREFIX_ETC/reality.pub" \
+		"$PREFIX_ETC/reality.uuid" \
+		"$PREFIX_ETC/awg-private.key" \
+		"$PREFIX_ETC/awg-public.key" \
 		"$PREFIX_ETC/token" \
 		"$PREFIX_ETC/node-config.json" \
 		"$PREFIX_LIB/install.env" \
-		"$PREFIX_LIB/awg-private.key" \
-		"$PREFIX_LIB/awg-public.key"; do
+		"$PREFIX_LIB/sfu-keys.env"; do
 		if [[ -f "$_f" ]]; then
 			cp -a "$_f" "$_actual_backup_dir/" 2>/dev/null || warn "backup failed: $_f"
 		fi
 	done
-	# Also copy any *.env state files
-	find "$PREFIX_LIB" -maxdepth 1 -name '*.env' -exec cp -a {} "$_actual_backup_dir/" \; 2>/dev/null || true
 	log "  identity files backed up to $_actual_backup_dir"
 	unset _f
 else
