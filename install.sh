@@ -589,18 +589,20 @@ OTEL_EXPORTER_OTLP_ENDPOINT=$(awg_extract "$tmp_cfg" otel_endpoint)
 REGISTER_TURNS_SUBDOMAIN=$(json_get turns_subdomain "$tmp_cfg")
 # CH3/CH5 fallback channel vars — optional; empty if backend does not provision them.
 export HYSTERIA2_SERVER HYSTERIA2_PORT HYSTERIA2_AUTH HYSTERIA2_OBFS
-HYSTERIA2_SERVER=$(json_get hysteria2_server "$tmp_cfg")
-HYSTERIA2_PORT=$(json_get hysteria2_port "$tmp_cfg")
-HYSTERIA2_AUTH=$(json_get hysteria2_auth "$tmp_cfg")
-HYSTERIA2_OBFS=$(json_get hysteria2_obfs "$tmp_cfg")
+[[ -z "${HYSTERIA2_SERVER:-}" ]] && HYSTERIA2_SERVER=$(json_get hysteria2_server "$tmp_cfg")
+[[ -z "${HYSTERIA2_PORT:-}" ]]   && HYSTERIA2_PORT=$(json_get hysteria2_port "$tmp_cfg")
+[[ -z "${HYSTERIA2_AUTH:-}" ]]   && HYSTERIA2_AUTH=$(json_get hysteria2_auth "$tmp_cfg")
+[[ -z "${HYSTERIA2_OBFS:-}" ]]   && HYSTERIA2_OBFS=$(json_get hysteria2_obfs "$tmp_cfg")
 export NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT
-NAIVE_SERVER=$(json_get naive_server "$tmp_cfg")
-NAIVE_PORT=$(json_get naive_port "$tmp_cfg")
-NAIVE_USER=$(json_get naive_user "$tmp_cfg")
-NAIVE_PASS=$(json_get naive_pass "$tmp_cfg")
+# Env vars (e.g. from --naive-server CLI flag or manual testing) take precedence
+# over node-config values. Only fall back to config when env is not set.
+[[ -z "${NAIVE_SERVER:-}" ]] && NAIVE_SERVER=$(json_get naive_server "$tmp_cfg")
+[[ -z "${NAIVE_PORT:-}" ]]   && NAIVE_PORT=$(json_get naive_port "$tmp_cfg")
+[[ -z "${NAIVE_USER:-}" ]]   && NAIVE_USER=$(json_get naive_user "$tmp_cfg")
+[[ -z "${NAIVE_PASS:-}" ]]   && NAIVE_PASS=$(json_get naive_pass "$tmp_cfg")
 # naive-client.json.tpl binds {{NAIVE_SOCKS_PORT}} for the local SOCKS listener.
 # Default 1080 matches naive's built-in default; override via node-config naive_socks_port.
-NAIVE_SOCKS_PORT=$(json_get naive_socks_port "$tmp_cfg")
+[[ -z "${NAIVE_SOCKS_PORT:-}" ]] && NAIVE_SOCKS_PORT=$(json_get naive_socks_port "$tmp_cfg")
 [[ -z "$NAIVE_SOCKS_PORT" ]] && NAIVE_SOCKS_PORT="1080"
 # channels[] — future-proof bypass channel array.
 # Empty if server is older than v0.12 (no channels field yet).
