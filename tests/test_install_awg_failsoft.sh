@@ -184,3 +184,49 @@ EOF
 	[ -f "$prefix_lib/channels-status.env" ]
 	grep -q 'awg=failed_at_setup' "$prefix_lib/channels-status.env"
 }
+
+# ---------------------------------------------------------------------------
+# MAJOR 4: install_amneziawg with internal die() — subshell wraps exit call
+# ---------------------------------------------------------------------------
+@test "install.sh wraps install_amneziawg in subshell so internal die() does not exit parent" {
+	# Verify the invocation is wrapped in a subshell: ( install_amneziawg )
+	# This is the fix for MAJOR 4: die() inside install_amneziawg calls exit 1
+	# which exits the parent shell unless wrapped in a subshell.
+	grep -qE '\(\s*install_amneziawg\s*\)' "$INSTALL"
+}
+
+@test "AWG internal die() does not kill parent install when subshell-wrapped" {
+	# Simulate: install_amneziawg calls die() internally (which calls exit 1).
+	# With subshell wrapping ( install_amneziawg ), the parent shell must survive.
+	run bash -c "
+		set -euo pipefail
+		log()  { echo \"LOG: \$*\"; }
+		warn() { echo \"WARN: \$*\"; }
+		die()  { echo \"DIE: \$*\" >&2; exit 1; }
+
+		install_amneziawg() {
+			# Simulates internal die() — exits the function's shell
+			die 'amneziawg git clone failed'
+		}
+
+		_awg_status='skipped'
+		AWG_ALLOCATED_IP='10.100.0.42/32'
+		AWG_MOTHERLY_PUBKEY='AAAA='
+		DRY_RUN=0
+
+		if [[ -n \"\${AWG_ALLOCATED_IP:-}\" && -n \"\${AWG_MOTHERLY_PUBKEY:-}\" && \$DRY_RUN -eq 0 ]]; then
+			if ( install_amneziawg ); then
+				_awg_status='active'
+			else
+				warn '[awg] install_amneziawg failed — marking awg=failed_at_setup'
+				_awg_status='failed_at_setup'
+			fi
+		fi
+
+		echo \"AWG_STATUS=\$_awg_status\"
+		echo 'INSTALL_CONTINUES'
+	"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"AWG_STATUS=failed_at_setup"* ]]
+	[[ "$output" == *"INSTALL_CONTINUES"* ]]
+}

@@ -206,6 +206,14 @@ fi
 # Restarts a single docker compose service only when its config file hash
 # differs from the last persisted hash. Updates the sha file on success.
 # Consults channels-status.env: skips channels that are not active.
+#
+# MAJOR 6 review-fix note: uses `docker compose restart` (not `up --force-recreate`).
+# This is intentional: the channels_version path re-renders only channel config
+# files (xray-client.json, etc.) — it does NOT re-render docker-compose.yml.
+# The compose service definitions are invariant under channels_version changes;
+# only the mounted config files change. `restart` is therefore correct here.
+# If compose.yml drift is detected via `install.sh --check`, the operator must
+# run a full re-install. This assumption is CI-verified via test_install_sh_check_drift.sh.
 _restart_if_changed() {
     local kind="$1" cfg_file="$2" sha_file="$3" compose_file="$4" container="$5"
 
@@ -228,8 +236,23 @@ _restart_if_changed() {
     if [[ "$_new_sha" != "$_old_sha" ]]; then
         log "  [surgical] channel $kind config changed — restarting $container"
         if docker compose -f "$compose_file" restart "$container" 2>>"$LOG_FILE"; then
-            printf '%s\n' "$_new_sha" > "$sha_file"
-            log "  [surgical] $container restarted OK"
+            # MAJOR 3 review-fix: write sha only after verifying the container
+            # is actually running. If the container is in CrashLoopBackOff /
+            # restarting state, writing the sha would suppress the next refresh
+            # cycle from retrying — leaving the container stuck on stale config.
+            # Allow ~5s for Docker to transition the state post-restart.
+            sleep 5
+            local _state
+            _state=$(docker compose -f "$compose_file" ps "$container" \
+                --format json 2>/dev/null \
+                | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("State","unknown"))' \
+                2>/dev/null || printf 'unknown')
+            if [[ "$_state" == "running" ]]; then
+                printf '%s\n' "$_new_sha" > "$sha_file"
+                log "  [surgical] $container restarted OK"
+            else
+                log "WARNING: [surgical] $container state=$_state after restart — sha not updated, next refresh will retry"
+            fi
         else
             log "WARNING: [surgical] docker restart $container failed — container may use stale config"
         fi

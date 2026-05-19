@@ -204,6 +204,63 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# MAJOR 3: sha write race — sha must NOT be updated when container is not running
+# ---------------------------------------------------------------------------
+@test "refresh.sh surgical restart: sha not updated when container stays non-running after restart" {
+	# MAJOR 3: sha write race fix.
+	# The actual _restart_if_changed in refresh.sh must NOT write sha when
+	# the container reports a non-running state after restart.
+	#
+	# Write config with a different sha (triggers restart)
+	printf 'new-config\n' > "$PREFIX_ETC/xray-client.json"
+	local old_sha="old-sha-value"
+	printf '%s\n' "$old_sha" > "$PREFIX_LIB/xray-config.sha"
+	local compose_file="$PREFIX_ETC/docker-compose.yml"
+	touch "$compose_file"
+
+	# Docker shim: restart succeeds but ps --format json returns State=restarting
+	cat > "$TMP/shims/docker" <<'DOCKSHIM2'
+#!/usr/bin/env bash
+if [[ "$*" == *"restart"* ]]; then
+	exit 0  # restart command succeeds...
+elif [[ "$*" == *"ps"* && "$*" == *"json"* ]]; then
+	# ...but container is still crash-looping
+	echo '{"State":"restarting"}'
+	exit 0
+fi
+exit 0
+DOCKSHIM2
+	chmod +x "$TMP/shims/docker"
+
+	# Source the actual refresh.sh function and invoke it
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		PREFIX_ETC='$PREFIX_ETC'
+		PREFIX_LIB='$PREFIX_LIB'
+		LOG_FILE='/dev/null'
+
+		# Source only the _restart_if_changed function from refresh.sh
+		# We need to extract and test the actual production function.
+		# Extract _restart_if_changed by sourcing with a guard to prevent main body execution.
+		source <(sed -n '/^_restart_if_changed()/,/^}/p' '$REFRESH')
+
+		_restart_if_changed xray \
+			'$PREFIX_ETC/xray-client.json' \
+			'$PREFIX_LIB/xray-config.sha' \
+			'$compose_file' \
+			oxpulse-partner-xray
+
+		echo DONE
+	"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"DONE"* ]]
+	# sha must NOT have been updated because container was still restarting
+	local sha_after
+	sha_after=$(cat "$PREFIX_LIB/xray-config.sha")
+	[ "$sha_after" = "$old_sha" ]
+}
+
+# ---------------------------------------------------------------------------
 # 5. Behavioral: failed channel in channels-status.env → skip restart
 # ---------------------------------------------------------------------------
 @test "refresh.sh surgical restart: skips failed channel" {

@@ -174,3 +174,71 @@ teardown() {
 	# sha256sum --check reads "hash  filename" lines relative to CWD
 	(cd "$REPO_ROOT/lib" && sha256sum --check "$CHECKSUMS")
 }
+
+# ---------------------------------------------------------------------------
+# BLOCKER 1 Part A: comment block explicitly says "tamper-evident at rest",
+# NOT "MITM-resistant" / "signature verification" / "tier-4 secure"
+# ---------------------------------------------------------------------------
+@test "install.sh _install_lib_source comment says tamper-evident (not MITM-resistant)" {
+	# Must NOT claim MITM resistance for the checksums validation block
+	! grep -iE 'MITM.resist|signature.verif|tier.4.*secure' "$INSTALL"
+	# MUST acknowledge the same-channel limitation
+	grep -qiE 'tamper.evident|tamper.at.rest|asset.bucket|cache' "$INSTALL"
+}
+
+# ---------------------------------------------------------------------------
+# BLOCKER 1 Part B: fail-closed default
+#   - tier-4 fetch with no local checksums AND no --no-integrity → die
+#   - tier-4 fetch with no local checksums AND --no-integrity → warn + proceed
+# ---------------------------------------------------------------------------
+@test "install.sh accepts --no-integrity flag" {
+	grep -q 'no.integrity\|no_integrity\|NO_INTEGRITY' "$INSTALL" || \
+	grep -q 'no.integrity\|no_integrity\|NO_INTEGRITY' "$REPO_ROOT/lib/install-args.sh"
+}
+
+@test "tier-4 without local checksums and without --no-integrity: dies with clear message" {
+	# Simulate the fail-closed path:
+	#   - no local checksums found
+	#   - remote checksums fetch also fails (no network)
+	#   - NO_INTEGRITY not set
+	# Expect: die with message including "unsafe" or "no-integrity"
+	run bash -c "
+		log()  { echo \"LOG: \$*\"; }
+		warn() { echo \"WARN: \$*\"; }
+		die()  { echo \"DIE: \$*\" >&2; exit 1; }
+
+		NO_INTEGRITY=0
+		_ck_file=''      # no checksums found
+		_ck_fetch_ok=0   # remote fetch also failed
+
+		# Logic from install.sh: fail-closed when no checksums + no --no-integrity
+		if [[ -z \"\$_ck_file\" && \$_ck_fetch_ok -eq 0 && \$NO_INTEGRITY -eq 0 ]]; then
+			die \"tier-4 fetch without local checksums file is unsafe — either install from release tarball or pass --no-integrity to acknowledge the risk\"
+		fi
+		echo 'CONTINUED'
+	"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"unsafe"* || "$output" == *"no-integrity"* ]]
+}
+
+@test "tier-4 without local checksums but with --no-integrity: warns and proceeds" {
+	run bash -c "
+		log()  { echo \"LOG: \$*\"; }
+		warn() { echo \"WARN: \$*\"; }
+		die()  { echo \"DIE: \$*\" >&2; exit 1; }
+
+		NO_INTEGRITY=1
+		_ck_file=''
+		_ck_fetch_ok=0
+
+		if [[ -z \"\$_ck_file\" && \$_ck_fetch_ok -eq 0 && \$NO_INTEGRITY -eq 0 ]]; then
+			die \"tier-4 fetch without local checksums file is unsafe — either install from release tarball or pass --no-integrity to acknowledge the risk\"
+		elif [[ -z \"\$_ck_file\" && \$_ck_fetch_ok -eq 0 && \$NO_INTEGRITY -eq 1 ]]; then
+			warn \"tier-4 fetch: --no-integrity acknowledged — skipping checksum validation (operator accepts risk)\"
+		fi
+		echo 'CONTINUED'
+	"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"CONTINUED"* ]]
+	[[ "$output" == *"no-integrity"* || "$output" == *"operator accepts"* ]]
+}

@@ -47,6 +47,26 @@ ambient `XRAY_XHTTP_*` env vars; opec reads node-config directly.
 
 ---
 
+## BLOCKER 2 follow-up: lib/install-systemd.sh hardcodes /usr/local/bin for oxpulse-xray-update.sh (2026-05-18)
+
+`lib/install-systemd.sh:_systemd_install_xray_update_script()` installs
+`oxpulse-xray-update.sh` to hardcoded `/usr/local/bin/oxpulse-xray-update.sh`
+instead of `${PREFIX_BIN:-/usr/local/bin}`. This means installations that
+override `PREFIX_BIN` via `OXPULSE_PREFIX_BIN` will leave the file at the
+wrong path.
+
+**Suggested fix:** Change the function to use `${PREFIX_BIN:-/usr/local/bin}`
+as the install destination. Requires `PREFIX_BIN` to be in scope when
+`install-systemd.sh` is sourced (it already is — exported from install.sh).
+
+**Severity:** LOW — `PREFIX_BIN` is only overridden in tests; prod defaults
+to `/usr/local/bin`. Uninstall.sh Phase 5.7 review-fix already handles
+removal of the hardcoded path.
+
+**File:line:** `lib/install-systemd.sh:_systemd_install_xray_update_script()` (~L206-213).
+
+---
+
 ## awg_extract silent failure swallows JSON / python3 errors during install (2026-05-18)
 
 **Severity:** P1 — install completes "successfully" with empty `AWG_*` vars and a dead `awg-quick@awg0` service. No surfacing log; operator sees install OK but the edge is non-functional until they tail journalctl.

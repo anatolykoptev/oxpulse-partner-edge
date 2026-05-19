@@ -262,7 +262,14 @@ EXPECTED_SBIN_FILES=(
 sbin_cleanup_zombies() {
 	local _zombies=()
 	local _f _base
-	for _f in "${PREFIX_SBIN}"/oxpulse-*; do
+	# MAJOR 1 review-fix: expanded glob covers lib scripts (not just oxpulse-* executables).
+	# Prior glob missed stale versions of channel-render-lib.sh, ghcr-auth-lib.sh,
+	# render-channel-lib.sh, oxpulse-token-lib.sh when they were renamed/removed.
+	for _f in \
+		"${PREFIX_SBIN}"/oxpulse-* \
+		"${PREFIX_SBIN}"/*-render-lib.sh \
+		"${PREFIX_SBIN}"/*-auth-lib.sh \
+		"${PREFIX_SBIN}"/*-token-lib.sh; do
 		[[ -e "$_f" ]] || continue
 		_base="$(basename "$_f")"
 		local _known=0

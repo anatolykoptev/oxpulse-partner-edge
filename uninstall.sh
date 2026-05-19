@@ -135,10 +135,15 @@ fi
 rmmod amneziawg 2>/dev/null || true
 
 # ---------- Step 4: Backup identity files if requested ----------
+# MAJOR 5 review-fix: track the actual timestamped backup dir so step 6 can
+# filter it from residuals. Filtering on BACKUP_ROOT alone is wrong when the
+# operator overrides BACKUP_ROOT via env — the actual backup subdir is
+# $BACKUP_ROOT/oxpulse-backup-<epoch> and we must exclude that exact path.
+_actual_backup_dir=""
 if [[ $OPT_KEEP_BACKUPS -eq 1 ]]; then
-	_backup_dir="${BACKUP_ROOT}/oxpulse-backup-$(date +%s)"
-	log "[4/6] backing up identity files to $_backup_dir"
-	mkdir -p "$_backup_dir"
+	_actual_backup_dir="${BACKUP_ROOT}/oxpulse-backup-$(date +%s)"
+	log "[4/6] backing up identity files to $_actual_backup_dir"
+	mkdir -p "$_actual_backup_dir"
 	for _f in \
 		"$PREFIX_ETC/token" \
 		"$PREFIX_ETC/node-config.json" \
@@ -146,13 +151,13 @@ if [[ $OPT_KEEP_BACKUPS -eq 1 ]]; then
 		"$PREFIX_LIB/awg-private.key" \
 		"$PREFIX_LIB/awg-public.key"; do
 		if [[ -f "$_f" ]]; then
-			cp -a "$_f" "$_backup_dir/" 2>/dev/null || warn "backup failed: $_f"
+			cp -a "$_f" "$_actual_backup_dir/" 2>/dev/null || warn "backup failed: $_f"
 		fi
 	done
 	# Also copy any *.env state files
-	find "$PREFIX_LIB" -maxdepth 1 -name '*.env' -exec cp -a {} "$_backup_dir/" \; 2>/dev/null || true
-	log "  identity files backed up to $_backup_dir"
-	unset _backup_dir _f
+	find "$PREFIX_LIB" -maxdepth 1 -name '*.env' -exec cp -a {} "$_actual_backup_dir/" \; 2>/dev/null || true
+	log "  identity files backed up to $_actual_backup_dir"
+	unset _f
 else
 	log "[4/6] skipping backup (--keep-backups not set)"
 fi
@@ -164,9 +169,13 @@ log "[5/6] removing install directories and files"
 rm -rf "$PREFIX_ETC" 2>/dev/null || warn "could not remove $PREFIX_ETC"
 rm -rf "$PREFIX_LIB"  2>/dev/null || warn "could not remove $PREFIX_LIB"
 
-# Binaries
-for _bin in opec partner-cli awg awg-quick; do
+# Binaries (known list + oxpulse-* glob for future additions)
+for _bin in opec partner-cli awg awg-quick oxpulse-xray-update.sh; do
 	rm -f "$PREFIX_BIN/$_bin" 2>/dev/null || true
+done
+# Sweep any remaining oxpulse-* binaries installed to PREFIX_BIN
+for _bin in "$PREFIX_BIN"/oxpulse-*; do
+	[[ -e "$_bin" ]] && rm -f "$_bin" 2>/dev/null || true
 done
 unset _bin
 
@@ -209,8 +218,13 @@ systemctl daemon-reload 2>/dev/null || warn "systemctl daemon-reload failed"
 
 # ---------- Step 6: Final verification ----------
 log "[6/6] verifying removal — scanning for remaining files"
+# Filter out: the actual timestamped backup dir (not just BACKUP_ROOT) so backup
+# files don't show up as residuals. When --keep-backups is not set, _actual_backup_dir
+# is empty and the grep -v is effectively a no-op.
 _residuals=$(find /etc /var /usr \( -name 'oxpulse*' -o -name 'awg-quick*' \) \
-	2>/dev/null | grep -v '/proc' | grep -v "$BACKUP_ROOT" || true)
+	2>/dev/null | grep -v '/proc' \
+	| grep -v "${_actual_backup_dir:-__no_backup__}" \
+	| grep -v "^${BACKUP_ROOT}/" || true)
 if [[ -n "$_residuals" ]]; then
 	warn "remaining files found after uninstall:"
 	printf '%s\n' "$_residuals" >&2
@@ -218,6 +232,6 @@ if [[ -n "$_residuals" ]]; then
 else
 	log "  no remaining oxpulse or awg-quick files found"
 fi
-unset _residuals
+unset _residuals _actual_backup_dir
 
 log "uninstall complete"

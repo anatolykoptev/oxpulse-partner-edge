@@ -207,3 +207,52 @@ _env_args() {
 	# Best-effort: must still exit 0
 	[ "$status" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# BLOCKER 2: oxpulse-xray-update.sh is in PREFIX_BIN and must be removed
+# ---------------------------------------------------------------------------
+@test "uninstall.sh --yes removes oxpulse-xray-update.sh from PREFIX_BIN" {
+	# Plant the file that install-systemd.sh writes to /usr/local/bin/
+	touch "$FAKE_BIN/oxpulse-xray-update.sh"
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	[ ! -f "$FAKE_BIN/oxpulse-xray-update.sh" ]
+}
+
+# ---------------------------------------------------------------------------
+# MAJOR 5: residual filter uses _backup_dir (timestamped path), not BACKUP_ROOT
+# ---------------------------------------------------------------------------
+@test "uninstall.sh --yes --keep-backups filter excludes backup dir not just BACKUP_ROOT" {
+	# MAJOR 5: residual filter must exclude the BACKUP_ROOT subtree so backup
+	# files don't appear as residuals. Test that step 6 does NOT emit
+	# "remaining files found" when the only find result is inside BACKUP_ROOT.
+	BACKUP_ROOT="$TMP/backups"
+	mkdir -p "$BACKUP_ROOT"
+
+	# Override find to return a fake file under BACKUP_ROOT subtree ONLY.
+	# The find shim is only invoked in step 6 (the residual scan), so we can
+	# use it to inject a controlled residual.
+	# Note: find is also called in step 4 (backup *.env). Make the shim
+	# context-aware by checking arguments.
+	cat > "$TMP/shims/find" <<FINDSHIM
+#!/usr/bin/env bash
+# Emit fake residual only when called with /etc /var /usr (step 6 scan),
+# not when called with PREFIX_LIB (step 4 backup)
+if [[ "\$*" == *"/etc"* || "\$*" == *"/var"* || "\$*" == *"/usr"* ]]; then
+    echo "$BACKUP_ROOT/oxpulse-backup-9999999/oxpulse-fake-residual"
+fi
+exit 0
+FINDSHIM
+	chmod +x "$TMP/shims/find"
+
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		OXPULSE_BACKUP_ROOT='$BACKUP_ROOT' $(_env_args) bash '$UNINSTALL' --yes --keep-backups
+	"
+	[ "$status" -eq 0 ]
+	# Step 6 must NOT report backup subtree as residuals
+	[[ "$output" != *"remaining files found"* ]]
+}

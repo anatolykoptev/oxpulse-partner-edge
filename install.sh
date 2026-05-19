@@ -97,13 +97,27 @@ _install_lib_source() {
 	trap 'rm -f "${tmp:-}"' RETURN
 	if curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
 		"${REPO_RAW}/lib/$name" -o "$tmp"; then
-		# Phase 5.7 Item 3: integrity check against lib-checksums.txt.
+		# Phase 5.7 Item 3: tamper-evident integrity check against lib-checksums.txt.
+		#
+		# What this provides: tamper-evident at rest — catches corruption in the
+		# operator's local asset-bucket cache (tier-1/2/3 paths) and accidental
+		# bit-rot. When both the lib and lib-checksums.txt are fetched from the same
+		# REPO_RAW origin (tier-4 curl path), a channel-level MITM can substitute
+		# both files simultaneously, so the checksum alone does NOT provide
+		# MITM-resistance during download. Use a release tarball (tier-1/2/3) for
+		# a stronger trust anchor.
+		#
 		# Lookup order for checksums file:
 		#   1. $(dirname "$0")/lib/lib-checksums.txt  (local checkout / staged operator dir)
 		#   2. /usr/local/lib/partner-edge/lib-checksums.txt  (deployed release tarball)
 		#   3. Fetch from REPO_RAW/lib/lib-checksums.txt alongside the module
-		# If unavailable → warn + continue (legacy fallback for pre-5.7 installs).
-		# If available and hash mismatches → die immediately (MITM / branch poison).
+		#
+		# Fail-closed: if no checksums file found (local or remote) AND --no-integrity
+		# was NOT passed, die with a clear message. Operators who run curl|bash from
+		# an untrusted or restricted environment must pass --no-integrity to acknowledge
+		# the risk explicitly.
+		#
+		# If available and hash mismatches → die immediately (tamper detected).
 		local _ck_file=""
 		local _ck_src_local="${BASH_SOURCE[0]:-}"
 		local _ck_src_dir=""
@@ -121,12 +135,19 @@ _install_lib_source() {
 			local _ck_remote_tmp
 			_ck_remote_tmp=$(mktemp)
 			trap 'rm -f "${tmp:-}" "${_ck_remote_tmp:-}"' RETURN
+			local _ck_fetch_ok=0
 			if curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
 				"${REPO_RAW}/lib/lib-checksums.txt" -o "$_ck_remote_tmp" 2>/dev/null; then
 				_ck_file="$_ck_remote_tmp"
-			else
-				warn "_install_lib_source: lib-checksums.txt not found — skipping integrity check (legacy install)"
+				_ck_fetch_ok=1
 			fi
+			# Fail-closed: no checksums available anywhere + --no-integrity not set → die.
+			if [[ -z "$_ck_file" && "${NO_INTEGRITY:-0}" -eq 0 ]]; then
+				die "tier-4 fetch without local checksums file is unsafe — either install from release tarball or pass --no-integrity to acknowledge the risk"
+			elif [[ -z "$_ck_file" && "${NO_INTEGRITY:-0}" -eq 1 ]]; then
+				warn "_install_lib_source: --no-integrity acknowledged — skipping checksum validation for $name (operator accepts risk)"
+			fi
+			unset _ck_fetch_ok
 		fi
 		if [[ -n "$_ck_file" && -f "$_ck_file" ]]; then
 			local _actual_hash _expected_hash
@@ -932,13 +953,19 @@ render_with_opec coturn  "$stage/coturn.tpl"  "$coturn_out"
 # from the register response, brings up awg-quick@awg0, verifies handshake.
 #
 # Phase 5.7 Item 2: AWG is an optional mesh channel — failure is fail-soft.
-# install_amneziawg internals still die() on hard errors; only the outer
-# invocation gets soft wrapping so a build failure does NOT abort the install.
+# MAJOR 4 review-fix: install_amneziawg contains die() calls that invoke exit 1
+# directly. An `if install_amneziawg; then` guard catches non-zero returns but
+# NOT bare exit calls — die() in the same shell process exits the parent install.
+# Wrapping in a subshell ( install_amneziawg ) isolates the exit so the outer
+# shell continues and can mark awg=failed_at_setup.
+# Side-effect: the PATH export inside install_amneziawg is not visible to the
+# parent after the subshell exits, but configure_amneziawg only needs the awg
+# binaries which are installed on disk, not the Go toolchain PATH.
 # Status is written to channels-status.env below (awg=active|failed_at_setup|skipped).
 _awg_status="skipped"
 if [[ -n "${AWG_ALLOCATED_IP:-}" && -n "${AWG_MOTHERLY_PUBKEY:-}" && $DRY_RUN -eq 0 ]]; then
 	log "[awg] central allocated $AWG_ALLOCATED_IP edge_id=$SFU_EDGE_ID — bringing up awg0"
-	if install_amneziawg; then
+	if ( install_amneziawg ); then
 		configure_amneziawg
 		_awg_status="active"
 	else

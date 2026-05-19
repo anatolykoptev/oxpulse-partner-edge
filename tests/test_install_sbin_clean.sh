@@ -102,3 +102,59 @@ teardown() {
 	grep -qE 'ghcr-auth-lib\.sh|ghcr.auth' "$INSTALL_SYSTEMD"
 	grep -qE 'channel-render-lib\.sh|render.channel' "$INSTALL_SYSTEMD"
 }
+
+# ---------------------------------------------------------------------------
+# MAJOR 1: zombie glob covers *-render-lib.sh, *-auth-lib.sh, *-token-lib.sh
+# ---------------------------------------------------------------------------
+@test "sbin_cleanup_zombies glob covers *-render-lib.sh pattern (not just oxpulse-*)" {
+	# MAJOR 1: the zombie glob must detect stale *-render-lib.sh files
+	# not in EXPECTED_SBIN_FILES, not just oxpulse-* files.
+	local fake_sbin="$TMP/sbin_major1"
+	mkdir -p "$fake_sbin"
+	# Plant a stale render-lib variant (e.g. old-channel-render-lib.sh from prior version)
+	# This should be caught by an expanded glob like *-render-lib.sh
+	touch "$fake_sbin/old-channel-render-lib.sh"
+	touch "$fake_sbin/channel-render-lib.sh"  # expected — must NOT be removed
+
+	run bash -c "
+		source '$INSTALL_SYSTEMD'
+		log()  { echo \"LOG: \$*\"; }
+		warn() { echo \"WARN: \$*\"; }
+		die()  { echo \"DIE: \$*\" >&2; exit 1; }
+		PREFIX_SBIN='$fake_sbin'
+		CLEAN_SBIN=1
+		sbin_cleanup_zombies 2>&1 || true
+		echo DONE
+	"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"DONE"* ]]
+	# Expected file must remain
+	[ -f "$fake_sbin/channel-render-lib.sh" ]
+	# Zombie must be removed
+	[ ! -f "$fake_sbin/old-channel-render-lib.sh" ]
+}
+
+@test "sbin_cleanup_zombies glob covers *-auth-lib.sh pattern (not just oxpulse-*)" {
+	local fake_sbin="$TMP/sbin_major1b"
+	mkdir -p "$fake_sbin"
+	# Plant a stale *-auth-lib.sh zombie (old name from prior version)
+	touch "$fake_sbin/old-ghcr-auth-lib.sh"
+	touch "$fake_sbin/ghcr-auth-lib.sh"  # expected — must NOT be removed
+
+	run bash -c "
+		source '$INSTALL_SYSTEMD'
+		log()  { echo \"LOG: \$*\"; }
+		warn() { echo \"WARN: \$*\"; }
+		die()  { echo \"DIE: \$*\" >&2; exit 1; }
+		PREFIX_SBIN='$fake_sbin'
+		CLEAN_SBIN=1
+		sbin_cleanup_zombies 2>&1 || true
+		echo DONE
+	"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"DONE"* ]]
+	# Expected file must remain
+	[ -f "$fake_sbin/ghcr-auth-lib.sh" ]
+	# Zombie must be removed
+	[ ! -f "$fake_sbin/old-ghcr-auth-lib.sh" ]
+}
