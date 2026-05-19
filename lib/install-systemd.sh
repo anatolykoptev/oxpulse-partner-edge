@@ -121,6 +121,21 @@ _systemd_install_lib_scripts() {
 		chmod 0644 "$PREFIX_SBIN/oxpulse-token-lib.sh"
 	fi
 
+	# Phase 5.8 Task 6: telegram-alert-lib.sh — shared rate-limited Telegram
+	# alert primitive (used by oxpulse-channels-health-report.sh transition
+	# detector + future per-channel watchdogs).
+	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/telegram-alert-lib.sh" ]]; then
+		install -m 0755 "$src_dir/lib/telegram-alert-lib.sh" "$PREFIX_SBIN/telegram-alert-lib.sh"
+	elif [[ -n "${src_dir:-}" && -f "$src_dir/telegram-alert-lib.sh" ]]; then
+		install -m 0755 "$src_dir/telegram-alert-lib.sh" "$PREFIX_SBIN/telegram-alert-lib.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/telegram-alert-lib.sh" ]]; then
+		install -m 0755 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/telegram-alert-lib.sh" \
+			"$PREFIX_SBIN/telegram-alert-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/lib/telegram-alert-lib.sh" -o "$PREFIX_SBIN/telegram-alert-lib.sh"
+		chmod 0755 "$PREFIX_SBIN/telegram-alert-lib.sh"
+	fi
+
 	# Fleet-wide infrastructure defaults (Bug 8 fix — install to canonical share path).
 	# channel-render-lib.sh and oxpulse-channels-health-report.sh both source this file
 	# from /usr/local/share/oxpulse-partner-edge/config/defaults.conf at runtime.
