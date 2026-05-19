@@ -80,10 +80,23 @@ _systemd_install_lib_scripts() {
 	# Bug 17 fix: install to BOTH PREFIX_SBIN (tier-3) and PREFIX_LIBDIR (tier-2) so that
 	# install.sh's top-of-file resolver finds the file at _rl_installed on staged/operator
 	# installs (where INSTALL_LIB_DIR=/usr/local/lib/partner-edge is pre-populated).
+	# Bug 19 fix: triple-fallback for the source path so release-asset flat layout works:
+	#   1. $src_dir/lib/render-channel-lib.sh   (git-clone / dev layout)
+	#   2. $src_dir/render-channel-lib.sh       (release-asset flat layout — curl|bash)
+	#   3. ${INSTALL_LIB_DIR}/render-channel-lib.sh (operator-staged ahead of install)
+	#   else: curl from REPO_RAW
 	install -d -m 0755 "$PREFIX_LIBDIR"
+	_rcl_src=""
 	if [[ -n "$src_dir" && -f "$src_dir/lib/render-channel-lib.sh" ]]; then
-		install -m 0644 "$src_dir/lib/render-channel-lib.sh" "$PREFIX_SBIN/render-channel-lib.sh"
-		install -m 0644 "$src_dir/lib/render-channel-lib.sh" "$PREFIX_LIBDIR/render-channel-lib.sh"
+		_rcl_src="$src_dir/lib/render-channel-lib.sh"
+	elif [[ -n "$src_dir" && -f "$src_dir/render-channel-lib.sh" ]]; then
+		_rcl_src="$src_dir/render-channel-lib.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/render-channel-lib.sh" ]]; then
+		_rcl_src="${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/render-channel-lib.sh"
+	fi
+	if [[ -n "$_rcl_src" ]]; then
+		install -m 0644 "$_rcl_src" "$PREFIX_SBIN/render-channel-lib.sh"
+		install -m 0644 "$_rcl_src" "$PREFIX_LIBDIR/render-channel-lib.sh"
 	else
 		curl -fsSL "$REPO_RAW/lib/render-channel-lib.sh" -o "$PREFIX_SBIN/render-channel-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/render-channel-lib.sh"
