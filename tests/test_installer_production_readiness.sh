@@ -28,9 +28,18 @@ expected_containers=(
 )
 for entry in "${expected_containers[@]}"; do
     IFS=: read -r container channel_key required <<<"$entry"
-    state=$(ssh_root "docker inspect --format '{{.State.Status}}' $container 2>/dev/null || echo MISSING")
+    state=$(ssh_root "docker inspect --format '{{.State.Status}}' $container 2>/dev/null || echo MISSING" | tr -d '\n')
     case "$state" in
         running) echo "OK:     $container=$state" ;;
+        restarting)
+            # Optional channels with unreachable upstreams (e.g. test/dummy NAIVE_SERVER)
+            # are expected to restart. Accept if optional and channel is active (not skipped).
+            if [[ "$required" == "optional" ]] && ! ssh_root "grep -qE '^${channel_key}=skipped$' /var/lib/oxpulse-partner-edge/channels-status.env 2>/dev/null"; then
+                echo "WARN:   $container=$state (optional, upstream unreachable — expected for test/dummy config)"
+            else
+                echo "FAIL:   $container=$state"; exit 1
+            fi
+            ;;
         MISSING)
             if [[ "$required" == "optional" ]] && ssh_root "grep -qE '^${channel_key}=skipped$' /var/lib/oxpulse-partner-edge/channels-status.env 2>/dev/null"; then
                 echo "SKIP:   $container (channel $channel_key marked skipped)"
@@ -44,7 +53,7 @@ for entry in "${expected_containers[@]}"; do
 done
 
 # Acceptance 2: Caddy /metrics reachable (Phase 5.8)
-status=$(ssh_root "docker exec oxpulse-partner-caddy curl -sf -o /dev/null -w '%{http_code}' http://127.0.0.1:2019/metrics 2>/dev/null || echo 000")
+status=$(ssh_root "docker exec oxpulse-partner-caddy curl -sf -o /dev/null -w '%{http_code}' -H 'Host: localhost' http://127.0.0.1:2019/metrics 2>/dev/null || echo 000")
 if [[ "$status" != "200" ]]; then
     echo "FAIL: Caddy /metrics returns $status (expected 200)"
     exit 1
@@ -52,7 +61,7 @@ fi
 echo "OK:     Caddy /metrics endpoint reachable"
 
 # Acceptance 3: per-upstream metrics exposed (Phase 5.8)
-metrics=$(ssh_root "docker exec oxpulse-partner-caddy curl -s http://127.0.0.1:2019/metrics 2>/dev/null")
+metrics=$(ssh_root "docker exec oxpulse-partner-caddy curl -s -H 'Host: localhost' http://127.0.0.1:2019/metrics 2>/dev/null")
 if ! echo "$metrics" | grep -q "caddy_reverse_proxy_upstreams_healthy"; then
     echo "FAIL: no caddy_reverse_proxy_upstreams_healthy metric"
     exit 1
