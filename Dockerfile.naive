@@ -25,7 +25,12 @@ RUN apk add --no-cache curl xz tar ca-certificates \
     && cp "$naive_bin" /opt/naive/naive \
     && chmod +x /opt/naive/naive \
     && rm -rf /tmp/naive.tar.xz /tmp/naive-extract \
-    && /opt/naive/naive --version
+    && file /opt/naive/naive 2>/dev/null || ls -la /opt/naive/naive
+# Note: don't run `/opt/naive/naive --version` here — naive is a glibc binary
+# but the alpine fetcher stage has musl, so the dynamic linker mismatch causes
+# `not found` exit 127 even when the binary is correctly placed. The final
+# distroless cc-debian12 stage is glibc, so the binary executes there.
+# Runtime smoke validation happens via partner-edge healthcheck.
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=fetcher /opt/naive/naive /usr/local/bin/naive
