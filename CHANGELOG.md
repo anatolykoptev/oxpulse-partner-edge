@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.40](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.39...partner-edge-v0.12.40) (2026-05-19)
+
+
+### Features
+
+* Phase 5.7 — installer hardening (uninstall + AWG fail-soft + integrity + surgical refresh) ([#190](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/190)) ([b5dd2c8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/b5dd2c8fd76b3529329faf7dc66bcb8aefa47016))
+
 ## [0.12.39](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.38...partner-edge-v0.12.39) (2026-05-18)
 
 
