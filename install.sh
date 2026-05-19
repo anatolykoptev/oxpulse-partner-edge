@@ -21,6 +21,10 @@ set -euo pipefail
 PREFIX_ETC="${OXPULSE_PREFIX_ETC:-/etc/oxpulse-partner-edge}"
 PREFIX_LIB="${OXPULSE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
 PREFIX_SBIN=/usr/local/sbin
+# Bug 20: PREFIX_LIBDIR must be declared before lib/install-systemd.sh is
+# sourced — that module references $PREFIX_LIBDIR and runs under set -u.
+# shellcheck disable=SC2034  # consumed by lib/install-systemd.sh
+PREFIX_LIBDIR="${OXPULSE_PREFIX_LIBDIR:-/usr/local/lib/partner-edge}"
 # shellcheck disable=SC2034  # consumed by systemd_install() in lib/install-systemd.sh
 SYSTEMD_DIR=/etc/systemd/system
 # shellcheck disable=SC2034  # REGISTRY referenced by templates via IMAGE_VERSION, kept for override env surface
