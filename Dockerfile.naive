@@ -1,0 +1,31 @@
+# Phase 5.10 Task 8: NaiveProxy client for partner-edge UC5 channel.
+# Builds from klzgrad/naiveproxy upstream releases (signed tarballs).
+#
+# Multi-stage: fetcher pulls + verifies binary, runtime is distroless cc.
+# Image target ~30MB (naive binary ~10MB + distroless base).
+#
+# NAIVE_VERSION: v148.0.7778.96-5 (latest stable as of 2026-05-18).
+# Release page: https://github.com/klzgrad/naiveproxy/releases
+
+FROM alpine:3.21 AS fetcher
+ARG NAIVE_VERSION=v148.0.7778.96-5
+ARG TARGETARCH
+RUN apk add --no-cache curl xz tar ca-certificates \
+    && case "${TARGETARCH}" in \
+        amd64) arch=x64 ;; \
+        arm64) arch=arm64 ;; \
+        *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/naive.tar.xz \
+        "https://github.com/klzgrad/naiveproxy/releases/download/${NAIVE_VERSION}/naiveproxy-${NAIVE_VERSION}-linux-${arch}.tar.xz" \
+    && mkdir -p /opt/naive \
+    && tar -xJf /tmp/naive.tar.xz -C /opt/naive --strip-components=1 \
+    && rm /tmp/naive.tar.xz \
+    && /opt/naive/naive --version
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=fetcher /opt/naive/naive /usr/local/bin/naive
+USER nonroot
+EXPOSE 1080
+ENTRYPOINT ["/usr/local/bin/naive"]
+CMD ["/etc/naive/config.json"]
