@@ -62,7 +62,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          for c in sfu coturn caddy xray; do
+          for c in sfu coturn caddy xray naive; do
             ref="${REGISTRY}/${OWNER}/partner-edge-${c}:v${VERSION}"
             echo ">> inspecting $ref"
             docker buildx imagetools inspect "$ref" >/dev/null
@@ -73,7 +73,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          for c in sfu coturn caddy xray; do
+          for c in sfu coturn caddy xray naive; do
             src="${REGISTRY}/${OWNER}/partner-edge-${c}:v${VERSION}"
             dst="${REGISTRY}/${OWNER}/partner-edge-${c}:stable"
             echo ">> $src -> $dst"
@@ -97,5 +97,5 @@ jobs:
             echo "| motherly (krolik) | Mon 03:00 +30min |"
             echo "| piter | Tue 03:33 +2h |"
             echo ""
-            echo "Components retagged: sfu, coturn, caddy, xray"
+            echo "Components retagged: sfu, coturn, caddy, xray, naive"
           } >> "$GITHUB_STEP_SUMMARY"
