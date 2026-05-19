@@ -642,7 +642,8 @@
 						"h2"
 					]
 				}
-			}
+			},
+			"metrics": {}
 		},
 		"tls": {
 			"automation": {

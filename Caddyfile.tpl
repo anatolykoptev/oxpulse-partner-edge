@@ -38,6 +38,11 @@
     servers {
         # H3/QUIC disabled — ТСПУ entropy heuristic target (R1 Layer 0).
         protocols h1 h2
+        # Phase 5.8: expose Prometheus metrics on localhost:2019/metrics.
+        # Surfaces caddy_reverse_proxy_upstreams_healthy{upstream=...} for the
+        # observability sidecar to scrape (Task 5 wires Telegram alerts off
+        # this metric).
+        metrics
         listener_wrappers {
             layer4 {
                 @turns tls sni {{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}}
