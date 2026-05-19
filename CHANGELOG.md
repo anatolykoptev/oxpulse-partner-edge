@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.42](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.41...partner-edge-v0.12.42) (2026-05-19)
+
+
+### Bug Fixes
+
+* **release:** remove same-file cp uninstall.sh that broke v0.12.41 build ([#197](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/197)) ([0bb0cd1](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0bb0cd1105fe53650c5f6e530ce748c30cde88db))
+
 ## [0.12.40](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.39...partner-edge-v0.12.40) (2026-05-19)
 
 
