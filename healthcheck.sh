@@ -334,7 +334,9 @@ else
 		_ch_total=$((_ch_total + 1))
 		case "$_ch_status" in
 			active)            _ch_active_count=$((_ch_active_count + 1)) ;;
-			failed_at_render|failed_at_start) _ch_failed_count=$((_ch_failed_count + 1)) ;;
+			# failed_at_setup: Phase 5.7 AWG fail-soft — setup failed but install continued.
+			# Treated as degraded (counts toward failed) but not a schema-drift unknown.
+			failed_at_render|failed_at_start|failed_at_setup) _ch_failed_count=$((_ch_failed_count + 1)) ;;
 			skipped)           ;;  # not attempted — does not count toward failure
 			# MAJOR 4 fix: unknown/typo status (e.g. 'actived', 'provisioning') counts
 			# as failure rather than silently passing.  Schema drift → false-green prevented.

@@ -24,7 +24,7 @@
 #   BRAND_CTA_URL_RU, BRAND_CTA_URL_EN, BRAND_CTA_URL_ZH, BRAND_CTA_URL_FA,
 #   BRAND_CTA_TEXT_RU, BRAND_CTA_TEXT_EN, BRAND_CTA_TEXT_ZH, BRAND_CTA_TEXT_FA,
 #   BRAND_LEGAL_ENTITY, BRAND_LEGAL_COUNTRY, BRAND_LEGAL_CONTACT,
-#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN
+#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN, CLEAN_SBIN
 
 _args_usage() {
 	sed -n '2,18p' "$0" >&2
@@ -75,6 +75,9 @@ assembles a minimal BrandingConfig payload from whichever flags are set):
   --brand-legal-entity=<text>      Legal entity name
   --brand-legal-country=<code>     ISO 3166 alpha-2 country code
   --brand-legal-contact=<email>    Legal contact email
+  --no-integrity             Skip tier-4 lib checksum validation when no local lib-checksums.txt is available.
+                             Use when installing from a private fork or airgapped environment without a release tarball.
+                             Implies you accept the risk that fetched libs cannot be verified.
   --check                    Re-render templates to /tmp, diff vs installed files. Exit 0=clean, 1=Caddyfile drift, 2=compose drift.
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
@@ -187,6 +190,15 @@ args_parse() {
 	# or --rotate-identity to override — this is the slice 3 contract for
 	# operator-initiated rotation. Requires explicit invocation; never auto-triggered.
 	FORCE_KEYGEN=0
+	# Phase 5.7 Item 5: when 1, remove stale sbin scripts not in EXPECTED_SBIN_FILES.
+	# Off by default — no surprise data-loss. Set to 1 via --clean-sbin.
+	CLEAN_SBIN=0
+	# BLOCKER 1 review-fix: tier-4 lib fetch fails closed when no local checksums
+	# file is available AND the remote checksums fetch also fails.
+	# Pass --no-integrity to explicitly acknowledge the risk and allow installation
+	# without checksum validation (e.g. from a private fork or airgapped network).
+	# Default 0 = fail-closed. Set to 1 via --no-integrity.
+	NO_INTEGRITY=0
 
 	# GHCR PAT supplied via --ghcr-token=ghp_xxx or OXPULSE_GHCR_TOKEN env.
 	# Flag wins over env. Empty disables (anonymous pull / assume prior docker login).
@@ -240,6 +252,8 @@ args_parse() {
 			--dry-run)          DRY_RUN=1 ;;
 			--bake)             BAKE_MODE=1 ;;
 			--force-keygen|--rotate-identity) FORCE_KEYGEN=1 ;;
+			--clean-sbin)       CLEAN_SBIN=1 ;;
+			--no-integrity)     NO_INTEGRITY=1 ;;
 			-h|--help)          _args_usage ;;
 			*) die "unknown arg: $1 (try --help)" ;;
 		esac
