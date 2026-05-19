@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: Format + Clippy
@@ -46,6 +50,7 @@ jobs:
   installer-bash-tests:
     name: Installer bash tests
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     env:
       # Tests use REPO_ROOT to locate install.sh / upgrade.sh / templates.
       # Without this, tests fall back to the developer's local path and fail.
@@ -89,10 +94,17 @@ jobs:
             test_install_ships_cover.sh test_install_wires_cert_watch.sh \
             test_sfu_compose.sh test_update_sh.sh test_upgrade_v01_to_v02.sh \
             test_xray_template_fingerprint.sh"
+          # Guard: every SKIP_LIST entry must exist; stale entries fail the job.
+          for entry in $SKIP_LIST; do
+            if [ ! -f "tests/$entry" ]; then
+              echo "ERROR: SKIP_LIST entry 'tests/$entry' does not exist — remove stale exclusion" >&2
+              exit 1
+            fi
+          done
           for f in tests/test_*.sh; do
             name=$(basename "$f")
             # Skip bats-format files (handled in next step)
-            if head -1 "$f" | grep -q 'bats'; then continue; fi
+            if head -1 "$f" | grep -qE '^#!.*\bbats\b'; then continue; fi
             # Skip excluded tests
             if echo "$SKIP_LIST" | grep -qw "$name"; then
               echo "SKIP (excluded): $name"; continue
@@ -115,7 +127,7 @@ jobs:
           set +e
           PASS=0; FAIL=0
           for f in tests/test_*.sh; do
-            head -1 "$f" | grep -q 'bats' || continue
+            head -1 "$f" | grep -qE '^#!.*\bbats\b' || continue
             echo "--- $(basename "$f") ---"
             if bats "$f"; then
               PASS=$((PASS+1))
