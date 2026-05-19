@@ -44,7 +44,7 @@ for entry in "${expected_containers[@]}"; do
 done
 
 # Acceptance 2: Caddy /metrics reachable (Phase 5.8)
-status=$(ssh_root "docker exec oxpulse-partner-caddy curl -sf -o /dev/null -w '%{http_code}' http://127.0.0.1:2019/metrics 2>/dev/null || echo 000")
+status=$(ssh_root "docker exec oxpulse-partner-caddy curl -sf -o /dev/null -w '%{http_code}' http://localhost:2019/metrics 2>/dev/null || echo 000")
 if [[ "$status" != "200" ]]; then
     echo "FAIL: Caddy /metrics returns $status (expected 200)"
     exit 1
@@ -52,7 +52,7 @@ fi
 echo "OK:     Caddy /metrics endpoint reachable"
 
 # Acceptance 3: per-upstream metrics exposed (Phase 5.8)
-metrics=$(ssh_root "docker exec oxpulse-partner-caddy curl -s http://127.0.0.1:2019/metrics 2>/dev/null")
+metrics=$(ssh_root "docker exec oxpulse-partner-caddy curl -s http://localhost:2019/metrics 2>/dev/null")
 if ! echo "$metrics" | grep -q "caddy_reverse_proxy_upstreams_healthy"; then
     echo "FAIL: no caddy_reverse_proxy_upstreams_healthy metric"
     exit 1
