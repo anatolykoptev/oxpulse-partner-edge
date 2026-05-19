@@ -186,9 +186,27 @@ services:
       oxpulse.channel: "hy2"
       oxpulse.phase: "1.7"
 
-  # CH5 NaiveProxy client: deferred — klzgrad/naiveproxy is not published as a
-  # Docker image. CH5 will be re-added once the edge-side wiring lands (see
-  # plans/2026-05-16-multi-channel-partner-edge.md §Phase 2).
+  # ── CH5 NaiveProxy client ───────────────────────────────────────────────────
+  # HTTP/2 CONNECT proxy tunnelled over TLS:443 — ТСПУ-resilient channel.
+  # Always rendered; compose_strip_failed_channels() in lib/render-channel-lib.sh
+  # removes this block post-render when NAIVE_SERVER env is unset (Task 7).
+  # Image: partner-edge-naive (klzgrad/naiveproxy wrapper, Task 8).
+  # Port bound to 127.0.0.1 only — Caddy reverse_proxy is the sole consumer.
+  naive:
+    image: ghcr.io/anatolykoptev/partner-edge-naive:{{IMAGE_VERSION}}
+    container_name: oxpulse-partner-naive
+    restart: unless-stopped
+    networks:
+      - edge
+    ports:
+      - "127.0.0.1:{{NAIVE_SOCKS_PORT}}:{{NAIVE_SOCKS_PORT}}"
+    volumes:
+      - /etc/oxpulse-partner-edge/naive-client.json:/etc/naive/config.json:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   caddy-data:

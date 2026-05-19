@@ -74,6 +74,11 @@ render_channel_soft() {
 compose_strip_failed_channels() {
 	local compose_file=$1
 	shift
+	local -a _extra=()
+	# Phase 5.10 Task 7: naive service is always rendered in docker-compose.yml.tpl
+	# (opec lacks conditional blocks). Strip it post-render when unconfigured.
+	[[ -z "${NAIVE_SERVER:-}" ]] && _extra+=("naive")
+	set -- "$@" "${_extra[@]}"
 	[[ $# -eq 0 ]] && return 0          # nothing to strip
 	[[ -f "$compose_file" ]] || { warn "compose_strip_failed_channels: $compose_file not found"; return 1; }
 
