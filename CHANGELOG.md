@@ -5,6 +5,38 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.47](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.46...partner-edge-v0.12.47) (2026-05-20)
+
+
+### Features
+
+* **ci:** gate installer bash tests on every PR ([c6c6878](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c6c6878f20bda8008ceb9499c297a24d31351264))
+* **ci:** gate installer bash tests on every PR ([50a9824](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/50a9824d7ebc2f5d5d217b451c886a3780d04794))
+* **installer:** hint SFU slow-start in healthcheck timeout warn ([4d14439](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4d14439e221f5995adc761e02347ee833ff61c28))
+* **installer:** hint SFU slow-start in healthcheck timeout warn ([99e5734](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/99e57341d4681df455b544d143d0727742e601b4))
+
+
+### Bug Fixes
+
+* Fix:  ([5f311b3](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/5f311b35943f4ae2d3482abb8bba2fdf2aaeea29))
+* add step [5b/6] gated on --purge-packages (default off). ([0fd0185](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0fd01859fa2fcc3b026bab540cf8dfba32e7b0f6))
+* **ci:** address code-quality findings on installer-bash-tests job ([04551ca](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/04551ca76164ae15a9cf3b1043dea50f5d6470e9))
+* **ci:** skip 2 stale tests (compose_strip + production_readiness) ([a53e5d7](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a53e5d7e12b86a94743ee79437fa3f871b88f8a3))
+* **ci:** skip 4 stale bats files with pre-existing drift ([9cd2c42](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/9cd2c42cf7375bc9b9ad8c6adf51c99cf5085bda))
+* **installer:** Bug E mkdir before reality-keygen + Bug C+D uninstall hardening ([2b9a963](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/2b9a9631d616bbc1623a9c8c7b93c9d1cf2bb4f9))
+* **installer:** create PREFIX_ETC before opec reality-keygen (Fix E) ([0e5f679](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0e5f679533a2c4866d9971cf7ff68d05e5fe4d6b))
+* **integrity:** refresh lib-checksums.txt drift (render-channel-lib + install-healthcheck) ([5a25cb4](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/5a25cb46b257329e8f3e4ac1787add7beb610d1a))
+* **integrity:** refresh lib-checksums.txt for render-channel-lib + install-healthcheck ([0b2b8b3](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0b2b8b3f6352c448b6f63254075ceb162b73a867))
+* **naive:** address PR [#214](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/214) MAJORs + MINORs — extended fixture guard + hy2 perms ([56fa6fa](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/56fa6fa94143aa02345ad247972a04991e842956))
+* **naive:** perms 0640+gid-65532, fixture-host guard, granular channel status ([8075fcf](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/8075fcfe34645a259c116eb344fccb4998dbfa13))
+* **naive:** perms 0640+gid-65532, fixture-host guard, granular channel status ([d649df6](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d649df6f33e79c997f371cccdbf113e3cb61fcba))
+* **opec:** accept missing relay_jwt_secret in register response ([8b2f647](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/8b2f6472f58b52e06e9c6d936433520ceda5a271))
+* **opec:** accept missing relay_jwt_secret in register response ([4966323](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4966323ca8f7879439a457b0a4d890c783d9aeab))
+* **opec:** normalize empty relay_jwt_secret + warn when absent ([490f84f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/490f84fcf1aa19a3477cbb93cbf6798dff700e7a))
+* **uninstall:** BLOCKER+4 MAJORs from PR [#212](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/212) reviewer ([574b71f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/574b71f8abd00adf69a9e58b5faab7e7a76b82b1))
+* **uninstall:** remove amneziawg build artifacts with --purge-packages (Fix D) ([0fd0185](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0fd01859fa2fcc3b026bab540cf8dfba32e7b0f6))
+* **uninstall:** remove docker named volumes on uninstall (Fix C) ([5f311b3](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/5f311b35943f4ae2d3482abb8bba2fdf2aaeea29))
+
 ## [0.12.42](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.41...partner-edge-v0.12.42) (2026-05-19)
 
 
