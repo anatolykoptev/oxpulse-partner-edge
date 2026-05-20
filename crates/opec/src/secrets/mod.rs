@@ -76,6 +76,10 @@ pub enum SecretsCommands {
         awg_pub_file: PathBuf,
         #[arg(long)]
         out_env: PathBuf,
+        /// Optional path to dump the raw HTTP response body (atomic, 0600)
+        /// for install.sh to extract fields beyond the 10 canonical env keys.
+        #[arg(long)]
+        out_json: Option<PathBuf>,
         #[arg(long)]
         region: Option<String>,
         #[arg(long)]
@@ -117,6 +121,7 @@ pub fn dispatch(cmd: SecretsCommands) -> anyhow::Result<()> {
             reality_uuid_file,
             awg_pub_file,
             out_env,
+            out_json,
             region,
             branding_config,
             timeout_secs,
@@ -131,6 +136,7 @@ pub fn dispatch(cmd: SecretsCommands) -> anyhow::Result<()> {
             reality_uuid_file,
             awg_pub_file,
             out_env,
+            out_json,
             region,
             branding_config,
             timeout_secs,

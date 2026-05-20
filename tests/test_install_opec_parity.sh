@@ -236,8 +236,58 @@ mirror_install_exports() {
     [[ -n "$awg_line" && -n "$reg_line" && "$awg_line" -lt "$reg_line" ]]
 }
 
-@test "install.sh json_get block skipped when OPEC_REGISTER_USED is set" {
-    grep -qE 'OPEC_REGISTER_USED' install.sh
+@test "install.sh no longer guards extraction on OPEC_REGISTER_USED" {
+    # BLOCKER fix: OPEC_REGISTER_USED was deleted in Phase 4.8; lock in the cleanup.
+    ! grep -qE 'OPEC_REGISTER_USED' install.sh
+}
+
+@test "install.sh out-json capability probe block exists before opec register call" {
+    # MAJOR #3: install.sh must probe for --out-json support before invoking opec
+    # so pre-v0.12.48 binaries get re-downloaded rather than silently failing.
+    # The probe pattern: run `opec secrets register --help` and grep for --out-json.
+    grep -qE "opec secrets register.*--help.*grep.*out-json|grep.*out-json.*opec secrets register|--out-json.*pre-v0\.12" install.sh
+}
+
+@test "install.sh dry-run mock has edge_id inside awg block (not top-level sfu_edge_id)" {
+    # MAJOR #2: backend returns edge_id inside the awg{} sub-object (AwgConfig).
+    # install.sh must NOT use a top-level sfu_edge_id key — awg_extract is the
+    # correct extractor. Verify the dry-run mock mirrors the real schema.
+    python3 - install.sh <<'PYCHECK'
+import re, sys
+content = open(sys.argv[1]).read()
+m = re.search(r'cat >"?\$tmp_cfg"? <<DRYJSON(.*?)DRYJSON', content, re.DOTALL)
+if not m:
+    print("dry-run JSON block not found", file=sys.stderr); sys.exit(1)
+block = m.group(1)
+# top-level sfu_edge_id must be gone
+if '"sfu_edge_id"' in block:
+    print("FAIL: top-level sfu_edge_id still present in dry-run mock", file=sys.stderr); sys.exit(1)
+# edge_id and otel_endpoint must appear inside the awg block.
+# Use a balanced-brace search: find "awg": { ... } allowing nested ${...}.
+awg_start = block.find('"awg"')
+if awg_start < 0:
+    print("FAIL: no awg key in dry-run mock", file=sys.stderr); sys.exit(1)
+brace_start = block.find('{', awg_start)
+if brace_start < 0:
+    print("FAIL: no { after awg key", file=sys.stderr); sys.exit(1)
+depth, i, awg_block = 0, brace_start, ""
+while i < len(block):
+    ch = block[i]
+    if ch == '{': depth += 1
+    elif ch == '}':
+        depth -= 1
+        if depth == 0:
+            awg_block = block[brace_start+1:i]
+            break
+    i += 1
+if not awg_block:
+    print("FAIL: could not extract awg{} block", file=sys.stderr); sys.exit(1)
+if '"edge_id"' not in awg_block:
+    print("FAIL: edge_id missing from awg{} block", file=sys.stderr); sys.exit(1)
+if '"otel_endpoint"' not in awg_block:
+    print("FAIL: otel_endpoint missing from awg{} block", file=sys.stderr); sys.exit(1)
+print("OK")
+PYCHECK
 }
 
 # ---------------------------------------------------------------------------
