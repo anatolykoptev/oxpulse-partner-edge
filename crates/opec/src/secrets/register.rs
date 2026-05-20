@@ -13,6 +13,11 @@ pub struct Args {
     pub reality_uuid_file: PathBuf,
     pub awg_pub_file: PathBuf,
     pub out_env: PathBuf,
+    /// Optional path to dump the raw HTTP response body (atomic, 0600).
+    /// Lets install.sh extract fields beyond the 10 canonical env keys
+    /// (awg.*, signaling_sfu_secret, naive_*, hysteria2_*, channels[],
+    /// sfu_edge_id, otel_endpoint, service_token).
+    pub out_json: Option<PathBuf>,
     pub region: Option<String>,
     pub branding_config: Option<PathBuf>,
     pub timeout_secs: u64,
@@ -179,8 +184,16 @@ pub fn run(args: Args) -> Result<(), SecretsError> {
         .timeout(std::time::Duration::from_secs(args.timeout_secs))
         .build();
 
-    let raw = post_with_retry(&agent, &endpoint, &body, args.retries)?;
+    let (body_str, raw) = post_with_retry(&agent, &endpoint, &body, args.retries)?;
+
+    // MAJOR #1 fix: validate BEFORE writing out_json. On a malformed backend
+    // body or rejected validation, we must not leave a secrets-bearing tempfile
+    // in /tmp. Only write if validation passes.
     let response = raw.into_validated()?;
+
+    if let Some(path) = args.out_json.as_deref() {
+        write_json_file(path, &body_str)?;
+    }
 
     // MAJOR fix: warn when relay_jwt_secret is absent/empty so operators see the
     // regime change in install logs. Signaling now uses Ed25519 via /api/partner/keys;
@@ -213,7 +226,7 @@ fn post_with_retry(
     endpoint: &str,
     body: &str,
     retries: u32,
-) -> Result<RegisterResponseRaw, SecretsError> {
+) -> Result<(String, RegisterResponseRaw), SecretsError> {
     let mut last_err: Option<SecretsError> = None;
     for attempt in 0..=retries {
         match agent
@@ -245,7 +258,7 @@ fn post_with_retry(
                         });
                     }
                 };
-                return Ok(parsed);
+                return Ok((body_str, parsed));
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let body_excerpt: String = resp
@@ -288,6 +301,42 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), SecretsError> {
             reason: "value contains newline — refusing to write env-file (injection vector)".into(),
         });
     }
+    Ok(())
+}
+
+fn write_json_file(path: &std::path::Path, body: &str) -> Result<(), SecretsError> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".register-jsonfile.")
+        .tempfile_in(dir)
+        .map_err(|e| SecretsError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+    tmp.write_all(body.as_bytes())
+        .map_err(|e| SecretsError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+    tmp.as_file().sync_all().map_err(|e| SecretsError::Io {
+        path: tmp.path().to_path_buf(),
+        source: e,
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o600)).map_err(
+            |e| SecretsError::Io {
+                path: tmp.path().to_path_buf(),
+                source: e,
+            },
+        )?;
+    }
+    tmp.persist(path).map_err(|e| SecretsError::Io {
+        path: path.to_path_buf(),
+        source: e.error,
+    })?;
     Ok(())
 }
 
