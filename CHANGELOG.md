@@ -5,6 +5,15 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.48](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.47...partner-edge-v0.12.48) (2026-05-20)
+
+
+### Bug Fixes
+
+* **installer:** close OPEC handoff regression — full backend response passthrough via --out-json ([31619b2](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/31619b2b428fbe7a2207e0e56ec64e82e36b47bc))
+* **installer:** close OPEC handoff regression — full backend response passthrough via --out-json ([634874f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/634874f368f4db400cdc130f4aee3f1a2a96a0a9))
+* **opec:** fix-loop on PR [#215](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/215) — BLOCKER + 3 MAJORs ([7d2d8df](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7d2d8df6b7d71d091bc50173bfa1847c0ac0ddc9))
+
 ## [0.12.47](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.46...partner-edge-v0.12.47) (2026-05-20)
 
 
