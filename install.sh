@@ -196,24 +196,30 @@ unset _arg
 # register, sfu-signing-key). Phase 4.4 made it a HARD requirement — there is
 # no bash fallback for render anymore. Auto-fetch from release assets here so a
 # fresh-install host needs only install.sh + a working network.
-if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v opec >/dev/null 2>&1; then
+#
+# Also called from the --out-json capability probe (MAJOR #3 / v0.12.48):
+# if the installed opec is older than v0.12.48 it lacks --out-json and the
+# register call would silently produce no tmp_cfg, breaking all downstream
+# json_get extractions.
+_ensure_opec_binary() {
+	local _machine _opec_arch _opec_url
 	_machine=$(uname -m)
 	case "$_machine" in
 		x86_64)  _opec_arch=amd64 ;;
 		aarch64) _opec_arch=arm64 ;;
 		*) die "opec: unsupported architecture: $_machine — supply an opec binary on PATH or use INSTALL_OPEC_FROM_PATH=" ;;
 	esac
-	if [[ -n "${_opec_arch:-}" ]]; then
-		_opec_url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/opec-${_opec_arch}"
-		log "opec not found -- downloading from release assets ($_opec_arch)"
-		if curl -fsSL --max-time 60 "$_opec_url" -o /usr/local/bin/opec 2>/dev/null; then
-			chmod +x /usr/local/bin/opec
-		else
-			rm -f /usr/local/bin/opec
-			die "opec download failed from $_opec_url — render is no longer optional (Phase 4.4 removed the bash fallback). Pre-stage /usr/local/bin/opec or check network connectivity to GitHub releases."
-		fi
+	_opec_url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/opec-${_opec_arch}"
+	log "opec not found -- downloading from release assets ($_opec_arch)"
+	if curl -fsSL --max-time 60 "$_opec_url" -o /usr/local/bin/opec 2>/dev/null; then
+		chmod +x /usr/local/bin/opec
+	else
+		rm -f /usr/local/bin/opec
+		die "opec download failed from $_opec_url — render is no longer optional (Phase 4.4 removed the bash fallback). Pre-stage /usr/local/bin/opec or check network connectivity to GitHub releases."
 	fi
-	unset _machine _opec_arch _opec_url
+}
+if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v opec >/dev/null 2>&1; then
+	_ensure_opec_binary
 fi
 
 # ---------- Args ----------
@@ -328,7 +334,7 @@ if [ "$BAKE_MODE" = "0" ]; then
 # ---------- Step 4: fetch node config ----------
 log "[4/10] fetching node config"
 tmp_cfg=$(mktemp)
-trap 'rm -f "$tmp_cfg"' EXIT
+trap 'rm -f "$tmp_cfg" "$tmp_cfg.env"' EXIT	# defense-in-depth: also clean up secrets-bearing env file
 # Idempotent re-install protection: if state file from a prior install
 # exists and the operator passed --token=<raw> (which is single-use and
 # would 409 on the backend), short-circuit before burning the token.
@@ -458,10 +464,47 @@ DRYENV
 		# shellcheck disable=SC1090
 		. "$tmp_cfg.env"
 		set +a
-		# Same flag as the real-exec path — env-file was sourced, json_get
-		# must NOT re-parse $tmp_cfg (which the dry-run never writes).
-		OPEC_REGISTER_USED=1
+		# Synthesize the JSON twin so the unified post-register extraction
+		# (json_get / awg_extract / jq for service_token & channels) has a
+		# valid input in dry-run mode. Fields beyond the canonical 10 are
+		# placeholders matching the production response shape.
+		cat >"$tmp_cfg" <<DRYJSON
+{
+  "node_id": "${PARTNER_ID}-DRYRUN",
+  "backend_endpoint": "https://api.oxpulse.chat",
+  "turn_secret": "DRYRUN-turn-secret",
+  "reality_uuid": "${REALITY_UUID}",
+  "reality_public_key": "${REALITY_PUBKEY}",
+  "reality_short_id": "0123456789abcdef",
+  "reality_server_name": "www.cloudflare.com",
+  "reality_encryption": "",
+  "relay_jwt_secret": "DRYRUN-relay-jwt-secret",
+  "turns_subdomain": "${TURNS_SUBDOMAIN:-}",
+  "signaling_sfu_secret": "DRYRUN-sfu-secret",
+  "awg": {
+    "allocated_ip": "10.7.0.2",
+    "motherly_pubkey": "DRYRUN-motherly-pubkey",
+    "motherly_endpoint": "1.2.3.4:51820",
+    "motherly_awg_ip": "10.7.0.1",
+    "jc": "4", "jmin": "40", "jmax": "70",
+    "s1": "50", "s2": "100", "s4": "0",
+    "h1": "1", "h2": "2", "h3": "3", "h4": "4",
+    "edge_id": "${PARTNER_ID}-DRYRUN",
+    "otel_endpoint": ""
+  },
+  "channels": []
+}
+DRYJSON
+		chmod 0600 "$tmp_cfg"
 	else
+		# MAJOR #3 / v0.12.48 capability probe: --out-json was added in v0.12.48.
+		# Pre-v0.12.48 opec ignores the flag silently, leaving tmp_cfg empty and
+		# breaking all downstream json_get / awg_extract calls. Re-download if absent.
+		if ! /usr/local/bin/opec secrets register --help 2>&1 | grep -q -- '--out-json'; then
+			warn "opec binary does not support --out-json (pre-v0.12.48). Forcing re-download."
+			rm -f /usr/local/bin/opec
+			_ensure_opec_binary
+		fi
 		log "  register: delegating to opec secrets register"
 		_opec_register_args=(
 			secrets register
@@ -474,6 +517,7 @@ DRYENV
 			--reality-uuid-file "$REALITY_UUID_PATH"
 			--awg-pub-file "$AWG_PUB_PATH"
 			--out-env "$tmp_cfg.env"
+			--out-json "$tmp_cfg"
 		)
 		[[ -n "$REGION" ]] && _opec_register_args+=(--region "$REGION")
 		[[ -n "$BRANDING_CONFIG" ]] && _opec_register_args+=(--branding-config "$BRANDING_CONFIG")
@@ -486,8 +530,6 @@ DRYENV
 		. "$tmp_cfg.env"
 		set +a
 		unset _opec_register_args
-		# Mark to skip json_get section below.
-		OPEC_REGISTER_USED=1
 	fi
 fi
 
@@ -506,9 +548,10 @@ v=d.get(sys.argv[2])
 print(json.dumps(v) if v is not None else 'null')
 " "$file" "$key" 2>/dev/null || echo "null"
 }
-# When OPEC handled registration, env-file was already sourced above and
-# variables are already set. Skip json_get field extraction in that case.
-if [[ -z "${OPEC_REGISTER_USED:-}" ]]; then
+# Unified extraction: opec now writes both $tmp_cfg.env (10 canonical keys)
+# AND $tmp_cfg (raw response JSON via --out-json). We extract from $tmp_cfg
+# here so all 21+ vars are populated identically in opec-register, manual-
+# config, and dry-run paths.
 NODE_ID=$(json_get node_id "$tmp_cfg")
 BACKEND_ENDPOINT=$(json_get backend_endpoint "$tmp_cfg")
 TURN_SECRET=$(json_get turn_secret "$tmp_cfg")
@@ -666,7 +709,7 @@ fi
 [[ -z "$TURN_SECRET" ]]        && die "turn_secret missing from config"
 [[ -z "$REALITY_UUID" ]]       && die "reality_uuid missing from config"
 [[ -z "$REALITY_PUBLIC_KEY" ]] && die "reality_public_key missing from config"
-fi  # end: if [[ -z "${OPEC_REGISTER_USED:-}" ]]
+# end: unified post-register extraction
 
 # Persist the resolved node config so oxpulse-partner-edge-refresh can
 # detect operator-side Reality keypair rotations and hot-update it.
