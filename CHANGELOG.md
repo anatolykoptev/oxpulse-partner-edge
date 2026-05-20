@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.49](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.48...partner-edge-v0.12.49) (2026-05-20)
+
+
+### Bug Fixes
+
+* **installer:** Bug M + Bug O — fetch render-channel-lib on curl|bash flow, gate naive via compose profiles ([4469943](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/446994317e91ca1f23cfd0476f201a3281d3677f))
+* **installer:** Bug M + Bug O — fetch render-channel-lib on curl|bash flow, gate naive via compose profiles ([d92a906](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d92a90697b4d0225c9d409fb530e47d6a72055c5))
+
 ## [0.12.48](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.47...partner-edge-v0.12.48) (2026-05-20)
 
 
