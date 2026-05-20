@@ -414,3 +414,42 @@ fn register_emits_relay_jwt_secret_when_present() {
         "present relay_jwt_secret must be emitted verbatim; got:\n{env}"
     );
 }
+
+/// MINOR fix: empty-string relay_jwt_secret from server must be treated
+/// identically to absent/null — normalized to None in into_validated(),
+/// and emitted as RELAY_JWT_SECRET='' in the env-file.
+#[test]
+fn register_empty_string_relay_jwt_normalizes_to_empty_envfile() {
+    let mut server = mockito::Server::new();
+    let _mock = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(
+            r#"{
+            "node_id": "node-789",
+            "backend_endpoint": "9.10.11.12:5349",
+            "turn_secret": "ts-empty-relay",
+            "reality_uuid": "11111111-2222-3333-4444-555555555555",
+            "reality_public_key": "REALITY_PUB_VALUE",
+            "reality_short_id": "0123456789abcdef",
+            "reality_server_name": "www.cloudflare.com",
+            "reality_encryption": "mlkem768x25519plus",
+            "relay_jwt_secret": "",
+            "turns_subdomain": "api-test"
+        }"#,
+        )
+        .create();
+
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    register::run(args_for(tmp.path(), server.url()))
+        .expect("empty-string relay_jwt_secret must not error");
+
+    let env = fs::read_to_string(tmp.path().join("out.env")).unwrap();
+    // Some("") must be normalized to None by into_validated(), so env-file
+    // emits the same empty-value line as absent/null.
+    assert!(
+        env.contains("RELAY_JWT_SECRET=''"),
+        "empty-string relay_jwt_secret must emit empty line; got:\n{env}"
+    );
+}
