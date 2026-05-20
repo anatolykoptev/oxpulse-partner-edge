@@ -296,3 +296,160 @@ fn register_envfile_escapes_embedded_single_quote() {
         "expected canonical single-quote escape, got: {env}"
     );
 }
+
+// --- Bug F regression tests ---
+// Per cross-repo contract investigation: oxpulse-chat /api/partner/register
+// has never emitted relay_jwt_secret. The hard require() added in Phase 4.3c
+// (May 17) causes all fresh installs to fail at step [4/10]. These tests
+// document the correct behaviour: absent/null field -> RELAY_JWT_SECRET='',
+// present field -> RELAY_JWT_SECRET='<value>'.
+
+fn full_response_body_without_relay_jwt_secret() -> &'static str {
+    r#"{
+        "node_id": "node-123",
+        "backend_endpoint": "1.2.3.4:5349",
+        "turn_secret": "ts-deadbeef",
+        "reality_uuid": "11111111-2222-3333-4444-555555555555",
+        "reality_public_key": "REALITY_PUB_VALUE",
+        "reality_short_id": "0123456789abcdef",
+        "reality_server_name": "www.cloudflare.com",
+        "reality_encryption": "mlkem768x25519plus",
+        "turns_subdomain": "api-test"
+    }"#
+}
+
+fn full_response_body_with_relay_jwt_null() -> &'static str {
+    r#"{
+        "node_id": "node-123",
+        "backend_endpoint": "1.2.3.4:5349",
+        "turn_secret": "ts-deadbeef",
+        "reality_uuid": "11111111-2222-3333-4444-555555555555",
+        "reality_public_key": "REALITY_PUB_VALUE",
+        "reality_short_id": "0123456789abcdef",
+        "reality_server_name": "www.cloudflare.com",
+        "reality_encryption": "mlkem768x25519plus",
+        "relay_jwt_secret": null,
+        "turns_subdomain": "api-test"
+    }"#
+}
+
+/// Bug F regression: server omits relay_jwt_secret entirely ->
+/// opec must accept it and emit RELAY_JWT_SECRET='' in the env-file.
+#[test]
+fn register_accepts_missing_relay_jwt_secret() {
+    let mut server = mockito::Server::new();
+    let _mock = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(full_response_body_without_relay_jwt_secret())
+        .create();
+
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    register::run(args_for(tmp.path(), server.url()))
+        .expect("missing relay_jwt_secret must not error");
+
+    let env = fs::read_to_string(tmp.path().join("out.env")).unwrap();
+    assert!(
+        env.contains("RELAY_JWT_SECRET=''"),
+        "missing relay_jwt_secret must emit empty line; got:\n{env}"
+    );
+}
+
+/// Bug F regression: server sends relay_jwt_secret: null ->
+/// opec must accept it and emit RELAY_JWT_SECRET='' in the env-file.
+#[test]
+fn register_accepts_null_relay_jwt_secret() {
+    let mut server = mockito::Server::new();
+    let _mock = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(full_response_body_with_relay_jwt_null())
+        .create();
+
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    register::run(args_for(tmp.path(), server.url()))
+        .expect("null relay_jwt_secret must not error");
+
+    let env = fs::read_to_string(tmp.path().join("out.env")).unwrap();
+    assert!(
+        env.contains("RELAY_JWT_SECRET=''"),
+        "null relay_jwt_secret must emit empty line; got:\n{env}"
+    );
+}
+
+/// Backward-compat: server sends a non-empty relay_jwt_secret ->
+/// env-file must carry the value (existing 5 nodes, legacy HS256 path).
+#[test]
+fn register_emits_relay_jwt_secret_when_present() {
+    let mut server = mockito::Server::new();
+    let _mock = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(
+            r#"{
+            "node_id": "node-456",
+            "backend_endpoint": "5.6.7.8:5349",
+            "turn_secret": "ts-aabbcc",
+            "reality_uuid": "11111111-2222-3333-4444-555555555555",
+            "reality_public_key": "REALITY_PUB_VALUE",
+            "reality_short_id": "fedcba9876543210",
+            "reality_server_name": "www.example.com",
+            "reality_encryption": "mlkem768x25519plus",
+            "relay_jwt_secret": "rjs-legacy-value",
+            "turns_subdomain": "api-prod"
+        }"#,
+        )
+        .create();
+
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    register::run(args_for(tmp.path(), server.url()))
+        .expect("present relay_jwt_secret must succeed");
+
+    let env = fs::read_to_string(tmp.path().join("out.env")).unwrap();
+    assert!(
+        env.contains("RELAY_JWT_SECRET='rjs-legacy-value'"),
+        "present relay_jwt_secret must be emitted verbatim; got:\n{env}"
+    );
+}
+
+/// MINOR fix: empty-string relay_jwt_secret from server must be treated
+/// identically to absent/null — normalized to None in into_validated(),
+/// and emitted as RELAY_JWT_SECRET='' in the env-file.
+#[test]
+fn register_empty_string_relay_jwt_normalizes_to_empty_envfile() {
+    let mut server = mockito::Server::new();
+    let _mock = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(
+            r#"{
+            "node_id": "node-789",
+            "backend_endpoint": "9.10.11.12:5349",
+            "turn_secret": "ts-empty-relay",
+            "reality_uuid": "11111111-2222-3333-4444-555555555555",
+            "reality_public_key": "REALITY_PUB_VALUE",
+            "reality_short_id": "0123456789abcdef",
+            "reality_server_name": "www.cloudflare.com",
+            "reality_encryption": "mlkem768x25519plus",
+            "relay_jwt_secret": "",
+            "turns_subdomain": "api-test"
+        }"#,
+        )
+        .create();
+
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    register::run(args_for(tmp.path(), server.url()))
+        .expect("empty-string relay_jwt_secret must not error");
+
+    let env = fs::read_to_string(tmp.path().join("out.env")).unwrap();
+    // Some("") must be normalized to None by into_validated(), so env-file
+    // emits the same empty-value line as absent/null.
+    assert!(
+        env.contains("RELAY_JWT_SECRET=''"),
+        "empty-string relay_jwt_secret must emit empty line; got:\n{env}"
+    );
+}

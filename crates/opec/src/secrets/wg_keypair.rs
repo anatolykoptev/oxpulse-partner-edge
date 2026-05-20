@@ -152,7 +152,7 @@ mod tests {
     /// base64 of 31 bytes → InvalidKeyFormat error (wrong decoded length).
     #[test]
     fn pub_from_priv_b64_rejects_wrong_length() {
-        let short = STANDARD.encode(&[0u8; 31]); // 31 bytes → base64 decodes fine but wrong len
+        let short = STANDARD.encode([0u8; 31]); // 31 bytes → base64 decodes fine but wrong len
         let err = pub_from_priv_b64(&short).expect_err("31-byte priv must be rejected");
         assert!(
             matches!(err, SecretsError::InvalidKeyFormat { .. }),
