@@ -445,3 +445,106 @@ COMPEOF
 		grep -q 'volume rm' "$SHIM_LOG"
 	fi
 }
+
+# ---------------------------------------------------------------------------
+# Fix D: uninstall.sh --purge-packages removes amneziawg build artifacts
+# ---------------------------------------------------------------------------
+# amneziawg is built from source (not apt/dnf packages).
+# `amneziawg-tools/src/make install` writes files to system paths that
+# are NOT under PREFIX_BIN=/usr/local/bin:
+#   /usr/bin/awg-quick            (make install target)
+#   /usr/bin/awg                  (make install target)
+#   /usr/share/man/man8/awg-quick.8
+#   /usr/share/bash-completion/completions/awg-quick
+#   /usr/lib/systemd/system/awg-quick@.service
+#   /usr/lib/systemd/system/awg-quick.target
+#   /usr/local/bin/amneziawg-go   (explicit install by install-awg.sh)
+# The --purge-packages flag removes these artifacts (off by default).
+
+_awg_env_args() {
+	# Extend _env_args with overrides for awg artifact paths
+	printf '%s ' \
+		"OXPULSE_AWG_USR_BIN=$TMP/usr/bin" \
+		"OXPULSE_AWG_USR_SHARE=$TMP/usr/share" \
+		"OXPULSE_AWG_USR_SYSLIB=$TMP/usr/lib/systemd/system" \
+		"OXPULSE_AWG_LOCAL_BIN=$TMP/usr/local/bin"
+}
+
+_plant_awg_artifacts() {
+	mkdir -p "$TMP/usr/bin" \
+	         "$TMP/usr/share/man/man8" \
+	         "$TMP/usr/share/bash-completion/completions" \
+	         "$TMP/usr/lib/systemd/system" \
+	         "$TMP/usr/local/bin"
+	touch "$TMP/usr/bin/awg-quick"
+	touch "$TMP/usr/bin/awg"
+	touch "$TMP/usr/share/man/man8/awg-quick.8"
+	touch "$TMP/usr/share/bash-completion/completions/awg-quick"
+	touch "$TMP/usr/lib/systemd/system/awg-quick@.service"
+	touch "$TMP/usr/lib/systemd/system/awg-quick.target"
+	touch "$TMP/usr/local/bin/amneziawg-go"
+}
+
+@test "Fix D: --yes WITHOUT --purge-packages leaves awg build artifacts intact" {
+	_plant_awg_artifacts
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) $(_awg_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	# Without --purge-packages, artifacts must NOT be removed
+	[ -f "$TMP/usr/bin/awg-quick" ]
+}
+
+@test "Fix D: --yes --purge-packages removes awg-quick from AWG_USR_BIN" {
+	_plant_awg_artifacts
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) $(_awg_env_args) bash '$UNINSTALL' --yes --purge-packages
+	"
+	[ "$status" -eq 0 ]
+	[ ! -f "$TMP/usr/bin/awg-quick" ]
+}
+
+@test "Fix D: --yes --purge-packages removes amneziawg-go from AWG_LOCAL_BIN" {
+	_plant_awg_artifacts
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) $(_awg_env_args) bash '$UNINSTALL' --yes --purge-packages
+	"
+	[ "$status" -eq 0 ]
+	[ ! -f "$TMP/usr/local/bin/amneziawg-go" ]
+}
+
+@test "Fix D: --yes --purge-packages removes man page and bash-completion artifacts" {
+	_plant_awg_artifacts
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) $(_awg_env_args) bash '$UNINSTALL' --yes --purge-packages
+	"
+	[ "$status" -eq 0 ]
+	[ ! -f "$TMP/usr/share/man/man8/awg-quick.8" ]
+	[ ! -f "$TMP/usr/share/bash-completion/completions/awg-quick" ]
+}
+
+@test "Fix D: --yes --purge-packages removes awg-quick@.service and awg-quick.target" {
+	_plant_awg_artifacts
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) $(_awg_env_args) bash '$UNINSTALL' --yes --purge-packages
+	"
+	[ "$status" -eq 0 ]
+	[ ! -f "$TMP/usr/lib/systemd/system/awg-quick@.service" ]
+	[ ! -f "$TMP/usr/lib/systemd/system/awg-quick.target" ]
+}
+
+@test "Fix D: --help text mentions --purge-packages" {
+	run bash "$UNINSTALL" --help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"--purge-packages"* ]]
+}
+
+@test "Fix D: unknown flag still fails with exit 2" {
+	run bash "$UNINSTALL" --unknown-flag-xyz
+	[ "$status" -eq 2 ]
+}
