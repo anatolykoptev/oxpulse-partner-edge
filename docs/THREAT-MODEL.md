@@ -57,7 +57,7 @@ scale, machine-learning traffic classification, active probing of
 suspected proxy IP addresses, and dynamic IP/domain blocking.
 
 **Operators.** National filtering systems deployed in Russia (ТСПУ /
-TSPU), Iran, China (GFW), and Belarus. These systems operate at ISP
+TSPU), Iran, China (GFW), Belarus, and Cuba (ETECSA). These systems operate at ISP
 level with state backing and can be updated rapidly in response to new
 circumvention techniques.
 
@@ -113,10 +113,7 @@ possibility of future decryption.
   ML-KEM-768 (NIST FIPS 203) on the xray connection, providing
   resistance to future quantum decryption of recorded tunnel traffic.
 
-- **5-way SNI rotation.** The tunnel's server name indicator rotates
-  across a pool of domains provided by the control plane, reducing the
-  effectiveness of static SNI-based blocking rules. Implemented in
-  `oxpulse-partner-edge-sni-rotate.sh`.
+- **8-name SNI pool, daily per-node rotation.** The tunnel's server name indicator rotates across a pool of eight major-brand HTTPS domains supplied by the control plane (5 Samsung subdomains plus 3 Microsoft 365 subdomains — Outlook, Teams, login.microsoftonline). Per-node selection is deterministic via `sha256(node_id : YYYY-MM-DD) mod pool_size` and re-evaluated daily by a systemd timer at 04-06 UTC randomised. No two partner-edges look identical to a network observer correlating across nodes, and a node's SNI is non-stationary across days. Reduces the effectiveness of static SNI-based blocking rules and increases the cost of any single-brand block. Implemented in `oxpulse-partner-edge-sni-rotate.sh`.
 
 - **Deterministic per-node SNI selection.** Each node selects its SNI
   value deterministically via `sha256(node_id)`, ensuring that the
@@ -275,7 +272,7 @@ boundary of the partner-edge system:
 | Use | Primitive | Source |
 |---|---|---|
 | Real-time media (1:1 mesh) | DTLS-SRTP, AES-128-GCM | WebRTC standard |
-| Group media (3–6 SFU rooms) | SFrame + ratchet KX | IETF SFrame drafts |
+| Group media (3–6 SFU rooms) | SFrame + ratchet KX | IETF Proposed Standard RFC 9605 (2025) |
 | Ratchet key exchange | X25519 + ChaCha20-Poly1305 | libsodium / ring |
 | Post-quantum tunnel layer | ML-KEM-768 | xray 26.x (NIST FIPS 203) |
 | Tunnel transport | VLESS + Reality + XHTTP | xray-core |
