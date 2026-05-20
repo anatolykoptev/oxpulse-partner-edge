@@ -55,18 +55,33 @@ elif [[ -f "$_rl_sbin" ]]; then
 	# shellcheck source=/dev/null
 	source "$_rl_sbin"
 else
-	# Inline fallback — keeps install.sh self-contained if lib is missing.
-	_in_array() { local needle=$1; shift; local el; for el in "$@"; do [[ "$el" == "$needle" ]] && return 0; done; return 1; }
-	CHANNELS_FAILED=()
-	render_channel_soft() {
-		local kind=$1
-		warn "render_channel_soft: lib/render-channel-lib.sh not found — channel $kind skipped"
-		CHANNELS_FAILED+=("$kind"); return 1
-	}
-	compose_strip_failed_channels() {
-		warn "compose_strip_failed_channels: lib/render-channel-lib.sh not found — compose not stripped"
-		return 1
-	}
+	# Bug M fix: fetch lib/render-channel-lib.sh from REPO_RAW before falling back
+	# to inline stubs. In curl|bash flow the lib is not on disk yet; fetching it
+	# here mirrors the pattern used for channel-render-lib.sh (L282-294).
+	# Persist to INSTALL_LIB_DIR so subsequent calls (timer, update) reuse it.
+	_rl_fetched="${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/render-channel-lib.sh"
+	_rl_tmp=$(mktemp)
+	if curl -fsSL "${REPO_RAW}/lib/render-channel-lib.sh" -o "$_rl_tmp" 2>/dev/null; then
+		cp "$_rl_tmp" "$_rl_fetched"
+		# shellcheck source=/dev/null
+		source "$_rl_tmp"
+		rm -f "$_rl_tmp"
+	else
+		rm -f "$_rl_tmp"
+		# Inline fallback — used only when both local paths and REPO_RAW fetch fail.
+		_in_array() { local needle=$1; shift; local el; for el in "$@"; do [[ "$el" == "$needle" ]] && return 0; done; return 1; }
+		CHANNELS_FAILED=()
+		render_channel_soft() {
+			local kind=$1
+			warn "render_channel_soft: lib/render-channel-lib.sh not found — channel $kind skipped"
+			CHANNELS_FAILED+=("$kind"); return 1
+		}
+		compose_strip_failed_channels() {
+			warn "compose_strip_failed_channels: lib/render-channel-lib.sh not found — compose not stripped"
+			return 1
+		}
+	fi
+	unset _rl_fetched _rl_tmp
 fi
 unset _rl_local _rl_installed _rl_sbin
 
