@@ -159,3 +159,54 @@ teardown() {
 	echo "install_d_line=$install_d_line"
 	[ -n "$install_d_line" ]
 }
+
+# ---------------------------------------------------------------------------
+# MAJOR #4: behavioral regression — PREFIX_ETC created at mode 0700 in live run
+# ---------------------------------------------------------------------------
+# Extracts and runs the reality-keygen block from install.sh with a mock opec,
+# verifies the directory exists at 0700 after execution.
+# This is the actual red→green for Bug E (fresh-install hardening).
+
+@test "MAJOR4: PREFIX_ETC created at mode 0700 before opec reality-keygen runs" {
+	# Precondition: FAKE_ETC must not exist (simulates post-uninstall state)
+	rm -rf "$FAKE_ETC"
+	[ ! -d "$FAKE_ETC" ]
+
+	# Extract the reality-keygen block from install.sh.
+	# Start from REALITY_PRIV_PATH= (includes path var definitions).
+	# End at the `fi` that closes the outer DRY_RUN if-block — which is the
+	# line immediately after the first `unset _opec_args` in this section.
+	local block_start unset_line block_end
+	block_start=$(grep -n '^REALITY_PRIV_PATH=' "$REPO_ROOT/install.sh" | head -1 | cut -d: -f1)
+	unset_line=$(awk "NR>${block_start} && /unset _opec_args/ {print NR; exit}" "$REPO_ROOT/install.sh")
+	block_end=$((unset_line + 1))  # include the closing `fi`
+
+	echo "block: $block_start..$block_end"
+	[ -n "$block_start" ]
+	[ -n "$unset_line" ]
+
+	local block
+	block=$(sed -n "${block_start},${block_end}p" "$REPO_ROOT/install.sh")
+
+	run bash -c "
+		set -euo pipefail
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		PREFIX_ETC='$FAKE_ETC'
+		DRY_RUN=0
+		FORCE_KEYGEN=0
+		die() { echo \"die: \$*\" >&2; exit 1; }
+		log() { :; }
+		warn() { :; }
+		$block
+		echo 'block-ok'
+	"
+	echo "output: $output"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"block-ok"* ]]
+	# Directory MUST exist at mode 0700
+	[ -d "$FAKE_ETC" ]
+	local mode
+	mode=$(stat -c '%a' "$FAKE_ETC" 2>/dev/null || stat -f '%OLp' "$FAKE_ETC" 2>/dev/null)
+	echo "mode=$mode"
+	[ "$mode" = "700" ]
+}
