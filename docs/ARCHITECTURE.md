@@ -161,14 +161,15 @@ network-level filtering:
   presents as standard TLS to external observers. Configuration in
   `xray-client.json.tpl`.
 
-- **5-way SNI rotation** — the tunnel rotates its server name indicator
-  across a pool of domains, reducing long-lived traffic correlation.
-  Implemented in `oxpulse-partner-edge-sni-rotate.sh`, scheduled via
-  systemd timer.
-
-- **Deterministic per-node SNI selection** — each node selects its SNI
-  deterministically via `sha256(node_id)`, diversifying the (IP, SNI)
-  tuple across the mesh to prevent bulk fingerprinting.
+- **8-name SNI pool with deterministic per-node-per-day rotation** —
+  the tunnel rotates its server name indicator across a pool of eight
+  major-brand HTTPS domains (5 Samsung subdomains, 3 Microsoft 365
+  subdomains). Each node selects its current SNI deterministically via
+  `sha256(node_id : YYYY-MM-DD) mod pool_size`, so the (IP, SNI) tuple
+  is unique per node and non-stationary across days. Daily re-evaluation
+  is scheduled by a systemd timer at 04-06 UTC randomised. Reduces
+  long-lived traffic correlation and prevents bulk fingerprinting.
+  Implemented in `oxpulse-partner-edge-sni-rotate.sh`.
 
 - **Cover page + active-probing defense** — a static cover page is
   served to direct HTTP visitors, and the `@probe` Caddy matcher

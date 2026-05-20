@@ -10,7 +10,8 @@
 - oxpulse-sfu-kit migration: -1,881 lines of inlined code replaced by audited library
 - Cascade relay client: `POST /relay/connect`, str0m offerer, `relay_source` DC
 - release-please automated CHANGELOG + CI
-- 3-node deployment: krolik (SJC), rvpn (R-VPN partner), piter (SPB)
+- Initial 3-node deployment: krolik (SJC), rvpn (R-VPN partner), piter (SPB)
+- Subsequent fleet growth to five active partner-edge source-domains on `partner-edge-sfu:v0.12.48` as of 2026-05-19
 
 ---
 
@@ -39,6 +40,18 @@
 | Registry integration | `registry/mod.rs` — `googcc` field; conservative merge with Pacer in `update_pacer_layers()` |
 
 Probe controller and CongestionWindowPushback remain in Phase 2 backlog.
+
+---
+
+## 🚧 Phase 1.5 — Next-generation partner-edge bundle (v0.13, in-flight Q2 2026)
+
+*Production-ready installer + multi-channel deployment + queue-throughput improvements. Targets release inside 30-60 days of the 2026-05-19 reference date. A pre-deployment queue of operators is committed to this bundle.*
+
+- Production-ready single-command installer with bake-and-snapshot scaling support.
+- Multi-channel bypass deployment (xray Reality + naive-proxy fallback + telegram tunnel).
+- Channel-health probe + central reporting via `POST /api/partner/channel-health`.
+- Hydrate-on-boot flow for snapshot-scaling clones.
+- Onboarding throughput improvements for operators registering new edges.
 
 ---
 
