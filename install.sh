@@ -458,9 +458,38 @@ DRYENV
 		# shellcheck disable=SC1090
 		. "$tmp_cfg.env"
 		set +a
-		# Same flag as the real-exec path — env-file was sourced, json_get
-		# must NOT re-parse $tmp_cfg (which the dry-run never writes).
-		OPEC_REGISTER_USED=1
+		# Synthesize the JSON twin so the unified post-register extraction
+		# (json_get / awg_extract / jq for service_token & channels) has a
+		# valid input in dry-run mode. Fields beyond the canonical 10 are
+		# placeholders matching the production response shape.
+		cat >"$tmp_cfg" <<DRYJSON
+{
+  "node_id": "${PARTNER_ID}-DRYRUN",
+  "backend_endpoint": "https://api.oxpulse.chat",
+  "turn_secret": "DRYRUN-turn-secret",
+  "reality_uuid": "${REALITY_UUID}",
+  "reality_public_key": "${REALITY_PUBKEY}",
+  "reality_short_id": "0123456789abcdef",
+  "reality_server_name": "www.cloudflare.com",
+  "reality_encryption": "",
+  "relay_jwt_secret": "DRYRUN-relay-jwt-secret",
+  "turns_subdomain": "${TURNS_SUBDOMAIN:-}",
+  "signaling_sfu_secret": "DRYRUN-sfu-secret",
+  "sfu_edge_id": "${PARTNER_ID}-DRYRUN",
+  "otel_endpoint": "",
+  "awg": {
+    "allocated_ip": "10.7.0.2",
+    "motherly_pubkey": "DRYRUN-motherly-pubkey",
+    "motherly_endpoint": "1.2.3.4:51820",
+    "motherly_awg_ip": "10.7.0.1",
+    "jc": "4", "jmin": "40", "jmax": "70",
+    "s1": "50", "s2": "100", "s4": "0",
+    "h1": "1", "h2": "2", "h3": "3", "h4": "4"
+  },
+  "channels": []
+}
+DRYJSON
+		chmod 0600 "$tmp_cfg"
 	else
 		log "  register: delegating to opec secrets register"
 		_opec_register_args=(
@@ -474,6 +503,7 @@ DRYENV
 			--reality-uuid-file "$REALITY_UUID_PATH"
 			--awg-pub-file "$AWG_PUB_PATH"
 			--out-env "$tmp_cfg.env"
+			--out-json "$tmp_cfg"
 		)
 		[[ -n "$REGION" ]] && _opec_register_args+=(--region "$REGION")
 		[[ -n "$BRANDING_CONFIG" ]] && _opec_register_args+=(--branding-config "$BRANDING_CONFIG")
@@ -486,8 +516,6 @@ DRYENV
 		. "$tmp_cfg.env"
 		set +a
 		unset _opec_register_args
-		# Mark to skip json_get section below.
-		OPEC_REGISTER_USED=1
 	fi
 fi
 
@@ -506,9 +534,10 @@ v=d.get(sys.argv[2])
 print(json.dumps(v) if v is not None else 'null')
 " "$file" "$key" 2>/dev/null || echo "null"
 }
-# When OPEC handled registration, env-file was already sourced above and
-# variables are already set. Skip json_get field extraction in that case.
-if [[ -z "${OPEC_REGISTER_USED:-}" ]]; then
+# Unified extraction: opec now writes both $tmp_cfg.env (10 canonical keys)
+# AND $tmp_cfg (raw response JSON via --out-json). We extract from $tmp_cfg
+# here so all 21+ vars are populated identically in opec-register, manual-
+# config, and dry-run paths.
 NODE_ID=$(json_get node_id "$tmp_cfg")
 BACKEND_ENDPOINT=$(json_get backend_endpoint "$tmp_cfg")
 TURN_SECRET=$(json_get turn_secret "$tmp_cfg")
@@ -666,7 +695,7 @@ fi
 [[ -z "$TURN_SECRET" ]]        && die "turn_secret missing from config"
 [[ -z "$REALITY_UUID" ]]       && die "reality_uuid missing from config"
 [[ -z "$REALITY_PUBLIC_KEY" ]] && die "reality_public_key missing from config"
-fi  # end: if [[ -z "${OPEC_REGISTER_USED:-}" ]]
+# end: unified post-register extraction
 
 # Persist the resolved node config so oxpulse-partner-edge-refresh can
 # detect operator-side Reality keypair rotations and hot-update it.
