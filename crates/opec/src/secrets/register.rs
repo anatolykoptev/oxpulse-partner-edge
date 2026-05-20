@@ -125,7 +125,7 @@ struct RegisterResponse {
     reality_short_id: String,
     reality_server_name: String,
     reality_encryption: String,
-    relay_jwt_secret: String,
+    relay_jwt_secret: Option<String>,
     turns_subdomain: String,
 }
 
@@ -149,7 +149,7 @@ impl RegisterResponseRaw {
             reality_short_id: require(self.reality_short_id, "reality_short_id")?,
             reality_server_name: require(self.reality_server_name, "reality_server_name")?,
             reality_encryption,
-            relay_jwt_secret: require(self.relay_jwt_secret, "relay_jwt_secret")?,
+            relay_jwt_secret: self.relay_jwt_secret,
             turns_subdomain: self.turns_subdomain,
         })
     }
@@ -282,6 +282,9 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), SecretsError> {
 
 fn write_env_file(path: &std::path::Path, r: &RegisterResponse) -> Result<(), SecretsError> {
     use std::io::Write;
+    // relay_jwt_secret is optional (server never emits it; Ed25519 path is canonical).
+    // Emit empty string when absent so install.sh RELAY_JWT_SECRET=$(json_get ...) is defined.
+    let relay_jwt_secret = r.relay_jwt_secret.as_deref().unwrap_or("");
     let pairs: [(&str, &str); 10] = [
         ("NODE_ID", &r.node_id),
         ("BACKEND_ENDPOINT", &r.backend_endpoint),
@@ -291,7 +294,7 @@ fn write_env_file(path: &std::path::Path, r: &RegisterResponse) -> Result<(), Se
         ("REALITY_SHORT_ID", &r.reality_short_id),
         ("REALITY_SERVER_NAME", &r.reality_server_name),
         ("REALITY_ENCRYPTION", &r.reality_encryption),
-        ("RELAY_JWT_SECRET", &r.relay_jwt_secret),
+        ("RELAY_JWT_SECRET", relay_jwt_secret),
         ("TURNS_SUBDOMAIN", &r.turns_subdomain),
     ];
 
