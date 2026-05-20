@@ -34,6 +34,12 @@ pub struct BodyInputs<'a> {
     pub reality_uuid_file: PathBuf,
     pub awg_pub_file: PathBuf,
     pub branding_config: Option<PathBuf>,
+    /// Operator-declared countries this edge serves (ISO-3166 alpha-2, already
+    /// upper-folded by the caller). When present, sent as `serve_countries` in
+    /// the register body. When absent, the backend derives from MaxMind lookup.
+    /// Populated from `SERVE_COUNTRIES_JSON` env (set by install.sh from
+    /// the `--serve-countries=RU,BY` CLI flag).
+    pub serve_countries: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -52,6 +58,11 @@ struct RegisterBody {
     reality_uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     branding: Option<serde_json::Value>,
+    /// Operator-declared countries this edge serves.
+    /// When absent, omitted from the POST body so the backend can COALESCE-preserve
+    /// any prior operator declaration (e.g. migration-set ruoxp={RU}).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    serve_countries: Option<Vec<String>>,
 }
 
 pub fn build_body(inputs: &BodyInputs) -> Result<String, SecretsError> {
@@ -96,6 +107,7 @@ pub fn build_body(inputs: &BodyInputs) -> Result<String, SecretsError> {
         reality_public_key: read_trim(&inputs.reality_pub_file)?,
         reality_uuid: read_trim(&inputs.reality_uuid_file)?,
         branding,
+        serve_countries: inputs.serve_countries.clone(),
     };
 
     serde_json::to_string(&body).map_err(|e| SecretsError::ResponseParse {
@@ -163,6 +175,31 @@ impl RegisterResponseRaw {
 }
 
 pub fn run(args: Args) -> Result<(), SecretsError> {
+    // Federation Phase 1: read operator-declared serve_countries from env.
+    // install.sh sets SERVE_COUNTRIES_JSON (a JSON array like ["RU","BY"]) when the
+    // operator passes --serve-countries=RU,BY. When absent, serve_countries is None
+    // and the backend falls back to MaxMind-derived geo_countries.
+    //
+    // Fail loud on parse error: silent ignore would mean the operator declares
+    // --serve-countries=RU,BY and silently gets MaxMind NL instead — the exact
+    // bug this feature defends against.
+    let serve_countries: Option<Vec<String>> = match std::env::var("SERVE_COUNTRIES_JSON").ok() {
+        None => None,
+        Some(ref raw) if raw.trim().is_empty() => None,
+        Some(raw) => {
+            let parsed: Vec<String> =
+                serde_json::from_str(&raw).map_err(|e| SecretsError::ResponseParse {
+                    reason: format!(
+                        "SERVE_COUNTRIES_JSON is not a valid JSON array: {} (got: {})",
+                        e,
+                        // Redacted: show first 40 chars only, never full env value.
+                        raw.chars().take(40).collect::<String>()
+                    ),
+                })?;
+            Some(parsed)
+        }
+    };
+
     let body = build_body(&BodyInputs {
         partner_id: &args.partner_id,
         domain: &args.domain,
@@ -173,6 +210,7 @@ pub fn run(args: Args) -> Result<(), SecretsError> {
         reality_uuid_file: args.reality_uuid_file.clone(),
         awg_pub_file: args.awg_pub_file.clone(),
         branding_config: args.branding_config.clone(),
+        serve_countries,
     })?;
 
     let endpoint = format!(
