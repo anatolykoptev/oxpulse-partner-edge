@@ -608,6 +608,34 @@ export NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT
 # Default 1080 matches naive's built-in default; override via node-config naive_socks_port.
 [[ -z "${NAIVE_SOCKS_PORT:-}" ]] && NAIVE_SOCKS_PORT=$(json_get naive_socks_port "$tmp_cfg")
 [[ -z "$NAIVE_SOCKS_PORT" ]] && NAIVE_SOCKS_PORT="1080"
+# Fix #2: fixture-host guard -- log early warning for test-fixture NAIVE_SERVER.
+# Operators have passed naive_server=naive-test.example.com in error (2026-05-17 ruoxp
+# incident); installer happily rendered the channel, container crashlooped.
+#
+# Pattern covers: localhost, (*.)?example.{com,net,org,invalid}, *.invalid, *.test,
+# 0.0.0.0, 127.x.x.x (loopback), 169.254.x.x (link-local), RFC5737 doc ranges
+# (192.0.2.x, 198.51.100.x, 203.0.113.x), IPv6 loopback (:: / ::1).
+#
+# MAJOR #2 fix: bash guard is case-insensitive via ${NAIVE_SERVER,,} (lowercase).
+# MAJOR #3 fix: Rust render::naive is authoritative for fixture detection —
+# this bash guard logs early to help the operator but does NOT clear NAIVE_SERVER
+# or gate the channel. Rust will reject fixture hosts at render time with a
+# RenderError::Validation that causes render_channel_soft to fail-soft (ch5 skipped).
+_naive_status="skipped_no_server"
+if [[ -n "${NAIVE_SERVER:-}" ]]; then
+	_naive_server_lc="${NAIVE_SERVER,,}"
+	if [[ "$_naive_server_lc" =~ ^(localhost|(.*\.)?example\.(com|net|org|invalid)|.*\.invalid|invalid|.*\.test|0\.0\.0\.0|127\.[0-9]+\.[0-9]+\.[0-9]+|169\.254\.[0-9]+\.[0-9]+|192\.0\.2\.[0-9]+|198\.51\.100\.[0-9]+|203\.0\.113\.[0-9]+|::1?|::)$ ]]; then
+		warn "naive_server '${NAIVE_SERVER}' looks like a test fixture host (operator log only; Rust render will also reject)"
+		_naive_status="skipped_fixture_host"
+		# NOTE: do NOT clear NAIVE_SERVER here. Rust render::naive is the authoritative
+		# guard — it will return RenderError::Validation for fixture hosts, which causes
+		# render_channel_soft to fail-soft (ch5 skipped). Clearing here caused a race
+		# where bash and Rust could disagree on edge cases (e.g. mixed-case hosts).
+	else
+		_naive_status="pending"  # updated to active/failed_at_render below
+	fi
+	unset _naive_server_lc
+fi
 # channels[] — future-proof bypass channel array.
 # Empty if server is older than v0.12 (no channels field yet).
 CHANNELS_JSON=$(json_get_raw channels "$tmp_cfg")
@@ -1038,13 +1066,29 @@ fi
 if [[ "${_hy2_status}" == "active" ]]; then
 	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
 	log "  hysteria2 CH3 profile enabled"
+	# MAJOR #1 fix: set restrictive perms on hysteria2-client.yaml.
+	# re_render_hysteria2() writes with umask 077 (mode 0600), which is correct for
+	# host-only access. The hysteria2 container (tobyxdd/hysteria:v2.8.2) runs as
+	# root inside the container (no USER directive in upstream Dockerfile) and
+	# mounts the file :ro, so 0640 root:root suffices — no chown to a gid needed.
+	# Threat model matches naive: only the distroless root process reads the secret.
+	chmod 0640 "${PREFIX_ETC}/hysteria2-client.yaml"
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
-	# Phase 5.5: naive is a bypass channel — render fail-soft.
+	# Phase 5.5: naive is a bypass channel -- render fail-soft.
 	if render_channel_soft naive "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"; then
-		chmod 0600 "$PREFIX_ETC/naive-client.json"
+		# Fix #1: 0640 + gid 65532 so distroless/nonroot container can read the proxy
+		# password. gid 65532 = distroless nonroot (Dockerfile.naive final stage).
+		# Trade-off: any process with gid 65532 on the host can read the secret, but
+		# /etc/passwd has no entry for gid 65532 outside the container, so host exposure
+		# is theoretical only. 0600 root:root prevents the container from reading it.
+		chown root:65532 "$PREFIX_ETC/naive-client.json"
+		chmod 0640 "$PREFIX_ETC/naive-client.json"
 		COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch5"
+		_naive_status="active"
 		log "  naive-client.json rendered (CH5 profile enabled)"
+	else
+		_naive_status="failed_at_render"
 	fi
 fi
 rm -rf "$stage"
@@ -1082,15 +1126,12 @@ if [[ $DRY_RUN -eq 0 ]]; then
 			printf 'xray=%s\n' "active"
 		fi
 		printf 'hysteria2=%s\n' "${_hy2_status}"
-		if [[ -n "${NAIVE_SERVER:-}" ]]; then
-			if _in_array naive "${CHANNELS_FAILED[@]:-}"; then
-				printf 'naive=%s\n' "failed_at_render"
-			else
-				printf 'naive=%s\n' "active"
-			fi
-		else
-			printf 'naive=%s\n' "skipped"
-		fi
+		# Fix #3: granular naive status (skipped_no_server|skipped_fixture_host|
+		# failed_at_render|active) determined by _naive_status set above.
+		# Safety: 'pending' is transient; should never reach here (render block always
+		# resolves it). If it somehow does, treat as failed_at_render.
+		[[ "${_naive_status}" == "pending" ]] && _naive_status="failed_at_render"
+		printf 'naive=%s\n' "${_naive_status}"
 		# Phase 5.7: AWG mesh channel status (active|failed_at_setup|skipped)
 		printf 'awg=%s\n' "${_awg_status}"
 	} > "$_chs_tmp"
@@ -1098,7 +1139,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	mv -f "$_chs_tmp" "$PREFIX_LIB/channels-status.env"
 	unset _chs_tmp
 fi
-unset _hy2_status _awg_status
+unset _hy2_status _awg_status _naive_status
 
 # Secrets-containing files → 0600.
 chmod 0600 "$xray_out" "$coturn_out" || true
