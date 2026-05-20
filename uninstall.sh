@@ -133,11 +133,10 @@ if [[ -f "$_compose_file" ]]; then
 fi
 # Explicit volume removal: covers the case where the compose file is already
 # gone (i.e. uninstall called twice, or compose file removed manually).
-# -f is idempotent — no error if the volume does not exist. Fix C.
-docker volume rm -f \
-	oxpulse-partner-edge_caddy-data \
-	oxpulse-partner-edge_caddy-config \
-	oxpulse-partner-edge_coturn-log 2>/dev/null || true
+# Label-filter: catches ALL named volumes for this compose project —
+# including any volumes added in the future. BLOCKER fix.
+docker volume ls --filter label=com.docker.compose.project=oxpulse-partner-edge -q 2>/dev/null \
+	| xargs -r docker volume rm -f 2>/dev/null || true
 unset _compose_file
 # Force-remove any leftover oxpulse-partner-* containers
 docker ps -q --filter 'name=oxpulse-partner-' 2>/dev/null \
@@ -149,8 +148,11 @@ if ip link show awg0 >/dev/null 2>&1; then
 	ip link set awg0 down 2>/dev/null || true
 	ip link delete awg0 2>/dev/null || true
 fi
-# Remove amneziawg module if loaded (best-effort — kmod may not exist)
-rmmod amneziawg 2>/dev/null || true
+# Remove amneziawg module only if loaded — unconditional rmmod spews
+# noise and may fail if the module was never built. Gate on lsmod. MAJOR #2 fix.
+if lsmod | grep -q '^amneziawg '; then
+	rmmod amneziawg 2>&1 || warn "rmmod amneziawg failed (held by another iface?)"
+fi
 
 # ---------- Step 4: Backup identity files if requested ----------
 # MAJOR 5 review-fix: track the actual timestamped backup dir so step 6 can
@@ -265,10 +267,15 @@ log "[6/6] verifying removal — scanning for remaining files"
 # Filter out: the actual timestamped backup dir (not just BACKUP_ROOT) so backup
 # files don't show up as residuals. When --keep-backups is not set, _actual_backup_dir
 # is empty and the grep -v is effectively a no-op.
+# When --purge-packages is OFF, awg-quick artifacts are expected residuals
+# (they are only cleaned by the --purge-packages path). Filter them so
+# operators see signal, not noise, on default uninstalls. MAJOR #1 fix.
 _residuals=$(find /etc /var /usr \( -name 'oxpulse*' -o -name 'awg-quick*' \) \
 	2>/dev/null | grep -v '/proc' \
 	| grep -v "${_actual_backup_dir:-__no_backup__}" \
-	| grep -v "^${BACKUP_ROOT}/" || true)
+	| grep -v "^${BACKUP_ROOT}/" \
+	| { [[ $OPT_PURGE_PACKAGES -eq 1 ]] && cat || grep -v "awg-quick"; } \
+	|| true)
 if [[ -n "$_residuals" ]]; then
 	warn "remaining files found after uninstall:"
 	printf '%s\n' "$_residuals" >&2
