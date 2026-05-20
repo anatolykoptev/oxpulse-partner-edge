@@ -186,15 +186,14 @@ pub fn run(args: Args) -> Result<(), SecretsError> {
 
     let (body_str, raw) = post_with_retry(&agent, &endpoint, &body, args.retries)?;
 
-    // Write the raw response body to out_json BEFORE validation so install.sh
-    // (and operators debugging a stale-registry / missing-field failure) can
-    // see exactly what the backend returned. The env-file path stays
-    // back-compat (only the canonical 10 keys).
+    // MAJOR #1 fix: validate BEFORE writing out_json. On a malformed backend
+    // body or rejected validation, we must not leave a secrets-bearing tempfile
+    // in /tmp. Only write if validation passes.
+    let response = raw.into_validated()?;
+
     if let Some(path) = args.out_json.as_deref() {
         write_json_file(path, &body_str)?;
     }
-
-    let response = raw.into_validated()?;
 
     // MAJOR fix: warn when relay_jwt_secret is absent/empty so operators see the
     // regime change in install logs. Signaling now uses Ed25519 via /api/partner/keys;

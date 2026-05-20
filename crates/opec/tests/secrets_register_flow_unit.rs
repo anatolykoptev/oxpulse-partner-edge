@@ -592,3 +592,75 @@ fn register_without_out_json_skips_file_write() {
     assert!(tmp.path().join("out.env").exists());
     mock.assert();
 }
+
+// ── MAJOR #1 regression: out_json must NOT be written on validation failure ──
+// Prior behavior: write_json_file() was called BEFORE into_validated().
+// On a malformed/rejected response the temp-file lingered in /tmp with
+// secrets-bearing content. Fix: validate first, write only on success.
+
+#[test]
+fn register_validation_failure_does_not_write_out_json() {
+    // Backend returns a body missing required fields → into_validated() fails.
+    let mut server = mockito::Server::new();
+    let _mock = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(r#"{"node_id": "n"}"#) // missing backend_endpoint, turn_secret, etc.
+        .create();
+
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    let json_path = tmp.path().join("out.json");
+
+    let err = register::run(args_with_out_json(
+        tmp.path(),
+        server.url(),
+        json_path.clone(),
+    ))
+    .expect_err("validation failure must return error");
+
+    assert!(
+        matches!(
+            err,
+            SecretsError::MissingResponseField { .. } | SecretsError::Http { .. }
+        ),
+        "expected MissingResponseField, got: {err:?}"
+    );
+    // MAJOR #1: out_json must NOT exist — bogus body must not linger in /tmp.
+    assert!(
+        !json_path.exists(),
+        "out_json must NOT be written when validation fails (secrets-bearing tempfile protection)"
+    );
+}
+
+#[test]
+fn register_parse_failure_does_not_write_out_json() {
+    // Backend returns non-JSON (parse fails before into_validated).
+    let mut server = mockito::Server::new();
+    let _mock = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body("not-json")
+        .create();
+
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    let json_path = tmp.path().join("out.json");
+
+    let err = register::run(args_with_out_json(
+        tmp.path(),
+        server.url(),
+        json_path.clone(),
+    ))
+    .expect_err("parse failure must return error");
+
+    assert!(
+        matches!(err, SecretsError::ResponseParse { .. }),
+        "expected ResponseParse, got: {err:?}"
+    );
+    // MAJOR #1: out_json must NOT exist on parse failure.
+    assert!(
+        !json_path.exists(),
+        "out_json must NOT be written when response parse fails"
+    );
+}
