@@ -188,13 +188,15 @@ services:
 
   # ── CH5 NaiveProxy client ───────────────────────────────────────────────────
   # HTTP/2 CONNECT proxy tunnelled over TLS:443 — ТСПУ-resilient channel.
-  # Always rendered; compose_strip_failed_channels() in lib/render-channel-lib.sh
-  # removes this block post-render when NAIVE_SERVER env is unset (Task 7).
+  # Activated via `docker compose --profile ch5 up -d` (same pattern as CH3).
+  # compose_strip_failed_channels() in lib/render-channel-lib.sh still removes
+  # this block post-render as a defence-in-depth fallback when NAIVE_SERVER unset.
   # Image: partner-edge-naive (klzgrad/naiveproxy wrapper, Task 8).
   # Port bound to 127.0.0.1 only — Caddy reverse_proxy is the sole consumer.
   naive:
     image: ghcr.io/anatolykoptev/partner-edge-naive:{{IMAGE_VERSION}}
     container_name: oxpulse-partner-naive
+    profiles: [ch5]
     restart: unless-stopped
     networks:
       - edge
