@@ -24,7 +24,7 @@
 #   BRAND_CTA_URL_RU, BRAND_CTA_URL_EN, BRAND_CTA_URL_ZH, BRAND_CTA_URL_FA,
 #   BRAND_CTA_TEXT_RU, BRAND_CTA_TEXT_EN, BRAND_CTA_TEXT_ZH, BRAND_CTA_TEXT_FA,
 #   BRAND_LEGAL_ENTITY, BRAND_LEGAL_COUNTRY, BRAND_LEGAL_CONTACT,
-#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN, CLEAN_SBIN
+#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN, CLEAN_SBIN, SERVE_COUNTRIES
 
 _args_usage() {
 	sed -n '2,18p' "$0" >&2
@@ -50,6 +50,10 @@ Optional:
   --healthcheck-timeout=<s>  Step 7 wait deadline in seconds (default: 300, env: HEALTHCHECK_TIMEOUT)
   --branding-config=<path>   BrandingConfig JSON to ship with /api/partner/register (env: BRANDING_CONFIG).
                              Absent → backend synthesises an OxPulse default stub for the partner.
+  --serve-countries=<ISO1,ISO2,...>  Comma-separated client countries this edge serves
+                             (e.g. --serve-countries=RU,BY). Operator-declared,
+                             upper-folded server-side. Optional — falls back to
+                             MaxMind country of public_ip.
 
 Brand shortcut flags (used when --branding-config is NOT set; install.sh
 assembles a minimal BrandingConfig payload from whichever flags are set):
@@ -130,6 +134,8 @@ args_parse() {
 	# Region tag (e.g. `pl-waw`, `ru-msk`, `us-east`). Empty → auto-detect from
 	# public IP via ipinfo.io after Step 3. Honored over auto-detect when set.
 	REGION="${REGION:-}"
+	# Comma-separated client countries this edge serves (e.g. RU,BY). Absent = derive from MaxMind.
+	SERVE_COUNTRIES="${SERVE_COUNTRIES:-}"
 	# Step 7 healthcheck loop deadline (seconds). ACME first-issuance can
 	# legitimately take 2–4 minutes when DNS is slow to propagate or the LE
 	# rate limiter throttles; 120 was too tight on call.cheburator.bot and
@@ -215,6 +221,7 @@ args_parse() {
 			--tunnel=*)         TUNNEL="${1#*=}" ;;
 			--image-version=*)  IMAGE_VERSION="${1#*=}" ;;
 			--region=*)         REGION="${1#*=}" ;;
+			--serve-countries=*) SERVE_COUNTRIES="${1#*=}" ;;
 			--healthcheck-timeout=*) HEALTHCHECK_TIMEOUT="${1#*=}" ;;
 			--branding-config=*) BRANDING_CONFIG="${1#*=}" ;;
 			--brand-display-name=*)    BRAND_DISPLAY_NAME="${1#*=}" ;;
