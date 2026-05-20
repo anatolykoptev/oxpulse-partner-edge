@@ -49,6 +49,7 @@ curl -fsSL \
 | `--image-version=<tag>` | | Pin containers to a specific image tag (default: `latest`) |
 | `--dry-run` | | Render configs and print plan — no docker/systemd changes |
 | `--bake` | | Bake phase for snapshot workflows: install packages + images, no secrets, no start |
+| `--naive-server=<host>` | | Enable naive proxy bypass channel (CH5). Omitting this flag skips the channel cleanly. Test-fixture hosts (`localhost`, `*.example.com`, `*.example.net`, `*.example.org`, `*.test`) are auto-rejected with a warning. |
 
 \* Either `--token` or `--manual-config` is required.
 </details>
