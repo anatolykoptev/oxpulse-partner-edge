@@ -379,6 +379,10 @@ if [[ $DRY_RUN -eq 1 ]]; then
 	REALITY_UUID="00000000-0000-0000-0000-000000000000"
 else
 	log "  reality keypair: delegating to opec secrets reality-keygen"
+	# Ensure PREFIX_ETC exists before opec writes key files into it.
+	# Fresh-install: after uninstall.sh removes the dir, opec fails with
+	# 'io error at reality.priv: No such file or directory'. Fix E.
+	install -d -m 0700 "$PREFIX_ETC"
 	# Map operator-facing --force-keygen / --rotate-identity (FORCE_KEYGEN=1)
 	# to the OPEC --rotate flag. Array form avoids unquoted-expansion fragility.
 	_opec_args=(secrets reality-keygen --out-dir "$PREFIX_ETC")
