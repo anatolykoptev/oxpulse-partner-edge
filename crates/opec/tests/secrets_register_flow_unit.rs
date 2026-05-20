@@ -25,6 +25,7 @@ fn args_for(tmp: &std::path::Path, registry_url: String) -> register::Args {
         reality_uuid_file: tmp.join("reality.uuid"),
         awg_pub_file: tmp.join("awg.pub"),
         out_env: tmp.join("out.env"),
+        out_json: None,
         region: None,
         branding_config: None,
         timeout_secs: 5,
@@ -452,4 +453,142 @@ fn register_empty_string_relay_jwt_normalizes_to_empty_envfile() {
         env.contains("RELAY_JWT_SECRET=''"),
         "empty-string relay_jwt_secret must emit empty line; got:\n{env}"
     );
+}
+
+// ── --out-json passthrough (OPEC handoff regression fix) ─────────────────────
+// Background: write_env_file() emits only the 10 canonical keys. install.sh
+// also needs awg.*, signaling_sfu_secret, naive_*, hysteria2_*, channels[],
+// sfu_edge_id, otel_endpoint, service_token. The new --out-json flag dumps
+// the raw HTTP response body so install.sh can extract everything via json_get.
+
+fn args_with_out_json(
+    tmp: &std::path::Path,
+    registry_url: String,
+    out_json: std::path::PathBuf,
+) -> register::Args {
+    register::Args {
+        registry_url,
+        partner_id: "p".to_string(),
+        domain: "d.net".to_string(),
+        token: "t".to_string(),
+        public_ip: "1.1.1.1".to_string(),
+        reality_pub_file: tmp.join("reality.pub"),
+        reality_uuid_file: tmp.join("reality.uuid"),
+        awg_pub_file: tmp.join("awg.pub"),
+        out_env: tmp.join("out.env"),
+        out_json: Some(out_json),
+        region: None,
+        branding_config: None,
+        timeout_secs: 5,
+        retries: 1,
+    }
+}
+
+const FULL_RESPONSE_BODY: &str = r#"{
+    "node_id": "node-123",
+    "backend_endpoint": "1.2.3.4:5349",
+    "turn_secret": "ts-deadbeef",
+    "reality_uuid": "11111111-2222-3333-4444-555555555555",
+    "reality_public_key": "REALITY_PUB_VALUE",
+    "reality_short_id": "0123456789abcdef",
+    "reality_server_name": "www.cloudflare.com",
+    "reality_encryption": "mlkem768x25519plus",
+    "relay_jwt_secret": "rjs-cafebabe",
+    "turns_subdomain": "api-test",
+    "signaling_sfu_secret": "sss-secret",
+    "sfu_edge_id": "edge-007",
+    "otel_endpoint": "https://otel.example.com",
+    "service_token": "stkn_abcd1234",
+    "awg": {
+        "allocated_ip": "10.7.0.42",
+        "motherly_pubkey": "MOTHER_PUB",
+        "motherly_endpoint": "1.2.3.4:51820",
+        "motherly_awg_ip": "10.7.0.1",
+        "jc": "4", "jmin": "40", "jmax": "70",
+        "s1": "50", "s2": "100", "s4": "0",
+        "h1": "1", "h2": "2", "h3": "3", "h4": "4"
+    },
+    "hysteria2_server": "h2.example.com",
+    "hysteria2_port": 443,
+    "hysteria2_auth": "h2auth",
+    "hysteria2_obfs": "salamander",
+    "naive_server": "naive.example.com",
+    "naive_port": 8443,
+    "naive_user": "u",
+    "naive_pass": "p",
+    "naive_socks_port": 1080,
+    "channels": [{"id": "ch1"}, {"id": "ch2"}]
+}"#;
+
+#[test]
+fn register_writes_out_json_with_full_response_body() {
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(FULL_RESPONSE_BODY)
+        .create();
+
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    let json_path = tmp.path().join("out.json");
+    register::run(args_with_out_json(
+        tmp.path(),
+        server.url(),
+        json_path.clone(),
+    ))
+    .expect("register with --out-json succeeds");
+
+    // ── Assertion 1: out_env still has the 10 canonical keys (back-compat) ──
+    let env = fs::read_to_string(tmp.path().join("out.env")).unwrap();
+    assert!(env.contains("NODE_ID='node-123'"));
+    assert!(env.contains("TURN_SECRET='ts-deadbeef'"));
+    assert!(env.contains("RELAY_JWT_SECRET='rjs-cafebabe'"));
+
+    // ── Assertion 2: out_json exists, mode 0600, contents parse to JSON ──
+    let raw = fs::read_to_string(&json_path).expect("out_json file written");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).expect("out_json must be valid JSON");
+
+    // ── Assertion 3: full passthrough — fields beyond the canonical 10 ──
+    assert_eq!(parsed["signaling_sfu_secret"], "sss-secret");
+    assert_eq!(parsed["sfu_edge_id"], "edge-007");
+    assert_eq!(parsed["service_token"], "stkn_abcd1234");
+    assert_eq!(parsed["awg"]["allocated_ip"], "10.7.0.42");
+    assert_eq!(parsed["awg"]["motherly_pubkey"], "MOTHER_PUB");
+    assert_eq!(parsed["hysteria2_server"], "h2.example.com");
+    assert_eq!(parsed["naive_server"], "naive.example.com");
+    assert_eq!(parsed["channels"][0]["id"], "ch1");
+    assert_eq!(parsed["otel_endpoint"], "https://otel.example.com");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&json_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "out-json must be 0600 (contains service_token)"
+        );
+    }
+
+    mock.assert();
+}
+
+#[test]
+fn register_without_out_json_skips_file_write() {
+    // out_json: None — back-compat path, no extra file emitted.
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/api/partner/register")
+        .with_status(200)
+        .with_body(FULL_RESPONSE_BODY)
+        .create();
+
+    let tmp = TempDir::new().unwrap();
+    make_files(tmp.path());
+    register::run(args_for(tmp.path(), server.url())).expect("register without out_json succeeds");
+
+    // No stray file in the temp dir other than the env-file + inputs we created.
+    assert!(tmp.path().join("out.env").exists());
+    mock.assert();
 }
