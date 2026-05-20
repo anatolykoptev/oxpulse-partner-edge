@@ -536,6 +536,13 @@ DRYJSON
 		)
 		[[ -n "$REGION" ]] && _opec_register_args+=(--region "$REGION")
 		[[ -n "$BRANDING_CONFIG" ]] && _opec_register_args+=(--branding-config "$BRANDING_CONFIG")
+		# Federation Phase 1: pass operator-declared serve_countries as SERVE_COUNTRIES_JSON env
+		# to opec secrets register. opec reads the env and includes it in the POST body.
+		# jq trims whitespace per element so "RU, BY" yields ["RU","BY"] not [" BY"].
+		if [[ -n "${SERVE_COUNTRIES:-}" ]]; then
+			SERVE_COUNTRIES_JSON=$(printf '%s' "$SERVE_COUNTRIES" | jq -R '[split(",")[] | gsub("^\\s+|\\s+$";"")]' | jq -c .)
+			export SERVE_COUNTRIES_JSON
+		fi
 		if ! opec "${_opec_register_args[@]}"; then
 			die "opec secrets register failed"
 		fi
