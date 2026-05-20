@@ -149,7 +149,9 @@ impl RegisterResponseRaw {
             reality_short_id: require(self.reality_short_id, "reality_short_id")?,
             reality_server_name: require(self.reality_server_name, "reality_server_name")?,
             reality_encryption,
-            relay_jwt_secret: self.relay_jwt_secret,
+            // Normalize Some("") -> None: empty string is indistinguishable
+            // from absent at the protocol level; treat both as legacy-HS256-absent.
+            relay_jwt_secret: self.relay_jwt_secret.filter(|s| !s.is_empty()),
             turns_subdomain: self.turns_subdomain,
         })
     }
@@ -179,6 +181,15 @@ pub fn run(args: Args) -> Result<(), SecretsError> {
 
     let raw = post_with_retry(&agent, &endpoint, &body, args.retries)?;
     let response = raw.into_validated()?;
+
+    // MAJOR fix: warn when relay_jwt_secret is absent/empty so operators see the
+    // regime change in install logs. Signaling now uses Ed25519 via /api/partner/keys;
+    // relay_jwt_secret is legacy HS256 cascade-relay and may never be emitted.
+    if response.relay_jwt_secret.is_none() {
+        eprintln!(
+            "opec secrets register: relay_jwt_secret absent — using local fallback (legacy HS256 cascade-relay deprecated, see Ed25519 /api/partner/keys path)"
+        );
+    }
 
     // Stale-registry detection: install.sh L1181-1184 contract.
     if response.reality_encryption.trim().is_empty()
