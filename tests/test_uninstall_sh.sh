@@ -398,3 +398,250 @@ FINDSHIM
 	[ ! -f "$bdir/not-identity.txt" ]
 	[ ! -f "$bdir/unknown-file.dat" ]
 }
+
+# ---------------------------------------------------------------------------
+# Fix C: uninstall.sh removes docker named volumes
+# ---------------------------------------------------------------------------
+@test "Fix C: uninstall.sh --yes removes docker named volumes (compose -v)" {
+	# Pre-create dummy docker volume tracking via shim log inspection.
+	# The shim records all docker calls; we verify 'down -v' or explicit
+	# 'volume rm' appears for the named volumes.
+
+	# Plant a compose file so the conditional docker compose down branch fires
+	mkdir -p "$FAKE_ETC"
+	cat > "$FAKE_ETC/docker-compose.yml" << 'COMPEOF'
+version: "3"
+services:
+  caddy:
+    image: caddy
+volumes:
+  caddy-data:
+  caddy-config:
+  coturn-log:
+COMPEOF
+
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	# Must see either 'docker compose ... down ... -v' or 'docker volume rm'
+	grep -qE 'docker compose.*down.*-v|-v.*down|docker volume rm' "$SHIM_LOG"
+}
+
+@test "Fix C: uninstall.sh --yes queries docker volume ls with label-filter" {
+	# When compose file is absent, the label-filter fallback must query volumes
+	# by compose-project label — future-proof vs hardcoded name list (BLOCKER fix).
+	local shim_log="$SHIM_LOG"
+	printf '#!/usr/bin/env bash\necho "docker $*" >> "%s"\n' "$shim_log" > "$TMP/shims/docker"
+	chmod +x "$TMP/shims/docker"
+
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	# Must have used the label-filter approach (not hardcoded volume names)
+	grep -q 'volume ls.*label=com.docker.compose.project=oxpulse-partner-edge' "$SHIM_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# Fix D: uninstall.sh --purge-packages removes amneziawg build artifacts
+# ---------------------------------------------------------------------------
+# amneziawg is built from source (not apt/dnf packages).
+# `amneziawg-tools/src/make install` writes files to system paths that
+# are NOT under PREFIX_BIN=/usr/local/bin:
+#   /usr/bin/awg-quick            (make install target)
+#   /usr/bin/awg                  (make install target)
+#   /usr/share/man/man8/awg-quick.8
+#   /usr/share/bash-completion/completions/awg-quick
+#   /usr/lib/systemd/system/awg-quick@.service
+#   /usr/lib/systemd/system/awg-quick.target
+#   /usr/local/bin/amneziawg-go   (explicit install by install-awg.sh)
+# The --purge-packages flag removes these artifacts (off by default).
+
+_awg_env_args() {
+	# Extend _env_args with overrides for awg artifact paths
+	printf '%s ' \
+		"OXPULSE_AWG_USR_BIN=$TMP/usr/bin" \
+		"OXPULSE_AWG_USR_SHARE=$TMP/usr/share" \
+		"OXPULSE_AWG_USR_SYSLIB=$TMP/usr/lib/systemd/system" \
+		"OXPULSE_AWG_LOCAL_BIN=$TMP/usr/local/bin"
+}
+
+_plant_awg_artifacts() {
+	mkdir -p "$TMP/usr/bin" \
+	         "$TMP/usr/share/man/man8" \
+	         "$TMP/usr/share/bash-completion/completions" \
+	         "$TMP/usr/lib/systemd/system" \
+	         "$TMP/usr/local/bin"
+	touch "$TMP/usr/bin/awg-quick"
+	touch "$TMP/usr/bin/awg"
+	touch "$TMP/usr/share/man/man8/awg-quick.8"
+	touch "$TMP/usr/share/bash-completion/completions/awg-quick"
+	touch "$TMP/usr/lib/systemd/system/awg-quick@.service"
+	touch "$TMP/usr/lib/systemd/system/awg-quick.target"
+	touch "$TMP/usr/local/bin/amneziawg-go"
+}
+
+@test "Fix D: --yes WITHOUT --purge-packages leaves awg build artifacts intact" {
+	_plant_awg_artifacts
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) $(_awg_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	# Without --purge-packages, artifacts must NOT be removed
+	[ -f "$TMP/usr/bin/awg-quick" ]
+}
+
+@test "Fix D: --yes --purge-packages removes awg-quick from AWG_USR_BIN" {
+	_plant_awg_artifacts
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) $(_awg_env_args) bash '$UNINSTALL' --yes --purge-packages
+	"
+	[ "$status" -eq 0 ]
+	[ ! -f "$TMP/usr/bin/awg-quick" ]
+}
+
+@test "Fix D: --yes --purge-packages removes amneziawg-go from AWG_LOCAL_BIN" {
+	_plant_awg_artifacts
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) $(_awg_env_args) bash '$UNINSTALL' --yes --purge-packages
+	"
+	[ "$status" -eq 0 ]
+	[ ! -f "$TMP/usr/local/bin/amneziawg-go" ]
+}
+
+@test "Fix D: --yes --purge-packages removes man page and bash-completion artifacts" {
+	_plant_awg_artifacts
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) $(_awg_env_args) bash '$UNINSTALL' --yes --purge-packages
+	"
+	[ "$status" -eq 0 ]
+	[ ! -f "$TMP/usr/share/man/man8/awg-quick.8" ]
+	[ ! -f "$TMP/usr/share/bash-completion/completions/awg-quick" ]
+}
+
+@test "Fix D: --yes --purge-packages removes awg-quick@.service and awg-quick.target" {
+	_plant_awg_artifacts
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) $(_awg_env_args) bash '$UNINSTALL' --yes --purge-packages
+	"
+	[ "$status" -eq 0 ]
+	[ ! -f "$TMP/usr/lib/systemd/system/awg-quick@.service" ]
+	[ ! -f "$TMP/usr/lib/systemd/system/awg-quick.target" ]
+}
+
+@test "Fix D: --help text mentions --purge-packages" {
+	run bash "$UNINSTALL" --help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"--purge-packages"* ]]
+}
+
+@test "Fix D: unknown flag still fails with exit 2" {
+	run bash "$UNINSTALL" --unknown-flag-xyz
+	[ "$status" -eq 2 ]
+}
+
+# ---------------------------------------------------------------------------
+# BLOCKER: volume removal uses label-filter — future-proof, catches all volumes
+# ---------------------------------------------------------------------------
+# The explicit docker volume rm fallback must NOT hardcode volume names.
+# Fix: docker volume ls --filter label=com.docker.compose.project=oxpulse-partner-edge -q | xargs -r docker volume rm -f
+# This catches all named volumes including any added in the future.
+
+@test "BLOCKER: volume rm uses label-filter, not hardcoded names" {
+	# Write docker shim that bakes SHIM_LOG path at creation time
+	local shim_log="$SHIM_LOG"
+	printf '#!/usr/bin/env bash\necho "docker $*" >> "%s"\ncase "$*" in\n  *"volume ls"*"label=com.docker.compose.project=oxpulse-partner-edge"*)\n    echo "oxpulse-partner-edge_caddy-data"\n    echo "oxpulse-partner-edge_caddy-config"\n    echo "oxpulse-partner-edge_coturn-log"\n    echo "oxpulse-partner-edge_edge"\n    ;;\nesac\n' "$shim_log" > "$TMP/shims/docker"
+	chmod +x "$TMP/shims/docker"
+
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	# Must have called docker volume ls with label filter
+	grep -q 'volume ls.*label=com.docker.compose.project=oxpulse-partner-edge' "$SHIM_LOG"
+	# Must have called docker volume rm (will include edge volume from xargs output)
+	grep -q 'volume rm' "$SHIM_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# MAJOR #1: awg-quick residuals suppressed in Step 6 without --purge-packages
+# ---------------------------------------------------------------------------
+# Without --purge-packages, awg-quick paths are "expected residuals" and must
+# NOT appear in the Step 6 warning output.
+
+@test "MAJOR1: awg-quick residuals suppressed in Step 6 without --purge-packages" {
+	# Override find shim to return an awg-quick path under /usr/bin
+	printf '#!/usr/bin/env bash\necho "/usr/bin/awg-quick"\n' > "$TMP/shims/find"
+	chmod +x "$TMP/shims/find"
+
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	# _residuals must be empty: awg-quick paths are filtered when --purge-packages
+	# is OFF. So the "remaining files found" warning must NOT appear.
+	[[ "$output" != *"remaining files found"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# MAJOR #2: rmmod amneziawg gated on lsmod presence
+# ---------------------------------------------------------------------------
+
+@test "MAJOR2: rmmod amneziawg NOT called when module is absent from lsmod" {
+	local shim_log="$SHIM_LOG"
+	printf '#!/usr/bin/env bash\necho "lsmod" >> "%s"\necho "Module                  Size  Used by"\necho "nf_nat                 49152  1 iptable_nat"\n' "$shim_log" > "$TMP/shims/lsmod"
+	chmod +x "$TMP/shims/lsmod"
+	printf '#!/usr/bin/env bash\necho "rmmod $*" >> "%s"\nexit 0\n' "$shim_log" > "$TMP/shims/rmmod"
+	chmod +x "$TMP/shims/rmmod"
+
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	# rmmod must NOT have been called for amneziawg
+	! grep -q 'rmmod amneziawg' "$SHIM_LOG"
+}
+
+@test "MAJOR2: rmmod amneziawg called when module IS present in lsmod" {
+	local shim_log="$SHIM_LOG"
+	printf '#!/usr/bin/env bash\necho "lsmod" >> "%s"\necho "Module                  Size  Used by"\necho "amneziawg             163840  0"\n' "$shim_log" > "$TMP/shims/lsmod"
+	chmod +x "$TMP/shims/lsmod"
+	printf '#!/usr/bin/env bash\necho "rmmod $*" >> "%s"\nexit 0\n' "$shim_log" > "$TMP/shims/rmmod"
+	chmod +x "$TMP/shims/rmmod"
+
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	# rmmod MUST have been called for amneziawg
+	grep -q 'rmmod amneziawg' "$SHIM_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# MAJOR #3: install.sh PREFIX_ETC install -d appears only once in keygen section
+# ---------------------------------------------------------------------------
+
+@test "MAJOR3: install.sh has single install -d -m 0700 PREFIX_ETC sentinel (no duplicate in awg-keygen)" {
+	local reality_keygen_line awg_keygen_line count_before_awg
+	reality_keygen_line=$(grep -n '_opec_args=(secrets reality-keygen' "$REPO_ROOT/install.sh" | head -1 | cut -d: -f1)
+	awg_keygen_line=$(grep -n '_opec_args=(secrets awg-keygen' "$REPO_ROOT/install.sh" | head -1 | cut -d: -f1)
+	count_before_awg=$(awk "NR<=${awg_keygen_line} && /install -d -m 0700.*PREFIX_ETC/ {count++} END {print count+0}" "$REPO_ROOT/install.sh")
+
+	echo "count_before_awg=$count_before_awg reality_line=$reality_keygen_line awg_line=$awg_keygen_line"
+	[ -n "$reality_keygen_line" ]
+	[ -n "$awg_keygen_line" ]
+	# After the fix: exactly 1 install -d -m 0700 in the keygen section (sentinel at reality-keygen only)
+	[ "$count_before_awg" -eq 1 ]
+}
