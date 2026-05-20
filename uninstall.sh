@@ -28,6 +28,11 @@ PREFIX_SHARE="${OXPULSE_PREFIX_SHARE:-/usr/local/share/oxpulse-partner-edge}"
 SYSTEMD_DIR="${OXPULSE_SYSTEMD_DIR:-/etc/systemd/system}"
 # Backup root — overridable in tests to avoid writing to /root
 BACKUP_ROOT="${OXPULSE_BACKUP_ROOT:-/root}"
+# amneziawg artifact paths (test hooks for Fix D)
+AWG_USR_BIN="${OXPULSE_AWG_USR_BIN:-/usr/bin}"
+AWG_USR_SHARE="${OXPULSE_AWG_USR_SHARE:-/usr/share}"
+AWG_USR_SYSLIB="${OXPULSE_AWG_USR_SYSLIB:-/usr/lib/systemd/system}"
+AWG_LOCAL_BIN="${OXPULSE_AWG_LOCAL_BIN:-/usr/local/bin}"
 
 log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
@@ -35,11 +40,13 @@ warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 # ---------- Arg parsing ----------
 OPT_YES=0
 OPT_KEEP_BACKUPS=0
+OPT_PURGE_PACKAGES=0
 
 for _arg in "$@"; do
 	case "$_arg" in
-		--yes)           OPT_YES=1 ;;
-		--keep-backups)  OPT_KEEP_BACKUPS=1 ;;
+		--yes)            OPT_YES=1 ;;
+		--keep-backups)   OPT_KEEP_BACKUPS=1 ;;
+		--purge-packages) OPT_PURGE_PACKAGES=1 ;;
 		-h|--help)
 			cat >&2 <<'HELPEOF'
 uninstall.sh — Remove all oxpulse-partner-edge install artifacts.
@@ -49,6 +56,10 @@ Usage: sudo bash uninstall.sh [--yes] [--keep-backups]
   --yes            Skip interactive confirmation.
   --keep-backups   Move identity files to /root/oxpulse-backup-<epoch>/
                    before removing the install directories.
+  --purge-packages Remove amneziawg build artifacts installed to system paths
+                   (/usr/bin/awg-quick, /usr/bin/awg, /usr/local/bin/amneziawg-go,
+                   man pages, bash-completion, awg-quick@.service, awg-quick.target).
+                   Off by default — operators may keep awg-tools for other uses.
   -h / --help      Show this help text.
 
 Files removed:
@@ -117,9 +128,15 @@ unset _unit
 log "[2/6] stopping docker compose stack (best-effort)"
 _compose_file="$PREFIX_ETC/docker-compose.yml"
 if [[ -f "$_compose_file" ]]; then
-	docker compose -f "$_compose_file" down --remove-orphans 2>/dev/null \
-		|| warn "docker compose down failed — containers may still be running"
+	docker compose -f "$_compose_file" down --remove-orphans -v 2>/dev/null \
+		|| warn "docker compose down -v failed — containers or volumes may still exist"
 fi
+# Explicit volume removal: covers the case where the compose file is already
+# gone (i.e. uninstall called twice, or compose file removed manually).
+# Label-filter: catches ALL named volumes for this compose project —
+# including any volumes added in the future. BLOCKER fix.
+docker volume ls --filter label=com.docker.compose.project=oxpulse-partner-edge -q 2>/dev/null \
+	| xargs -r docker volume rm -f 2>/dev/null || true
 unset _compose_file
 # Force-remove any leftover oxpulse-partner-* containers
 docker ps -q --filter 'name=oxpulse-partner-' 2>/dev/null \
@@ -131,8 +148,11 @@ if ip link show awg0 >/dev/null 2>&1; then
 	ip link set awg0 down 2>/dev/null || true
 	ip link delete awg0 2>/dev/null || true
 fi
-# Remove amneziawg module if loaded (best-effort — kmod may not exist)
-rmmod amneziawg 2>/dev/null || true
+# Remove amneziawg module only if loaded — unconditional rmmod spews
+# noise and may fail if the module was never built. Gate on lsmod. MAJOR #2 fix.
+if lsmod | grep -q '^amneziawg '; then
+	rmmod amneziawg 2>&1 || warn "rmmod amneziawg failed (held by another iface?)"
+fi
 
 # ---------- Step 4: Backup identity files if requested ----------
 # MAJOR 5 review-fix: track the actual timestamped backup dir so step 6 can
@@ -221,15 +241,41 @@ done
 unset _unit_file
 systemctl daemon-reload 2>/dev/null || warn "systemctl daemon-reload failed"
 
+# ---------- Step 5b: Remove amneziawg build artifacts (--purge-packages) ----------
+if [[ $OPT_PURGE_PACKAGES -eq 1 ]]; then
+	log "[5b/6] removing amneziawg build artifacts (--purge-packages)"
+	# amneziawg is built from source by lib/install-awg.sh; its 'make install'
+	# writes to system paths outside PREFIX_BIN. Remove them here. Fix D.
+	# /usr/bin/awg-quick + /usr/bin/awg (from amneziawg-tools make install)
+	rm -f "$AWG_USR_BIN/awg-quick" 2>/dev/null || true
+	rm -f "$AWG_USR_BIN/awg"       2>/dev/null || true
+	# /usr/local/bin/amneziawg-go (installed explicitly by install-awg.sh)
+	rm -f "$AWG_LOCAL_BIN/amneziawg-go" 2>/dev/null || true
+	# man page + bash-completion
+	rm -f "$AWG_USR_SHARE/man/man8/awg-quick.8"                     2>/dev/null || true
+	rm -f "$AWG_USR_SHARE/bash-completion/completions/awg-quick"     2>/dev/null || true
+	# systemd unit files installed by amneziawg-tools (not under SYSTEMD_DIR)
+	rm -f "$AWG_USR_SYSLIB/awg-quick@.service"   2>/dev/null || true
+	rm -f "$AWG_USR_SYSLIB/awg-quick.target"      2>/dev/null || true
+	systemctl daemon-reload 2>/dev/null || true
+else
+	log "[5b/6] skipping amneziawg artifact removal (pass --purge-packages to enable)"
+fi
+
 # ---------- Step 6: Final verification ----------
 log "[6/6] verifying removal — scanning for remaining files"
 # Filter out: the actual timestamped backup dir (not just BACKUP_ROOT) so backup
 # files don't show up as residuals. When --keep-backups is not set, _actual_backup_dir
 # is empty and the grep -v is effectively a no-op.
+# When --purge-packages is OFF, awg-quick artifacts are expected residuals
+# (they are only cleaned by the --purge-packages path). Filter them so
+# operators see signal, not noise, on default uninstalls. MAJOR #1 fix.
 _residuals=$(find /etc /var /usr \( -name 'oxpulse*' -o -name 'awg-quick*' \) \
 	2>/dev/null | grep -v '/proc' \
 	| grep -v "${_actual_backup_dir:-__no_backup__}" \
-	| grep -v "^${BACKUP_ROOT}/" || true)
+	| grep -v "^${BACKUP_ROOT}/" \
+	| { [[ $OPT_PURGE_PACKAGES -eq 1 ]] && cat || grep -v "awg-quick"; } \
+	|| true)
 if [[ -n "$_residuals" ]]; then
 	warn "remaining files found after uninstall:"
 	printf '%s\n' "$_residuals" >&2
