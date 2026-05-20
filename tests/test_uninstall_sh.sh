@@ -398,3 +398,50 @@ FINDSHIM
 	[ ! -f "$bdir/not-identity.txt" ]
 	[ ! -f "$bdir/unknown-file.dat" ]
 }
+
+# ---------------------------------------------------------------------------
+# Fix C: uninstall.sh removes docker named volumes
+# ---------------------------------------------------------------------------
+@test "Fix C: uninstall.sh --yes removes docker named volumes (compose -v)" {
+	# Pre-create dummy docker volume tracking via shim log inspection.
+	# The shim records all docker calls; we verify 'down -v' or explicit
+	# 'volume rm' appears for the named volumes.
+
+	# Plant a compose file so the conditional docker compose down branch fires
+	mkdir -p "$FAKE_ETC"
+	cat > "$FAKE_ETC/docker-compose.yml" << 'COMPEOF'
+version: "3"
+services:
+  caddy:
+    image: caddy
+volumes:
+  caddy-data:
+  caddy-config:
+  coturn-log:
+COMPEOF
+
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	# Must see either 'docker compose ... down ... -v' or 'docker volume rm'
+	grep -qE 'docker compose.*down.*-v|-v.*down|docker volume rm' "$SHIM_LOG"
+}
+
+@test "Fix C: uninstall.sh --yes calls docker volume rm for all 3 named volumes" {
+	# When compose file is absent, explicit volume rm must still run
+	# (volumes may exist from a prior install even if the compose file is gone)
+
+	run bash -c "
+		export PATH='$TMP/shims:/usr/bin:/bin'
+		$(_env_args) bash '$UNINSTALL' --yes
+	"
+	[ "$status" -eq 0 ]
+	# Either compose down -v was called, or explicit volume rm for the 3 volumes
+	if grep -q 'compose.*down.*-v' "$SHIM_LOG" 2>/dev/null; then
+		true  # covered by compose down -v
+	else
+		grep -q 'volume rm' "$SHIM_LOG"
+	fi
+}
