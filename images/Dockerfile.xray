@@ -2,14 +2,17 @@
 # Partner-agnostic xray-core client image. config.json is bind-mounted.
 #
 # xray-core pin: teddysun/xray:<tag> maps 1:1 to XTLS/Xray-core releases.
-# Current pin: 26.4.25 — downgraded from 26.5.3 which introduced a runtime
-# crash: "CurvePreferences includes unsupported curve" when fingerprint is set
-# to "randomized". 26.4.x (tested: 26.4.17, 26.4.25) works correctly with
-# randomized TLS fingerprinting. Re-pin to 26.5.x only after upstream fixes
-# the utls/CurvePreferences regression.
-# To bump: edit the FROM tag below AND open a bundle release (bump VERSION in
-# release-please or tag manually) so partner-edge-xray image rebuilds.
-FROM teddysun/xray:26.4.25
+# Current pin: 26.5.9 — bumped from 26.4.25 on 2026-05-20 (2026-05-20 fleet
+# outage RCA). 26.4.25 was unaffected by the 26.5.3 CurvePreferences crash
+# but had the 26.4+ default-deny private-IP matcher in freedom outbound that
+# silently broke xray-reality → 127.0.0.1:8907 forwarding. Fix lives in the
+# server renderer (oxpulse-chat xray_config.rs `ipsBlocked: []`).
+# 26.5.9 empirically tested: starts cleanly with `fingerprint: randomized`
+# (the 26.5.3 utls/CurvePreferences regression IS fixed by 26.5.9).
+# To bump further: edit the FROM tag below AND open a bundle release (bump
+# VERSION in release-please or tag manually) so partner-edge-xray image
+# rebuilds.
+FROM teddysun/xray:latest
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.source="https://github.com/anatolykoptev/oxpulse-partner-edge"
