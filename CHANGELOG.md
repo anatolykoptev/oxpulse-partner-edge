@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.50](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.49...partner-edge-v0.12.50) (2026-05-20)
+
+
+### Features
+
+* **opec:** --serve-countries installer flag + opec body field ([97bf117](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/97bf117523b66c628cba8b4730cfd0f1bef49698))
+* **opec:** --serve-countries installer flag + opec register body field ([76ae8d6](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/76ae8d653e9ca0bfa95d68a280a20471228a163c))
+
 ## [0.12.49](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.48...partner-edge-v0.12.49) (2026-05-20)
 
 
