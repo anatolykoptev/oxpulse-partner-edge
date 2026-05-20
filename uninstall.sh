@@ -117,9 +117,16 @@ unset _unit
 log "[2/6] stopping docker compose stack (best-effort)"
 _compose_file="$PREFIX_ETC/docker-compose.yml"
 if [[ -f "$_compose_file" ]]; then
-	docker compose -f "$_compose_file" down --remove-orphans 2>/dev/null \
-		|| warn "docker compose down failed — containers may still be running"
+	docker compose -f "$_compose_file" down --remove-orphans -v 2>/dev/null \
+		|| warn "docker compose down -v failed — containers or volumes may still exist"
 fi
+# Explicit volume removal: covers the case where the compose file is already
+# gone (i.e. uninstall called twice, or compose file removed manually).
+# -f is idempotent — no error if the volume does not exist. Fix C.
+docker volume rm -f \
+	oxpulse-partner-edge_caddy-data \
+	oxpulse-partner-edge_caddy-config \
+	oxpulse-partner-edge_coturn-log 2>/dev/null || true
 unset _compose_file
 # Force-remove any leftover oxpulse-partner-* containers
 docker ps -q --filter 'name=oxpulse-partner-' 2>/dev/null \
