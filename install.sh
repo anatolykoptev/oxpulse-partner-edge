@@ -604,6 +604,20 @@ export NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT
 # Default 1080 matches naive's built-in default; override via node-config naive_socks_port.
 [[ -z "${NAIVE_SOCKS_PORT:-}" ]] && NAIVE_SOCKS_PORT=$(json_get naive_socks_port "$tmp_cfg")
 [[ -z "$NAIVE_SOCKS_PORT" ]] && NAIVE_SOCKS_PORT="1080"
+# Fix #2: fixture-host guard -- reject test placeholders before render.
+# Operators have passed naive_server=naive-test.example.com in error (2026-05-17 ruoxp
+# incident); installer happily rendered the channel, container crashlooped.
+# Pattern rejects: localhost, *.example.{com,net,org}, *.test
+_naive_status="skipped_no_server"
+if [[ -n "${NAIVE_SERVER:-}" ]]; then
+	if [[ "$NAIVE_SERVER" =~ ^(localhost|.*\.example\.(com|net|org)|.*\.test)$ ]]; then
+		warn "naive_server '${NAIVE_SERVER}' looks like a test fixture -- skipping naive channel"
+		_naive_status="skipped_fixture_host"
+		NAIVE_SERVER=""
+	else
+		_naive_status="pending"  # updated to active/failed_at_render below
+	fi
+fi
 # channels[] — future-proof bypass channel array.
 # Empty if server is older than v0.12 (no channels field yet).
 CHANNELS_JSON=$(json_get_raw channels "$tmp_cfg")
@@ -1036,11 +1050,20 @@ if [[ "${_hy2_status}" == "active" ]]; then
 	log "  hysteria2 CH3 profile enabled"
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
-	# Phase 5.5: naive is a bypass channel — render fail-soft.
+	# Phase 5.5: naive is a bypass channel -- render fail-soft.
 	if render_channel_soft naive "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"; then
-		chmod 0600 "$PREFIX_ETC/naive-client.json"
+		# Fix #1: 0640 + gid 65532 so distroless/nonroot container can read the proxy
+		# password. gid 65532 = distroless nonroot (Dockerfile.naive final stage).
+		# Trade-off: any process with gid 65532 on the host can read the secret, but
+		# /etc/passwd has no entry for gid 65532 outside the container, so host exposure
+		# is theoretical only. 0600 root:root prevents the container from reading it.
+		chown root:65532 "$PREFIX_ETC/naive-client.json"
+		chmod 0640 "$PREFIX_ETC/naive-client.json"
 		COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch5"
+		_naive_status="active"
 		log "  naive-client.json rendered (CH5 profile enabled)"
+	else
+		_naive_status="failed_at_render"
 	fi
 fi
 rm -rf "$stage"
@@ -1078,15 +1101,12 @@ if [[ $DRY_RUN -eq 0 ]]; then
 			printf 'xray=%s\n' "active"
 		fi
 		printf 'hysteria2=%s\n' "${_hy2_status}"
-		if [[ -n "${NAIVE_SERVER:-}" ]]; then
-			if _in_array naive "${CHANNELS_FAILED[@]:-}"; then
-				printf 'naive=%s\n' "failed_at_render"
-			else
-				printf 'naive=%s\n' "active"
-			fi
-		else
-			printf 'naive=%s\n' "skipped"
-		fi
+		# Fix #3: granular naive status (skipped_no_server|skipped_fixture_host|
+		# failed_at_render|active) determined by _naive_status set above.
+		# Safety: 'pending' is transient; should never reach here (render block always
+		# resolves it). If it somehow does, treat as failed_at_render.
+		[[ "${_naive_status}" == "pending" ]] && _naive_status="failed_at_render"
+		printf 'naive=%s\n' "${_naive_status}"
 		# Phase 5.7: AWG mesh channel status (active|failed_at_setup|skipped)
 		printf 'awg=%s\n' "${_awg_status}"
 	} > "$_chs_tmp"
@@ -1094,7 +1114,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	mv -f "$_chs_tmp" "$PREFIX_LIB/channels-status.env"
 	unset _chs_tmp
 fi
-unset _hy2_status _awg_status
+unset _hy2_status _awg_status _naive_status
 
 # Secrets-containing files → 0600.
 chmod 0600 "$xray_out" "$coturn_out" || true

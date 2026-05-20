@@ -338,6 +338,11 @@ else
 			# Treated as degraded (counts toward failed) but not a schema-drift unknown.
 			failed_at_render|failed_at_start|failed_at_setup) _ch_failed_count=$((_ch_failed_count + 1)) ;;
 			skipped)           ;;  # not attempted — does not count toward failure
+			# Fix #3: granular skip reasons for naive channel (skipped_no_server when
+			# NAIVE_SERVER was empty, skipped_fixture_host when guard rejected a test
+			# placeholder like *.example.com / localhost / *.test).  Neither counts
+			# toward failure — the naive channel was simply not provisioned.
+			skipped_no_server|skipped_fixture_host) ;;  # naive channel intentionally skipped
 			# MAJOR 4 fix: unknown/typo status (e.g. 'actived', 'provisioning') counts
 			# as failure rather than silently passing.  Schema drift → false-green prevented.
 			*) warn "channels-status.env: unknown status '${_ch_status}' for channel '${_ch_name}' — treating as failed"; _ch_failed_count=$((_ch_failed_count + 1)) ;;
