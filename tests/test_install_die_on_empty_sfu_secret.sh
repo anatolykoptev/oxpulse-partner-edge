@@ -13,16 +13,17 @@ INSTALL="$REPO_ROOT/install.sh"
 [[ -f "$INSTALL" ]] || { echo "FAIL: install.sh not found at $INSTALL"; exit 1; }
 
 # 1. The empty-secret guard must call die, not warn.
-#    Use awk to extract the block from the SIGNALING_SFU_SECRET assignment to
-#    the next blank line that closes the [[ -z ]] guard.
+#    Locate the [[ -z "...SIGNALING_SFU_SECRET..." ]] guard block itself,
+#    not the assignment site (assignment + guard can be separated by 100+
+#    lines of unrelated code, breaking a naive line-range capture).
 guard_block=$(awk '
-    /^SIGNALING_SFU_SECRET=\$\(json_get signaling_sfu_secret/ { capture=1 }
+    /^if \[\[ -z "\${SIGNALING_SFU_SECRET:-}" \]\]; then/ { capture=1 }
     capture { print }
     capture && /^fi$/ { exit }
 ' "$INSTALL")
 
 [[ -n "$guard_block" ]] \
-    || { echo "FAIL: could not locate SIGNALING_SFU_SECRET guard block in $INSTALL"; exit 1; }
+    || { echo "FAIL: could not locate SIGNALING_SFU_SECRET guard block (if [[ -z ... ]]; then ... fi) in $INSTALL"; exit 1; }
 
 # 2. The guard must invoke die (hard exit), not warn (soft continue).
 echo "$guard_block" | grep -qE '\bdie\b' \
@@ -38,7 +39,9 @@ echo "$guard_block" | grep -qE '^[[:space:]]*warn\b' \
 #    and "redeploy" / "motherly" (the actionable verb + target).
 echo "$guard_block" | grep -q 'SIGNALING_SFU_SECRET' \
     || { echo "FAIL: die message missing SIGNALING_SFU_SECRET hint"; exit 1; }
-echo "$guard_block" | grep -qi 'group calls' \
+# Use tr to flatten newlines so the test tolerates line wrap inside the
+# die heredoc (e.g. group calls split across lines).
+echo "$guard_block" | tr -s '[:space:]' ' ' | grep -qi 'group  *calls' \
     || { echo "FAIL: die message must explain group-call breakage"; exit 1; }
 
 # 4. Sanity: install.sh still parses.
