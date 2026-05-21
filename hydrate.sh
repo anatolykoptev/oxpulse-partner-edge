@@ -21,7 +21,22 @@ PREFIX_LIB=/var/lib/oxpulse-partner-edge
 HYDRATE_ENV="$PREFIX_ETC/hydrate.env"
 SENTINEL="$PREFIX_LIB/hydrated"
 BACKEND_URL="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
-IMAGE_VERSION="${OXPULSE_IMAGE_VERSION:-latest}"
+# Resolve IMAGE_VERSION with strict precedence:
+#   1. $OXPULSE_IMAGE_VERSION env (operator override via hydrate.env)
+#   2. VERSION file shipped alongside this script (release artifact pins it)
+#   3. die — hydrate is automated, no operator at the keyboard to recover,
+#      and defaulting to a floating "latest" tag means clones drift away
+#      from the pinned fleet within a single GHCR push. Audit 2026-05-22 F2.
+SCRIPT_DIR_VERSION="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE_VERSION="${OXPULSE_IMAGE_VERSION:-}"
+if [[ -z "$IMAGE_VERSION" ]]; then
+    _version_file="${SCRIPT_DIR_VERSION}/VERSION"
+    if [[ -r "$_version_file" ]]; then
+        # VERSION file format: "0.12.52  # x-release-please-version"
+        IMAGE_VERSION=$(awk '{print $1; exit}' "$_version_file")
+    fi
+fi
+[[ -n "$IMAGE_VERSION" ]] || die "IMAGE_VERSION unresolved: set OXPULSE_IMAGE_VERSION in hydrate.env or ship VERSION file alongside hydrate.sh"
 
 log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
