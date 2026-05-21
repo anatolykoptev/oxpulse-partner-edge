@@ -45,6 +45,10 @@ fn set_frozen_env() {
     );
     env::set_var("RELAY_JWT_SECRET", "test-relay-jwt-secret");
     env::set_var("SIGNALING_SFU_SECRET", "test-signaling-sfu-secret");
+    // AWG_ALLOCATED_IP — this partner's own mesh IP. Wired into the SFU
+    // SFU_METRICS_BIND / SFU_RELAY_API_BIND env vars by the compose template
+    // so the privileged HTTP sockets are mesh-only. Audit 2026-05-21.
+    env::set_var("AWG_ALLOCATED_IP", "10.9.0.6");
     env::set_var("HYSTERIA2_SOCKS_PORT", "18891");
     env::set_var("NAIVE_SOCKS_PORT", "18892");
     env::set_var("HY2_SERVER", "");
