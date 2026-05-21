@@ -1,7 +1,7 @@
 [Unit]
 Description=OxPulse partner-edge auto-refresh of Reality keys
 After=network-online.target oxpulse-partner-edge.service
-Requires=oxpulse-partner-edge.service
+Wants=oxpulse-partner-edge.service
 
 [Service]
 Type=oneshot
