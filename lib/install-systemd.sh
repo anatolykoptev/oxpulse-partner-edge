@@ -96,7 +96,12 @@ _systemd_install_lib_scripts() {
 	fi
 	if [[ -n "$_rcl_src" ]]; then
 		install -m 0644 "$_rcl_src" "$PREFIX_SBIN/render-channel-lib.sh"
-		install -m 0644 "$_rcl_src" "$PREFIX_LIBDIR/render-channel-lib.sh"
+		# Bug 8/10: when operator pre-stages the file into PREFIX_LIBDIR (workaround
+		# for Bug R), _rcl_src == dst and `install` errors "are the same file".
+		# Guard with -ef so same-file is a silent no-op.
+		if [[ ! "$_rcl_src" -ef "$PREFIX_LIBDIR/render-channel-lib.sh" ]]; then
+			install -m 0644 "$_rcl_src" "$PREFIX_LIBDIR/render-channel-lib.sh"
+		fi
 	else
 		curl -fsSL "$REPO_RAW/lib/render-channel-lib.sh" -o "$PREFIX_SBIN/render-channel-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/render-channel-lib.sh"
