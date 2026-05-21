@@ -10,7 +10,7 @@ and must have **enough RAM** to handle the steady-state SFU load.
 
 | Requirement | Minimum | Recommended |
 |---|---|---|
-| RAM           | 2 GiB           | **4 GiB**            |
+| RAM           | **2 GiB**       | **4 GiB**            |
 | vCPUs         | 1               | **2**                |
 | Disk          | 20 GiB          | **40 GiB SSD**       |
 | Bandwidth     | 1 TB/month      | unmetered            |
@@ -39,33 +39,37 @@ compromise of that panel exposes our keys.
 (docker, the partner-edge containers, fail2ban, ufw/firewalld). Nothing
 else. No website, no mail server, no other VPN.
 
-## Why 4 GiB RAM (not 2 GiB)
+## RAM sizing
 
-Steady-state memory footprint on a healthy partner (zvonilka,
-2026-05-21):
+**Empirical baseline (2026-05-22, zvonilka partner-edge under light load):**
 
 | Component | RSS |
 |---|---|
-| oxpulse-partner-caddy   | 27 MiB |
-| oxpulse-partner-xray    | 23 MiB |
+| oxpulse-partner-caddy     | 27 MiB |
+| oxpulse-partner-xray      | 23 MiB |
 | oxpulse-partner-hysteria2 | 22 MiB |
-| oxpulse-partner-coturn  |  9 MiB |
-| oxpulse-partner-sfu     |  4 MiB (idle) |
-| dockerd                 | 58 MiB |
-| journald                | 127 MiB |
-| **System overhead**     | **~270 MiB** |
+| oxpulse-partner-coturn    | 9 MiB |
+| oxpulse-partner-sfu       | 4 MiB (idle) |
+| dockerd                   | 58 MiB |
+| journald                  | 127 MiB |
+| **Stack overhead**        | **~270 MiB** |
 
-The SFU's RSS at *idle* is ~4 MiB; under live load (100 participants
-in a room with audio + low-res video) it climbs to **600–900 MiB**
-in the str0m-managed RTP buffers + decoder state. Add OS overhead and a
-~200 MiB margin for log buffers and you need **at least 1.5 GiB**
-available to the SFU container. On a 2 GiB host the OS + other
-containers leave well under 1 GiB free → the OOM killer takes the SFU
-mid-call. Empirically this happened during the 2026-04 partner load
-test (see internal post-mortem).
+Total RAM at idle / light traffic: ~700 MiB used out of 1.8 GiB on
+zvonilka. **2 GiB is sufficient for 1:1 calls and small rooms (the
+current production workload across all 4 partners as of 2026-05-22).**
 
-4 GiB gives the SFU room to grow to a multi-hundred-participant room
-without OOM, and survives a hysteria2 spike without paging.
+**4 GiB is the comfortable choice** for:
+
+- larger rooms (more participants -> more str0m RTP buffers + decoder state)
+- bursty hysteria2 / Reality channels
+- co-resident logs that accumulate between log rotations
+- headroom for the SFU under load spikes without paging
+
+The exact SFU memory growth per participant is **not yet measured
+in-house** -- see followup P in `FOLLOWUPS.md` for the planned
+capacity benchmark. Until that publishes, we recommend 4 GiB for any
+partner expecting > 20 concurrent participants per room, and document
+2 GiB as the verified-working minimum for the current fleet's workload.
 
 ## Why ufw / firewalld must be active
 
