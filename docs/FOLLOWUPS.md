@@ -118,3 +118,24 @@ metrics on `bind_address`.
 **Files:** `crates/sfu/`, `oxpulse-sfu-kit/`. Estimated cost: 1–2 days.
 
 **Discovered:** 2026-05-21 audit, while implementing the split-bind fix.
+
+
+---
+
+### P. Run in-house SFU capacity benchmark to ground RAM recommendation
+
+**Where:** `docs/HOSTING_REQUIREMENTS.md` currently recommends 2 GiB minimum / 4 GiB comfortable, with the caveat that MiB-per-participant growth has not been measured in-house. Industry-standard WebRTC SFUs (Jitsi videobridge, LiveKit) suggest 2-4 GiB for moderate loads, but our str0m-based SFU has its own memory profile.
+
+**Symptom:** today operators choosing a VPS plan have to pick between "2 GiB just to fit" or "8 GiB just in case." A real benchmark turns guess into number.
+
+**Why it matters:** with ~10 partners in onboarding queue (per `oxpulse-partner-edge-pipeline`), each picking a hosting plan, an authoritative MiB-per-participant figure prevents both under-provisioning (mid-call OOM) and over-provisioning (operator cost waste).
+
+**Next step:**
+
+1. Build a load harness (Playwright + WebRTC bot, or real client at scale) that ramps participants from 1 -> 50 -> 100 -> 200 in a single SFU room.
+2. Capture `oxpulse-partner-sfu` RSS at each step from `docker stats --no-stream` and from cgroup `memory.current`.
+3. Publish the MiB-per-participant curve in `docs/HOSTING_REQUIREMENTS.md` (replacing the current "not yet measured in-house" note) and emit `sfu_memory_per_participant_bytes` as a derived metric for capacity alerts.
+
+**Files:** new `tests/load/sfu-room-ramp.ts` (or similar), `docs/HOSTING_REQUIREMENTS.md` update.
+
+**Discovered:** 2026-05-22 README refresh -- current RAM recommendation is industry-extrapolated, not measured.
