@@ -60,7 +60,9 @@ async fn main() -> anyhow::Result<()> {
     let metrics = Arc::new(SfuMetrics::new()?);
 
     // Spawn the Prometheus HTTP server on metrics_port.
-    let metrics_addr = format!("{}:{}", config.bind_address, config.metrics_port);
+    // Use metrics_bind_addr() so SFU_METRICS_BIND can scope the /metrics socket
+    // to the AWG mesh on partner-edge deployments (audit 2026-05-21).
+    let metrics_addr = format!("{}:{}", config.metrics_bind_addr(), config.metrics_port);
     let metrics_handle = spawn_metrics_server(metrics_addr, metrics.clone())?;
 
     // Relay API -- JWT-authenticated POST /relay/connect for cascade relay setup.
@@ -96,7 +98,9 @@ async fn main() -> anyhow::Result<()> {
 
     let (mut relay_rx, relay_handle) = if relay_enabled {
         let relay_secret = Arc::<[u8]>::from(relay_secret_opt.unwrap().into_bytes());
-        let relay_addr = format!("{}:{}", config.bind_address, config.relay_api_port);
+        // Use relay_api_bind_addr() so SFU_RELAY_API_BIND can scope the relay
+        // socket to the AWG mesh on partner-edge deployments (audit 2026-05-21).
+        let relay_addr = format!("{}:{}", config.relay_api_bind_addr(), config.relay_api_port);
         let relay_listener = tokio::net::TcpListener::bind(&relay_addr)
             .await
             .with_context(|| format!("bind relay API on {relay_addr}"))?;
@@ -173,7 +177,10 @@ async fn main() -> anyhow::Result<()> {
         config.relay_auth_secret.as_ref()
     {
         let (client_inject_tx, client_inject_rx) = tokio::sync::mpsc::channel::<PendingClient>(32);
-        let client_ws_addr = format!("{}:{}", config.bind_address, config.client_ws_port);
+        // Use client_ws_bind_addr() so SFU_CLIENT_WS_BIND can scope the client-WS
+        // socket to the docker bridge IP on partner-edge deployments
+        // (caddy reverse-proxies via host.docker.internal:8920). Audit 2026-05-21.
+        let client_ws_addr = format!("{}:{}", config.client_ws_bind_addr(), config.client_ws_port);
         let client_ws_listener = tokio::net::TcpListener::bind(&client_ws_addr)
             .await
             .with_context(|| format!("bind client_ws API on {client_ws_addr}"))?;
