@@ -671,6 +671,32 @@ AWG_H4=$(awg_extract               "$tmp_cfg" h4)
 	"${AWG_MOTHERLY_AWG_IP:-}" "${AWG_JC:-}" "${AWG_JMIN:-}" "${AWG_JMAX:-}" \
 	"${AWG_S1:-}" "${AWG_S2:-}" "${AWG_S4:-}" "${AWG_H1:-}" "${AWG_H2:-}" \
 	"${AWG_H3:-}" "${AWG_H4:-}"
+
+# Validate AWG_* vars are non-empty when the backend signalled it allocated
+# an AWG IP. awg_extract() returns "" silently on python3 / JSON failure
+# (RHS of $(...) is exempt from `set -e`). Empty values would render a
+# broken awg0.conf with `PublicKey =`, `Endpoint =`, etc.; awg-quick@awg0
+# then exits 1 silently and install reports green completion on a
+# non-functional edge.
+#
+# Bug class: 2026-05-18 mesh-bridge-online-drop incident. See FOLLOWUPS.md
+# entry "awg_extract silent failure swallows JSON / python3 errors during
+# install". Regression guard: tests/test_install_awg_extract_validate.sh.
+if [[ -n "${AWG_ALLOCATED_IP:-}" ]]; then
+	for _awg_var in AWG_MOTHERLY_PUBKEY AWG_MOTHERLY_ENDPOINT AWG_MOTHERLY_AWG_IP \
+	                AWG_JC AWG_JMIN AWG_JMAX AWG_S1 AWG_S2 AWG_S4 \
+	                AWG_H1 AWG_H2 AWG_H3 AWG_H4; do
+		if [[ -z "${!_awg_var:-}" ]]; then
+			die "AWG mesh: /api/partner/register response is missing or has empty '$_awg_var'.
+This means the backend returned a partial 'awg' block (or python3 failed to
+parse it), and the edge will not have a working AWG tunnel after install.
+
+Re-run install OR set OXPULSE_NO_AWG=1 to skip AWG and run xray-only.
+Diagnose locally: python3 -m json.tool < \"\$tmp_cfg\" | grep -A 20 awg"
+		fi
+	done
+	unset _awg_var
+fi
 SFU_EDGE_ID=$(awg_extract          "$tmp_cfg" edge_id)
 export OTEL_EXPORTER_OTLP_ENDPOINT
 OTEL_EXPORTER_OTLP_ENDPOINT=$(awg_extract "$tmp_cfg" otel_endpoint)
