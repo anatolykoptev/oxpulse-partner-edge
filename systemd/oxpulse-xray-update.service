@@ -1,7 +1,7 @@
 [Unit]
 Description=oxpulse partner-edge xray container auto-update (single-container watchtower)
 After=docker.service
-Requires=docker.service
+Wants=docker.service
 
 [Service]
 Type=oneshot
