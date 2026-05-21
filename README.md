@@ -31,7 +31,7 @@ Optional channel (enable with `--naive-server=<host>`):
 
 - Debian 12 / Ubuntu 22.04+ / AlmaLinux 9 / Rocky 9 / CentOS Stream 9 with `systemd`
 - **Dedicated host** (no control panel, no other workloads — see [`docs/HOSTING_REQUIREMENTS.md`](docs/HOSTING_REQUIREMENTS.md))
-- **2 vCPU, 4 GiB RAM, 40 GiB SSD** (1 GiB minimum is no longer sufficient — SFU peaks at 600–900 MiB under 100-participant load; 2 GiB hosts OOM mid-call)
+- **2 GiB RAM minimum** (verified-working on the current production fleet at light workload); **4 GiB comfortable** for larger rooms / log headroom. 2 vCPU + 40 GiB SSD recommended
 - Public IPv4; DNS A record for your domain
 - Either `ufw` (Debian-family) or `firewalld` (RHEL-family) — installer configures the whitelist automatically; missing → installer warns + skips and you must apply manually
 
