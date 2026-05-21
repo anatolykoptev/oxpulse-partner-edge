@@ -295,6 +295,8 @@ _install_lib_source install-healthcheck.sh
 _install_lib_source install-systemd.sh
 # shellcheck source=lib/install-awg.sh
 _install_lib_source install-awg.sh
+# shellcheck source=lib/install-firewall.sh
+_install_lib_source install-firewall.sh
 
 preflight_run
 
@@ -1138,6 +1140,12 @@ if [[ -n "${AWG_ALLOCATED_IP:-}" && -n "${AWG_MOTHERLY_PUBKEY:-}" && $DRY_RUN -e
 	if ( install_amneziawg ); then
 		configure_amneziawg
 		_awg_status="active"
+		# Host firewall hardening — must run AFTER awg0 is up so the AWG
+		# listen port is discoverable. Without this, partner hosts ship with
+		# :9317 (SFU /metrics) + :8912 (relay API) publicly reachable; see
+		# the 2026-05-21 zvonilka/rvpn/ruoxp audit. firewall_apply is
+		# idempotent and supports ufw (Debian/Ubuntu) + firewalld (RHEL).
+		firewall_apply
 	else
 		warn "[awg] install_amneziawg failed — edge will run without VPN mesh"
 		warn "      Run 'install_amneziawg' manually after fixing the build environment."
