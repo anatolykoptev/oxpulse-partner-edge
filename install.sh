@@ -217,20 +217,34 @@ unset _arg
 # register call would silently produce no tmp_cfg, breaking all downstream
 # json_get extractions.
 _ensure_opec_binary() {
-	local _machine _opec_arch _opec_url
+	local _machine _opec_arch _opec_url _bundled
 	_machine=$(uname -m)
 	case "$_machine" in
 		x86_64)  _opec_arch=amd64 ;;
 		aarch64) _opec_arch=arm64 ;;
 		*) die "opec: unsupported architecture: $_machine — supply an opec binary on PATH or use INSTALL_OPEC_FROM_PATH=" ;;
 	esac
+	# Install destination: /usr/bin/ is in CentOS/RHEL default sudoers secure_path
+	# (/sbin:/bin:/usr/sbin:/usr/bin) while /usr/local/bin/ is NOT. Placing opec in
+	# /usr/local/bin/ on RHEL-family edges makes it invisible to sudo invocations
+	# from the installer (incident 2026-05-20 cheburator).
+	local _dest=/usr/bin/opec
+	# Prefer the bundled opec-${arch} from the install bundle (same directory as
+	# this install.sh). Saves a GitHub round-trip and works on edges blocked from
+	# GitHub by upstream DPI (e.g. RU partner servers).
+	_bundled="${BASH_SOURCE[0]%/*}/opec-${_opec_arch}"
+	if [[ -f "$_bundled" ]]; then
+		log "opec not found on PATH -- installing bundled binary ($_opec_arch)"
+		install -m 0755 "$_bundled" "$_dest" || die "opec install failed: cp $_bundled -> $_dest"
+		return 0
+	fi
 	_opec_url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/opec-${_opec_arch}"
-	log "opec not found -- downloading from release assets ($_opec_arch)"
-	if curl -fsSL --max-time 60 "$_opec_url" -o /usr/local/bin/opec 2>/dev/null; then
-		chmod +x /usr/local/bin/opec
+	log "opec not found and no bundled binary -- downloading from release assets ($_opec_arch)"
+	if curl -fsSL --max-time 60 "$_opec_url" -o "$_dest" 2>/dev/null; then
+		chmod +x "$_dest"
 	else
-		rm -f /usr/local/bin/opec
-		die "opec download failed from $_opec_url — render is no longer optional (Phase 4.4 removed the bash fallback). Pre-stage /usr/local/bin/opec or check network connectivity to GitHub releases."
+		rm -f "$_dest"
+		die "opec download failed from $_opec_url — render is no longer optional (Phase 4.4 removed the bash fallback). Pre-stage /usr/bin/opec, supply opec-${_opec_arch} alongside install.sh, or check network connectivity to GitHub releases."
 	fi
 }
 if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v opec >/dev/null 2>&1; then

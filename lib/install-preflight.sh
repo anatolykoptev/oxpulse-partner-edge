@@ -57,6 +57,7 @@ preflight_run() {
 	fi
 
 	_preflight_firewall
+	_preflight_low_memory_swap
 	_preflight_dnf_cache_sanity
 }
 
@@ -103,6 +104,46 @@ _preflight_firewall() {
 			log "  + $spec"
 		done
 	fi
+}
+
+
+_preflight_low_memory_swap() {
+	# On low-memory edges (<1.5 GiB total) dnf makecache + image pulls regularly
+	# OOM-kill mid-install (incident 2026-05-20 cheburator: 951 MiB RAM, dnf
+	# anon-rss 502 MiB, no swap headroom -> killed at preflight). Add a 1 GiB
+	# temp swapfile if neither total RAM nor existing swap clears the floor.
+	[[ $DRY_RUN -ne 0 ]] && return 0
+	local mem_total_mib swap_total_mib
+	mem_total_mib=$(awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+	swap_total_mib=$(awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+	local headroom_mib=$((mem_total_mib + swap_total_mib))
+	if (( headroom_mib >= 1536 )); then
+		return 0
+	fi
+	local swapfile=/var/lib/oxpulse-partner-edge.swap
+	if [[ -f $swapfile ]] && swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$swapfile"; then
+		log "  low-mem swap already active at $swapfile (mem=${mem_total_mib}MiB swap=${swap_total_mib}MiB)"
+		return 0
+	fi
+	local size_mib=$(( 1536 - headroom_mib + 256 ))   # extra 256 MiB headroom
+	(( size_mib < 512 )) && size_mib=512
+	log "  low memory (${mem_total_mib}MiB RAM + ${swap_total_mib}MiB swap) -> adding ${size_mib}MiB temp swap at $swapfile"
+	if ! dd if=/dev/zero of="$swapfile" bs=1M count="$size_mib" status=none 2>/dev/null; then
+		warn "  swapfile allocation failed; continuing without swap (dnf may OOM)"
+		return 0
+	fi
+	chmod 600 "$swapfile"
+	if ! mkswap "$swapfile" >/dev/null 2>&1 || ! swapon "$swapfile" 2>/dev/null; then
+		warn "  swapfile activation failed; continuing without swap (dnf may OOM)"
+		rm -f "$swapfile"
+		return 0
+	fi
+	if ! grep -qF "$swapfile" /etc/fstab 2>/dev/null; then
+		printf '%s none swap sw 0 0
+' "$swapfile" >> /etc/fstab
+	fi
+	log "  swap active: $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | head -3 | tr '
+' ';' )"
 }
 
 _preflight_dnf_cache_sanity() {
