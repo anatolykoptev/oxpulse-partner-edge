@@ -76,3 +76,45 @@ during an incident.
 `tests/test_install_mesh_reachability_check.sh`.
 
 **Discovered:** 2026-05-20 zvonilka.net mesh outage (S4 = 17 vs server S4 = 18).
+
+
+---
+
+### O. Consolidate production SFU binary into `oxpulse-sfu-kit`
+
+**Where:** `crates/sfu/` in this (partner-edge) repo today; should live in
+the [`oxpulse-sfu-kit`](https://github.com/anatolykoptev/oxpulse-sfu-kit) repo
+alongside the reusable kit primitives.
+
+**Symptom:** today `oxpulse-sfu-kit` exposes a *library* (`SfuConfig` with
+`bind_address`/`metrics_port`/etc.) and an example binary `basic-sfu.rs`,
+but the *production* binary that runs on partner-edges is built from
+`crates/sfu/` in this repo and has its own larger `SfuConfig` (adds
+`relay_api_port`, `client_ws_port`, `relay_auth_secret`, `sfu_signing_public_key`,
+`stats_interval_secs`, `solo_kick_after_secs`, etc.). The two configs have
+drifted: changes to one don't reach the other, and any feature the kit's
+example added would require copy-paste into this repo.
+
+**Why it matters:** memory `feedback_sfu_kit_reuse` says "kit owns
+active-speaker, BWE, fanout, layer-select; check kit before writing new SFU
+code." The split today violates that: production code that should be in the
+kit (relay API, client WS, JWT verification, solo-kick policy) lives in
+partner-edge instead. Concrete cost — the 2026-05-21 split-bind work
+(this PR) had to be done in partner-edge; the same fix in the kit's
+`basic-sfu.rs` example was not made and the kit example still binds
+metrics on `bind_address`.
+
+**Next step:**
+
+1. Spin off `crates/sfu/` from this repo into `oxpulse-sfu-kit` as a new
+   crate `oxpulse-sfu-bin` (binary) that depends on the kit library.
+2. Or alternatively: pull the kit's `src/` into this repo as a vendored
+   subcrate and deprecate the standalone kit repo. (Per `feedback_sfu_kit_reuse`,
+   the kit is the long-term home — option 1 is preferred.)
+3. After consolidation, port the changes from THIS PR
+   (`SFU_METRICS_BIND` / `SFU_RELAY_API_BIND` / `SFU_CLIENT_WS_BIND`) into
+   `examples/basic-sfu.rs` so the canonical example doesn't drift.
+
+**Files:** `crates/sfu/`, `oxpulse-sfu-kit/`. Estimated cost: 1–2 days.
+
+**Discovered:** 2026-05-21 audit, while implementing the split-bind fix.

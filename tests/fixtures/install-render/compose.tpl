@@ -107,7 +107,19 @@ services:
     depends_on:
       - caddy
     environment:
+      # SFU_BIND_ADDRESS stays at 0.0.0.0 because the UDP media socket MUST
+      # listen on the public NIC for WebRTC ICE host candidates to be routable.
+      # SFU_METRICS_BIND + SFU_RELAY_API_BIND override the bind for the
+      # privileged HTTP sockets (Prometheus /metrics + relay API): mesh-only,
+      # so they are not reachable from the public internet regardless of
+      # host firewall state. Audit 2026-05-21 found these were leaking on the
+      # public NIC across all 3 production partners. AWG_ALLOCATED_IP is the
+      # partner's own mesh IP (e.g. 10.9.0.6 for zvonilka), allocated by
+      # motherly during /api/partner/register. Empty when mesh disabled — SFU
+      # then falls back to bind_address.
       SFU_BIND_ADDRESS: "0.0.0.0"
+      SFU_METRICS_BIND: "{{AWG_ALLOCATED_IP}}"
+      SFU_RELAY_API_BIND: "{{AWG_ALLOCATED_IP}}"
       SFU_UDP_PORT: "{{SFU_UDP_PORT}}"
       SFU_METRICS_PORT: "{{SFU_METRICS_PORT}}"
       # Per-edge label baked into every Prometheus series via the SFU's

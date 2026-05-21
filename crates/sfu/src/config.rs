@@ -66,6 +66,22 @@ pub struct SfuConfig {
     /// persist before the SFU disconnects the lone peer. Set to 0 to disable
     /// the feature. Env: `SFU_SOLO_KICK_AFTER_SECS`. Default: 120.
     pub solo_kick_after_secs: u64,
+    /// Optional per-socket bind override for the Prometheus `/metrics` HTTP
+    /// server. When `None`, falls back to `bind_address`. Set to the AWG mesh
+    /// IP (e.g. `10.9.0.6`) on partner-edge deployments so the metrics socket
+    /// is not reachable from the public NIC even if the host firewall is
+    /// misconfigured. Env: `SFU_METRICS_BIND`.
+    pub metrics_bind: Option<String>,
+    /// Optional per-socket bind override for the relay-API HTTP server
+    /// (`POST /relay/connect`). When `None`, falls back to `bind_address`.
+    /// Mesh-only on partner-edge (set to AWG IP). Env: `SFU_RELAY_API_BIND`.
+    pub relay_api_bind: Option<String>,
+    /// Optional per-socket bind override for the client-facing WebSocket
+    /// endpoint (`/sfu/ws/{room_id}`). When `None`, falls back to
+    /// `bind_address`. Caddy reverse-proxies via `host.docker.internal:8920`
+    /// (docker bridge gw), so safe to bind to the bridge IP when known;
+    /// otherwise leave unset and rely on host firewall. Env: `SFU_CLIENT_WS_BIND`.
+    pub client_ws_bind: Option<String>,
 }
 
 impl Default for SfuConfig {
@@ -83,6 +99,9 @@ impl Default for SfuConfig {
             public_ip: None,
             stats_interval_secs: 2,
             solo_kick_after_secs: 120,
+            metrics_bind: None,
+            relay_api_bind: None,
+            client_ws_bind: None,
         }
     }
 }
@@ -120,11 +139,36 @@ impl SfuConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(120),
+            metrics_bind: std::env::var("SFU_METRICS_BIND")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            relay_api_bind: std::env::var("SFU_RELAY_API_BIND")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            client_ws_bind: std::env::var("SFU_CLIENT_WS_BIND")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }
 
 impl SfuConfig {
+    /// Resolved bind address for the Prometheus /metrics socket.
+    /// Returns `metrics_bind` if set, otherwise falls back to `bind_address`.
+    pub fn metrics_bind_addr(&self) -> &str {
+        self.metrics_bind.as_deref().unwrap_or(&self.bind_address)
+    }
+
+    /// Resolved bind address for the relay-API socket. See `metrics_bind_addr`.
+    pub fn relay_api_bind_addr(&self) -> &str {
+        self.relay_api_bind.as_deref().unwrap_or(&self.bind_address)
+    }
+
+    /// Resolved bind address for the client-WebSocket socket. See `metrics_bind_addr`.
+    pub fn client_ws_bind_addr(&self) -> &str {
+        self.client_ws_bind.as_deref().unwrap_or(&self.bind_address)
+    }
+
     /// Build a fresh `str0m::Rtc` with the stats interval from config.
     ///
     /// Use this instead of bare `Rtc::new(Instant::now())` in all production
@@ -281,6 +325,73 @@ mod tests {
             "empty SFU_PUBLIC_IP must be treated as unset (compose passes empty string when var unset)"
         );
         std::env::remove_var("SFU_PUBLIC_IP");
+    }
+
+    #[test]
+    fn split_bind_defaults_to_bind_address() {
+        // Backward compat — if operator hasn't set the new override env vars,
+        // the resolved bind addr for metrics/relay/WS must be `bind_address`.
+        // This is what existing partner-edge deployments rely on.
+        let cfg = SfuConfig::default();
+        assert_eq!(cfg.metrics_bind_addr(), cfg.bind_address);
+        assert_eq!(cfg.relay_api_bind_addr(), cfg.bind_address);
+        assert_eq!(cfg.client_ws_bind_addr(), cfg.bind_address);
+        assert!(cfg.metrics_bind.is_none());
+        assert!(cfg.relay_api_bind.is_none());
+        assert!(cfg.client_ws_bind.is_none());
+    }
+
+    #[test]
+    fn split_bind_metrics_env_overrides_bind_address() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("SFU_BIND_ADDRESS", "0.0.0.0");
+        std::env::set_var("SFU_METRICS_BIND", "10.9.0.6");
+        let cfg = SfuConfig::from_env();
+        assert_eq!(cfg.metrics_bind_addr(), "10.9.0.6");
+        assert_eq!(cfg.relay_api_bind_addr(), "0.0.0.0");
+        assert_eq!(cfg.client_ws_bind_addr(), "0.0.0.0");
+        std::env::remove_var("SFU_METRICS_BIND");
+        std::env::remove_var("SFU_BIND_ADDRESS");
+    }
+
+    #[test]
+    fn split_bind_empty_env_treated_as_unset() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Compose passes literal "" when an env block names a variable that
+        // is unset — same edge case as SFU_PUBLIC_IP. Must not lock the
+        // socket to an empty string (which would fail to bind).
+        std::env::set_var("SFU_BIND_ADDRESS", "0.0.0.0");
+        std::env::set_var("SFU_METRICS_BIND", "");
+        std::env::set_var("SFU_RELAY_API_BIND", "");
+        std::env::set_var("SFU_CLIENT_WS_BIND", "");
+        let cfg = SfuConfig::from_env();
+        assert!(cfg.metrics_bind.is_none());
+        assert!(cfg.relay_api_bind.is_none());
+        assert!(cfg.client_ws_bind.is_none());
+        assert_eq!(cfg.metrics_bind_addr(), "0.0.0.0");
+        std::env::remove_var("SFU_METRICS_BIND");
+        std::env::remove_var("SFU_RELAY_API_BIND");
+        std::env::remove_var("SFU_CLIENT_WS_BIND");
+        std::env::remove_var("SFU_BIND_ADDRESS");
+    }
+
+    #[test]
+    fn split_bind_all_three_independent() {
+        // Verify each override is scoped to its own socket — flipping one
+        // doesn't leak across to the others.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("SFU_BIND_ADDRESS", "0.0.0.0");
+        std::env::set_var("SFU_METRICS_BIND", "10.9.0.7");
+        std::env::set_var("SFU_RELAY_API_BIND", "10.9.0.8");
+        std::env::set_var("SFU_CLIENT_WS_BIND", "127.0.0.1");
+        let cfg = SfuConfig::from_env();
+        assert_eq!(cfg.metrics_bind_addr(), "10.9.0.7");
+        assert_eq!(cfg.relay_api_bind_addr(), "10.9.0.8");
+        assert_eq!(cfg.client_ws_bind_addr(), "127.0.0.1");
+        std::env::remove_var("SFU_METRICS_BIND");
+        std::env::remove_var("SFU_RELAY_API_BIND");
+        std::env::remove_var("SFU_CLIENT_WS_BIND");
+        std::env::remove_var("SFU_BIND_ADDRESS");
     }
 
     #[test]
