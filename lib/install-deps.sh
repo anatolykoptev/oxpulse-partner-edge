@@ -58,4 +58,45 @@ deps_install() {
 	else
 		warn "  [dry-run] skipping docker install"
 	fi
+
+	_deps_configure_docker_logging
+}
+
+# Configure Docker daemon logging policy so container logs cannot fill disk.
+# Default Docker policy is unlimited json-file logs; under steady traffic
+# the caddy access log alone grows ~5MB/hour on a busy partner edge and
+# fills / over weeks. Apply a 10MB/file x 3 file rotation policy --
+# capped total per-container at 30MB. Idempotent: skip if daemon.json
+# already sets log-driver.
+_deps_configure_docker_logging() {
+	if [[ $DRY_RUN -ne 0 ]]; then
+		log "  [deps] [dry-run] would write /etc/docker/daemon.json log rotation policy"
+		return 0
+	fi
+	local cfg=/etc/docker/daemon.json
+	if [[ -f "$cfg" ]] && grep -q '"log-driver"' "$cfg"; then
+		log "  [deps] /etc/docker/daemon.json already sets log-driver -- skipping"
+		return 0
+	fi
+	mkdir -p /etc/docker
+	if [[ -f "$cfg" ]]; then
+		cp "$cfg" "${cfg}.bak.$(date +%s)"
+	fi
+	cat >"$cfg" <<JSON
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+JSON
+	log "  [deps] wrote /etc/docker/daemon.json (json-file, max-size=10m, max-file=3)"
+	# New policy applies only to containers created AFTER daemon reload.
+	# Compose up at the end of install.sh recreates everything, so the new
+	# policy reaches all partner-edge containers in the same install run.
+	if systemctl is-active --quiet docker 2>/dev/null; then
+		systemctl reload docker 2>/dev/null \
+			|| warn "    systemctl reload docker failed -- policy applies to next-created containers only"
+	fi
 }
