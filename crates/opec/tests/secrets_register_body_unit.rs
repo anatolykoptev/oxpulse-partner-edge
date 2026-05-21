@@ -24,6 +24,7 @@ fn body_required_fields_only() {
         reality_uuid_file: tmp.path().join("reality.uuid"),
         awg_pub_file: tmp.path().join("awg.pub"),
         branding_config: None,
+        serve_countries: None,
     })
     .expect("body builds");
 
@@ -63,6 +64,7 @@ fn body_with_region() {
         reality_uuid_file: tmp.path().join("a.uuid"),
         awg_pub_file: tmp.path().join("b.pub"),
         branding_config: None,
+        serve_countries: None,
     })
     .unwrap();
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -92,6 +94,7 @@ fn body_with_branding_config_file() {
         reality_uuid_file: tmp.path().join("a.uuid"),
         awg_pub_file: tmp.path().join("b.pub"),
         branding_config: Some(tmp.path().join("brand.json")),
+        serve_countries: None,
     })
     .unwrap();
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -121,6 +124,7 @@ fn body_invalid_branding_json_errors() {
         reality_uuid_file: tmp.path().join("a.uuid"),
         awg_pub_file: tmp.path().join("b.pub"),
         branding_config: Some(tmp.path().join("brand.json")),
+        serve_countries: None,
     });
     assert!(result.is_err());
 }
