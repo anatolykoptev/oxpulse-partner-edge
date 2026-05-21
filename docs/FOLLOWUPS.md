@@ -41,3 +41,38 @@ Tests T7/T8/T9 cover docker restart failure, missing compose file, curl `--retry
 ### 4. `install -m 0600` on log file failure mode
 
 `update.sh:47` — `install -m 0600 /dev/null "$LOG_FILE" 2>/dev/null || true` silently swallows error if log directory doesn't exist. Script then fails later at first `tee -a` with cryptic write error. Either pre-create directory or die clearly.
+
+
+---
+
+### N. Installer should run post-install mesh-reachability probe
+
+**Where:** `install.sh` after the `configure_amneziawg` call (~Step 4 / Phase 4.10).
+
+**Symptom:** if the AmneziaWG obfuscation params drift between the server-side
+`awg0.conf` and what the partner installer wrote, the data plane silently
+drops decrypted frames. WireGuard handshake still works (so
+`awg show awg0` looks healthy with recent handshake), but
+`ping -I awg0 <motherly_awg_ip>` returns 100% packet loss. Operator has
+no signal until end-user reports a connection failure. See
+`docs/AWG_PARAM_INVARIANT.md` and the 2026-05-20 zvonilka.net outage RCA.
+
+**Why it matters:** any future change to server-side `Jc/Jmin/S1..S4/H1..H4`
+that is not synchronously rolled to all partners re-introduces this class of
+failure. A 5-second post-install probe (3 ICMP pings to
+`${AWG_MOTHERLY_AWG_IP}`) catches drift at install time, when the operator
+is at the keyboard and can fix it immediately, rather than 24h later
+during an incident.
+
+**Next step:**
+
+1. After `configure_amneziawg` succeeds, run `ping -c 3 -W 2 -I awg0 "${AWG_MOTHERLY_AWG_IP}"`.
+2. If 0% loss, log "mesh: reachability OK" and continue.
+3. If non-zero loss, log a clear diagnostic referencing
+   `docs/AWG_PARAM_INVARIANT.md`, suggest the byte-diff command from that
+   doc, and exit non-zero so the installer does not report success.
+
+**Files:** `install.sh` (Step 4 region) + new test
+`tests/test_install_mesh_reachability_check.sh`.
+
+**Discovered:** 2026-05-20 zvonilka.net mesh outage (S4 = 17 vs server S4 = 18).

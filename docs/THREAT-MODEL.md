@@ -204,10 +204,14 @@ a compromised mesh peer.
 
 - *Class A (network filtering).* AmneziaWG is the project's primary
   defense against WireGuard-handshake fingerprint blocking observed in
-  Russian and Iranian DPI in 2024–2026. Each partner-edge derives
-  AmneziaWG `Jc/Jmin/Jmax/S1/S2/H1..H4` parameters per node from the
-  control-plane registration response, so no two partner-edges share
-  the same wire-shape signature.
+  Russian and Iranian DPI in 2024–2026. The AmneziaWG `Jc/Jmin/Jmax/S1/S2/S4/H1..H4`
+  parameters are deployment-wide (shared across the server and every
+  partner-edge that joined the mesh), distributed at install time via
+  the control-plane registration response. They MUST match
+  byte-for-byte across all peers — see `docs/AWG_PARAM_INVARIANT.md`
+  for the failure mode if drift occurs. Per-deployment randomization
+  defeats DPI rules tuned to a known WireGuard wire shape; deployment
+  uniqueness is what hides the protocol, not per-node uniqueness.
 - *Class C (compromised partner operator).* A hostile partner that
   joins the mesh sees only encrypted partner-to-partner control
   packets and other partner-edges' source IPs. They do not see user
