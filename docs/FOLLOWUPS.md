@@ -80,44 +80,52 @@ during an incident.
 
 ---
 
-### O. Consolidate production SFU binary into `oxpulse-sfu-kit`
+### ~~O. Consolidate production SFU binary into `oxpulse-sfu-kit`~~ (closed 2026-05-22)
 
-**Where:** `crates/sfu/` in this (partner-edge) repo today; should live in
-the [`oxpulse-sfu-kit`](https://github.com/anatolykoptev/oxpulse-sfu-kit) repo
-alongside the reusable kit primitives.
+**Decision:** do **NOT** consolidate. The split between `oxpulse-sfu-kit`
+(library) and `crates/sfu/` (production binary) is correct layering, not
+drift. Verified 2026-05-22 by `infrastructure-auditor` (F5):
 
-**Symptom:** today `oxpulse-sfu-kit` exposes a *library* (`SfuConfig` with
-`bind_address`/`metrics_port`/etc.) and an example binary `basic-sfu.rs`,
-but the *production* binary that runs on partner-edges is built from
-`crates/sfu/` in this repo and has its own larger `SfuConfig` (adds
-`relay_api_port`, `client_ws_port`, `relay_auth_secret`, `sfu_signing_public_key`,
-`stats_interval_secs`, `solo_kick_after_secs`, etc.). The two configs have
-drifted: changes to one don't reach the other, and any feature the kit's
-example added would require copy-paste into this repo.
+- `oxpulse-sfu-kit` is the **media-plane primitives library** —
+  `BandwidthEstimator`, `ClientOrigin`, `PacerAction`, `SfuRid`,
+  `PacerConfig`, active-speaker detection, fanout, layer selection.
+  Its `SfuConfig` has 4 fields (`udp_port`, `metrics_port`,
+  `bind_address`, `log_level`) — the minimum the library needs to
+  bring up a media socket.
+- `crates/sfu/` is the **partner-edge production binary** —
+  `relay_api_port`, `client_ws_port`, `relay_auth_secret`,
+  `sfu_signing_public_key`, `public_ip`, `stats_interval_secs`,
+  `solo_kick_after_secs`, `fips_mode`. It imports kit primitives cleanly
+  via `use oxpulse_sfu_kit::*` without re-implementing them, then layers
+  on **deployment-specific policy**: JWT verification, FIPS toggle,
+  solo-kick window, client-WS endpoint with `SIGNALING_SFU_SECRET`-gated
+  exposure, 1208-line renegotiation, 1034-line udp_loop, 742-line WS
+  session.
 
-**Why it matters:** memory `feedback_sfu_kit_reuse` says "kit owns
-active-speaker, BWE, fanout, layer-select; check kit before writing new SFU
-code." The split today violates that: production code that should be in the
-kit (relay API, client WS, JWT verification, solo-kick policy) lives in
-partner-edge instead. Concrete cost — the 2026-05-21 split-bind work
-(this PR) had to be done in partner-edge; the same fix in the kit's
-`basic-sfu.rs` example was not made and the kit example still binds
-metrics on `bind_address`.
+Consolidating would push deployment policy (JWT secret, FIPS toggle,
+solo-kick window, partner-edge config invariants) into a generic media
+library where every other consumer would have to opt out. The
+2026-05-21 split-bind work (#232) was correctly scoped to partner-edge
+because the new env vars (`SFU_METRICS_BIND` / `SFU_RELAY_API_BIND` /
+`SFU_CLIENT_WS_BIND`) are deployment-network-position policy, not
+media-plane primitives. Kit's `examples/basic-sfu.rs` could pick up
+the same pattern if needed as an example, but the production split is
+right where it is.
 
-**Next step:**
+Memory `feedback_sfu_kit_reuse` ("kit owns active-speaker, BWE,
+fanout, layer-select; check kit before writing new SFU code") is
+about NOT re-implementing kit primitives in partner-edge — it does
+NOT call for the inverse (don't fold deployment-specific policy into
+the kit).
 
-1. Spin off `crates/sfu/` from this repo into `oxpulse-sfu-kit` as a new
-   crate `oxpulse-sfu-bin` (binary) that depends on the kit library.
-2. Or alternatively: pull the kit's `src/` into this repo as a vendored
-   subcrate and deprecate the standalone kit repo. (Per `feedback_sfu_kit_reuse`,
-   the kit is the long-term home — option 1 is preferred.)
-3. After consolidation, port the changes from THIS PR
-   (`SFU_METRICS_BIND` / `SFU_RELAY_API_BIND` / `SFU_CLIENT_WS_BIND`) into
-   `examples/basic-sfu.rs` so the canonical example doesn't drift.
+**Layering rule going forward:** if a field touches media flow,
+encoding, or pacing → kit. If a field touches authentication,
+network-position binding, deployment policy, or partner identity →
+partner-edge `crates/sfu/`.
 
-**Files:** `crates/sfu/`, `oxpulse-sfu-kit/`. Estimated cost: 1–2 days.
-
-**Discovered:** 2026-05-21 audit, while implementing the split-bind fix.
+**Why this entry stays in the file:** documents the decision so the
+next person tempted to "clean up the duplication" finds the rationale
+without re-running the audit.
 
 
 ---
