@@ -56,9 +56,55 @@ preflight_run() {
 		log "  ports 80/443/3478/5349/${SFU_UDP_PORT}(udp)/${SFU_METRICS_PORT}(tcp) preflight done (oxpulse-owned=${owned_by_oxpulse})"
 	fi
 
+	_preflight_cleanup_ghost_containers
 	_preflight_firewall
 	_preflight_low_memory_swap
 	_preflight_dnf_cache_sanity
+}
+
+# Strip "ghost" partner-edge containers — those created by an out-of-band
+# `docker run` (no compose labels, no RestartPolicy) using one of OUR images.
+# Without this, prior debug runs / aborted installer attempts can leave
+# orphan naive/xray-client/etc. containers consuming memory and network
+# resources; the operator has no easy signal they exist. The 2026-05-21
+# audit found 5 such ghost naive containers across the live fleet
+# (4 on zvonilka, 1 on rvpn).
+#
+# Safe-by-construction filter:
+#   1. Image must be ghcr.io/anatolykoptev/partner-edge-* (one of ours).
+#   2. com.docker.compose.project label must be EMPTY (compose-managed
+#      containers always carry this label).
+#   3. RestartPolicy MUST be "no" (compose containers use unless-stopped /
+#      always; legitimate run-once containers have explicit reason to exist).
+#
+# Any container matching all three is a ghost — remove it.
+_preflight_cleanup_ghost_containers() {
+	if ! command -v docker >/dev/null 2>&1 || [[ $DRY_RUN -ne 0 ]]; then
+		return 0
+	 fi
+	local ghosts cnt
+	ghosts=$(docker ps -a \
+		--filter 'label=com.docker.compose.project=' \
+		--format '{{.Names}}\t{{.Image}}\t{{.Status}}' 2>/dev/null \
+		| awk '$2 ~ /^ghcr\.io\/anatolykoptev\/partner-edge-/' || true)
+	if [[ -z "$ghosts" ]]; then return 0; fi
+
+	while IFS=$'\t' read -r name image _status; do
+		[[ -z "$name" ]] && continue
+		# Belt-and-suspenders — confirm RestartPolicy=no before remove.
+		local pol
+		pol=$(docker inspect "$name" --format '{{.HostConfig.RestartPolicy.Name}}' 2>/dev/null || echo "")
+		if [[ "$pol" != "no" && "$pol" != "" ]]; then
+			log "  [preflight] skip $name — RestartPolicy=$pol (not a ghost)"
+			continue
+		fi
+		log "  [preflight] removing ghost container $name ($image)"
+		docker rm -f "$name" >/dev/null 2>&1 || warn "    docker rm $name failed (ignoring)"
+		cnt=$((${cnt:-0} + 1))
+	done <<< "$ghosts"
+	if [[ -n "${cnt:-}" ]]; then
+		log "  [preflight] removed ${cnt} ghost container(s)"
+	fi
 }
 
 _preflight_firewall() {

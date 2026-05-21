@@ -229,3 +229,7 @@ cargo build --release -p opec
 ```
 
 See [`crates/opec/README.md`](crates/opec/README.md) and [`docs/runbooks/opec-tenant.md`](docs/runbooks/opec-tenant.md).
+
+## Host requirements
+
+Before installing, see [`docs/HOSTING_REQUIREMENTS.md`](docs/HOSTING_REQUIREMENTS.md) — the partner-edge host MUST be dedicated (no control panel, no other workloads) and have at least 4 GiB RAM. The installer enforces a firewall whitelist (`lib/install-firewall.sh`) and requires either `ufw` or `firewalld`.
