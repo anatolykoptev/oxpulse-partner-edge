@@ -163,6 +163,26 @@ V01_TO_V02=0
 # FIX 5: exclusive lock to prevent two concurrent upgrade.sh invocations from
 # corrupting the .prev backup chain. Both operators writing .prev simultaneously
 # would interleave state and leave rollback pointing at partially-applied config.
+
+# Helper: resolve_default_target sets TARGET if empty, preferring VERSION file
+# over 'latest' to keep upgrade target deterministic with the installer release.
+# Audit 2026-05-22 F2 — operator may invoke `oxpulse-partner-edge-upgrade`
+# without args; without this helper, that pulled :latest from GHCR even when
+# the installer pinned to a specific tag. Now we honor the same pin unless
+# the operator explicitly types `latest`.
+resolve_default_target() {
+	if [[ -n "$TARGET" ]]; then return 0; fi
+	local version_file
+	version_file="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/VERSION"
+	if [[ -r "$version_file" ]]; then
+		TARGET=$(awk '{print $1; exit}' "$version_file")
+		log "TARGET defaulted to $TARGET from VERSION file"
+		return 0
+	fi
+	warn "TARGET unspecified and VERSION file missing — defaulting to 'latest' (floating tag, not recommended)"
+	TARGET=latest
+}
+
 # Skip for read-only modes: --dry-run and --check never mutate state.
 if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
 	LOCK_FILE="$PREFIX_LIB/upgrade.lock"
@@ -817,7 +837,7 @@ run_conflict_checks() {
 
 # ---- --with-templates mode ----
 if [[ "$MODE" == with_templates ]]; then
-	[[ -z "$TARGET" ]] && TARGET=latest
+	resolve_default_target
 	log "--with-templates: atomic Caddyfile + healthcheck + image upgrade (target=$TARGET)"
 
 	if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -936,7 +956,7 @@ if [[ "$MODE" == with_templates ]]; then
 	exit 0
 fi
 
-[[ -z "$TARGET" ]] && TARGET=latest
+resolve_default_target
 log "current=$CURRENT target=$TARGET"
 
 if [[ "$CURRENT" == "$TARGET" && "$MODE" != rollback ]]; then
