@@ -327,7 +327,6 @@ mod tests {
         std::env::remove_var("SFU_PUBLIC_IP");
     }
 
-
     #[test]
     fn split_bind_defaults_to_bind_address() {
         // Backward compat — if operator hasn't set the new override env vars,
