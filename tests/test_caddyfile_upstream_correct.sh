@@ -1,14 +1,18 @@
 #!/usr/bin/env bats
-# Regression guard: primary reverse_proxy upstream in tunnel snippets must be
-# xray-client:3080 (local dokodemo-door container that wraps HTTP in VLESS and
-# tunnels through awg0 to motherly's xray-server).
+# Regression guard for tunnel-snippet reverse_proxy ordering.
 #
-# Regression introduced: PR #158 commit 571e4de changed the upstream to
-# {{AWG_MOTHERLY_IP}}:{{BACKEND_PORT}} which renders as 10.9.0.2:5349 —
-# motherly's public VLESS-reality entry (TLS-only, NOT HTTP). Over AWG mesh
-# backend does not bind :5349 at all (only :8907 is open on the mesh interface).
-# Result: every HTTPS request returns 503 on all live partner edges.
-# Live confirmed: ru.oxpulse.chat v0.12.38. Likely caused zvonilka silent>24h alert.
+# Current architecture (2026-05-21): the pool has 4 upstreams in lb_policy=first
+# order:
+#   1. {{AWG_MOTHERLY_IP}}:8907     CH2 — AWG-direct via socat bridge (fastest)
+#   2. xray-client:3080             CH1 — VLESS+Reality tunnel
+#   3. {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}}  CH3 — Hysteria2 QUIC fallback
+#   4. 127.0.0.1:{{NAIVE_SOCKS_PORT}}              CH5 — naive forward proxy (deferred)
+#
+# Historical regression (PR #158, 571e4de): primary upstream was set to
+# {{AWG_MOTHERLY_IP}}:{{BACKEND_PORT}} which rendered as 10.9.0.2:5349 — the
+# VLESS-Reality TLS port, NOT HTTP. Result: every HTTPS request returned 503.
+# The :5349 ban remains. Port 8907 is the socat-bridged HTTP path on krolik —
+# verified 2026-05-21 returning 200 OK on rvpn/ruoxp/cheburator.
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -26,24 +30,25 @@ render_tpl() {
     "$TPL"
 }
 
-@test "tunnel_upstream snippet: primary upstream is xray-client:3080 (not AWG mesh address)" {
-  # The primary upstream MUST be the local xray-client container on :3080.
-  # If this fails, the Caddyfile.tpl contains the wrong upstream (regression PR #158).
+@test "tunnel_upstream snippet: primary upstream is AWG mesh 10.9.0.2:8907 (CH2 socat bridge)" {
+  # The primary upstream MUST be the AWG mesh address on :8907 — krolik's
+  # oxpulse-awg-bridge.service socat that forwards to docker-proxy of oxpulse-chat.
+  # CH2 is the fastest path (~300 ms RTT) and bypasses the 16 KB TCP cap that
+  # kills CH1 reality on RU mobile ISPs.
   rendered=$(render_tpl)
-  echo "$rendered" | grep -qF 'reverse_proxy {args[0]} xray-client:3080' || {
-    echo "FAIL: tunnel_upstream snippet does not use xray-client:3080 as primary upstream" >&2
+  echo "$rendered" | grep -qF 'reverse_proxy {args[0]} 10.9.0.2:8907 xray-client:3080' || {
+    echo "FAIL: tunnel_upstream snippet does not start with 10.9.0.2:8907 xray-client:3080" >&2
     echo "      Found upstream lines:" >&2
     echo "$rendered" | grep 'reverse_proxy' >&2
     return 1
   }
 }
 
-@test "tunnel_upstream_default snippet: primary upstream is xray-client:3080 (not AWG mesh address)" {
+@test "tunnel_upstream_default snippet: primary upstream is AWG mesh 10.9.0.2:8907 (CH2)" {
   # Same check for the no-args SPA fallback snippet.
   rendered=$(render_tpl)
-  # The default snippet has no {args[0]}, starts directly with the upstream host
-  echo "$rendered" | grep -qE '^[[:space:]]+reverse_proxy xray-client:3080' || {
-    echo "FAIL: tunnel_upstream_default snippet does not use xray-client:3080 as primary upstream" >&2
+  echo "$rendered" | grep -qE '^[[:space:]]+reverse_proxy 10\.9\.0\.2:8907 xray-client:3080' || {
+    echo "FAIL: tunnel_upstream_default does not start with 10.9.0.2:8907 xray-client:3080" >&2
     echo "      Found upstream lines:" >&2
     echo "$rendered" | grep 'reverse_proxy' >&2
     return 1
@@ -62,15 +67,18 @@ render_tpl() {
   fi
 }
 
-@test "Caddyfile.tpl source: tunnel snippet lines must not contain {{AWG_MOTHERLY_IP}} (primary upstream regression guard)" {
-  # Template source must specify xray-client:3080 directly in the two tunnel
-  # snippet reverse_proxy lines (L78 and L96 at time of regression).
-  # {{AWG_MOTHERLY_IP}} in those specific lines = regression.
-  # Note: AWG_MOTHERLY_IP may still exist elsewhere (e.g. exports, comments) — only
-  # reverse_proxy directive lines are checked.
-  if grep -E '^\s+reverse_proxy.*\{\{AWG_MOTHERLY_IP\}\}' "$TPL"; then
-    echo "FAIL: {{AWG_MOTHERLY_IP}} found in a reverse_proxy directive in Caddyfile.tpl" >&2
-    echo "      Primary upstream must be xray-client:3080, not an AWG mesh address" >&2
+@test "Caddyfile.tpl source: tunnel snippet pool order is CH2,CH1,CH3,CH5" {
+  # Verifies the placeholder order in the template source matches the documented
+  # 4-channel waterfall. Reordering without intent breaks the lb_policy=first
+  # fallback chain and is a regression.
+  if ! grep -qF 'reverse_proxy {args[0]} {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}}' "$TPL"; then
+    echo "FAIL: tunnel_upstream snippet pool order changed; expected CH2,CH1,CH3,CH5" >&2
+    grep 'reverse_proxy' "$TPL" >&2
+    return 1
+  fi
+  if ! grep -qF 'reverse_proxy {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}}' "$TPL"; then
+    echo "FAIL: tunnel_upstream_default snippet pool order changed; expected CH2,CH1,CH3,CH5" >&2
+    grep 'reverse_proxy' "$TPL" >&2
     return 1
   fi
 }

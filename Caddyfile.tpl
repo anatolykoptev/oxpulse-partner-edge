@@ -80,7 +80,7 @@
 # A second snippet (tunnel_upstream_default) handles the no-path catch-all SPA
 # fallback where there is no route argument.
 (tunnel_upstream) {
-    reverse_proxy {args[0]} xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
+    reverse_proxy {args[0]} {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
         lb_policy first
         lb_try_duration 5s
         lb_try_interval 250ms
@@ -102,7 +102,7 @@
 }
 
 (tunnel_upstream_default) {
-    reverse_proxy xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
+    reverse_proxy {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
         lb_policy first
         lb_try_duration 5s
         lb_try_interval 250ms

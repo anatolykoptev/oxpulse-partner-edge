@@ -264,6 +264,9 @@
 																	},
 																	"upstreams": [
 																		{
+																			"dial": "10.9.0.2:8907"
+																		},
+																		{
 																			"dial": "xray-client:3080"
 																		},
 																		{
@@ -326,6 +329,9 @@
 																		"try_interval": 250000000
 																	},
 																	"upstreams": [
+																		{
+																			"dial": "10.9.0.2:8907"
+																		},
 																		{
 																			"dial": "xray-client:3080"
 																		},
@@ -390,6 +396,9 @@
 																	},
 																	"upstreams": [
 																		{
+																			"dial": "10.9.0.2:8907"
+																		},
+																		{
 																			"dial": "xray-client:3080"
 																		},
 																		{
@@ -452,6 +461,9 @@
 																		"try_interval": 250000000
 																	},
 																	"upstreams": [
+																		{
+																			"dial": "10.9.0.2:8907"
+																		},
 																		{
 																			"dial": "xray-client:3080"
 																		},

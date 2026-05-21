@@ -197,7 +197,23 @@ rm -rf "$PREFIX_LIB"  2>/dev/null || warn "could not remove $PREFIX_LIB"
 # Binaries (known list + oxpulse-* glob for future additions)
 for _bin in opec partner-cli awg awg-quick oxpulse-xray-update.sh; do
 	rm -f "$PREFIX_BIN/$_bin" 2>/dev/null || true
+	# Sweep /usr/bin too — opec moved there in fix/installer-prod-debts-2026-05-21
+	# (CentOS/RHEL sudoers secure_path) but older installs left it in PREFIX_BIN.
+	rm -f "/usr/bin/$_bin" 2>/dev/null || true
 done
+
+# ---------- Low-memory swap cleanup ----------
+# Mirror of _preflight_low_memory_swap in lib/install-preflight.sh. Idempotent;
+# safe to run on hosts that never had the swapfile.
+_SWAPFILE=/var/lib/oxpulse-partner-edge.swap
+if [[ -f $_SWAPFILE ]]; then
+	swapoff "$_SWAPFILE" 2>/dev/null || true
+	rm -f "$_SWAPFILE"
+fi
+if grep -qF "$_SWAPFILE" /etc/fstab 2>/dev/null; then
+	sed -i "\|^${_SWAPFILE} |d" /etc/fstab
+fi
+
 # Sweep any remaining oxpulse-* binaries installed to PREFIX_BIN
 for _bin in "$PREFIX_BIN"/oxpulse-*; do
 	[[ -e "$_bin" ]] && rm -f "$_bin" 2>/dev/null || true
