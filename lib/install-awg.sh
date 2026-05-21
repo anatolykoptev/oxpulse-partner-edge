@@ -17,6 +17,13 @@
 #   AWG_ALLOCATED_IP                    this edge's allocated AWG /32
 #   AWG_JC AWG_JMIN AWG_JMAX            anti-cens jitter params
 #   AWG_S1 AWG_S2 AWG_S4                pcap-fingerprint protection
+#
+#   INVARIANT — Jc/Jmin/Jmax/S1/S2/S4/H1..H4 MUST match the server-side
+#   awg0.conf byte-for-byte, or the data plane silently drops decrypted
+#   frames (WireGuard handshake still works; ping fails 100%). Do NOT
+#   randomize, compute, or default these values here — write them
+#   verbatim from the registration response. See docs/AWG_PARAM_INVARIANT.md
+#   for the full failure mode and the 2026-05-20 zvonilka.net outage RCA.
 #   AWG_H1 AWG_H2 AWG_H3 AWG_H4         packet-header hashes
 #   log warn die                        functions (install.sh provides)
 #
