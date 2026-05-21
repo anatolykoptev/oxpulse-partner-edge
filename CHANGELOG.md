@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.52](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.51...partner-edge-v0.12.52) (2026-05-21)
+
+
+### Bug Fixes
+
+* **install:** validate AWG_* vars are non-empty after awg_extract ([#227](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/227)) ([555260f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/555260f5e9244409345ac8d187be9a238da25a95))
+
 ## [0.12.51](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.50...partner-edge-v0.12.51) (2026-05-21)
 
 
