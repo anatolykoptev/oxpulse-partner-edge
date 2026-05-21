@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.51](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.50...partner-edge-v0.12.51) (2026-05-21)
+
+
+### Bug Fixes
+
+* **installer:** prod debts from 2026-05-20 fleet outage ([#225](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/225)) ([192840e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/192840e864d4b9ae7ebc293d0ee712799ee8a926))
+* **xray:** pin teddysun/xray to 26.5.9 (replace :latest) ([#223](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/223)) ([2b5cf95](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/2b5cf954441c9456361110a89ad78d4329bf66af))
+
 ## [0.12.50](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.49...partner-edge-v0.12.50) (2026-05-20)
 
 
