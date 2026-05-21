@@ -2,17 +2,19 @@
 # Partner-agnostic xray-core client image. config.json is bind-mounted.
 #
 # xray-core pin: teddysun/xray:<tag> maps 1:1 to XTLS/Xray-core releases.
-# Current pin: 26.5.9 — bumped from 26.4.25 on 2026-05-20 (2026-05-20 fleet
-# outage RCA). 26.4.25 was unaffected by the 26.5.3 CurvePreferences crash
-# but had the 26.4+ default-deny private-IP matcher in freedom outbound that
-# silently broke xray-reality → 127.0.0.1:8907 forwarding. Fix lives in the
-# server renderer (oxpulse-chat xray_config.rs `ipsBlocked: []`).
-# 26.5.9 empirically tested: starts cleanly with `fingerprint: randomized`
-# (the 26.5.3 utls/CurvePreferences regression IS fixed by 26.5.9).
-# To bump further: edit the FROM tag below AND open a bundle release (bump
-# VERSION in release-please or tag manually) so partner-edge-xray image
+# Current pin: 26.5.9 (2026-05-21). Verified working with fingerprint:randomized
+# Reality config (the utls/CurvePreferences crash in 26.5.0-26.5.3 was fixed by
+# upstream 26.5.4+; 26.5.9 = current latest at pin time).
+# Always pin to a specific tag, never :latest -- :latest defeats per-bundle
+# reproducibility and re-opens the crash class if upstream regresses.
+# 2026-05-20 fleet outage RCA: 26.4+ added a default-deny private-IP matcher in
+# the freedom outbound that broke xray-reality -> 127.0.0.1:8907 forwarding.
+# Server-side fix lives in oxpulse-chat xray_config.rs (ipsBlocked:[]).
+# To bump: verify the new tag against a partner-edge xray-client.json using
+# fingerprint:randomized, edit the FROM tag below AND open a bundle release
+# (bump VERSION in release-please or tag manually) so partner-edge-xray image
 # rebuilds.
-FROM teddysun/xray:latest
+FROM teddysun/xray:26.5.9
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.source="https://github.com/anatolykoptev/oxpulse-partner-edge"
