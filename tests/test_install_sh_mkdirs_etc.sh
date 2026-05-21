@@ -210,3 +210,34 @@ teardown() {
 	echo "mode=$mode"
 	[ "$mode" = "700" ]
 }
+
+# ---------------------------------------------------------------------------
+# Bug Q: PREFIX_LIBDIR must be created before cp writes render-channel-lib.sh
+# into it at top-of-file (the _rl_fetched path).
+# ---------------------------------------------------------------------------
+@test "Bug Q: install -d for PREFIX_LIBDIR appears before cp _rl_tmp _rl_fetched in install.sh" {
+	# _rl_fetched is set to ${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/render-channel-lib.sh
+	# and cp "$_rl_tmp" "$_rl_fetched" happens at the top of install.sh (early render-channel-lib fetch).
+	# The parent dir must be created before that cp — find the line numbers and assert ordering.
+	local mkd_line cp_line
+	mkd_line=$(grep -n 'install -d.*PREFIX_LIBDIR\|install -d.*INSTALL_LIB_DIR\|mkdir.*_rl_fetched\|install -d.*dirname.*_rl' \
+		"$REPO_ROOT/install.sh" | head -1 | cut -d: -f1)
+	cp_line=$(grep -n 'cp "\$_rl_tmp" "\$_rl_fetched"' "$REPO_ROOT/install.sh" | head -1 | cut -d: -f1)
+	echo "mkd_line=$mkd_line cp_line=$cp_line"
+	[ -n "$mkd_line" ]
+	[ -n "$cp_line" ]
+	[ "$mkd_line" -lt "$cp_line" ]
+}
+
+# ---------------------------------------------------------------------------
+# Bug Q: structural — all 3 PREFIX dirs created at script top
+#   1. PREFIX_ETC  (mode 0700) — already checked by Fix E tests above
+#   2. PREFIX_LIBDIR (mode 0755) — new
+#   3. /usr/local/share/oxpulse-partner-edge (mode 0755) — new
+# ---------------------------------------------------------------------------
+@test "Bug Q: install.sh creates PREFIX_LIBDIR before the top-of-file render-channel-lib cp" {
+	# Confirm that PREFIX_LIBDIR mkdir is explicitly present in install.sh
+	# (not just implicitly inside install-systemd.sh which runs much later).
+	grep -q 'install -d.*PREFIX_LIBDIR\|install -d.*INSTALL_LIB_DIR\|install -d.*dirname.*_rl_fetched' \
+		"$REPO_ROOT/install.sh"
+}

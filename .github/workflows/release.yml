@@ -349,6 +349,11 @@ jobs:
           VERSION: ${{ needs.extract-version.outputs.version }}
         run: |
           cp install.sh                partner-edge-installer.sh
+          # Bug R: substitute @RELEASE_TAG@ sentinel with the real tag so the
+          # released installer pins REPO_RAW to this exact release (not main HEAD).
+          # Must happen BEFORE the sha256sum step below so SHA256SUMS reflects
+          # the substituted bytes that operators will actually download.
+          sed -i "s|@RELEASE_TAG@|${TAG}|g" partner-edge-installer.sh
           cp upgrade.sh                partner-edge-upgrade.sh
           cp healthcheck.sh            partner-edge-healthcheck.sh
           # Phase 4.1 + 4.2: install.sh sources lib/install-*.sh modules. Ship

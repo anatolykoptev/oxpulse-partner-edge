@@ -29,7 +29,19 @@ PREFIX_LIBDIR="${OXPULSE_PREFIX_LIBDIR:-/usr/local/lib/partner-edge}"
 SYSTEMD_DIR=/etc/systemd/system
 # shellcheck disable=SC2034  # REGISTRY referenced by templates via IMAGE_VERSION, kept for override env surface
 REGISTRY="${OXPULSE_IMAGE_REGISTRY:-ghcr.io/anatolykoptev}"
-REPO_RAW="${OXPULSE_REPO_RAW:-https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main}"
+# Bug R: pin REPO_RAW to release tag so released installers fetch lib/* from
+# the same commit as the release (not main HEAD). release.yml replaces the
+# @RELEASE_TAG@ placeholder with the real tag before uploading the installer.
+# When running from a dev checkout or main (placeholder not substituted), falls
+# back to main. Operator can always override via OXPULSE_REPO_RAW env var.
+OXPULSE_RELEASE_TAG="${OXPULSE_RELEASE_TAG:-@RELEASE_TAG@}"
+if [[ -n "${OXPULSE_REPO_RAW:-}" ]]; then
+	REPO_RAW="$OXPULSE_REPO_RAW"
+elif [[ "${OXPULSE_RELEASE_TAG}" != "@RELEASE_TAG@" ]]; then
+	REPO_RAW="https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/${OXPULSE_RELEASE_TAG}"
+else
+	REPO_RAW="https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main"
+fi
 BACKEND_API="${OXPULSE_BACKEND_API:-${OXPULSE_BACKEND_URL:-https://api.oxpulse.chat}}"
 # Strip trailing slash so we never emit //api/partner/register.
 BACKEND_API="${BACKEND_API%/}"
@@ -59,6 +71,10 @@ else
 	# to inline stubs. In curl|bash flow the lib is not on disk yet; fetching it
 	# here mirrors the pattern used for channel-render-lib.sh (L282-294).
 	# Persist to INSTALL_LIB_DIR so subsequent calls (timer, update) reuse it.
+	# Bug Q: ensure INSTALL_LIB_DIR exists before cp writes render-channel-lib.sh
+	# into it. After uninstall.sh removes /usr/local/lib/partner-edge, a fresh
+	# install fails here with "No such file or directory".
+	install -d -m 0755 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}"
 	_rl_fetched="${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/render-channel-lib.sh"
 	_rl_tmp=$(mktemp)
 	if curl -fsSL "${REPO_RAW}/lib/render-channel-lib.sh" -o "$_rl_tmp" 2>/dev/null; then
