@@ -232,7 +232,9 @@ _ensure_opec_binary() {
 	# Prefer the bundled opec-${arch} from the install bundle (same directory as
 	# this install.sh). Saves a GitHub round-trip and works on edges blocked from
 	# GitHub by upstream DPI (e.g. RU partner servers).
-	_bundled="${BASH_SOURCE[0]%/*}/opec-${_opec_arch}"
+	local _script_dir
+	_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+	_bundled="${_script_dir:-.}/opec-${_opec_arch}"
 	if [[ -f "$_bundled" ]]; then
 		log "opec not found on PATH -- installing bundled binary ($_opec_arch)"
 		install -m 0755 "$_bundled" "$_dest" || die "opec install failed: cp $_bundled -> $_dest"
@@ -247,8 +249,17 @@ _ensure_opec_binary() {
 		die "opec download failed from $_opec_url — render is no longer optional (Phase 4.4 removed the bash fallback). Pre-stage /usr/bin/opec, supply opec-${_opec_arch} alongside install.sh, or check network connectivity to GitHub releases."
 	fi
 }
-if [[ $_PRESCAN_CHECK -eq 0 ]] && ! command -v opec >/dev/null 2>&1; then
-	_ensure_opec_binary
+if [[ $_PRESCAN_CHECK -eq 0 ]]; then
+	# Brownfield guard: previous installs landed opec in /usr/local/bin which is
+	# NOT in CentOS/RHEL default sudoers secure_path. `command -v` from the
+	# operator shell sees it, but sudo doesn't -> stage [4] dies. Force reinstall
+	# whenever the resolved path is not /usr/bin/opec.
+	_resolved="$(command -v opec 2>/dev/null || true)"
+	if [[ $_resolved != /usr/bin/opec ]]; then
+		_ensure_opec_binary
+		# Remove stale brownfield binary so PATH resolution is unambiguous.
+		[[ -f /usr/local/bin/opec ]] && rm -f /usr/local/bin/opec
+	fi
 fi
 
 # ---------- Args ----------

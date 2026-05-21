@@ -121,16 +121,27 @@ _preflight_low_memory_swap() {
 		return 0
 	fi
 	local swapfile=/var/lib/oxpulse-partner-edge.swap
-	if [[ -f $swapfile ]] && swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$swapfile"; then
+	if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$swapfile"; then
 		log "  low-mem swap already active at $swapfile (mem=${mem_total_mib}MiB swap=${swap_total_mib}MiB)"
 		return 0
 	fi
 	local size_mib=$(( 1536 - headroom_mib + 256 ))   # extra 256 MiB headroom
 	(( size_mib < 512 )) && size_mib=512
 	log "  low memory (${mem_total_mib}MiB RAM + ${swap_total_mib}MiB swap) -> adding ${size_mib}MiB temp swap at $swapfile"
-	if ! dd if=/dev/zero of="$swapfile" bs=1M count="$size_mib" status=none 2>/dev/null; then
-		warn "  swapfile allocation failed; continuing without swap (dnf may OOM)"
-		return 0
+	# Stale-file safety: a previous install or reboot may have left an inactive
+	# file at $swapfile. Truncating it with dd while kernel still maps zero
+	# pages would corrupt swap. Belt-and-braces: swapoff first (no-op if not
+	# active), then atomic-replace the file via fallocate which errors upfront
+	# on ENOSPC rather than half-writing.
+	swapoff "$swapfile" 2>/dev/null || true
+	rm -f "$swapfile"
+	if ! fallocate -l "${size_mib}M" "$swapfile" 2>/dev/null; then
+		# fallocate not available on every fs (e.g. tmpfs); fall back to dd.
+		if ! dd if=/dev/zero of="$swapfile" bs=1M count="$size_mib" status=none 2>/dev/null; then
+			warn "  swapfile allocation failed; continuing without swap (dnf may OOM)"
+			rm -f "$swapfile"
+			return 0
+		fi
 	fi
 	chmod 600 "$swapfile"
 	if ! mkswap "$swapfile" >/dev/null 2>&1 || ! swapon "$swapfile" 2>/dev/null; then
