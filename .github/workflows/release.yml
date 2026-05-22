@@ -320,8 +320,53 @@ jobs:
           path: ${{ matrix.arch.asset }}
           retention-days: 1
 
+  build-awg-params-agent:
+    needs: extract-version
+    strategy:
+      fail-fast: true
+      matrix:
+        arch:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: oxpulse-awg-params-agent-amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: oxpulse-awg-params-agent-arm64
+    runs-on: ${{ matrix.arch.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workdir: crates/awg-params-agent
+          shared-key: "awg-params-agent-${{ matrix.arch.asset }}"
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+
+      - name: Build awg-params-agent (${{ matrix.arch.asset }})
+        run: |
+          cargo build -p awg-params-agent --release \
+            --target ${{ matrix.arch.target }}
+          cp target/${{ matrix.arch.target }}/release/oxpulse-awg-params-agent \
+            ${{ matrix.arch.asset }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.arch.asset }}
+          path: ${{ matrix.arch.asset }}
+          retention-days: 1
+
   attach-release-assets:
-    needs: [extract-version, build-and-push, merge-manifests, build-partner-cli, build-opec]
+    needs: [extract-version, build-and-push, merge-manifests, build-partner-cli, build-opec, build-awg-params-agent]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -343,6 +388,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: opec-arm64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oxpulse-awg-params-agent-amd64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oxpulse-awg-params-agent-arm64
 
       - name: Stage artifacts
         env:
@@ -367,6 +420,7 @@ jobs:
           cp lib/install-systemd.sh       install-systemd.sh
           cp lib/install-args.sh          install-args.sh
           cp lib/install-awg.sh           install-awg.sh
+          cp lib/install-awg-params-agent.sh install-awg-params-agent.sh
           # Phase 5.5 MAJOR 1: fail-soft render helpers (sourced by install/hydrate/update/refresh).
           cp lib/render-channel-lib.sh    render-channel-lib.sh
           # Bug 8 fix: ship defaults.conf so install-systemd.sh can fetch it
@@ -379,6 +433,7 @@ jobs:
           (cd lib && sha256sum \
             install-args.sh \
             install-awg.sh \
+            install-awg-params-agent.sh \
             install-deps.sh \
             install-healthcheck.sh \
             install-network.sh \
@@ -389,6 +444,7 @@ jobs:
           cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
           chmod +x opec-amd64 opec-arm64
+          chmod +x oxpulse-awg-params-agent-amd64 oxpulse-awg-params-agent-arm64
           sha256sum \
             partner-edge-installer.sh \
             partner-edge-upgrade.sh \
@@ -401,6 +457,7 @@ jobs:
             install-systemd.sh \
             install-args.sh \
             install-awg.sh \
+            install-awg-params-agent.sh \
             render-channel-lib.sh \
             lib-checksums.txt \
             config-defaults.conf \
@@ -408,6 +465,8 @@ jobs:
             partner-cli-arm64 \
             opec-amd64 \
             opec-arm64 \
+            oxpulse-awg-params-agent-amd64 \
+            oxpulse-awg-params-agent-arm64 \
             > SHA256SUMS
 
       - name: Upload release assets
@@ -440,6 +499,9 @@ jobs:
             partner-cli-arm64 \
             opec-amd64 \
             opec-arm64 \
+            oxpulse-awg-params-agent-amd64 \
+            oxpulse-awg-params-agent-arm64 \
+            install-awg-params-agent.sh \
             SHA256SUMS \
             --clobber
 

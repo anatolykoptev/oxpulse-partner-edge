@@ -295,6 +295,8 @@ _install_lib_source install-healthcheck.sh
 _install_lib_source install-systemd.sh
 # shellcheck source=lib/install-awg.sh
 _install_lib_source install-awg.sh
+# shellcheck source=lib/install-awg-params-agent.sh
+_install_lib_source install-awg-params-agent.sh
 # shellcheck source=lib/install-firewall.sh
 _install_lib_source install-firewall.sh
 
@@ -1403,6 +1405,9 @@ fi  # end BAKE_MODE=0 (hydrate path)
 
 # ---------- Step 8: systemd ----------
 systemd_run
+
+# ---------- Step 8b: awg-params-agent ----------
+awg_params_agent_run
 
 # ---------- Step 10: report ----------
 log "[10/10] done"
