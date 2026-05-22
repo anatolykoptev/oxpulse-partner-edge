@@ -3,8 +3,9 @@
 //!
 //! Strategy: per-key regex replacement on the raw text, matching the
 //! orchestrator's `renderAwgConf` in `cmd/orchestrator/awg_params.go`.
-//! Each param line is `^Key = <digits>$` (multiline).  Peer sections are
-//! untouched because WireGuard peer keys are base64, not bare digits.
+//! Numeric params use `^Key = \d+$`; I1 (InitString) uses `^I1 = .+$`
+//! because its value contains angle brackets and hex literals.
+//! Peer sections are untouched because WireGuard peer keys are base64.
 
 use crate::error::Result;
 use crate::params::AwgParams;
@@ -12,7 +13,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 
-/// Compiled regexes for all 10 AWG obfuscation params.
+/// Compiled regexes for the 10 numeric AWG obfuscation params.
 /// Multiline flag ensures `^`/`$` match individual lines, not the whole string.
 static AWG_PARAM_RE: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
     let mut m = HashMap::new();
@@ -25,10 +26,16 @@ static AWG_PARAM_RE: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
     m
 });
 
-/// Replace the 10 AWG obfuscation params in `conf` with values from `params`.
+/// Compiled regex for I1 (InitString) — value is arbitrary chars, not digits.
+static AWG_I1_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^I1 = .+$").expect("static regex is valid"));
+
+/// Replace the 11 AWG obfuscation params in `conf` with values from `params`.
 ///
-/// Returns `Err` if any of the 10 keys is absent from the conf text — this
-/// prevents a silent no-op when the conf shape has changed or is corrupted.
+/// Returns `Err` if any of the 10 numeric keys is absent from the conf text,
+/// or if I1 is `Some` but absent from the conf — prevents a silent no-op
+/// when the conf shape has changed or is corrupted.
+/// I1 is `None` → skip (backward compat for pre-I1 DB rows).
 /// All other content ([Peer] sections, PrivateKey, Address, comments,
 /// whitespace) is preserved byte-for-byte.
 pub fn merge_obfuscation_params(conf: &str, params: &AwgParams) -> Result<String> {
@@ -49,7 +56,7 @@ pub fn merge_obfuscation_params(conf: &str, params: &AwgParams) -> Result<String
     for (key, val) in &replacements {
         let re = AWG_PARAM_RE
             .get(key)
-            .expect("all 10 keys are in AWG_PARAM_RE");
+            .expect("all 10 numeric keys are in AWG_PARAM_RE");
         if !re.is_match(&result) {
             return Err(crate::error::anyhow!(
                 "conf merge: key {:?} not found in conf (conf structure changed or corrupted)",
@@ -59,6 +66,25 @@ pub fn merge_obfuscation_params(conf: &str, params: &AwgParams) -> Result<String
         let new_line = format!("{} = {}", key, val);
         result = re.replace_all(&result, new_line.as_str()).into_owned();
     }
+
+    // I1 (InitString) — string value, handled separately after numeric loop.
+    // `None` OR `Some("")` → skip. Mirrors orchestrator Go-side semantics:
+    // empty-string I1 (e.g. writer regression emits `"I1": ""`) MUST be
+    // treated identically to JSON-omitted I1 — otherwise the agent would
+    // write a malformed `I1 = ` line while motherly's conf stays clean,
+    // creating exactly the silent-drift class that T1.3.x closes.
+    if let Some(i1_val) = params.i1.as_deref().filter(|s| !s.is_empty()) {
+        if !AWG_I1_RE.is_match(&result) {
+            return Err(crate::error::anyhow!(
+                "conf merge: key \"I1\" not found in conf (conf structure changed or corrupted)"
+            ));
+        }
+        let new_line = format!("I1 = {}", i1_val);
+        result = AWG_I1_RE
+            .replace_all(&result, new_line.as_str())
+            .into_owned();
+    }
+
     Ok(result)
 }
 
@@ -66,7 +92,7 @@ pub fn merge_obfuscation_params(conf: &str, params: &AwgParams) -> Result<String
 mod tests {
     use super::*;
 
-    /// Minimal valid awg0.conf fixture with all 10 params and a [Peer] block.
+    /// Minimal valid awg0.conf fixture with all 11 params and a [Peer] block.
     fn fixture_conf() -> &'static str {
         "[Interface]\n\
          PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
@@ -82,6 +108,7 @@ mod tests {
          H2 = 234567890\n\
          H3 = 345678901\n\
          H4 = 456789012\n\
+         I1 = <r 2><b 0x0100><b 0x0001><b 0x0000><b 0x0000><b 0x0000>\n\
          Table = off\n\
          MTU = 1300\n\
          \n\
@@ -93,6 +120,7 @@ mod tests {
          PersistentKeepalive = 25\n"
     }
 
+    /// sample_params with I1=None (backward-compat — old DB rows without I1).
     fn sample_params(jc: i64) -> AwgParams {
         AwgParams {
             jc,
@@ -105,6 +133,15 @@ mod tests {
             h2: 234567890,
             h3: 345678901,
             h4: 456789012,
+            i1: None,
+        }
+    }
+
+    /// sample_params with an I1 value set.
+    fn sample_params_with_i1(jc: i64, i1: &str) -> AwgParams {
+        AwgParams {
+            i1: Some(i1.to_owned()),
+            ..sample_params(jc)
         }
     }
 
@@ -195,6 +232,7 @@ mod tests {
             h2: 22222222,
             h3: 33333333,
             h4: 44444444,
+            i1: None, // I1 absent — backward compat path
         };
         let out = merge_obfuscation_params(fixture_conf(), &params).unwrap();
         assert!(out.contains("Jc = 7\n"));
@@ -207,5 +245,88 @@ mod tests {
         assert!(out.contains("H2 = 22222222\n"));
         assert!(out.contains("H3 = 33333333\n"));
         assert!(out.contains("H4 = 44444444\n"));
+        // I1=None → existing I1 line preserved unchanged.
+        assert!(
+            out.contains("I1 = <r 2><b 0x0100>"),
+            "I1 line must be preserved when i1 is None"
+        );
+    }
+
+    /// T1.3.x: I1 (InitString) is replaced correctly.
+    /// Value contains angle brackets and hex literals — not digits.
+    #[test]
+    fn merge_obfuscation_params_replaces_i1() {
+        let params = sample_params_with_i1(11, "<r 3><b 0x0200><b 0x0002>");
+        let out = merge_obfuscation_params(fixture_conf(), &params).unwrap();
+        assert!(
+            out.contains("I1 = <r 3><b 0x0200><b 0x0002>\n"),
+            "I1 must be replaced, got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains("I1 = <r 2><b 0x0100>"),
+            "old I1 must not remain"
+        );
+    }
+
+    /// T1.3.x: I1=None leaves existing I1 line unchanged (backward compat
+    /// for pre-I1 DB rows).
+    #[test]
+    fn merge_obfuscation_params_i1_none_preserves_existing_line() {
+        let params = sample_params(11); // i1: None
+        let out = merge_obfuscation_params(fixture_conf(), &params).unwrap();
+        assert!(
+            out.contains("I1 = <r 2><b 0x0100><b 0x0001><b 0x0000><b 0x0000><b 0x0000>\n"),
+            "existing I1 line must survive when i1 is None:\n{}",
+            out
+        );
+    }
+
+    /// T1.3.x (reviewer MAJOR): I1=Some("") MUST be treated like None — skip
+    /// apply, leave existing I1 line untouched. Otherwise the agent writes a
+    /// malformed `I1 = ` line while motherly's Go-side `if params.I1 != ""`
+    /// skip keeps motherly clean — the exact silent-drift class T1.3.x closes.
+    #[test]
+    fn merge_obfuscation_params_i1_empty_string_skipped() {
+        let params = sample_params_with_i1(11, ""); // i1: Some("")
+        let out = merge_obfuscation_params(fixture_conf(), &params).unwrap();
+        // Existing I1 line MUST survive — empty I1 must skip, not overwrite.
+        assert!(
+            out.contains("I1 = <r 2><b 0x0100><b 0x0001><b 0x0000><b 0x0000><b 0x0000>\n"),
+            "existing I1 line must survive when i1 is Some(empty):\n{}",
+            out
+        );
+        // Output must NOT contain a malformed `I1 = ` line (trailing space, no value).
+        assert!(
+            !out.contains("I1 = \n"),
+            "must not write malformed empty `I1 = ` line:\n{}",
+            out
+        );
+    }
+
+    /// T1.3.x: I1=Some but absent from conf → Err (not silent no-op).
+    #[test]
+    fn merge_obfuscation_params_errors_on_missing_i1_when_some() {
+        // Build a conf without the I1 line.
+        let conf_no_i1 = "[Interface]\n\
+                           PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
+                           Address = 10.9.0.2/32\n\
+                           Jc = 11\n\
+                           Jmin = 50\n\
+                           Jmax = 1000\n\
+                           S1 = 17\n\
+                           S2 = 18\n\
+                           S4 = 18\n\
+                           H1 = 1\n\
+                           H2 = 2\n\
+                           H3 = 3\n\
+                           H4 = 4\n";
+        let params = sample_params_with_i1(11, "<r 3><b 0x0200>");
+        let err = merge_obfuscation_params(conf_no_i1, &params).unwrap_err();
+        assert!(
+            err.to_string().contains("I1"),
+            "error must name missing key I1, got: {}",
+            err
+        );
     }
 }
