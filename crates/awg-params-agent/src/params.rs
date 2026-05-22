@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-/// AmneziaWG obfuscation parameters — 10 fields matching the server's
+/// AmneziaWG obfuscation parameters — 11 fields matching the server's
 /// `awg_params_epoch.params` JSONB schema and the orchestrator's `AwgParams`
 /// struct in `cmd/orchestrator/awg_params.go`.
 ///
-/// I1 is intentionally absent: the orchestrator and installer both carry 10
-/// params. When the server schema extends to I1, add the field and its regex
-/// in `conf_merge.rs`.
+/// I1 (InitString) is a string value containing arbitrary bytes rendered as
+/// angle-bracket tokens (e.g. `<r 2><b 0x0100>...`). Added in T1.3.x lockstep
+/// with the Go orchestrator fix. Deserialization uses `default` so that
+/// pre-I1 DB rows (where the field is absent from JSON) deserialize without
+/// error — `i1` will be `None` and conf_merge skips the I1 line.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AwgParams {
     #[serde(rename = "Jc")]
@@ -29,6 +31,9 @@ pub struct AwgParams {
     pub h3: i64,
     #[serde(rename = "H4")]
     pub h4: i64,
+    /// InitString — arbitrary bytes as conf literal. `None` when absent from DB row.
+    #[serde(rename = "I1", default)]
+    pub i1: Option<String>,
 }
 
 /// Response shape from `GET /api/partner/awg-params/latest?component=awg`.
