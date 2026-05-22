@@ -1,0 +1,28 @@
+[package]
+name = "awg-params-agent"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-or-later"
+description = "OxPulse AWG params agent — polls central server for obfuscation param epochs and applies them to the kernel (T1.3.d)"
+
+[[bin]]
+name = "oxpulse-awg-params-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+humantime = "2"
+once_cell = "1"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "process", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
