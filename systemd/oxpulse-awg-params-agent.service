@@ -1,0 +1,17 @@
+[Unit]
+Description=OxPulse AWG params agent (T1.3 federation pull)
+Documentation=https://github.com/anatolykoptev/oxpulse-partner-edge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/oxpulse-awg-params-agent
+EnvironmentFile=/etc/oxpulse-partner-edge/awg-params-agent.env
+Restart=on-failure
+RestartSec=10s
+# Root is required for `awg syncconf` (netlink socket for amneziawg-go).
+User=root
+
+[Install]
+WantedBy=multi-user.target
