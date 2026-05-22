@@ -4,9 +4,9 @@
 use crate::error::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::Path;
 use tempfile::NamedTempFile;
-use std::io::Write;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AwgState {
@@ -33,13 +33,11 @@ pub fn save_state(path: &Path, state: &AwgState) -> Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
 
     // Ensure the state directory exists (first run on a fresh install).
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("create state dir {:?}", dir))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create state dir {:?}", dir))?;
 
     let json = serde_json::to_string_pretty(state).context("serialize state")?;
 
-    let mut tmp =
-        NamedTempFile::new_in(dir).with_context(|| format!("create tmp in {:?}", dir))?;
+    let mut tmp = NamedTempFile::new_in(dir).with_context(|| format!("create tmp in {:?}", dir))?;
     tmp.write_all(json.as_bytes()).context("write state tmp")?;
     tmp.flush().context("flush state tmp")?;
     tmp.as_file().sync_all().context("fsync state tmp")?;
@@ -73,7 +71,9 @@ mod tests {
         };
         save_state(&path, &state).unwrap();
 
-        let loaded = load_state(&path).unwrap().expect("state should exist after save");
+        let loaded = load_state(&path)
+            .unwrap()
+            .expect("state should exist after save");
         assert_eq!(loaded.last_applied_epoch, state.last_applied_epoch);
         // Timestamp survives roundtrip within 1ms (serde_json uses RFC3339).
         let diff = (loaded.applied_at - state.applied_at)

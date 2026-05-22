@@ -7,11 +7,11 @@ use crate::{
     state::{load_state, save_state, AwgState},
 };
 use chrono::Utc;
+use std::io::Write;
 use std::{path::PathBuf, time::Duration};
 use tempfile::NamedTempFile;
 use tokio::{process::Command, time::sleep};
 use tracing::{debug, error, info};
-use std::io::Write;
 
 /// All configuration for the agent loop, parsed from env at startup.
 pub struct AgentConfig {
@@ -62,8 +62,7 @@ impl AgentLoop {
         };
 
         // 2. Compare against local state.
-        let state = load_state(&self.cfg.state_path)
-            .context("load state")?;
+        let state = load_state(&self.cfg.state_path).context("load state")?;
         let last_epoch = state.as_ref().map(|s| s.last_applied_epoch).unwrap_or(0);
 
         if response.epoch <= last_epoch {
@@ -129,12 +128,12 @@ impl AgentLoop {
         let content = content.to_owned();
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("create conf dir {:?}", dir))?;
+            std::fs::create_dir_all(&dir).with_context(|| format!("create conf dir {:?}", dir))?;
 
             let mut tmp =
                 NamedTempFile::new_in(&dir).with_context(|| format!("temp file in {:?}", dir))?;
-            tmp.write_all(content.as_bytes()).context("write conf tmp")?;
+            tmp.write_all(content.as_bytes())
+                .context("write conf tmp")?;
             tmp.flush().context("flush conf tmp")?;
             tmp.as_file().sync_all().context("fsync conf tmp")?;
             tmp.persist(&conf_path)

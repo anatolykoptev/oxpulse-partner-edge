@@ -16,7 +16,9 @@ use std::collections::HashMap;
 /// Multiline flag ensures `^`/`$` match individual lines, not the whole string.
 static AWG_PARAM_RE: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
     let mut m = HashMap::new();
-    for key in &["Jc", "Jmin", "Jmax", "S1", "S2", "S4", "H1", "H2", "H3", "H4"] {
+    for key in &[
+        "Jc", "Jmin", "Jmax", "S1", "S2", "S4", "H1", "H2", "H3", "H4",
+    ] {
         let pattern = format!(r"(?m)^{} = \d+$", regex::escape(key));
         m.insert(*key, Regex::new(&pattern).expect("static regex is valid"));
     }

@@ -29,8 +29,7 @@ fn main() -> anyhow::Result<()> {
     // Init tracing. RUST_LOG controls verbosity; default to info.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -66,14 +65,14 @@ fn load_config() -> Result<AgentConfig> {
         })?;
 
     if service_token.is_empty() {
-        return Err(anyhow::anyhow!("service token file {:?} is empty", token_path));
+        return Err(anyhow::anyhow!(
+            "service token file {:?} is empty",
+            token_path
+        ));
     }
 
-    let awg_conf_path: PathBuf = env_or(
-        "OXPULSE_AWG_CONF_PATH",
-        "/etc/amnezia/amneziawg/awg0.conf",
-    )
-    .into();
+    let awg_conf_path: PathBuf =
+        env_or("OXPULSE_AWG_CONF_PATH", "/etc/amnezia/amneziawg/awg0.conf").into();
 
     let awg_iface = env_or("OXPULSE_AWG_IFACE", "awg0");
 
@@ -83,9 +82,7 @@ fn load_config() -> Result<AgentConfig> {
     )
     .into();
 
-    let poll_interval = parse_duration(
-        &env_or("OXPULSE_POLL_INTERVAL", "30s"),
-    )?;
+    let poll_interval = parse_duration(&env_or("OXPULSE_POLL_INTERVAL", "30s"))?;
 
     info!(
         central_url = %central_url,
@@ -110,9 +107,7 @@ fn load_config() -> Result<AgentConfig> {
 }
 
 fn require_env(key: &str) -> Result<String> {
-    std::env::var(key).map_err(|_| {
-        anyhow::anyhow!("required env var {} is not set", key)
-    })
+    std::env::var(key).map_err(|_| anyhow::anyhow!("required env var {} is not set", key))
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -121,7 +116,6 @@ fn env_or(key: &str, default: &str) -> String {
 
 /// Parse a humantime duration string like "30s", "1m", "2m30s".
 fn parse_duration(s: &str) -> Result<Duration> {
-    humantime::parse_duration(s).map_err(|e| {
-        anyhow::anyhow!("invalid OXPULSE_POLL_INTERVAL {:?}: {}", s, e)
-    })
+    humantime::parse_duration(s)
+        .map_err(|e| anyhow::anyhow!("invalid OXPULSE_POLL_INTERVAL {:?}: {}", s, e))
 }

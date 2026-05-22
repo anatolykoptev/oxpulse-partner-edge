@@ -18,13 +18,20 @@ impl AgentClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .context("build HTTP client")?;
-        Ok(Self { client, central_url, token })
+        Ok(Self {
+            client,
+            central_url,
+            token,
+        })
     }
 
     /// Poll `GET /api/partner/awg-params/latest?component=awg`.
     /// Returns `Ok(None)` on 4xx/5xx — loop logs and retries next interval.
     pub async fn poll_latest(&self) -> Result<Option<AwgParamsLatestResponse>> {
-        let url = format!("{}/api/partner/awg-params/latest?component=awg", self.central_url);
+        let url = format!(
+            "{}/api/partner/awg-params/latest?component=awg",
+            self.central_url
+        );
         debug!(%url, "polling awg-params");
 
         let resp = self
