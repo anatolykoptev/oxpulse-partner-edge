@@ -295,6 +295,8 @@ _install_lib_source install-healthcheck.sh
 _install_lib_source install-systemd.sh
 # shellcheck source=lib/install-awg.sh
 _install_lib_source install-awg.sh
+# shellcheck source=lib/install-awg-params-agent.sh
+_install_lib_source install-awg-params-agent.sh
 # shellcheck source=lib/install-firewall.sh
 _install_lib_source install-firewall.sh
 
@@ -312,6 +314,12 @@ src_self="${BASH_SOURCE[0]:-}"
 if [[ -n "$src_self" && -f "$(cd "$(dirname "$src_self")" 2>/dev/null && pwd)/docker-compose.yml.tpl" ]]; then
 	src_dir="$(cd "$(dirname "$src_self")" && pwd)"
 fi
+# INSTALL_SH_DIR: canonical dir of install.sh itself, used by lib modules to
+# locate bundled binaries shipped alongside install.sh (release flat layout).
+# Differs from src_dir: src_dir requires docker-compose.yml.tpl; INSTALL_SH_DIR
+# is always set when not running via curl|bash.
+INSTALL_SH_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || echo "")"
+export INSTALL_SH_DIR
 
 # ---------- Step 3b: pre-pull images ----------
 # Runs unconditionally (bake + full-install modes).
@@ -1398,6 +1406,11 @@ fi
 
 # ---------- Step 7: healthcheck ----------
 healthcheck_run
+
+# ---------- Step 8b: awg-params-agent ----------
+# Must be inside BAKE_MODE=0 block: _awg_params_agent_render_env expands
+#  which is only assigned during the hydrate path above.
+awg_params_agent_run
 
 fi  # end BAKE_MODE=0 (hydrate path)
 
