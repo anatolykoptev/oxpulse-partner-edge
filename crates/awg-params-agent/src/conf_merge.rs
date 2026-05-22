@@ -68,8 +68,12 @@ pub fn merge_obfuscation_params(conf: &str, params: &AwgParams) -> Result<String
     }
 
     // I1 (InitString) — string value, handled separately after numeric loop.
-    // `None` → skip (old DB rows without I1 field).
-    if let Some(i1_val) = &params.i1 {
+    // `None` OR `Some("")` → skip. Mirrors orchestrator Go-side semantics:
+    // empty-string I1 (e.g. writer regression emits `"I1": ""`) MUST be
+    // treated identically to JSON-omitted I1 — otherwise the agent would
+    // write a malformed `I1 = ` line while motherly's conf stays clean,
+    // creating exactly the silent-drift class that T1.3.x closes.
+    if let Some(i1_val) = params.i1.as_deref().filter(|s| !s.is_empty()) {
         if !AWG_I1_RE.is_match(&result) {
             return Err(crate::error::anyhow!(
                 "conf merge: key \"I1\" not found in conf (conf structure changed or corrupted)"
@@ -274,6 +278,28 @@ mod tests {
         assert!(
             out.contains("I1 = <r 2><b 0x0100><b 0x0001><b 0x0000><b 0x0000><b 0x0000>\n"),
             "existing I1 line must survive when i1 is None:\n{}",
+            out
+        );
+    }
+
+    /// T1.3.x (reviewer MAJOR): I1=Some("") MUST be treated like None — skip
+    /// apply, leave existing I1 line untouched. Otherwise the agent writes a
+    /// malformed `I1 = ` line while motherly's Go-side `if params.I1 != ""`
+    /// skip keeps motherly clean — the exact silent-drift class T1.3.x closes.
+    #[test]
+    fn merge_obfuscation_params_i1_empty_string_skipped() {
+        let params = sample_params_with_i1(11, ""); // i1: Some("")
+        let out = merge_obfuscation_params(fixture_conf(), &params).unwrap();
+        // Existing I1 line MUST survive — empty I1 must skip, not overwrite.
+        assert!(
+            out.contains("I1 = <r 2><b 0x0100><b 0x0001><b 0x0000><b 0x0000><b 0x0000>\n"),
+            "existing I1 line must survive when i1 is Some(empty):\n{}",
+            out
+        );
+        // Output must NOT contain a malformed `I1 = ` line (trailing space, no value).
+        assert!(
+            !out.contains("I1 = \n"),
+            "must not write malformed empty `I1 = ` line:\n{}",
             out
         );
     }
