@@ -38,13 +38,13 @@ _awg_params_agent_install_binary() {
 	if [[ -n "${src_dir:-}" && -f "${src_dir}/${_asset}" ]]; then
 		_bundled="${src_dir}/${_asset}"
 	fi
-	# Release bundle flat layout: installer + binaries sit in the same directory.
-	# BASH_SOURCE[1] is install.sh when this lib file is sourced from it.
-	if [[ -z "$_bundled" && -n "${BASH_SOURCE[1]:-}" ]]; then
-		local _install_dir
-		_install_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[1]}")" 2>/dev/null && pwd)"
-		if [[ -f "${_install_dir}/${_asset}" ]]; then
-			_bundled="${_install_dir}/${_asset}"
+	# Release bundle flat layout: installer + binaries sit in the same directory
+	# as install.sh. Use INSTALL_SH_DIR (exported by install.sh near src_dir
+	# setup) instead of BASH_SOURCE[1] which resolves to this lib file, not
+	# to install.sh itself.
+	if [[ -z "$_bundled" && -n "${INSTALL_SH_DIR:-}" ]]; then
+		if [[ -f "${INSTALL_SH_DIR}/${_asset}" ]]; then
+			_bundled="${INSTALL_SH_DIR}/${_asset}"
 		fi
 	fi
 
@@ -58,7 +58,7 @@ _awg_params_agent_install_binary() {
 	# Fall back to release asset download from GitHub releases.
 	local _url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/${_asset}"
 	log "  awg-params-agent: downloading release binary ($_arch) from releases"
-	if curl -fsSL --max-time 60 "$_url" -o "$_dest" 2>/dev/null; then
+	if curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 "$_url" -o "$_dest" 2>/dev/null; then
 		chmod 0755 "$_dest"
 	else
 		rm -f "$_dest"
@@ -72,7 +72,8 @@ _awg_params_agent_install_unit() {
 		install -m 0644 "${src_dir}/systemd/${_AWG_PARAMS_AGENT_UNIT}" \
 			"${SYSTEMD_DIR}/${_AWG_PARAMS_AGENT_UNIT}"
 	else
-		curl -fsSL "${REPO_RAW}/systemd/${_AWG_PARAMS_AGENT_UNIT}" \
+		curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 \
+			"${REPO_RAW}/systemd/${_AWG_PARAMS_AGENT_UNIT}" \
 			-o "${SYSTEMD_DIR}/${_AWG_PARAMS_AGENT_UNIT}" \
 			|| die "awg-params-agent: failed to fetch unit from REPO_RAW"
 	fi
@@ -104,7 +105,7 @@ _awg_params_agent_state_dir() {
 # Full install = enable --now.
 _awg_params_agent_enable() {
 	systemctl daemon-reload
-	if [[ "$BAKE_MODE" == "0" ]]; then
+	if [[ "${BAKE_MODE:-0}" == "0" ]]; then
 		systemctl enable --now "$_AWG_PARAMS_AGENT_UNIT"
 	else
 		systemctl enable "$_AWG_PARAMS_AGENT_UNIT"

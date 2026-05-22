@@ -222,3 +222,67 @@ ENVEOF
 	# systemctl enable --now called
 	grep -q 'systemctl enable --now oxpulse-awg-params-agent.service' "$FAKE_LOG"
 }
+
+@test "BAKE_MODE=1 with unset NODE_ID: awg_params_agent_run must not crash" {
+	# Regression guard for BLOCKER 1: awg_params_agent_run was called outside
+	# the BAKE_MODE=0 gate; _awg_params_agent_render_env expanded unset NODE_ID
+	# under set -euo pipefail, crashing the installer.
+	# After fix (Option A): awg_params_agent_run is inside BAKE_MODE=0 block,
+	# so this test exercises the function directly with DRY_RUN=1 to verify
+	# it doesn't touch NODE_ID on the dry path.
+	run bash -c "
+		DRY_RUN=1
+		BAKE_MODE=1
+		src_dir=''
+		REPO_RAW='http://127.0.0.1:1/does-not-exist'
+		SYSTEMD_DIR='/tmp'
+		PREFIX_ETC='/tmp'
+		PREFIX_LIB='/tmp'
+		BACKEND_API='https://api.oxpulse.chat'
+		log()  { echo \"log: \$*\"; }
+		warn() { echo \"warn: \$*\"; }
+		die()  { echo \"die: \$*\" >&2; exit 1; }
+		set -euo pipefail
+		unset NODE_ID
+		source \"$REPO_ROOT/lib/install-awg-params-agent.sh\"
+		awg_params_agent_run
+	"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"[dry-run] skipping"* ]]
+}
+
+@test "bundled-binary detection uses INSTALL_SH_DIR not BASH_SOURCE[1]" {
+	# Regression guard for MAJOR 1: BASH_SOURCE[1] inside a sourced lib
+	# resolves to the lib file, not install.sh. INSTALL_SH_DIR is now exported
+	# by install.sh and used as the canonical lookup path.
+	local fake_install_dir
+	fake_install_dir="$(mktemp -d)"
+	# Simulate tarball flat layout: binary alongside install.sh
+	touch "${fake_install_dir}/oxpulse-awg-params-agent-amd64"
+	chmod +x "${fake_install_dir}/oxpulse-awg-params-agent-amd64"
+
+	run env FAKE_LOG="$FAKE_LOG" PATH="$TMP/bin:$PATH" bash -c "
+		DRY_RUN=0
+		BAKE_MODE=0
+		src_dir=''
+		INSTALL_SH_DIR='${fake_install_dir}'
+		REPO_RAW='http://127.0.0.1:1/does-not-exist'
+		SYSTEMD_DIR='$DEST_SYSTEMD'
+		PREFIX_ETC='$DEST_ETC'
+		PREFIX_LIB='$DEST_LIB'
+		BACKEND_API='https://api.oxpulse.chat'
+		NODE_ID='test-node-01'
+		log()  { echo \"log: \$*\"; }
+		warn() { echo \"warn: \$*\" >&2; }
+		die()  { echo \"die: \$*\" >&2; exit 1; }
+		_AWG_PARAMS_AGENT_BIN='$DEST_BIN/oxpulse-awg-params-agent'
+		source \"$REPO_ROOT/lib/install-awg-params-agent.sh\"
+		_awg_params_agent_install_binary
+	"
+	[ "$status" -eq 0 ]
+	# Must have used the bundled path (install called), NOT curl
+	grep -q '^install ' "$FAKE_LOG"
+	! grep -q '^curl ' "$FAKE_LOG"
+
+	rm -rf "$fake_install_dir"
+}
