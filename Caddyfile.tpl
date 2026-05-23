@@ -188,6 +188,30 @@
     }
 }
 
+# =============================================================================
+# www → non-www redirect (single hop, 301 permanent).
+#
+# Same pattern as ssh zvonilka (operator added 2026-05-23) — codified here so
+# every new partner-edge install gets it automatically.
+#
+# Caddy auto-issues a Let's Encrypt cert for www.{{PARTNER_DOMAIN}} via
+# ACME HTTP-01 on :80 the first time DNS for `www.<partner_domain>`
+# resolves to this edge. If the partner operator hasn't created a
+# `www.` DNS record, ACME never fires (no error, just no cert) and the
+# vhost is dormant — main vhost above is unaffected.
+#
+# Both HTTPS (Caddy default) AND HTTP (explicit) variants redirect so a
+# user typing `http://www.X` is single-hopped to `https://X{uri}` rather
+# than double-hopped (`http://www.X` → `https://www.X` → `https://X`).
+# =============================================================================
+www.{{PARTNER_DOMAIN}} {
+    redir https://{{PARTNER_DOMAIN}}{uri} permanent
+}
+
+http://www.{{PARTNER_DOMAIN}} {
+    redir https://{{PARTNER_DOMAIN}}{uri} permanent
+}
+
 # Stub vhost — Caddy issues + renews cert for TURNS subdomain via ACME
 # HTTP-01 on :80 (Caddy still owns :80 unmultiplexed). The cert is written
 # to the caddy-data volume and bind-mounted read-only into coturn.
