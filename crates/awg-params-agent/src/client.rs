@@ -63,10 +63,12 @@ impl AgentClient {
 
     /// POST `{central}/api/partner/awg-params/applied` (T1.3.e receiver).
     /// Best-effort: logs on failure but does NOT propagate the error.
-    pub async fn report_applied(&self, node_id: &str, epoch: i64) {
+    ///
+    /// Note: `node_id` is NOT in the request body — backend derives it from
+    /// the Bearer-token auth context. See AwgAppliedPayload doc-comment.
+    pub async fn report_applied(&self, epoch: i64) {
         let url = format!("{}/api/partner/awg-params/applied", self.central_url);
         let payload = AwgAppliedPayload {
-            node_id: node_id.to_owned(),
             component: "awg",
             epoch,
         };
