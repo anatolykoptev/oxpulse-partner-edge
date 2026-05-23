@@ -86,6 +86,36 @@
 							"match": [
 								{
 									"host": [
+										"www.test.example"
+									]
+								}
+							],
+							"handle": [
+								{
+									"handler": "subroute",
+									"routes": [
+										{
+											"handle": [
+												{
+													"handler": "static_response",
+													"headers": {
+														"Location": [
+															"https://test.example{http.request.uri}"
+														]
+													},
+													"status_code": 301
+												}
+											]
+										}
+									]
+								}
+							],
+							"terminal": true
+						},
+						{
+							"match": [
+								{
+									"host": [
 										"test.example"
 									]
 								}
@@ -135,7 +165,7 @@
 											]
 										},
 										{
-											"group": "group8",
+											"group": "group9",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -164,7 +194,7 @@
 											]
 										},
 										{
-											"group": "group8",
+											"group": "group9",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -193,7 +223,7 @@
 											]
 										},
 										{
-											"group": "group8",
+											"group": "group9",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -494,6 +524,80 @@
 				},
 				"srv1": {
 					"listen": [
+						":80"
+					],
+					"listener_wrappers": [
+						{
+							"routes": [
+								{
+									"handle": [
+										{
+											"handler": "proxy",
+											"upstreams": [
+												{
+													"dial": [
+														"tcp/host.docker.internal:5349"
+													]
+												}
+											]
+										}
+									],
+									"match": [
+										{
+											"tls": {
+												"sni": [
+													"api-abc.test.example.test.example"
+												]
+											}
+										}
+									]
+								}
+							],
+							"wrapper": "layer4"
+						},
+						{
+							"wrapper": "tls"
+						}
+					],
+					"routes": [
+						{
+							"match": [
+								{
+									"host": [
+										"www.test.example"
+									]
+								}
+							],
+							"handle": [
+								{
+									"handler": "subroute",
+									"routes": [
+										{
+											"handle": [
+												{
+													"handler": "static_response",
+													"headers": {
+														"Location": [
+															"https://test.example{http.request.uri}"
+														]
+													},
+													"status_code": 301
+												}
+											]
+										}
+									]
+								}
+							],
+							"terminal": true
+						}
+					],
+					"protocols": [
+						"h1",
+						"h2"
+					]
+				},
+				"srv2": {
+					"listen": [
 						":9080"
 					],
 					"listener_wrappers": [
@@ -543,7 +647,7 @@
 									"handler": "subroute",
 									"routes": [
 										{
-											"group": "group10",
+											"group": "group12",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -569,7 +673,7 @@
 											]
 										},
 										{
-											"group": "group10",
+											"group": "group12",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -595,7 +699,7 @@
 											]
 										},
 										{
-											"group": "group10",
+											"group": "group12",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -629,7 +733,7 @@
 											]
 										},
 										{
-											"group": "group10",
+											"group": "group12",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -702,6 +806,7 @@
 					},
 					{
 						"subjects": [
+							"www.test.example",
 							"test.example"
 						],
 						"issuers": [
