@@ -1,10 +1,16 @@
-//! Pure conf-merge logic: replace AWG obfuscation params in a `awg0.conf`
-//! string while leaving everything else byte-identical.
+//! Pure conf-merge logic: replace-or-insert AWG obfuscation params in a
+//! `awg0.conf` string while leaving everything else byte-identical.
 //!
 //! Strategy: per-key regex replacement on the raw text, matching the
 //! orchestrator's `renderAwgConf` in `cmd/orchestrator/awg_params.go`.
 //! Numeric params use `^Key = \d+$`; I1 (InitString) uses `^I1 = .+$`
 //! because its value contains angle brackets and hex literals.
+//!
+//! Absent params are INSERTED into the `[Interface]` section rather than
+//! erroring — edges are dumb caches (roadmap invariant), so a bootstrap-only
+//! conf carrying no obfuscation params is valid input. This also self-heals
+//! legacy edges whose `awg0.conf` predates the I1 line: the agent tops up the
+//! missing line on its own, with no installer migration needed.
 //! Peer sections are untouched because WireGuard peer keys are base64.
 
 use crate::error::Result;
@@ -30,12 +36,43 @@ static AWG_PARAM_RE: Lazy<HashMap<&'static str, Regex>> = Lazy::new(|| {
 static AWG_I1_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?m)^I1 = .+$").expect("static regex is valid"));
 
-/// Replace the 11 AWG obfuscation params in `conf` with values from `params`.
+/// Compiled regex for the `[Interface]` section header line. Used to locate
+/// the insertion point for params that are absent from the conf.
+static AWG_INTERFACE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^\[Interface\][^\n]*$").expect("static regex is valid"));
+
+/// Insert `line` immediately after the `[Interface]` header line, preserving
+/// all other bytes. Returns `Err` only if `conf` has no `[Interface]` section.
+fn insert_into_interface(conf: &str, line: &str) -> Result<String> {
+    let Some(m) = AWG_INTERFACE_RE.find(conf) else {
+        return Err(crate::error::anyhow!(
+            "conf merge: no [Interface] section found (cannot insert {:?})",
+            line
+        ));
+    };
+    // `m.end()` is the position just before the header line's newline (or EOF
+    // if it is the last line). Splice `\n{line}` in right after the header.
+    let header_end = m.end();
+    let mut result = String::with_capacity(conf.len() + line.len() + 1);
+    result.push_str(&conf[..header_end]);
+    result.push('\n');
+    result.push_str(line);
+    result.push_str(&conf[header_end..]);
+    Ok(result)
+}
+
+/// Replace-or-insert the 11 AWG obfuscation params in `conf` with values from
+/// `params`.
 ///
-/// Returns `Err` if any of the 10 numeric keys is absent from the conf text,
-/// or if I1 is `Some` but absent from the conf — prevents a silent no-op
-/// when the conf shape has changed or is corrupted.
-/// I1 is `None` → skip (backward compat for pre-I1 DB rows).
+/// For each of the 10 numeric keys (and I1 when `Some` and non-empty): if the
+/// key's line is present it is REPLACED; if absent it is INSERTED immediately
+/// after the `[Interface]` header. This supports bootstrap-only confs (edges
+/// are dumb caches) and self-heals legacy edges whose `awg0.conf` lacks an I1
+/// line — no installer top-up needed.
+///
+/// Returns `Err` only if `conf` has no `[Interface]` section to insert into.
+/// I1 is `None` or `Some("")` → skip (backward compat for pre-I1 DB rows and
+/// empty-string writer regressions).
 /// All other content ([Peer] sections, PrivateKey, Address, comments,
 /// whitespace) is preserved byte-for-byte.
 pub fn merge_obfuscation_params(conf: &str, params: &AwgParams) -> Result<String> {
@@ -57,14 +94,13 @@ pub fn merge_obfuscation_params(conf: &str, params: &AwgParams) -> Result<String
         let re = AWG_PARAM_RE
             .get(key)
             .expect("all 10 numeric keys are in AWG_PARAM_RE");
-        if !re.is_match(&result) {
-            return Err(crate::error::anyhow!(
-                "conf merge: key {:?} not found in conf (conf structure changed or corrupted)",
-                key
-            ));
-        }
         let new_line = format!("{} = {}", key, val);
-        result = re.replace_all(&result, new_line.as_str()).into_owned();
+        if re.is_match(&result) {
+            result = re.replace_all(&result, new_line.as_str()).into_owned();
+        } else {
+            // Absent → insert into [Interface] (bootstrap / self-heal path).
+            result = insert_into_interface(&result, &new_line)?;
+        }
     }
 
     // I1 (InitString) — string value, handled separately after numeric loop.
@@ -74,15 +110,15 @@ pub fn merge_obfuscation_params(conf: &str, params: &AwgParams) -> Result<String
     // write a malformed `I1 = ` line while motherly's conf stays clean,
     // creating exactly the silent-drift class that T1.3.x closes.
     if let Some(i1_val) = params.i1.as_deref().filter(|s| !s.is_empty()) {
-        if !AWG_I1_RE.is_match(&result) {
-            return Err(crate::error::anyhow!(
-                "conf merge: key \"I1\" not found in conf (conf structure changed or corrupted)"
-            ));
-        }
         let new_line = format!("I1 = {}", i1_val);
-        result = AWG_I1_RE
-            .replace_all(&result, new_line.as_str())
-            .into_owned();
+        if AWG_I1_RE.is_match(&result) {
+            result = AWG_I1_RE
+                .replace_all(&result, new_line.as_str())
+                .into_owned();
+        } else {
+            // Absent → insert into [Interface] (self-heals I1-less legacy confs).
+            result = insert_into_interface(&result, &new_line)?;
+        }
     }
 
     Ok(result)
@@ -194,8 +230,9 @@ mod tests {
     }
 
     #[test]
-    fn merge_obfuscation_params_errors_on_missing_key() {
-        // conf missing Jc line → merge must return Err, not silently skip.
+    fn merge_inserts_missing_numeric_key() {
+        // conf missing Jc line → merge must INSERT it into [Interface], not Err.
+        // Self-heal path: edges are dumb caches, a bootstrap conf may lack params.
         let conf_no_jc = "[Interface]\n\
                           PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
                           Address = 10.9.0.2/32\n\
@@ -209,12 +246,16 @@ mod tests {
                           H3 = 3\n\
                           H4 = 4\n";
         let params = sample_params(99);
-        let err = merge_obfuscation_params(conf_no_jc, &params).unwrap_err();
+        let out = merge_obfuscation_params(conf_no_jc, &params).unwrap();
         assert!(
-            err.to_string().contains("Jc"),
-            "error should name the missing key, got: {}",
-            err
+            out.contains("Jc = 99\n"),
+            "missing Jc must be inserted, got:\n{}",
+            out
         );
+        // Inserted into the [Interface] section.
+        let hdr = out.find("[Interface]").expect("has [Interface]");
+        let jc = out.find("Jc = 99").expect("has inserted Jc");
+        assert!(jc > hdr, "inserted Jc must be inside [Interface]:\n{}", out);
     }
 
     /// Regression: base64 peer keys must not be mistaken for digit-only lines.
@@ -304,9 +345,11 @@ mod tests {
         );
     }
 
-    /// T1.3.x: I1=Some but absent from conf → Err (not silent no-op).
+    /// Self-heal: I1=Some but absent from conf → INSERT it (not Err).
+    /// Closes the legacy-edge gap where an `awg0.conf` predates the I1 line —
+    /// the agent tops it up itself, no installer migration needed.
     #[test]
-    fn merge_obfuscation_params_errors_on_missing_i1_when_some() {
+    fn merge_inserts_i1_when_missing() {
         // Build a conf without the I1 line.
         let conf_no_i1 = "[Interface]\n\
                            PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
@@ -322,11 +365,78 @@ mod tests {
                            H3 = 3\n\
                            H4 = 4\n";
         let params = sample_params_with_i1(11, "<r 3><b 0x0200>");
-        let err = merge_obfuscation_params(conf_no_i1, &params).unwrap_err();
+        let out = merge_obfuscation_params(conf_no_i1, &params).unwrap();
         assert!(
-            err.to_string().contains("I1"),
-            "error must name missing key I1, got: {}",
-            err
+            out.contains("I1 = <r 3><b 0x0200>\n"),
+            "missing I1 must be inserted, got:\n{}",
+            out
+        );
+        let hdr = out.find("[Interface]").expect("has [Interface]");
+        let i1 = out.find("I1 = <r 3>").expect("has inserted I1");
+        assert!(i1 > hdr, "inserted I1 must be inside [Interface]:\n{}", out);
+    }
+
+    /// Bootstrap-only conf: an `[Interface]` carrying only the base WireGuard
+    /// keys (no obfuscation params) + a `[Peer]` block. After merge, all 10
+    /// numeric params and an I1 line must be inserted into `[Interface]`, and
+    /// the `[Peer]` block must survive intact.
+    #[test]
+    fn merge_bootstrap_conf_inserts_all_params() {
+        let bootstrap = "[Interface]\n\
+                         PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
+                         Address = 10.9.0.2/32\n\
+                         ListenPort = 43801\n\
+                         Table = off\n\
+                         MTU = 1300\n\
+                         \n\
+                         [Peer]\n\
+                         PublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=\n\
+                         Endpoint = motherly.example.com:51820\n\
+                         AllowedIPs = 10.9.0.1/32\n\
+                         PersistentKeepalive = 25\n";
+        let params = sample_params_with_i1(11, "<r 3><b 0x0200>");
+        let out = merge_obfuscation_params(bootstrap, &params).unwrap();
+
+        // All 10 numeric params inserted.
+        for &line in &[
+            "Jc = 11",
+            "Jmin = 50",
+            "Jmax = 1000",
+            "S1 = 17",
+            "S2 = 18",
+            "S4 = 18",
+            "H1 = 123456789",
+            "H2 = 234567890",
+            "H3 = 345678901",
+            "H4 = 456789012",
+        ] {
+            assert!(
+                out.contains(line),
+                "missing inserted param {:?}:\n{}",
+                line,
+                out
+            );
+        }
+        // I1 inserted.
+        assert!(
+            out.contains("I1 = <r 3><b 0x0200>"),
+            "I1 must be inserted:\n{}",
+            out
+        );
+
+        // [Peer] block intact.
+        assert!(out.contains("PublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="));
+        assert!(out.contains("Endpoint = motherly.example.com:51820"));
+        assert!(out.contains("AllowedIPs = 10.9.0.1/32"));
+        assert!(out.contains("PersistentKeepalive = 25"));
+
+        // Inserted params must land in [Interface], not leak into [Peer].
+        let peer_pos = out.find("[Peer]").expect("has [Peer]");
+        let jc_pos = out.find("Jc = 11").expect("has inserted Jc");
+        assert!(
+            jc_pos < peer_pos,
+            "inserted Jc leaked into [Peer]:\n{}",
+            out
         );
     }
 }

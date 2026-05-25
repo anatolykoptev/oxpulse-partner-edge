@@ -16,7 +16,7 @@ use tracing::{debug, error, info};
 /// All configuration for the agent loop, parsed from env at startup.
 pub struct AgentConfig {
     pub central_url: String,
-    pub service_token: String,
+    pub service_token_path: PathBuf,
     pub awg_conf_path: PathBuf,
     pub awg_iface: String,
     pub state_path: PathBuf,
@@ -31,7 +31,7 @@ pub struct AgentLoop {
 
 impl AgentLoop {
     pub fn new(cfg: AgentConfig) -> Result<Self> {
-        let client = AgentClient::new(cfg.central_url.clone(), cfg.service_token.clone())?;
+        let client = AgentClient::new(cfg.central_url.clone(), cfg.service_token_path.clone())?;
         Ok(Self { cfg, client })
     }
 
@@ -106,9 +106,7 @@ impl AgentLoop {
         info!(epoch = response.epoch, "epoch applied successfully");
 
         // 7. Report to central (best-effort — failure does not affect the loop).
-        self.client
-            .report_applied(&self.cfg.node_id, response.epoch)
-            .await;
+        self.client.report_applied(response.epoch).await;
 
         Ok(())
     }
