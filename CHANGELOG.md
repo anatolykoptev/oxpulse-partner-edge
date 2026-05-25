@@ -5,6 +5,28 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.53](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.52...partner-edge-v0.12.53) (2026-05-25)
+
+
+### Features
+
+* **awg-params-agent:** T1.3.x — apply I1 (InitString) in kernel conf merge ([#241](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/241)) ([20b0f0f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/20b0f0fb0d2b80ab3e4074869a96f86e5778ea1a))
+* **edge:** T1.3.d — awg-params-agent crate (poll + apply + report) ([#239](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/239)) ([4a8f30b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4a8f30ba0b38d23ccc59eb932a9a4c8475b733d1))
+* **installer:** Caddyfile.tpl — www.&lt;partner_domain&gt; → non-www 301 redirect ([#242](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/242)) ([41ef3fe](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/41ef3fecac1fce546964ea3fdb1246c2a2124c0a))
+* **installer:** mirror-aware binary fetch (OXPULSE_MIRROR_BASE) + GitHub fallback ([b551058](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/b55105845140e5b4ef2c5cdc715c4bc09f46b737))
+* **installer:** mirror-aware binary fetch with GitHub fallback ([0c1d8c7](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0c1d8c7f8fd97c62efd4f7aad29b608d34f72cb7))
+* **installer:** partner-edge host firewall hardening ([#231](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/231)) ([42f9c8c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/42f9c8c5725e455483d92451e11df74c0ccd83f9))
+* **install:** T1.3.f — install awg-params-agent binary + systemd unit + env config ([#240](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/240)) ([b24042c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/b24042c0bbeb0f1776730754c1b82507f06ffd7c))
+* **sfu:** split bind address per socket (metrics + relay-API + WS) ([#232](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/232)) ([0b9d1af](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0b9d1afc108186b3ed1b6ca4c4e6d078379e46fa))
+
+
+### Bug Fixes
+
+* **installer:** pin IMAGE_VERSION from VERSION file, not floating 'latest' ([#237](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/237)) ([37ccb73](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/37ccb7377e65595862fbf3850fc884d45e2971fb))
+* **installer:** three fresh-reinstall hardening fixes (Q, R, 8/10) ([#221](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/221)) ([c33411e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c33411e4704d2f8fb80b86ca28c52e17867f5d40))
+* **systemd:** refresh.service Wants= instead of Requires= oxpulse-partner-edge ([#234](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/234)) ([cfeaf3c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/cfeaf3c317f49f7998f45bc232906ce1aca04d83))
+* **systemd:** sni-rotate + xray-update Wants= instead of Requires= ([#236](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/236)) ([007a4cf](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/007a4cfca259c2027a11b696d6713010d4fdc27b))
+
 ## [0.12.52](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.51...partner-edge-v0.12.52) (2026-05-21)
 
 
