@@ -69,6 +69,6 @@ pub struct Redirect {
 }
 
 /// Parse raw YAML bytes into a [`TenantsFile`].
-pub fn parse(src: &str) -> Result<TenantsFile, serde_yml::Error> {
-    serde_yml::from_str(src)
+pub fn parse(src: &str) -> Result<TenantsFile, serde_norway::Error> {
+    serde_norway::from_str(src)
 }
