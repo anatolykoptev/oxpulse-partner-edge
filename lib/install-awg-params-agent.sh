@@ -57,6 +57,11 @@ _awg_params_agent_install_binary() {
 
 	# Fall back to release asset download from GitHub releases.
 	local _url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/${_asset}"
+	if [[ -n "${OXPULSE_MIRROR_BASE:-}" ]] && curl -fsSL --max-time 30 "${OXPULSE_MIRROR_BASE}/${_asset}" -o "$_dest" 2>/dev/null; then
+		log "  awg-params-agent: installed from mirror ${OXPULSE_MIRROR_BASE} (${_arch})"
+		chmod 0755 "$_dest"
+		return 0
+	fi
 	log "  awg-params-agent: downloading release binary ($_arch) from releases"
 	if curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 "$_url" -o "$_dest" 2>/dev/null; then
 		chmod 0755 "$_dest"
