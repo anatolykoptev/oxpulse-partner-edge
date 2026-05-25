@@ -106,9 +106,7 @@ impl AgentLoop {
         info!(epoch = response.epoch, "epoch applied successfully");
 
         // 7. Report to central (best-effort — failure does not affect the loop).
-        self.client
-            .report_applied(response.epoch)
-            .await;
+        self.client.report_applied(response.epoch).await;
 
         Ok(())
     }

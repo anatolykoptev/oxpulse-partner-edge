@@ -433,6 +433,10 @@ mod tests {
         // Inserted params must land in [Interface], not leak into [Peer].
         let peer_pos = out.find("[Peer]").expect("has [Peer]");
         let jc_pos = out.find("Jc = 11").expect("has inserted Jc");
-        assert!(jc_pos < peer_pos, "inserted Jc leaked into [Peer]:\n{}", out);
+        assert!(
+            jc_pos < peer_pos,
+            "inserted Jc leaked into [Peer]:\n{}",
+            out
+        );
     }
 }
