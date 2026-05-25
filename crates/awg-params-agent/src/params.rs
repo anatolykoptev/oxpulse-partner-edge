@@ -47,9 +47,14 @@ pub struct AwgParamsLatestResponse {
 
 /// Payload for `POST /api/partner/awg-params/applied` (T1.3.e receiver).
 /// Sent best-effort; loop continues on failure.
+///
+/// Note: `node_id` is NOT in this payload — backend derives it from the
+/// Bearer-token auth context (lookup partner_nodes by service_token_hash).
+/// Backend struct AwgParamsAppliedRequest uses #[serde(deny_unknown_fields)],
+/// so sending node_id here would 422. Security-correct: client can't spoof
+/// which node it claims to be by passing a different node_id in the body.
 #[derive(Debug, Serialize)]
 pub struct AwgAppliedPayload {
-    pub node_id: String,
     pub component: &'static str,
     pub epoch: i64,
 }
