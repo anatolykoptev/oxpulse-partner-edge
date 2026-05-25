@@ -354,3 +354,57 @@ EOF
 	[[ "$output" != *"GUARD_DID_NOT_EXIT"* ]]
 	[[ "$output" == *"topping up awg-params-agent (idempotent)"* ]]
 }
+
+@test "existing-install guard: failed top-up degrades to warn, does not abort re-run (WS4 die-containment)" {
+	# Regression: awg_params_agent_run can `die` (exit 1) on arch/download/unit
+	# failures. A bare `cmd || warn` cannot catch a die — it aborts the whole
+	# re-run, falsely signalling the existing (working) edge is broken. The guard
+	# wraps the call in a subshell so a failed *optional* top-up degrades to a
+	# warning. This test drives the die-class path with a `exit 1` stub and asserts
+	# the guard still reaches `exit 0`. Without the subshell wrap, status would be 1.
+	cat > "$DEST_LIB/install.env" <<EOF
+NODE_ID=stale-node-77
+BACKEND_API=https://api.oxpulse.chat
+EOF
+
+	mkdir -p "$TMP/sbin"
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/sbin/oxpulse-partner-edge-healthcheck"
+	chmod +x "$TMP/sbin/oxpulse-partner-edge-healthcheck"
+
+	awk '
+		/if \[\[ -f "\$PREFIX_LIB\/install\.env" && -z "\$MANUAL_CONFIG" \]\]; then/ { cap=1 }
+		cap {
+			print
+			if ($0 ~ /; then[[:space:]]*$/) depth++
+			if ($0 ~ /^[[:space:]]*fi[[:space:]]*$/) { depth--; if (depth==0) exit }
+		}
+	' "$REPO_ROOT/install.sh" > "$TMP/guard.sh"
+	[ -s "$TMP/guard.sh" ]
+	grep -q 'awg_params_agent_run' "$TMP/guard.sh"
+
+	run env FAKE_LOG="$FAKE_LOG" PATH="$TMP/bin:$PATH" bash -c "
+		set -euo pipefail
+		DRY_RUN=0
+		BAKE_MODE=0
+		MANUAL_CONFIG=''
+		src_dir='$CHECKOUT'
+		REPO_RAW='http://127.0.0.1:1/does-not-exist'
+		SYSTEMD_DIR='$DEST_SYSTEMD'
+		PREFIX_ETC='$DEST_ETC'
+		PREFIX_LIB='$DEST_LIB'
+		PREFIX_SBIN='$TMP/sbin'
+		log()  { echo \"log: \$*\"; }
+		warn() { echo \"warn: \$*\"; }
+		die()  { echo \"die: \$*\" >&2; exit 1; }
+		sleep() { :; }
+		source '$REPO_ROOT/lib/install-awg-params-agent.sh'
+		# Simulate a die-class top-up failure (binary/unit fetch).
+		awg_params_agent_run() { echo 'die: awg-params-agent: simulated install failure' >&2; exit 1; }
+		source '$TMP/guard.sh'
+		echo 'GUARD_DID_NOT_EXIT'  # unreachable: guard exits 0
+	"
+	# The decisive assertion: a die-class top-up failure must NOT abort the re-run.
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"GUARD_DID_NOT_EXIT"* ]]
+	[[ "$output" == *"awg-params-agent top-up failed (non-fatal)"* ]]
+}
