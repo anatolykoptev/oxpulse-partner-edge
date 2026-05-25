@@ -5,6 +5,19 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.54](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.53...partner-edge-v0.12.54) (2026-05-25)
+
+
+### Features
+
+* **awg-agent:** conf_merge inserts missing obfuscation params (self-heal I1-less + bootstrap-only confs) ([bad25f4](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/bad25f4582ceb94fff9702a8290b3c4472c78849))
+* **awg-agent:** re-read service token per request (survive rotation without restart; fixes 401-after-rotate) ([ef6b1e9](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ef6b1e9e7a336b894ff37a73b7d41a04dea6e5dc))
+
+
+### Bug Fixes
+
+* **awg-params-agent:** strip node_id from POST applied body — surfaced by T1.3.h canary 2026-05-23 ([ea1b2b6](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ea1b2b660a20fa77fe461b7ad73a855b8653b4f0))
+
 ## [0.12.53](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.52...partner-edge-v0.12.53) (2026-05-25)
 
 
