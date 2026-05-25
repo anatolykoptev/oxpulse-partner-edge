@@ -436,7 +436,10 @@ if [[ -f "$PREFIX_LIB/install.env" && -z "$MANUAL_CONFIG" ]]; then
 		NODE_ID="$prior_node_id"
 		BACKEND_API=$(. "$PREFIX_LIB/install.env" 2>/dev/null && printf '%s' "${BACKEND_API:-}")
 		log "  topping up awg-params-agent (idempotent)"
-		awg_params_agent_run || warn "  awg-params-agent top-up failed (non-fatal); see journalctl"
+		# Subshell contains a possible `die` (lib: arch/download/unit-fetch). A bare
+		# `cmd || warn` can't catch a `die` — its `exit 1` aborts the whole re-run,
+		# falsely signalling the already-working edge is broken. Degrade to a warn.
+		( awg_params_agent_run ) || warn "  awg-params-agent top-up failed (non-fatal); see journalctl"
 		log  "  running healthcheck and exiting 0"
 		"$PREFIX_SBIN/oxpulse-partner-edge-healthcheck" || true
 		exit 0
