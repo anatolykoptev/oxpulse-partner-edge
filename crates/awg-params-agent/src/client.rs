@@ -139,8 +139,7 @@ mod tests {
         f.flush().expect("flush");
         let path = f.path().to_path_buf();
 
-        let client =
-            AgentClient::new("https://x".into(), path.clone()).expect("build client");
+        let client = AgentClient::new("https://x".into(), path.clone()).expect("build client");
 
         // First read: trimmed current contents.
         assert_eq!(client.read_token().expect("read token"), "stkn_aaa");
