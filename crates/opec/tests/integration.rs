@@ -51,7 +51,7 @@ mod schema_tests {
     fn round_trip_preserves_structure() {
         let src = fixture("valid_single_tenant.yaml");
         let original = parse(&src).expect("parse");
-        let serialized = serde_yml::to_string(&original).expect("serialize");
+        let serialized = serde_norway::to_string(&original).expect("serialize");
         let reparsed = parse(&serialized).expect("re-parse");
         assert_eq!(original, reparsed, "round-trip must be identity");
     }
