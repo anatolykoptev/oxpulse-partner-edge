@@ -14,9 +14,11 @@ use super::{render_to_file, RenderError};
 /// result via serde_norway to catch substitution that produced invalid YAML.
 pub fn render(src: &Path, dst: &Path) -> Result<()> {
     let rendered = render_to_file(src, dst)?;
-    serde_norway::from_str::<serde_norway::Value>(&rendered).map_err(|e| RenderError::Validation {
-        kind: "compose",
-        reason: format!("rendered file is not valid YAML: {e}"),
+    serde_norway::from_str::<serde_norway::Value>(&rendered).map_err(|e| {
+        RenderError::Validation {
+            kind: "compose",
+            reason: format!("rendered file is not valid YAML: {e}"),
+        }
     })?;
     Ok(())
 }
