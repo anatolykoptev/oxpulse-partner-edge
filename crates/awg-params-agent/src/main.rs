@@ -97,7 +97,7 @@ fn load_config() -> Result<AgentConfig> {
 
     Ok(AgentConfig {
         central_url,
-        service_token,
+        service_token_path: std::path::PathBuf::from(&token_path),
         awg_conf_path,
         awg_iface,
         state_path,
