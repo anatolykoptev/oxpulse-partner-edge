@@ -80,7 +80,7 @@ fn opec_render_compose_validates_yaml() {
     let out = tempfile::NamedTempFile::new().unwrap();
     opec::render::compose::render(&tpl, out.path()).expect("render ok");
     let body = fs::read_to_string(out.path()).unwrap();
-    serde_yml::from_str::<serde_yml::Value>(&body)
+    serde_norway::from_str::<serde_norway::Value>(&body)
         .expect("rendered compose.yml must parse as YAML");
 }
 
