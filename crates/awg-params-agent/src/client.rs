@@ -3,16 +3,17 @@
 use crate::error::{Context, Result};
 use crate::params::{AwgAppliedPayload, AwgParamsLatestResponse};
 use reqwest::{Client, StatusCode};
+use std::path::PathBuf;
 use tracing::{debug, warn};
 
 pub struct AgentClient {
     client: Client,
     central_url: String,
-    token: String,
+    token_path: PathBuf,
 }
 
 impl AgentClient {
-    pub fn new(central_url: String, token: String) -> Result<Self> {
+    pub fn new(central_url: String, token_path: PathBuf) -> Result<Self> {
         let client = Client::builder()
             .use_rustls_tls()
             .timeout(std::time::Duration::from_secs(30))
@@ -21,8 +22,23 @@ impl AgentClient {
         Ok(Self {
             client,
             central_url,
-            token,
+            token_path,
         })
+    }
+
+    /// Read the service token from `token_path` on every call, so a rotated
+    /// token is picked up without a process restart. Err if missing or empty.
+    fn read_token(&self) -> Result<String> {
+        let token = std::fs::read_to_string(&self.token_path)
+            .map(|s| s.trim().to_owned())
+            .with_context(|| format!("read service token from {:?}", self.token_path))?;
+        if token.is_empty() {
+            return Err(crate::error::anyhow!(
+                "service token file {:?} is empty",
+                self.token_path
+            ));
+        }
+        Ok(token)
     }
 
     /// Poll `GET /api/partner/awg-params/latest?component=awg`.
@@ -34,10 +50,11 @@ impl AgentClient {
         );
         debug!(%url, "polling awg-params");
 
+        let token = self.read_token()?;
         let resp = self
             .client
             .get(&url)
-            .bearer_auth(&self.token)
+            .bearer_auth(token)
             .send()
             .await
             .context("GET awg-params/latest")?;
@@ -73,10 +90,18 @@ impl AgentClient {
             epoch,
         };
 
+        let token = match self.read_token() {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(error = %e, %epoch, "report_applied: token read failed — skipping (best-effort)");
+                return;
+            }
+        };
+
         match self
             .client
             .post(&url)
-            .bearer_auth(&self.token)
+            .bearer_auth(token)
             .json(&payload)
             .send()
             .await
@@ -99,5 +124,29 @@ impl AgentClient {
                 warn!(error = %e, %epoch, "report_applied: request failed — ignoring (best-effort)");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn read_token_reads_current_file_contents() {
+        let mut f = tempfile::NamedTempFile::new().expect("create tempfile");
+        f.write_all(b"  stkn_aaa\n").expect("write token");
+        f.flush().expect("flush");
+        let path = f.path().to_path_buf();
+
+        let client =
+            AgentClient::new("https://x".into(), path.clone()).expect("build client");
+
+        // First read: trimmed current contents.
+        assert_eq!(client.read_token().expect("read token"), "stkn_aaa");
+
+        // Rotate the token on disk; the client must pick it up without rebuild.
+        std::fs::write(&path, "stkn_bbb").expect("rotate token");
+        assert_eq!(client.read_token().expect("read rotated token"), "stkn_bbb");
     }
 }
