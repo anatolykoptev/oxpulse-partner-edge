@@ -286,3 +286,71 @@ ENVEOF
 
 	rm -rf "$fake_install_dir"
 }
+
+@test "existing-install guard tops up awg-params-agent idempotently (WS4)" {
+	# WS4 regression: a node registered by a stale pre-T1.3.f installer has no
+	# awg-params-agent. A plain re-run must self-complete via the idempotent
+	# top-up the existing-install guard now performs (no --manual-config needed).
+	#
+	# Faithful test: extract the guard block from install.sh and run it with the
+	# same systemctl/install/curl mocks the rest of this file uses.
+
+	# Preconditions: prior install.env with NODE_ID + BACKEND_API; bundled binary
+	# present (from setup's CHECKOUT); NO agent unit installed yet.
+	cat > "$DEST_LIB/install.env" <<EOF
+NODE_ID=stale-node-42
+BACKEND_API=https://api.oxpulse.chat
+EOF
+	[ ! -f "$DEST_SYSTEMD/oxpulse-awg-params-agent.service" ]
+
+	# Fake healthcheck the guard calls before exit 0.
+	mkdir -p "$TMP/sbin"
+	printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/sbin/oxpulse-partner-edge-healthcheck"
+	chmod +x "$TMP/sbin/oxpulse-partner-edge-healthcheck"
+
+	# Extract the existing-install guard block (outer `if … fi`) from install.sh,
+	# tracking `; then`/`fi` depth so we capture exactly the guard and nothing else.
+	awk '
+		/if \[\[ -f "\$PREFIX_LIB\/install\.env" && -z "\$MANUAL_CONFIG" \]\]; then/ { cap=1 }
+		cap {
+			print
+			if ($0 ~ /; then[[:space:]]*$/) depth++
+			if ($0 ~ /^[[:space:]]*fi[[:space:]]*$/) { depth--; if (depth==0) exit }
+		}
+	' "$REPO_ROOT/install.sh" > "$TMP/guard.sh"
+	[ -s "$TMP/guard.sh" ]
+	# Couple test to real code: the guard must invoke the top-up.
+	grep -q 'awg_params_agent_run' "$TMP/guard.sh"
+
+	run env FAKE_LOG="$FAKE_LOG" PATH="$TMP/bin:$PATH" bash -c "
+		set -euo pipefail
+		DRY_RUN=0
+		BAKE_MODE=0
+		MANUAL_CONFIG=''
+		src_dir='$CHECKOUT'
+		REPO_RAW='http://127.0.0.1:1/does-not-exist'
+		SYSTEMD_DIR='$DEST_SYSTEMD'
+		PREFIX_ETC='$DEST_ETC'
+		PREFIX_LIB='$DEST_LIB'
+		PREFIX_SBIN='$TMP/sbin'
+		log()  { echo \"log: \$*\"; }
+		warn() { echo \"warn: \$*\"; }
+		die()  { echo \"die: \$*\" >&2; exit 1; }
+		sleep() { :; }
+		source '$REPO_ROOT/lib/install-awg-params-agent.sh'
+		# Override dest AFTER source so module constant points at a writable path.
+		_AWG_PARAMS_AGENT_BIN='$DEST_BIN/oxpulse-awg-params-agent'
+		source '$TMP/guard.sh'
+		echo 'GUARD_DID_NOT_EXIT'  # unreachable: guard exits 0
+	"
+	[ "$status" -eq 0 ]
+	# Top-up ran: unit installed, env rendered, enable --now fired.
+	[ -f "$DEST_SYSTEMD/oxpulse-awg-params-agent.service" ]
+	[ -f "$DEST_ETC/awg-params-agent.env" ]
+	grep -q 'OXPULSE_NODE_ID=stale-node-42'       "$DEST_ETC/awg-params-agent.env"
+	grep -q 'OXPULSE_CENTRAL_URL=https://api.oxpulse.chat' "$DEST_ETC/awg-params-agent.env"
+	grep -q 'systemctl enable --now oxpulse-awg-params-agent.service' "$FAKE_LOG"
+	# Guard exited 0 before the sentinel and logged the top-up.
+	[[ "$output" != *"GUARD_DID_NOT_EXIT"* ]]
+	[[ "$output" == *"topping up awg-params-agent (idempotent)"* ]]
+}

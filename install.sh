@@ -428,6 +428,15 @@ if [[ -f "$PREFIX_LIB/install.env" && -z "$MANUAL_CONFIG" ]]; then
 		warn "  bootstrap tokens are single-use; the backend would return 409. To re-deploy:"
 		warn "    • upgrade in place: sudo $PREFIX_SBIN/oxpulse-partner-edge-upgrade"
 		warn "    • apply a freshly-issued config: rerun with --manual-config=<path>"
+		# Idempotent top-up: a node registered by a stale pre-T1.3.f installer has
+		# no awg-params-agent. awg_params_agent_run (install -m / daemon-reload /
+		# enable --now) is idempotent, so a plain re-run can self-complete without
+		# --manual-config. Recover NODE_ID + BACKEND_API from install.env; PREFIX_*
+		# and SYSTEMD_DIR are set in install.sh top matter (lines 21/22/29).
+		NODE_ID="$prior_node_id"
+		BACKEND_API=$(. "$PREFIX_LIB/install.env" 2>/dev/null && printf '%s' "${BACKEND_API:-}")
+		log "  topping up awg-params-agent (idempotent)"
+		awg_params_agent_run || warn "  awg-params-agent top-up failed (non-fatal); see journalctl"
 		log  "  running healthcheck and exiting 0"
 		"$PREFIX_SBIN/oxpulse-partner-edge-healthcheck" || true
 		exit 0
@@ -1393,6 +1402,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 PARTNER_ID=$PARTNER_ID
 PARTNER_DOMAIN=$DOMAIN
 NODE_ID=$NODE_ID
+BACKEND_API=$BACKEND_API
 TUNNEL=$TUNNEL
 IMAGE_VERSION=$IMAGE_VERSION
 TURNS_SUBDOMAIN=$TURNS_SUBDOMAIN
