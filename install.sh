@@ -42,6 +42,15 @@ elif [[ "${OXPULSE_RELEASE_TAG}" != "@RELEASE_TAG@" ]]; then
 else
 	REPO_RAW="https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main"
 fi
+# OXPULSE_MIRROR_BASE: plain-TLS mirror for binaries + raw files, for edges
+# DPI-blocked from GitHub (e.g. install.krolik.tools / install.oxpulse.chat).
+# When set: binaries fetched from $OXPULSE_MIRROR_BASE/<asset> (GitHub releases
+# fallback); REPO_RAW defaults to $OXPULSE_MIRROR_BASE/raw unless OXPULSE_REPO_RAW set.
+OXPULSE_MIRROR_BASE="${OXPULSE_MIRROR_BASE:-}"
+OXPULSE_MIRROR_BASE="${OXPULSE_MIRROR_BASE%/}"
+if [[ -n "$OXPULSE_MIRROR_BASE" && -z "${OXPULSE_REPO_RAW:-}" ]]; then
+	REPO_RAW="$OXPULSE_MIRROR_BASE/raw"
+fi
 BACKEND_API="${OXPULSE_BACKEND_API:-${OXPULSE_BACKEND_URL:-https://api.oxpulse.chat}}"
 # Strip trailing slash so we never emit //api/partner/register.
 BACKEND_API="${BACKEND_API%/}"
@@ -257,6 +266,11 @@ _ensure_opec_binary() {
 		return 0
 	fi
 	_opec_url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/opec-${_opec_arch}"
+	if [[ -n "${OXPULSE_MIRROR_BASE:-}" ]] && curl -fsSL --max-time 30 "${OXPULSE_MIRROR_BASE}/opec-${_opec_arch}" -o "$_dest" 2>/dev/null; then
+		log "opec: installed from mirror ${OXPULSE_MIRROR_BASE} (${_opec_arch})"
+		chmod +x "$_dest"
+		return 0
+	fi
 	log "opec not found and no bundled binary -- downloading from release assets ($_opec_arch)"
 	if curl -fsSL --max-time 60 "$_opec_url" -o "$_dest" 2>/dev/null; then
 		chmod +x "$_dest"
