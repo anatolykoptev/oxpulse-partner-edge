@@ -73,7 +73,7 @@ elif [[ -r "$_DEFAULTS_CONF_LOCAL" ]]; then
     source "$_DEFAULTS_CONF_LOCAL"
 fi
 
-OXPULSE_BACKEND_API="${OXPULSE_BACKEND_API:-${OXPULSE_BACKEND_URL:-https://oxpulse.chat}}"
+OXPULSE_BACKEND_API="${OXPULSE_BACKEND_API:-${OXPULSE_BACKEND_URL:-https://api.oxpulse.chat}}"
 OXPULSE_BACKEND_API="${OXPULSE_BACKEND_API%/}"
 
 # ---------- preflight ----------
