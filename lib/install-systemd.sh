@@ -157,6 +157,21 @@ _systemd_install_lib_scripts() {
 # Install pre-made systemd unit files (no placeholder substitution).
 # Covers: main service, hydrate oneshot, refresh + sni-rotate + xray-update
 # + geoip-refresh + channels-health-report timer/service pairs.
+# Render the channel-health reporter drop-in so it targets the central API host
+# (BACKEND_API; default https://api.oxpulse.chat) instead of the script's
+# oxpulse.chat fallback. On a partner edge, oxpulse.chat geo-resolves to the
+# edge's OWN IP -> loops back to local reality :443 -> TLS internal error ->
+# HTTP 000, so last_seen never updates (incident 2026-05-26). Mirrors the
+# awg-params-agent OXPULSE_CENTRAL_URL. Honors OXPULSE_BACKEND_API / staging via BACKEND_API.
+_systemd_render_channel_health_dropin() {
+	local _d="$SYSTEMD_DIR/oxpulse-channels-health-report.service.d"
+	mkdir -p "$_d"
+	cat > "$_d/10-central-url.conf" <<DROPIN
+[Service]
+Environment=OXPULSE_BACKEND_API=${BACKEND_API}
+DROPIN
+}
+
 _systemd_install_units() {
 	# Main service unit
 	if [[ -n "$src_dir" && -f "$src_dir/systemd/oxpulse-partner-edge.service" ]]; then
@@ -220,6 +235,8 @@ _systemd_install_units() {
 			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
 		fi
 	done
+
+	_systemd_render_channel_health_dropin
 }
 
 # Install cert-watch units after sed-substituting {{TURNS_SUBDOMAIN}} and
