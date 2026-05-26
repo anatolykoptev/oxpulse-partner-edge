@@ -63,7 +63,7 @@ pub fn is_allowed_upstream(url: &str) -> bool {
     match scheme {
         "wss" => PUBLIC_WSS_ALLOWED.iter().any(|&p| {
             if let Some(sfx) = p.strip_prefix('.') {
-                host == sfx || host.ends_with(p)
+                host == sfx || (host.len() > p.len() && host.ends_with(p))
             } else {
                 host == p
             }
@@ -138,5 +138,13 @@ mod tests {
         let evil = "ws://10.9.0.2:0@evil.com/x";
         assert_eq!(evil.parse::<Uri>().unwrap().host().unwrap(), "evil.com");
         assert!(!is_allowed_upstream(evil));
+    }
+
+    #[test]
+    fn leading_dot_host_rejected() {
+        assert!(!is_allowed_upstream("wss://.oxpulse.chat/x"));
+        // sanity: legitimate forms still pass
+        assert!(is_allowed_upstream("wss://oxpulse.chat/x"));
+        assert!(is_allowed_upstream("wss://edge.oxpulse.chat/x"));
     }
 }
