@@ -8,3 +8,4 @@ ExecStart=/usr/local/sbin/oxpulse-channels-health-report
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+TimeoutStartSec=45
