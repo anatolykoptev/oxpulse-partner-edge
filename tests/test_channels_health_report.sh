@@ -34,6 +34,10 @@ make_bin() {
     if command -v jq >/dev/null 2>&1; then
         ln -sf "$(command -v jq)" "$dir/jq"
     fi
+    # openssl: needed for RFC 7635 ephemeral HMAC-SHA1 credential derivation.
+    if command -v openssl >/dev/null 2>&1; then
+        ln -sf "$(command -v openssl)" "$dir/openssl"
+    fi
     # curl: always provide a no-op stub (real curl may have permission issues via symlink)
     printf '#!/bin/sh\nprintf "200"\nexit 0\n' > "$dir/curl"; chmod +x "$dir/curl"
     cat > "$dir/systemctl" <<'STUB'
@@ -69,12 +73,27 @@ mkdir -p "$T1/etc" "$T1/var"
 write_node_config "$T1/etc" \
     '{"id":"ch1"},{"id":"ch2"},{"id":"ch3"},{"id":"ch4"},{"id":"ch5"},{"id":"ch6"}'
 
-# docker stub: ss -ltn shows :3080 for ch1 probe
+# docker stub: handles ch1 (ss -ltn :3080) and ch4 (turnutils_uclient / sed secret)
 cat > "$T1/docker" <<'STUB'
 #!/bin/bash
 # Simulate: docker exec oxpulse-partner-xray ss -ltn → output containing :3080
 if [[ "$*" == *"ss -ltn"* ]]; then
     echo "LISTEN 0 128 0.0.0.0:3080 0.0.0.0:*"
+    exit 0
+fi
+# Simulate: docker exec oxpulse-partner-coturn sed (secret read) → return secret
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then
+    echo "test-secret"
+    exit 0
+fi
+# Simulate: docker exec oxpulse-partner-coturn turnutils_uclient → success.
+# Reject peerless invocations (missing -y or -e): those exit 255 in real coturn
+# and should never reach here; this guard catches regressions.
+if [[ "$*" == *"turnutils_uclient"* ]]; then
+    if [[ "$*" != *" -y"* && "$*" != *" -e "* ]]; then
+        echo "STUB-ERROR: turnutils_uclient called without -y or -e (peerless — would exit 255 on real coturn)" >&2
+        exit 255
+    fi
     exit 0
 fi
 exit 1
@@ -104,12 +123,12 @@ OUTPUT=$(PATH="$T1:/usr/bin:/bin" \
 EXIT1=$?
 set -e
 
-# Verify we got at least 3 lines of JSON (ch1/ch2/ch3 — ch4/ch5/ch6 skipped)
+# Verify we got at least 4 lines of JSON (ch1/ch2/ch3/ch4 — ch5/ch6 skipped)
 LINE_COUNT=$(printf '%s\n' "$OUTPUT" | grep -c '"channel_name"' 2>/dev/null || echo 0)
-if [[ "$LINE_COUNT" -ge 3 ]]; then
+if [[ "$LINE_COUNT" -ge 4 ]]; then
     ok "test1: --dry-run emits $LINE_COUNT channel JSON lines"
 else
-    fail "test1: expected >=3 channel lines, got $LINE_COUNT; output: $OUTPUT"
+    fail "test1: expected >=4 channel lines, got $LINE_COUNT; output: $OUTPUT"
 fi
 
 # Validate all JSON objects in the output (output may be pretty-printed multi-line).
@@ -197,7 +216,7 @@ fi
 trap - EXIT
 rm -rf "$T3"
 
-# ── Test 4: only ch1+ch2+ch3 provisioned; ch4-ch6 not in output ──────────────
+# ── Test 4: only ch1+ch2+ch3 provisioned; ch5/ch6 not in output ──────────────
 T4=$(mktemp -d)
 trap 'rm -rf "$T4"' EXIT
 
@@ -208,7 +227,10 @@ write_node_config "$T4/etc" '{"id":"ch1"},{"id":"ch2"},{"id":"ch3"}'
 
 cat > "$T4/docker" <<'STUB'
 #!/bin/bash
-echo "LISTEN 0 128 0.0.0.0:3080 0.0.0.0:*"; exit 0
+if [[ "$*" == *"ss -ltn"* ]]; then
+    echo "LISTEN 0 128 0.0.0.0:3080 0.0.0.0:*"; exit 0
+fi
+exit 0
 STUB
 chmod +x "$T4/docker"
 cat > "$T4/ping" <<'STUB'
@@ -230,19 +252,19 @@ OUTPUT4=$(PATH="$T4:/usr/bin:/bin" \
     bash "$SCRIPT" --dry-run 2>/dev/null)
 set -e
 
-# Should have exactly 3 channel lines
+# Should have exactly 3 channel lines (ch4 not provisioned, ch5/ch6 skipped)
 COUNT4=$(printf '%s\n' "$OUTPUT4" | grep -c '"channel_name"' 2>/dev/null || echo 0)
 if [[ "$COUNT4" -eq 3 ]]; then
-    ok "test4: exactly 3 channel entries (ch1/ch2/ch3), ch4-ch6 absent"
+    ok "test4: exactly 3 channel entries (ch1/ch2/ch3), ch5-ch6 absent"
 else
     fail "test4: expected 3 channels, got $COUNT4; output: $OUTPUT4"
 fi
 
-# ch4/ch5/ch6 must not appear
-if printf '%s\n' "$OUTPUT4" | grep -qE '"channel_name":"ch[456]"'; then
-    fail "test4: ch4/ch5/ch6 should not be in JSON output"
+# ch5/ch6 must not appear (ch4 is now wired — only ch5/ch6 are skipped)
+if printf '%s\n' "$OUTPUT4" | grep -qE '"channel_name":"ch[56]"'; then
+    fail "test4: ch5/ch6 should not be in JSON output"
 else
-    ok "test4: ch4/ch5/ch6 correctly absent from JSON"
+    ok "test4: ch5/ch6 correctly absent from JSON"
 fi
 
 trap - EXIT
@@ -370,6 +392,225 @@ fi
 
 trap - EXIT
 rm -rf "$T7"
+
+# ── Test 8: ch4 coturn Allocate OK → handshake_ok=true ────────────────────────
+T8=$(mktemp -d)
+trap 'rm -rf "$T8"' EXIT
+
+make_bin "$T8"
+mkdir -p "$T8/etc"
+write_node_config "$T8/etc" '{"id":"ch4"}'
+
+# docker stub: sed returns secret; turnutils_uclient succeeds (Allocate OK).
+# Stub validates -y or -e is present; exits 255 if peerless (matches real coturn
+# behaviour, catches regression to the old broken -c-only invocation).
+cat > "$T8/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then
+    echo "probe-test-secret"
+    exit 0
+fi
+if [[ "$*" == *"turnutils_uclient"* ]]; then
+    if [[ "$*" != *" -y"* && "$*" != *" -e "* ]]; then
+        echo "STUB-ERROR: peerless turnutils_uclient (no -y/-e) — fails on real coturn" >&2
+        exit 255
+    fi
+    exit 0
+fi
+exit 1
+STUB
+chmod +x "$T8/docker"
+
+set +e
+OUTPUT8=$(PATH="$T8:/usr/bin:/bin" \
+    _NODE_CONFIG="$T8/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+if printf '%s\n' "$OUTPUT8" | jq -e 'select(.channel_name=="coturn" and .channel_handshake_ok==true)' >/dev/null 2>&1; then
+    ok "test8: ch4 TURN Allocate OK → channel_name=coturn handshake_ok=true"
+else
+    fail "test8: expected coturn handshake_ok=true; got: $OUTPUT8"
+fi
+
+trap - EXIT
+rm -rf "$T8"
+
+# ── Test 9: ch4 coturn Allocate fail → handshake_ok=false ─────────────────────
+# Simulates 486 / dead allocator: turnutils_uclient exits non-zero.
+T9=$(mktemp -d)
+trap 'rm -rf "$T9"' EXIT
+
+make_bin "$T9"
+mkdir -p "$T9/etc"
+write_node_config "$T9/etc" '{"id":"ch4"}'
+
+# docker stub: sed returns secret; turnutils_uclient fails (e.g. 486/timeout).
+# Validates -y/-e present even in the failure path (argv shape still must be correct).
+cat > "$T9/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then
+    echo "probe-test-secret"
+    exit 0
+fi
+if [[ "$*" == *"turnutils_uclient"* ]]; then
+    if [[ "$*" != *" -y"* && "$*" != *" -e "* ]]; then
+        echo "STUB-ERROR: peerless turnutils_uclient (no -y/-e) — fails on real coturn" >&2
+        exit 255
+    fi
+    exit 1
+fi
+exit 1
+STUB
+chmod +x "$T9/docker"
+
+set +e
+OUTPUT9=$(PATH="$T9:/usr/bin:/bin" \
+    _NODE_CONFIG="$T9/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+if printf '%s\n' "$OUTPUT9" | jq -e 'select(.channel_name=="coturn" and .channel_handshake_ok==false)' >/dev/null 2>&1; then
+    ok "test9: ch4 TURN Allocate fail → channel_name=coturn handshake_ok=false"
+else
+    fail "test9: expected coturn handshake_ok=false; got: $OUTPUT9"
+fi
+
+trap - EXIT
+rm -rf "$T9"
+
+# ── Test 10: ch4 STUN Binding fallback when secret unavailable ────────────────
+T10=$(mktemp -d)
+trap 'rm -rf "$T10"' EXIT
+
+make_bin "$T10"
+mkdir -p "$T10/etc"
+write_node_config "$T10/etc" '{"id":"ch4"}'
+
+# docker stub: awk returns empty (no secret); turnutils_stunclient succeeds
+cat > "$T10/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then
+    # Return empty — secret unavailable
+    echo ""
+    exit 0
+fi
+if [[ "$*" == *"turnutils_stunclient"* ]]; then
+    exit 0
+fi
+exit 1
+STUB
+chmod +x "$T10/docker"
+
+set +e
+OUTPUT10=$(PATH="$T10:/usr/bin:/bin" \
+    _NODE_CONFIG="$T10/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+if printf '%s\n' "$OUTPUT10" | jq -e 'select(.channel_name=="coturn" and .channel_handshake_ok==true)' >/dev/null 2>&1; then
+    ok "test10: ch4 STUN Binding fallback (no secret) → handshake_ok=true"
+else
+    fail "test10: expected coturn handshake_ok=true via STUN fallback; got: $OUTPUT10"
+fi
+
+trap - EXIT
+rm -rf "$T10"
+
+# ── Test 11: leak-resistance — base secret NEVER on HMAC argv (SEC-CR-001) ────
+# This guards the property that was violated TWICE: the long-term
+# static-auth-secret must NOT appear on the argv of whatever computes the HMAC
+# (/proc/<pid>/cmdline is world-readable on the edge). We wrap the HMAC binary
+# (python3, via OXPULSE_HMAC_BIN) with a stub that records its full argv, then
+# assert the secret marker is absent from the recording. The stub still emits a
+# valid base64 HMAC (delegating to the real python3) so the probe completes.
+T11=$(mktemp -d)
+trap 'rm -rf "$T11"' EXIT
+
+make_bin "$T11"
+mkdir -p "$T11/etc"
+write_node_config "$T11/etc" '{"id":"ch4"}'
+
+# A high-entropy secret marker that would be unmistakable if it leaked to argv.
+LEAK_MARKER="SECRETLEAKMARKER_d41d8cd98f00b204e9800998"
+ARGV_LOG="$T11/hmac_argv.log"
+REAL_PYTHON3=$(command -v python3)
+
+# docker stub: serve the secret marker; accept the uclient invocation.
+cat > "$T11/docker" <<STUB
+#!/bin/bash
+if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then
+    echo "$LEAK_MARKER"
+    exit 0
+fi
+if [[ "\$*" == *"turnutils_uclient"* ]]; then
+    if [[ "\$*" != *" -y"* && "\$*" != *" -e "* ]]; then
+        echo "STUB-ERROR: peerless turnutils_uclient" >&2
+        exit 255
+    fi
+    exit 0
+fi
+exit 1
+STUB
+chmod +x "$T11/docker"
+
+# HMAC stub: record argv (NOT env) to a log, then delegate to the real python3
+# so a valid credential is still produced. Recording argv mirrors exactly what
+# /proc/<pid>/cmdline would expose to a co-resident attacker.
+cat > "$T11/hmac_stub" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$ARGV_LOG"
+exec "$REAL_PYTHON3" "\$@"
+STUB
+chmod +x "$T11/hmac_stub"
+
+set +e
+OUTPUT11=$(PATH="$T11:/usr/bin:/bin" \
+    _NODE_CONFIG="$T11/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    OXPULSE_HMAC_BIN="$T11/hmac_stub" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+# The HMAC binary MUST have been invoked (proves we exercised the real path,
+# not the STUN fallback — a fallback would silently make this test vacuous).
+if [[ -s "$ARGV_LOG" ]]; then
+    ok "test11: HMAC binary invoked (allocate path, not STUN fallback)"
+else
+    fail "test11: HMAC argv log empty — probe did not run the HMAC path; output: $OUTPUT11"
+fi
+
+# CORE ASSERTION: the base secret must NOT be present in the recorded argv.
+if grep -q "$LEAK_MARKER" "$ARGV_LOG"; then
+    fail "test11: SECRET LEAK — base static-auth-secret found on HMAC argv: $(cat "$ARGV_LOG")"
+else
+    ok "test11: base secret NOT present on HMAC argv (no /proc/cmdline leak)"
+fi
+
+# The probe must still have produced a coturn payload (credential derivation worked).
+if printf '%s\n' "$OUTPUT11" | jq -e 'select(.channel_name=="coturn")' >/dev/null 2>&1; then
+    ok "test11: coturn payload still emitted (env-delivered secret produced a valid HMAC)"
+else
+    fail "test11: expected coturn payload; got: $OUTPUT11"
+fi
+
+# Sanity: the canonical use-auth-secret username form "<ts>:userid" (SEC-CR-002)
+# must be the HMAC input — assert the recorded argv contains the colon-joined form.
+if grep -qE ':[0-9]*healthprobe|[0-9]+:healthprobe' "$ARGV_LOG"; then
+    ok "test11: HMAC input uses canonical <ts>:healthprobe username (SEC-CR-002)"
+else
+    fail "test11: expected <ts>:healthprobe username on HMAC argv; got: $(cat "$ARGV_LOG")"
+fi
+
+trap - EXIT
+rm -rf "$T11"
 
 # ---------- syntax check ----------
 bash -n "$SCRIPT" && ok "syntax check: oxpulse-channels-health-report.sh"

@@ -152,6 +152,174 @@ probe_ch3() {
     printf '{"channel_name":"ch3","channel_rtt_ms":%d}' "$rtt_ms"
 }
 
+# ---------- probe: ch4 — coturn TURN Allocate (HMAC shared-secret) ----------
+# Tests the real TURN relay data path: if coturn is dead, quota-exceeded (486),
+# or the allocator is broken, handshake_ok=false is reported and the central
+# server can alert — closing the M2.6a observability blind spot.
+#
+# Method: derive a canonical coturn use-auth-secret ephemeral credential
+#   username = "<unix-expiry-ts>:healthprobe"   (now + 600 s)
+#   password = base64( HMAC-SHA1( static-auth-secret, username ) )
+# then run `turnutils_uclient -u <username> -w <password> -y -n 1 -p <port>`
+# inside the running coturn container.  This exercises the exact lt-cred-mech +
+# use-auth-secret auth + quota path real WebRTC clients hit (RFC 7635 TURN REST
+# API).  -y is the client-to-client self-test (allocates two relays and relays
+# between them — no external peer needed); -n 1 sends one test-data burst after
+# Allocate, then exits.  Catches the three silent-failure modes: dead allocator,
+# 486 Allocation Quota Reached, and HMAC credential drift.
+#
+# SECURITY: the HMAC is computed by python3 with the base secret passed via the
+# ENVIRONMENT ($K), never on argv — /proc/<pid>/cmdline is world-readable on the
+# edge (no hidepid), so any argv form (`openssl -hmac`, `-macopt hexkey:`,
+# `turnutils_uclient -W`) would leak the long-term secret to a co-resident
+# process.  Only the public username + the short-lived password reach argv.
+#
+# Fallback: if the secret cannot be read, STUN Binding via turnutils_stunclient
+# is used instead (weaker: only proves the process is listening, not that auth
+# or quota works).  This degraded mode is reported via channel_probe_mode in the
+# payload AND a coturn-probe-mode.env state file (the warn() to stderr is
+# swallowed by the dispatch command-substitution, so it must not be relied on).
+#
+# Secret source: rendered /etc/coturn/turnserver.conf inside the container
+# (same read used by healthcheck.sh check #8).  Override via OXPULSE_TURN_SECRET
+# env var for dry-run / testing without a running container.
+#
+# NOTE: coturn exposes no Prometheus /metrics endpoint, so quota exhaustion
+# (486 Allocation Quota Reached) leaves no counter.  A coturn-exporter sidecar
+# that parses /var/log/turnserver/turn.log for 486 lines would close this gap —
+# tracked as a followup, out of scope here.
+probe_ch4() {
+    local turn_secret turn_port turn_username turn_password t0 t1 exit_code rtt_ms
+    # probe_mode is reported in the payload AND a state file so the degraded
+    # signal survives — the dispatch command-substitution swallows stderr
+    # with 2>/dev/null (MAJOR fix), so a bare warn() would be invisible to
+    # operators and they could silently run STUN-only (no auth/quota coverage,
+    # the exact blind spot this probe exists to close).
+    local probe_mode="allocate"
+
+    turn_port="${OXPULSE_COTURN_PORT:-3478}"
+
+    # Read static-auth-secret from the running container's rendered config.
+    # OXPULSE_TURN_SECRET env allows dry-run / test override without a container.
+    # NOTE: sed avoids awk -F= which truncates base64 secrets at the first '='
+    # padding character (e.g. "abc==" → "abc").
+    if [[ -n "${OXPULSE_TURN_SECRET:-}" ]]; then
+        turn_secret="$OXPULSE_TURN_SECRET"
+    else
+        turn_secret=$(timeout 10 docker exec oxpulse-partner-coturn \
+            sed -n 's/^static-auth-secret=//p' \
+            /etc/coturn/turnserver.conf 2>/dev/null || true)
+    fi
+
+    if [[ -n "$turn_secret" ]]; then
+        # Derive RFC 7635 short-lived ephemeral credential in-script so that
+        # only a time-limited username+password (valid 600s) appears on argv —
+        # NOT the long-term base secret.  This prevents any co-resident process
+        # scraping /proc/<pid>/cmdline from obtaining unlimited TURN creds.
+        #
+        # SECURITY (SEC-CR-001): the base static-auth-secret MUST NEVER appear
+        # on any process argv.  /proc/<pid>/cmdline is world-readable (the edge
+        # has no hidepid), so the HMAC computation cannot pass the secret as a
+        # command-line argument — `openssl -hmac VALUE`, `-macopt hexkey:VALUE`
+        # and `turnutils_uclient -W VALUE` ALL leak it via argv equally.  We
+        # therefore compute the HMAC with python3, passing the secret through
+        # the ENVIRONMENT ($K, readable only by same-uid/root via
+        # /proc/<pid>/environ — NOT world-readable like cmdline).  Only the
+        # public username travels on argv.
+        #
+        # Derivation (canonical coturn use-auth-secret / RFC 7635 TURN REST API,
+        # matches WebRTC client + /api/turn-credentials):
+        #   username = <unix-expiry-timestamp>:<userid>   (now + 600 s)
+        #   password = base64( HMAC-SHA1( base_secret, username ) )
+        #
+        # The "<ts>:<userid>" form (SEC-CR-002) is mandatory: coturn parses the
+        # colon to extract the expiry; a bare timestamp takes a different
+        # username-parse branch than real clients, so the probe would not
+        # exercise the same code path.  base64 is single-line (SEC-CR-003) —
+        # python's b64encode never wraps.
+        #
+        # turnutils_uclient flags used:
+        #   -u  ephemeral username (public — safe on argv)
+        #   -w  ephemeral password (HMAC-SHA1 — short-lived, safe on argv)
+        #   -y  client-to-client self-test — allocates two relays and relays
+        #       traffic between them, so no external peer is needed; exercises
+        #       Allocate + CreatePermission + ChannelBind + data round-trip
+        #       end-to-end against the server's own relay-ip.  (Verified live:
+        #       valid cred → exit 0 with data relayed; wrong/expired cred → 255
+        #       at Allocate; quota exhaustion → 486 → 255.)
+        #   -n 1  one test-data message burst, then exit
+        #   -p  TURN server port (honours OXPULSE_COTURN_PORT)
+        turn_username="$(( $(date +%s) + 600 )):healthprobe"
+        # HMAC binary chosen at runtime so the leak-resistance test can stub it.
+        local hmac_bin="${OXPULSE_HMAC_BIN:-python3}"
+        turn_password=$(K="$turn_secret" "$hmac_bin" -c \
+            'import hmac,hashlib,os,sys,base64; print(base64.b64encode(hmac.new(os.environb[b"K"], sys.argv[1].encode(), hashlib.sha1).digest()).decode())' \
+            "$turn_username")
+
+        t0="${EPOCHREALTIME}"
+        timeout 10 docker exec oxpulse-partner-coturn \
+            turnutils_uclient \
+                -u "$turn_username" \
+                -w "$turn_password" \
+                -y -n 1 \
+                -p "$turn_port" \
+                127.0.0.1 \
+            >/dev/null 2>&1
+        exit_code=$?
+        t1="${EPOCHREALTIME}"
+    else
+        # Fallback: STUN Binding only — proves the process is alive, not
+        # that auth or quota works.  Weaker than Allocate; annotated so
+        # operators know what they're looking at.
+        probe_mode="stun-degraded"
+        warn "ch4: TURN secret unavailable — falling back to STUN Binding probe (degraded: no auth/quota coverage)"
+        t0="${EPOCHREALTIME}"
+        timeout 10 docker exec oxpulse-partner-coturn \
+            turnutils_stunclient 127.0.0.1 -p "$turn_port" \
+            >/dev/null 2>&1
+        exit_code=$?
+        t1="${EPOCHREALTIME}"
+    fi
+
+    rtt_ms=$(_elapsed_ms "$t0" "$t1")
+
+    # Persist the probe mode to a state file (outside the swallowed stderr +
+    # the swallowed command-substitution) so operators / central tooling can
+    # detect degraded STUN-only mode even though the WARN never reaches them.
+    _write_probe_mode_state "$probe_mode"
+
+    # channel_probe_mode is also emitted in the JSON payload — the central
+    # server receives it over the wire (POST body is NOT swallowed), giving a
+    # second, observable degraded signal independent of edge-local stderr.
+    if [[ "$exit_code" -eq 0 ]]; then
+        printf '{"channel_name":"coturn","channel_rtt_ms":%d,"channel_handshake_ok":true,"channel_probe_mode":"%s"}' "$rtt_ms" "$probe_mode"
+    else
+        printf '{"channel_name":"coturn","channel_rtt_ms":%d,"channel_handshake_ok":false,"channel_probe_mode":"%s"}' "$rtt_ms" "$probe_mode"
+    fi
+}
+
+# ---------- ch4 probe-mode state file ----------
+# Records whether the coturn probe ran in full "allocate" mode or fell back to
+# "stun-degraded".  The dispatch command-substitution swallows stderr, so the
+# warn() in probe_ch4 is invisible; this file is the observable degraded signal
+# (operators / monitoring read it; the central server also gets channel_probe_mode
+# in the POST payload).  Atomic write via mktemp + rename within the same dir.
+_write_probe_mode_state() {
+    local mode="$1"
+    local state_dir="${STATE_DIR:-/var/lib/oxpulse-partner-edge}"
+    local state_file="$state_dir/coturn-probe-mode.env"
+    mkdir -p "$state_dir" 2>/dev/null || return 0
+    local tmp
+    tmp=$(mktemp -p "$state_dir" coturn-probe-mode.XXXXXX 2>/dev/null) || return 0
+    {
+        echo "# Generated by oxpulse-channels-health-report.sh — do not edit"
+        printf 'COTURN_PROBE_MODE=%s\n' "$mode"
+        printf 'COTURN_PROBE_AT=%s\n' "$(date +%s)"
+    } > "$tmp"
+    chmod 0640 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$state_file" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+}
+
 # ---------- post one channel payload ----------
 _post_channel() {
     local payload="$1"
@@ -321,7 +489,10 @@ for _chan in "${_PROVISIONED[@]}"; do
         ch3*)
             _payload=$(probe_ch3 2>/dev/null || printf '{"channel_name":"ch3","channel_rtt_ms":0}')
             ;;
-        ch4*|ch5*|ch6*)
+        ch4*)
+            _payload=$(probe_ch4 2>/dev/null || printf '{"channel_name":"coturn","channel_rtt_ms":0,"channel_handshake_ok":false,"channel_probe_mode":"error"}')
+            ;;
+        ch5*|ch6*)
             log "$_chan not yet wired on edge — skipping"
             continue
             ;;
