@@ -5,6 +5,15 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.55](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.54...partner-edge-v0.12.55) (2026-05-26)
+
+
+### Bug Fixes
+
+* **installer:** contain die-class top-up failure in subshell ([dc447db](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/dc447dbb5bda65cf3bc84e8db896cbd9c5b40cab))
+* **installer:** contain die-class top-up failure in subshell ([4cd9ca2](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4cd9ca2b27cc9601d34a4420feccb0b64502c108))
+* **opec:** release serde_norway migration (RUSTSEC-2025-0068) ([9b2b109](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/9b2b1091f799d7b9cedd9455d02b413b900f7632))
+
 ## [0.12.54](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.53...partner-edge-v0.12.54) (2026-05-25)
 
 
