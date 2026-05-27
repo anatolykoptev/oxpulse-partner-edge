@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# oxpulse-partner-edge-ru-subnets-update — Refresh the RU-subnet list used by split-routing.
+#
+# Sources:
+#   1. RIPE delegated-ripencc-extended-latest (primary)
+#   2. ipdeny.com RU zone file (fallback)
+#
+# On success: atomically replaces OUTFILE and reloads the live nft set.
+# On failure: keeps the last-good OUTFILE intact (graceful degradation).
+#
+# NOTE: this script runs in system.slice (unmarked = direct egress) under systemd.
+# On an RU edge, direct foreign egress may be ТСПУ-throttled.  That is why:
+#   - Both RIPE and ipdeny fallback are tried (resilience to single-source throttle).
+#   - Persistent=true in the timer means a missed weekly run retries on next boot.
+#   - keep-last-good ensures a throttled fetch leaves the routing table intact.
+#
+# Variables overridable for testing:
+#   OUTFILE        destination path (default /etc/oxpulse-partner-edge/ru-subnets.txt)
+#   MIN_ENTRIES    minimum aggregate count before accepting update (default 1000)
+#   RIPE_FIXTURE   when set, used as the curl-piped content for RIPE (test shim)
+#   IPDENY_FIXTURE when set, used as the curl-piped content for ipdeny (test shim)
+set -euo pipefail
+
+OUTFILE="${OUTFILE:-/etc/oxpulse-partner-edge/ru-subnets.txt}"
+MIN_ENTRIES="${MIN_ENTRIES:-1000}"
+RIPE_URL="https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest"
+IPDENY_URL="https://www.ipdeny.com/ipblocks/data/countries/ru.zone"
+
+# Tmp file in same dir as OUTFILE for atomic mv (same filesystem → rename, not copy).
+OUTDIR="$(dirname "$OUTFILE")"
+TMPFILE="${OUTDIR}/.ru-subnets.tmp.$$"
+
+cleanup() {
+    rm -f "$TMPFILE"
+}
+trap cleanup EXIT
+
+# ── fetch raw CIDR lines ────────────────────────────────────────────────────
+RAW_FILE="$(mktemp /tmp/ru-ripe-raw-XXXXXX)"
+trap 'rm -f "$RAW_FILE"; cleanup' EXIT
+
+SOURCE=""
+
+# Primary: RIPE delegated stats → awk RU ipv4 → CIDR notation
+if curl -sf --proto '=https' --tlsv1.2 --max-time 60 "$RIPE_URL" \
+    | awk -F'|' '/^ripencc\|RU\|ipv4\|/ {
+        ip=$4; count=$5; bits=0; n=count
+        while (n>1) { n/=2; bits++ }
+        cidr=32-bits; print ip "/" cidr
+    }' > "$RAW_FILE" && [ -s "$RAW_FILE" ]; then
+    SOURCE="RIPE"
+elif curl -sf --proto '=https' --tlsv1.2 --max-time 60 "$IPDENY_URL" \
+    > "$RAW_FILE" && [ -s "$RAW_FILE" ]; then
+    SOURCE="ipdeny"
+else
+    echo "ERROR: Both RIPE and ipdeny downloads failed" >&2
+    exit 1
+fi
+
+# ── python3 collapse_addresses aggregation ──────────────────────────────────
+PYAGG="$(mktemp /tmp/ru-aggregate-XXXXXX.py)"
+trap 'rm -f "$RAW_FILE" "$PYAGG"; cleanup' EXIT
+
+cat > "$PYAGG" << 'PYEOF'
+import sys
+import ipaddress
+
+networks = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    try:
+        networks.append(ipaddress.ip_network(line, strict=False))
+    except ValueError:
+        pass
+
+aggregated = list(ipaddress.collapse_addresses(networks))
+for net in sorted(aggregated):
+    print(net)
+PYEOF
+
+mkdir -p "$OUTDIR"
+python3 "$PYAGG" < "$RAW_FILE" > "$TMPFILE"
+
+# ── MIN_ENTRIES guard ────────────────────────────────────────────────────────
+COUNT=$(wc -l < "$TMPFILE")
+
+if [ "$COUNT" -lt "$MIN_ENTRIES" ]; then
+    echo "ERROR: Only $COUNT entries after aggregation (minimum $MIN_ENTRIES). Aborting. Last-good file preserved." >&2
+    exit 1
+fi
+
+# ── atomic mv to OUTFILE ─────────────────────────────────────────────────────
+mv -f "$TMPFILE" "$OUTFILE"
+chmod 0644 "$OUTFILE"
+
+echo "OK: $COUNT aggregated RU subnets written to $OUTFILE (source: $SOURCE)"
+
+# ── reload the live nft set ──────────────────────────────────────────────────
+# try-restart is idempotent: no-op if the unit is not active; re-apply is idempotent.
+# Do NOT hard-fail if the unit is absent (edge may not have split-routing active yet).
+systemctl try-restart oxpulse-partner-edge-split-routing.service 2>/dev/null || true
