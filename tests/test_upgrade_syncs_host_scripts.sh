@@ -500,7 +500,8 @@ T10_SYSTEMD="$TMPDIR_ROOT/t10/systemd"
 T10_SNAP="$TMPDIR_ROOT/t10/snap"
 T10_ETC="$TMPDIR_ROOT/t10/etc"
 T10_LIB="$TMPDIR_ROOT/t10/var"
-mkdir -p "$T10_SBIN" "$T10_BIN" "$T10_LIBDIR" "$T10_SYSTEMD" "$T10_SNAP" "$T10_ETC" "$T10_LIB"
+T10_SHARE="$TMPDIR_ROOT/t10/share"
+mkdir -p "$T10_SBIN" "$T10_BIN" "$T10_LIBDIR" "$T10_SYSTEMD" "$T10_SNAP" "$T10_ETC" "$T10_LIB" "$T10_SHARE"
 
 # Plant sentinel (pre-upgrade state).
 PRE_SHA_SENTINEL="# SENTINEL pre-upgrade-health-report"
@@ -511,16 +512,44 @@ PRE_UPGRADE_SHA=$(sha256sum "$T10_SBIN/oxpulse-channels-health-report" | awk '{p
 # Build minimal install.env (upgrade.sh sources this for CURRENT and mirror state).
 printf 'IMAGE_VERSION=v0.10.0-pre\n' > "$T10_LIB/install.env"
 
-# Fake docker binary: succeeds on pull, fails on compose up.
+# Fake docker binary: succeeds on pull/inspect/config, fails on compose up.
+# compose config --services: returns a real service name so capture_running_digests
+# and resolve_pulled_digests populate maps and recreate_changed_services is invoked.
+# docker inspect: returns an old digest (simulates running container).
+# After pull, resolve_pulled_digests calls compose config + docker inspect again —
+# return a NEW digest so the service is considered changed and recreate is attempted.
 FAKE_DOCKER="$TMPDIR_ROOT/t10/docker"
 cat > "$FAKE_DOCKER" << 'DOCKER_FAKE'
 #!/bin/bash
 # Simulate docker compose up failure (non-zero exit).
-if [[ "$*" == *"up"* ]]; then
+if [[ "$*" == *" up "* || "$*" == *" up" ]]; then
     echo "Error: simulated compose up failure" >&2
     exit 1
 fi
-# pull, inspect, and all other subcommands succeed.
+# compose config --services: return our service list.
+if [[ "$*" == *"config --services"* ]]; then
+    printf 'sfu\n'
+    exit 0
+fi
+# compose ps --quiet sfu: return a fake container ID (simulates running container).
+if [[ "$*" == *"ps --quiet"* ]]; then
+    printf 'fakectr1234567890\n'
+    exit 0
+fi
+# docker inspect: return different digests pre/post-pull so recreate is triggered.
+# We use a state file to toggle between old and new digest.
+if [[ "$*" == *"inspect"* ]]; then
+    STATE_FILE="${DOCKER_STATE_FILE:-/tmp/docker_state_t10}"
+    if [[ -f "$STATE_FILE" ]]; then
+        printf 'sha256:newdigest9999999999999999999999999999999999999999999999999999999\n'
+    else
+        printf 'sha256:olddigest1111111111111111111111111111111111111111111111111111111\n'
+        touch "$STATE_FILE"
+    fi
+    exit 0
+fi
+# compose pull: succeed and "advance" state so next inspect returns new digest.
+# (State file already created on first inspect call above.)
 exit 0
 DOCKER_FAKE
 chmod +x "$FAKE_DOCKER"
@@ -539,6 +568,9 @@ T10_HEALTHCHECK="$T10_SBIN/healthcheck"
 printf '#!/bin/bash\nexit 0\n' > "$T10_HEALTHCHECK"
 chmod 0755 "$T10_HEALTHCHECK"
 
+# State file for the fake docker digest toggle.
+T10_DOCKER_STATE="$TMPDIR_ROOT/t10/docker_state"
+
 # Drive the actual compose-up-failure arm of upgrade.sh.
 # This exercises: snapshot → sync → pull (succeeds) → up (fails) → restore_host_scripts.
 OUT10=$(
@@ -546,10 +578,13 @@ OUT10=$(
     OXPULSE_PREFIX_LIB="$T10_LIB" \
     OXPULSE_PREFIX_SBIN="$T10_SBIN" \
     OXPULSE_PREFIX_BIN="$T10_BIN" \
+    OXPULSE_PREFIX_LIBDIR="$T10_LIBDIR" \
+    OXPULSE_PREFIX_SHARE="$T10_SHARE" \
     OXPULSE_SYSTEMD_DIR="$T10_SYSTEMD" \
     OXPULSE_HEALTHCHECK="$T10_HEALTHCHECK" \
     OXPULSE_SKIP_ROOT_CHECK=1 \
     DOCKER_BIN="$FAKE_DOCKER" \
+    DOCKER_STATE_FILE="$T10_DOCKER_STATE" \
     SYSTEMCTL_BIN=true \
     OXPULSE_REPO_RAW="http://127.0.0.1:$SERVE_PORT" \
     RELEASES_BASE="http://127.0.0.1:$SERVE_PORT/NOSUCHRELEASE" \
