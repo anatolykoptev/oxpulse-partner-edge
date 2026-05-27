@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.58](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.57...partner-edge-v0.12.58) (2026-05-27)
+
+
+### Features
+
+* **upgrade:** sync host-scripts (health-report, units, lib) on upgrade, not just images ([#257](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/257)) ([867285c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/867285cbf1800204d73237540628f0da679fe4b6))
+
 ## [0.12.57](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.56...partner-edge-v0.12.57) (2026-05-27)
 
 
