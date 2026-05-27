@@ -3,21 +3,20 @@ name: partner-edge-release
 on:
   push:
     tags:
-      - 'partner-edge-v*'
+      - 'v*'
   # Manual escape hatch: re-trigger image build/publish for any existing
   # tag without having to delete+re-push it. Why we need this: the
   # release-please action creates the tag via GITHUB_TOKEN which by
   # GitHub anti-recursion design does NOT trigger downstream workflows
   # (push events authored by GITHUB_TOKEN are filtered out). Result: a
   # release-please-merged version-bump leaves a tag with no image
-  # built. Discovered 2026-04-29 on tag partner-edge-v0.12.4 (recovery
-  # of the per-peer-token fix). Until release-please is configured with
-  # a Personal Access Token, this workflow_dispatch is the operator-
-  # facing escape hatch.
+  # built. Until release-please is configured with a Personal Access
+  # Token, this workflow_dispatch is the operator-facing escape hatch.
+  # Tag form: vX.Y.Z (no component prefix — single package repo).
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to re-publish (e.g. partner-edge-v0.12.4)'
+        description: 'Existing tag to re-publish (e.g. v0.12.60)'
         required: true
         type: string
 
@@ -63,11 +62,11 @@ jobs:
         run: |
           # Push event → ref_name is the tag. workflow_dispatch → use input tag.
           tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
-          if [[ ! "$tag" =~ ^partner-edge-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::tag '$tag' does not match partner-edge-vX.Y.Z"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$tag' does not match vX.Y.Z"
             exit 1
           fi
-          version="${tag#partner-edge-v}"
+          version="${tag#v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag"         >> "$GITHUB_OUTPUT"
       - name: Verify VERSION file matches tag
@@ -400,6 +399,7 @@ jobs:
       - name: Stage artifacts
         env:
           VERSION: ${{ needs.extract-version.outputs.version }}
+          TAG: ${{ needs.extract-version.outputs.tag }}
         run: |
           cp install.sh                partner-edge-installer.sh
           # Bug R: substitute @RELEASE_TAG@ sentinel with the real tag so the
