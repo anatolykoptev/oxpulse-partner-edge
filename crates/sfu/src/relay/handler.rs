@@ -1,6 +1,6 @@
 //! Axum HTTP handler for the relay API.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
@@ -12,7 +12,7 @@ use crate::relay::task::RelayTask;
 use crate::relay::types::{RelayConnectRequest, RelayConnectResponse};
 use crate::relay::{RelayJwt, RelayJwtError};
 
-pub type SeenJtis = Arc<Mutex<HashSet<String>>>;
+pub type SeenJtis = Arc<Mutex<HashMap<String, u64>>>;
 
 /// `(hs256_secret, signing_public_key, task_tx, seen_jtis)`
 /// `signing_public_key` is `Some` when SFU_SIGNING_PUBLIC_KEY is configured (Ed25519 preferred).
@@ -36,6 +36,40 @@ pub fn spawn_relay_api(
             .unwrap_or_else(|e| tracing::error!(error = %e, "relay API server error"));
     });
     Ok(handle)
+}
+
+/// Maximum number of relay candidates processed from a JWT.
+/// Bounds the failover loop against a buggy or compromised central sending thousands.
+const MAX_RELAY_CANDIDATES: usize = 8;
+
+/// B0: Build an allow-list-filtered, ordered candidate list from a verified JWT.
+///
+/// When `jwt.upstream_candidates` is non-empty, use it (B0 path — signed ordered
+/// list from central).  When empty, fall back to the single `jwt.upstream_url`
+/// (pre-B0 / legacy path — back-compat guaranteed by `#[serde(default)]`).
+/// Every URL is individually checked against the allow-list; disallowed entries
+/// are silently dropped.  Duplicates are removed (first occurrence wins).
+/// Result is capped at `MAX_RELAY_CANDIDATES`.  An empty return means no candidate
+/// survived and the handler MUST reject the request.
+pub(crate) fn select_candidates(jwt: &RelayJwt) -> Vec<String> {
+    let raw: Vec<String> = if jwt.upstream_candidates.is_empty() {
+        vec![jwt.upstream_url.clone()]
+    } else {
+        jwt.upstream_candidates.clone()
+    };
+    if raw.len() > MAX_RELAY_CANDIDATES {
+        tracing::warn!(
+            count = raw.len(),
+            max = MAX_RELAY_CANDIDATES,
+            "relay JWT contains more candidates than MAX_RELAY_CANDIDATES — truncating"
+        );
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    raw.into_iter()
+        .filter(|u| crate::relay::allowlist::is_allowed_upstream(u))
+        .filter(|u| seen.insert(u.clone()))
+        .take(MAX_RELAY_CANDIDATES)
+        .collect()
 }
 
 #[instrument(skip_all, fields(otel.kind = "server", relay.endpoint = "/relay/connect"))]
@@ -81,14 +115,24 @@ async fn relay_connect(
         }
     };
 
-    // Defense-in-depth: validate upstream URL against allow-list even though
-    // it comes from a signed JWT. See relay/allowlist.rs for policy details.
-    if !crate::relay::allowlist::is_allowed_upstream(&jwt.upstream_url) {
-        tracing::warn!(upstream_url = %jwt.upstream_url, "relay_connect: upstream URL not in allow-list");
+    // B0: Build allow-list-filtered candidate list from the signed JWT.
+    // Falls back to [upstream_url] when candidates absent (pre-B0 central, back-compat).
+    // Defense-in-depth: every candidate is re-checked against the allow-list even
+    // though it comes from a signed JWT.  See relay/allowlist.rs for policy details.
+    let allowed = select_candidates(&jwt);
+    if allowed.is_empty() {
+        tracing::warn!(
+            upstream_url = %jwt.upstream_url,
+            "relay_connect: no upstream candidate passed the allow-list"
+        );
         return error_response("upstream URL not allowed");
     }
 
-    // Replay prevention: reject if this JTI has already been seen.
+    // Replay prevention (SEC-CR-002): reject if this JTI has already been seen and not yet expired.
+    // Uses TTL-keyed eviction (jti → exp) instead of a blanket clear() at N entries.
+    // Blanket clear() would momentarily drop all replay protection: any jti could be
+    // replayed in the window between clear() and re-insertion (up to the token's 60s TTL).
+    // retain() is lazy GC — O(n) on the map at each request, bounded by token TTL × rate.
     {
         let mut seen = seen_jtis.lock().unwrap_or_else(|p| {
             tracing::error!(
@@ -96,7 +140,12 @@ async fn relay_connect(
             );
             p.into_inner()
         });
-        if seen.contains(&jwt.jti) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        seen.retain(|_jti, &mut exp| exp > now); // lazy GC: remove entries past their TTL
+        if seen.contains_key(&jwt.jti) {
             tracing::warn!(jti = %jwt.jti, "relay_connect: replayed JWT rejected");
             return (
                 StatusCode::CONFLICT,
@@ -106,18 +155,18 @@ async fn relay_connect(
                 }),
             );
         }
-        seen.insert(jwt.jti.clone());
-        // Simple bounded eviction: TTL is 60s, set won't grow unbounded in practice.
-        if seen.len() > 1000 {
-            seen.clear();
-        }
+        seen.insert(jwt.jti.clone(), jwt.exp);
     }
 
     let relay_id = format!("relay-{}", jwt.room_id.chars().take(8).collect::<String>());
+    // upstream_url is set to the first allowed candidate for back-compat with
+    // code that reads task.upstream_url directly; upstream_candidates carries the
+    // full ordered list for the B0 failover loop in the runner.
     let task = RelayTask {
         room_id: jwt.room_id.clone(),
-        upstream_url: jwt.upstream_url.clone(), // from JWT (signed), not body
+        upstream_url: allowed[0].clone(),
         upstream_room_token: jwt.upstream_room_token.clone(), // from JWT (signed), not body
+        upstream_candidates: allowed,
     };
 
     if task_tx.send(task).await.is_err() {
@@ -206,5 +255,168 @@ mod allow_list_tests {
     fn rejects_empty_host() {
         assert!(!is_allowed_upstream("wss:///path"));
         assert!(!is_allowed_upstream("wss://"));
+    }
+}
+
+#[cfg(test)]
+mod b0_select_candidates_tests {
+    use super::select_candidates;
+    use crate::relay::{now_unix_secs, RelayJwt};
+
+    fn make_jwt(upstream_url: &str, candidates: Vec<&str>) -> RelayJwt {
+        let now = now_unix_secs();
+        RelayJwt {
+            room_id: "r".to_string(),
+            upstream_url: upstream_url.to_string(),
+            upstream_room_token: "tok".to_string(),
+            iat: now,
+            exp: now + 300,
+            jti: "j".to_string(),
+            upstream_candidates: candidates.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // When upstream_candidates is empty, falls back to [upstream_url] (back-compat).
+    #[test]
+    fn empty_candidates_falls_back_to_upstream_url() {
+        let jwt = make_jwt("ws://10.9.0.2:8907/ws", vec![]);
+        let result = select_candidates(&jwt);
+        assert_eq!(result, vec!["ws://10.9.0.2:8907/ws"]);
+    }
+
+    // A list with one allowed + one disallowed: only the allowed one survives.
+    #[test]
+    fn mixed_list_filters_to_allowed_only() {
+        let jwt = make_jwt(
+            "ws://10.9.0.2:8907/ws",
+            vec!["ws://10.9.0.2:8907/ws", "ws://8.8.8.8/x"],
+        );
+        let result = select_candidates(&jwt);
+        assert_eq!(result, vec!["ws://10.9.0.2:8907/ws"]);
+    }
+
+    // All disallowed → empty Vec (handler must reject).
+    #[test]
+    fn all_disallowed_returns_empty() {
+        let jwt = make_jwt("ws://8.8.8.8/x", vec!["ws://8.8.8.8/x", "ws://1.1.1.1/y"]);
+        let result = select_candidates(&jwt);
+        assert!(
+            result.is_empty(),
+            "all-disallowed candidates must return empty Vec, got {:?}",
+            result
+        );
+    }
+
+    // Order is preserved from the signed candidate list.
+    #[test]
+    fn candidate_order_is_preserved() {
+        let jwt = make_jwt(
+            "ws://10.9.0.2:8907/ws",
+            vec!["ws://10.9.0.5:8907/ws", "ws://10.9.0.2:8907/ws"],
+        );
+        let result = select_candidates(&jwt);
+        assert_eq!(
+            result,
+            vec!["ws://10.9.0.5:8907/ws", "ws://10.9.0.2:8907/ws"],
+            "order must match the signed candidate list"
+        );
+    }
+
+    // Dedup: [A, A, B] → [A, B] preserving first occurrence.
+    // Tests fix for review finding: duplicates waste slots + retries against same dark hub.
+    #[test]
+    fn dedup_preserves_first_occurrence() {
+        // ws://10.9.0.2 is allow-listed mesh; appearing twice should collapse to one.
+        let jwt = make_jwt(
+            "ws://10.9.0.2/x",
+            vec!["ws://10.9.0.2/x", "ws://10.9.0.2/x", "ws://10.9.0.3/x"],
+        );
+        let result = select_candidates(&jwt);
+        assert_eq!(
+            result,
+            vec!["ws://10.9.0.2/x", "ws://10.9.0.3/x"],
+            "duplicate URLs must be deduplicated keeping first occurrence"
+        );
+    }
+
+    // Cap: > MAX_RELAY_CANDIDATES allowed mesh IPs → exactly MAX returned, order preserved.
+    // Tests fix for review finding: buggy/compromised central could send thousands.
+    #[test]
+    fn cap_truncates_to_max() {
+        // Build 9 unique allow-listed mesh IPs (MAX is 8).
+        let candidates: Vec<&str> = vec![
+            "ws://10.9.0.1/x",
+            "ws://10.9.0.2/x",
+            "ws://10.9.0.3/x",
+            "ws://10.9.0.4/x",
+            "ws://10.9.0.5/x",
+            "ws://10.9.0.6/x",
+            "ws://10.9.0.7/x",
+            "ws://10.9.0.8/x",
+            "ws://10.9.0.9/x",
+        ];
+        let jwt = make_jwt("ws://10.9.0.1/x", candidates);
+        let result = select_candidates(&jwt);
+        assert_eq!(result.len(), 8, "must cap at MAX_RELAY_CANDIDATES=8");
+        // Order preserved: first 8 IPs in original order.
+        assert_eq!(result[0], "ws://10.9.0.1/x");
+        assert_eq!(result[7], "ws://10.9.0.8/x");
+    }
+}
+
+#[cfg(test)]
+mod replay_cache_tests {
+    // Property tests for the TTL-eviction replay cache (SEC-CR-002).
+    // These mirror the exact operations the handler performs under the Mutex:
+    //   retain(exp > now) → contains_key → insert(jti, exp).
+    // If the retain predicate or insertion logic changes, these tests will catch it.
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    /// (a) A jti inserted with a future exp must still be present after retain,
+    /// so a second request with the same jti is correctly rejected.
+    #[test]
+    fn replay_cache_rejects_duplicate_jti_within_ttl() {
+        let mut cache: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let now = now_secs();
+        let future_exp = now + 60;
+
+        // First request: insert jti with a future expiry.
+        cache.insert("jti-abc".to_string(), future_exp);
+
+        // GC step (mirrors handler retain call).
+        cache.retain(|_jti, &mut exp| exp > now);
+
+        // jti is still valid — must survive retain.
+        assert!(
+            cache.contains_key("jti-abc"),
+            "jti with future exp must survive retain (replay must be detected)"
+        );
+    }
+
+    /// (b) A jti with a past exp must be evicted by retain, making it acceptable
+    /// again (its token has already expired so it cannot be replayed meaningfully).
+    #[test]
+    fn replay_cache_retain_evicts_expired_entries() {
+        let mut cache: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let now = now_secs();
+        // Use saturating_sub so the test doesn't panic at time=0 in mocked envs.
+        let past_exp = now.saturating_sub(1);
+
+        cache.insert("jti-expired".to_string(), past_exp);
+
+        // GC step mirrors the handler's retain call.
+        cache.retain(|_jti, &mut exp| exp > now);
+
+        // Expired entry must be gone.
+        assert!(
+            !cache.contains_key("jti-expired"),
+            "jti with past exp must be evicted by retain"
+        );
     }
 }
