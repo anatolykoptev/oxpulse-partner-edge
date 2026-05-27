@@ -64,15 +64,23 @@ exit 0
 STUB
 	chmod +x "$TMP/bin/systemctl"
 
-	# Fake checkout with the CL-1 scripts
+	# Fake checkout with CL-1 scripts + CL-3 update script + systemd units
 	CHECKOUT="$TMP/checkout"
-	mkdir -p "$CHECKOUT"
+	mkdir -p "$CHECKOUT/systemd"
 	printf '#!/usr/bin/env bash\n# fake split-routing apply\necho "apply"\n' \
 		> "$CHECKOUT/oxpulse-partner-edge-split-routing.sh"
 	chmod +x "$CHECKOUT/oxpulse-partner-edge-split-routing.sh"
 	printf '#!/usr/bin/env bash\n# fake split-routing disable\necho "disable"\n' \
 		> "$CHECKOUT/oxpulse-partner-edge-split-disable.sh"
 	chmod +x "$CHECKOUT/oxpulse-partner-edge-split-disable.sh"
+	# CL-3: update script + systemd unit stubs
+	printf '#!/usr/bin/env bash\necho "update"\n' \
+		> "$CHECKOUT/oxpulse-partner-edge-ru-subnets-update"
+	chmod +x "$CHECKOUT/oxpulse-partner-edge-ru-subnets-update"
+	printf '[Service]\nType=oneshot\nExecStart=/bin/true\n' \
+		> "$CHECKOUT/systemd/oxpulse-partner-edge-ru-subnets-update.service"
+	printf '[Timer]\nOnCalendar=weekly\n[Install]\nWantedBy=timers.target\n' \
+		> "$CHECKOUT/systemd/oxpulse-partner-edge-ru-subnets-update.timer"
 
 	# Destination dirs
 	DEST_SYSTEMD="$TMP/systemd"
