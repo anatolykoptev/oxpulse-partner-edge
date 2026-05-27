@@ -53,7 +53,8 @@ impl RelayJwt {
         let key = DecodingKey::from_secret(secret);
         let mut validation = Validation::new(Algorithm::HS256);
         validation.validate_exp = true;
-        // We validate jti ourselves in the handler; don't require it as a spec claim.
+        validation.leeway = 0; // SEC-CR-201: match the replay-cache GC (evicts at exp) and verify_ed25519 -- no replay window past exp
+                               // We validate jti ourselves in the handler; don't require it as a spec claim.
         validation.required_spec_claims = std::collections::HashSet::new();
 
         let claims = decode::<RelayJwt>(token, &key, &validation)
@@ -213,6 +214,31 @@ mod tests {
             RelayJwt::verify(&tampered, b"s"),
             Err(RelayJwtError::InvalidSignature | RelayJwtError::Malformed)
         ));
+    }
+
+    /// SEC-CR-201: HS256 verify() must reject tokens expired by even 5 seconds.
+    /// Before the fix (leeway=0), jsonwebtoken v10.4.0 default 60s leeway accepted
+    /// tokens in [exp, exp+60s] — exactly the window after the replay-cache GC evicts
+    /// the jti. This test proves the fix closes that window.
+    #[test]
+    fn verify_hs256_rejects_just_expired_token_no_leeway() {
+        let secret = b"test-secret-at-least-32-bytes-long-x";
+        let now = now_unix_secs();
+        let jwt = RelayJwt {
+            jti: "leeway-test".to_string(),
+            room_id: "r".to_string(),
+            upstream_url: "ws://10.9.0.2:8907/ws/call/r".to_string(),
+            upstream_room_token: "t".to_string(),
+            upstream_candidates: vec![],
+            iat: now.saturating_sub(120),
+            exp: now.saturating_sub(5), // expired 5s ago — within OLD 60s leeway, must now be REJECTED
+        };
+        let token = jwt.sign(secret).expect("sign");
+        let res = RelayJwt::verify(&token, secret);
+        assert!(
+            res.is_err(),
+            "expired HS256 token must be rejected with leeway=0 (was accepted within default 60s leeway)"
+        );
     }
     // --- Ed25519 (EdDSA) test helpers ---
 
