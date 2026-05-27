@@ -1411,6 +1411,13 @@ IMAGE_VERSION=$IMAGE_VERSION
 TURNS_SUBDOMAIN=$TURNS_SUBDOMAIN
 INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
+	# Persist OXPULSE_MIRROR_BASE so upgrade.sh can route host-script fetches
+	# through the same mirror on DPI-blocked edges (e.g. zvonilka RU relays).
+	# Written as a separate append so it is omitted on non-mirror installs and
+	# does not break existing upgrade.sh readers that don't expect the key.
+	if [[ -n "${OXPULSE_MIRROR_BASE:-}" ]]; then
+		printf 'OXPULSE_MIRROR_BASE=%s\n' "${OXPULSE_MIRROR_BASE}" >> "$PREFIX_LIB/install.env"
+	fi
 	chmod 0600 "$PREFIX_LIB/install.env"
 	# Phase 1: record sha256 of rendered Caddyfile for drift detection.
 	# healthcheck.sh check 15 compares this against /canary/config-hash.
