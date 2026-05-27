@@ -315,6 +315,8 @@ EXPECTED_SBIN_FILES=(
 	# CL-2: split-routing scripts (suffixless executables — matches sbin convention)
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable
+	# CL-3: RU-subnet feed script (suffixless executable)
+	oxpulse-partner-edge-ru-subnets-update
 )
 
 # Scan PREFIX_SBIN for oxpulse-* files not in EXPECTED_SBIN_FILES.
