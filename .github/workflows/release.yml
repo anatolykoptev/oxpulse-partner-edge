@@ -434,13 +434,10 @@ jobs:
           # Previously only partner-edge-upgrade.sh / render-channel-lib.sh /
           # config-defaults.conf were staged; the other 7 sbin files (including the
           # headline oxpulse-channels-health-report.sh) were fetched UNVERIFIED.
-          cp oxpulse-channels-health-report.sh oxpulse-channels-health-report.sh
-          cp hydrate.sh                        hydrate.sh
-          cp oxpulse-partner-edge-refresh.sh   oxpulse-partner-edge-refresh.sh
-          cp oxpulse-partner-edge-sni-rotate.sh oxpulse-partner-edge-sni-rotate.sh
-          cp ghcr-auth-lib.sh                  ghcr-auth-lib.sh
-          cp channel-render-lib.sh             channel-render-lib.sh
-          cp oxpulse-token-lib.sh              oxpulse-token-lib.sh
+          # These 7 already live in the repo root (= staging cwd) with the same
+          # name — no cp needed; they are picked up directly by the sha256sum +
+          # upload steps below. (A `cp X X` here fails "same file" and aborts the
+          # whole Stage step → 0 assets. Only subdir/renamed files need cp.)
           cp lib/telegram-alert-lib.sh         telegram-alert-lib.sh
           # Scripts exec'd by xray-update and geoip-refresh timers: staged so
           # SHA256SUMS covers them and sync_host_scripts can install + verify them.
