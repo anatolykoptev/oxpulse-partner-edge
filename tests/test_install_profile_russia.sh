@@ -3,7 +3,7 @@
 #
 # Covers:
 #   1. args_parse accepts --profile=russia (= form)
-#   2. args_parse accepts --profile russia (space form)
+#   2. args_parse rejects --profile russia (space form; unsupported, =form only)
 #   3. args_parse --profile foo dies with an error
 #   4. args_parse with no --profile sets PROFILE empty
 #   5. install.sh calls split_routing_run ONLY when PROFILE=russia
@@ -55,12 +55,15 @@ _run_args_parse_profile() {
 	[[ "$output" == *"PROFILE=russia"* ]]
 }
 
-# ─── 2. --profile russia (space form) sets PROFILE ───────────────────────────
+# ─── 2. --profile russia (space form) is rejected (unsupported; only =form) ───
+# After removing the space-form arm, `--profile` hits the catch-all die arm
+# and `russia` is left as a dangling argument that would also trigger die.
 
-@test "args_parse --profile russia (space form) sets PROFILE=russia" {
+@test "args_parse --profile russia (space form) is rejected as unknown arg" {
 	run _run_args_parse_profile --dry-run --partner-id=test --domain=test.net --token=abc --profile russia
-	[ "$status" -eq 0 ]
-	[[ "$output" == *"PROFILE=russia"* ]]
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"unknown arg"* ]]
+	[[ "$output" == *"--profile"* ]]
 }
 
 # ─── 3. Unknown profile dies ─────────────────────────────────────────────────

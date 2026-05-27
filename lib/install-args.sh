@@ -261,7 +261,6 @@ args_parse() {
 			--brand-legal-country=*)   BRAND_LEGAL_COUNTRY="${1#*=}" ;;
 			--brand-legal-contact=*)   BRAND_LEGAL_CONTACT="${1#*=}" ;;
 			--profile=*)        PROFILE="${1#*=}" ;;
-			--profile)          shift; PROFILE="${1:-}" ;;
 			--check)            CHECK_MODE=1 ;;
 			--dry-run)          DRY_RUN=1 ;;
 			--bake)             BAKE_MODE=1 ;;
@@ -342,7 +341,7 @@ args_parse() {
 	esac
 	case "${PROFILE:-}" in
 		""|russia) : ;;
-		*) die "--profile must be one of: russia (got: ${PROFILE})"; ;;
+		*) die "--profile must be one of: russia (got: ${PROFILE})" ;;
 	esac
 
 	# Interactive prompts for SFU port overrides (non-interactive / OXPULSE_NONINTERACTIVE=1 skips).
