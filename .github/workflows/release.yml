@@ -408,6 +408,12 @@ jobs:
           # the substituted bytes that operators will actually download.
           sed -i "s|@RELEASE_TAG@|${TAG}|g" partner-edge-installer.sh
           cp upgrade.sh                partner-edge-upgrade.sh
+          # Bug R (upgrade.sh): substitute @RELEASE_TAG@ in the upgrade script too,
+          # so REPO_RAW fetches in sync_host_scripts are pinned to this release tag.
+          # Without this, fetched bytes match main HEAD (not the tag) and the SHA256SUMS
+          # guard rejects every file that changed since the tag was cut — silently
+          # skipping the entire host-script sync on normal `upgrade vX.Y.Z` runs.
+          sed -i "s|@RELEASE_TAG@|${TAG}|g" partner-edge-upgrade.sh
           cp healthcheck.sh            partner-edge-healthcheck.sh
           # Phase 4.1 + 4.2: install.sh sources lib/install-*.sh modules. Ship
           # them as individual release assets so install.sh's
@@ -423,6 +429,38 @@ jobs:
           cp lib/install-awg-params-agent.sh install-awg-params-agent.sh
           # Phase 5.5 MAJOR 1: fail-soft render helpers (sourced by install/hydrate/update/refresh).
           cp lib/render-channel-lib.sh    render-channel-lib.sh
+          # Host-script sync assets: stage every file in _HOST_SCRIPT_SBIN_FILES so
+          # SHA256SUMS covers the full set and sync_host_scripts can verify each one.
+          # Previously only partner-edge-upgrade.sh / render-channel-lib.sh /
+          # config-defaults.conf were staged; the other 7 sbin files (including the
+          # headline oxpulse-channels-health-report.sh) were fetched UNVERIFIED.
+          cp oxpulse-channels-health-report.sh oxpulse-channels-health-report.sh
+          cp hydrate.sh                        hydrate.sh
+          cp oxpulse-partner-edge-refresh.sh   oxpulse-partner-edge-refresh.sh
+          cp oxpulse-partner-edge-sni-rotate.sh oxpulse-partner-edge-sni-rotate.sh
+          cp ghcr-auth-lib.sh                  ghcr-auth-lib.sh
+          cp channel-render-lib.sh             channel-render-lib.sh
+          cp oxpulse-token-lib.sh              oxpulse-token-lib.sh
+          cp lib/telegram-alert-lib.sh         telegram-alert-lib.sh
+          # Scripts exec'd by xray-update and geoip-refresh timers: staged so
+          # SHA256SUMS covers them and sync_host_scripts can install + verify them.
+          # oxpulse-xray-update.sh installs to /usr/local/bin/ (not sbin).
+          cp scripts/oxpulse-xray-update.sh   oxpulse-xray-update.sh
+          cp scripts/oxpulse-geoip-refresh.sh oxpulse-geoip-refresh.sh
+          # Systemd units managed by sync_host_scripts (step 5); stage so SHA256SUMS
+          # covers them and the integrity guard can be wired in upgrade.sh.
+          cp systemd/oxpulse-partner-edge.service              oxpulse-partner-edge.service
+          cp systemd/oxpulse-partner-edge-hydrate.service      oxpulse-partner-edge-hydrate.service
+          cp systemd/oxpulse-partner-edge-refresh.service      oxpulse-partner-edge-refresh.service
+          cp systemd/oxpulse-partner-edge-refresh.timer        oxpulse-partner-edge-refresh.timer
+          cp systemd/oxpulse-partner-edge-sni-rotate.service   oxpulse-partner-edge-sni-rotate.service
+          cp systemd/oxpulse-partner-edge-sni-rotate.timer     oxpulse-partner-edge-sni-rotate.timer
+          cp systemd/oxpulse-xray-update.service               oxpulse-xray-update.service
+          cp systemd/oxpulse-xray-update.timer                 oxpulse-xray-update.timer
+          cp systemd/oxpulse-geoip-refresh.service             oxpulse-geoip-refresh.service
+          cp systemd/oxpulse-geoip-refresh.timer               oxpulse-geoip-refresh.timer
+          cp systemd/oxpulse-channels-health-report.service    oxpulse-channels-health-report.service
+          cp systemd/oxpulse-channels-health-report.timer      oxpulse-channels-health-report.timer
           # Bug 8 fix: ship defaults.conf so install-systemd.sh can fetch it
           # from REPO_RAW on fresh installs (tier-4 fallback path).
           cp config/defaults.conf         config-defaults.conf
@@ -461,6 +499,28 @@ jobs:
             render-channel-lib.sh \
             lib-checksums.txt \
             config-defaults.conf \
+            oxpulse-channels-health-report.sh \
+            hydrate.sh \
+            oxpulse-partner-edge-refresh.sh \
+            oxpulse-partner-edge-sni-rotate.sh \
+            ghcr-auth-lib.sh \
+            channel-render-lib.sh \
+            oxpulse-token-lib.sh \
+            telegram-alert-lib.sh \
+            oxpulse-xray-update.sh \
+            oxpulse-geoip-refresh.sh \
+            oxpulse-partner-edge.service \
+            oxpulse-partner-edge-hydrate.service \
+            oxpulse-partner-edge-refresh.service \
+            oxpulse-partner-edge-refresh.timer \
+            oxpulse-partner-edge-sni-rotate.service \
+            oxpulse-partner-edge-sni-rotate.timer \
+            oxpulse-xray-update.service \
+            oxpulse-xray-update.timer \
+            oxpulse-geoip-refresh.service \
+            oxpulse-geoip-refresh.timer \
+            oxpulse-channels-health-report.service \
+            oxpulse-channels-health-report.timer \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
@@ -495,6 +555,28 @@ jobs:
             render-channel-lib.sh \
             lib-checksums.txt \
             config-defaults.conf \
+            oxpulse-channels-health-report.sh \
+            hydrate.sh \
+            oxpulse-partner-edge-refresh.sh \
+            oxpulse-partner-edge-sni-rotate.sh \
+            ghcr-auth-lib.sh \
+            channel-render-lib.sh \
+            oxpulse-token-lib.sh \
+            telegram-alert-lib.sh \
+            oxpulse-xray-update.sh \
+            oxpulse-geoip-refresh.sh \
+            oxpulse-partner-edge.service \
+            oxpulse-partner-edge-hydrate.service \
+            oxpulse-partner-edge-refresh.service \
+            oxpulse-partner-edge-refresh.timer \
+            oxpulse-partner-edge-sni-rotate.service \
+            oxpulse-partner-edge-sni-rotate.timer \
+            oxpulse-xray-update.service \
+            oxpulse-xray-update.timer \
+            oxpulse-geoip-refresh.service \
+            oxpulse-geoip-refresh.timer \
+            oxpulse-channels-health-report.service \
+            oxpulse-channels-health-report.timer \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \

@@ -1,11 +1,23 @@
 #!/usr/bin/env bash
-# upgrade.sh — pull a newer image tag, recreate services, verify, optionally roll back.
+# upgrade.sh — pull a newer image tag, sync host-scripts, recreate services,
+# verify, optionally roll back.
+#
+# Every apply (plain or --with-templates) now atomically upgrades BOTH:
+#   • Docker image tags (caddy, sfu, xray containers via compose pull+up)
+#   • Host-level scripts (oxpulse-channels-health-report, upgrade.sh, refresh,
+#     sni-rotate, lib scripts, systemd units) fetched from the release tag
+#
+# This closes the gap where host-script changes (e.g. ch4 coturn probe in
+# oxpulse-channels-health-report.sh, new systemd drop-ins) were silently skipped
+# by upgrade.sh and only reached an edge via a full installer re-run.
+# Example: v0.12.57 bundled BOTH sfu-siege-transport image change (#255) AND
+# ch4 health-report change; old upgrade.sh deployed only the image.
 #
 # Usage:
-#   oxpulse-partner-edge-upgrade                       # pull :latest
+#   oxpulse-partner-edge-upgrade                       # pull :latest + sync host-scripts
 #   oxpulse-partner-edge-upgrade v0.2.0                # pin to specific tag
 #   oxpulse-partner-edge-upgrade --check               # report pending upgrade, don't apply
-#   oxpulse-partner-edge-upgrade --rollback            # restore previous tag
+#   oxpulse-partner-edge-upgrade --rollback            # restore previous tag + host-scripts
 #   oxpulse-partner-edge-upgrade --templates-only      # re-render xray config from upstream template, no image pull
 #   oxpulse-partner-edge-upgrade --with-templates      # re-render Caddyfile + healthcheck + pull new image (atomic)
 #   oxpulse-partner-edge-upgrade --ghcr-token=ghp_xxx  # persist GHCR PAT before pull (one-time)
@@ -31,18 +43,85 @@ set -euo pipefail
 
 PREFIX_ETC="${OXPULSE_PREFIX_ETC:-/etc/oxpulse-partner-edge}"
 PREFIX_LIB="${OXPULSE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
+PREFIX_SBIN="${OXPULSE_PREFIX_SBIN:-/usr/local/sbin}"
+PREFIX_BIN="${OXPULSE_PREFIX_BIN:-/usr/local/bin}"
+PREFIX_LIBDIR="${OXPULSE_PREFIX_LIBDIR:-/usr/local/lib/partner-edge}"
+SYSTEMD_DIR="${OXPULSE_SYSTEMD_DIR:-/etc/systemd/system}"
 COMPOSE_FILE="$PREFIX_ETC/docker-compose.yml"
 STATE_FILE="$PREFIX_LIB/install.env"
 PREV_STATE_FILE="$PREFIX_LIB/install.env.prev"
 PREV_COMPOSE_FILE="$PREFIX_LIB/docker-compose.yml.prev"
 PREV_CADDYFILE="$PREFIX_LIB/Caddyfile.prev"
 PREV_HEALTHCHECK="$PREFIX_LIB/healthcheck.prev"
+# Directory where pre-upgrade host-script snapshots are stored for rollback.
+PREV_HOST_SCRIPTS_DIR="$PREFIX_LIB/host-scripts.prev"
 HEALTHCHECK="${OXPULSE_HEALTHCHECK:-/usr/local/sbin/oxpulse-partner-edge-healthcheck}"
-REPO_RAW="${OXPULSE_REPO_RAW:-https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main}"
+# @RELEASE_TAG@ is substituted by release.yml at publish time (same mechanism as
+# install.sh) so REPO_RAW fetches are pinned to the exact release tag, not main HEAD.
+# Without this pin the bytes fetched from raw.githubusercontent.com do not match the
+# SHA256SUMS released for that tag (main is always ahead of any tag).
+# Tests and operator overrides can still use OXPULSE_REPO_RAW to point at a fixture.
+OXPULSE_UPGRADE_TAG="${OXPULSE_UPGRADE_TAG:-@RELEASE_TAG@}"
+
+# Mirror awareness: OXPULSE_MIRROR_BASE is the plain-TLS mirror used by edges
+# DPI-blocked from GitHub (e.g. zvonilka RU relays).  install.sh sets
+# REPO_RAW=$MIRROR_BASE/raw when the mirror is set; upgrade.sh reads the
+# persisted OXPULSE_MIRROR_BASE from install.env (written at install time) and
+# applies the same polarity so that all host-script fetches work on mirror-
+# installed edges without requiring operator env injection on every upgrade run.
+#
+# Resolution order (highest → lowest priority):
+#   1. OXPULSE_REPO_RAW env  — operator/test override, wins unconditionally
+#   2. OXPULSE_MIRROR_BASE env  — explicit mirror override for this run
+#   3. OXPULSE_MIRROR_BASE from install.env  — persisted at install time
+#   4. raw.githubusercontent.com pinned to OXPULSE_UPGRADE_TAG (or main for dev)
+#
+# RELEASES_BASE follows the same polarity: mirror serves release assets under
+# the same path structure as GitHub releases ($MIRROR_BASE/$tag/<asset>).
+# If only OXPULSE_RELEASES_BASE is set (test override), it wins over mirror.
+
+# Load OXPULSE_MIRROR_BASE from install.env if not already in env.
+# We do this before resolving REPO_RAW so the state file overrides the default.
+if [[ -z "${OXPULSE_MIRROR_BASE:-}" && -r "${OXPULSE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}/install.env" ]]; then
+    _state_mirror=$(grep '^OXPULSE_MIRROR_BASE=' \
+        "${OXPULSE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}/install.env" \
+        2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+    [[ -n "$_state_mirror" ]] && OXPULSE_MIRROR_BASE="$_state_mirror"
+    unset _state_mirror
+fi
+OXPULSE_MIRROR_BASE="${OXPULSE_MIRROR_BASE%/}"
+
+if [[ -n "${OXPULSE_REPO_RAW:-}" ]]; then
+    REPO_RAW="$OXPULSE_REPO_RAW"
+elif [[ -n "${OXPULSE_MIRROR_BASE:-}" ]]; then
+    # Mirror installed: raw files come from $MIRROR_BASE/raw (same as install.sh).
+    REPO_RAW="$OXPULSE_MIRROR_BASE/raw"
+elif [[ "${OXPULSE_UPGRADE_TAG}" == "@RELEASE_TAG@" ]]; then
+    # Running from a local checkout (placeholder not substituted). Fall back to main
+    # so developer/test runs still work.  Live relay operators get the substituted tag.
+    REPO_RAW="https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main"
+else
+    REPO_RAW="https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/${OXPULSE_UPGRADE_TAG}"
+fi
+
+# GitHub releases download base for the target tag.  Tests can override via
+# OXPULSE_RELEASES_BASE to point at a local fixture server.
+# Mirror polarity: if OXPULSE_MIRROR_BASE is set, releases are served from
+# $MIRROR_BASE/<tag>/<asset> (operator must mirror the GitHub release layout).
+# OXPULSE_RELEASES_BASE env wins unconditionally (test/operator override).
+if [[ -n "${OXPULSE_RELEASES_BASE:-}" ]]; then
+    RELEASES_BASE="$OXPULSE_RELEASES_BASE"
+elif [[ -n "${OXPULSE_MIRROR_BASE:-}" ]]; then
+    RELEASES_BASE="$OXPULSE_MIRROR_BASE"
+else
+    RELEASES_BASE="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/download"
+fi
 NODE_CFG="$PREFIX_ETC/node-config.json"
 XRAY_CFG="$PREFIX_ETC/xray-client.json"
 # Allow tests to override docker binary (e.g. DOCKER_BIN=true for dry-run).
 DOCKER_BIN="${DOCKER_BIN:-docker}"
+# Allow tests to override systemctl (e.g. SYSTEMCTL_BIN=true to no-op).
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 
 log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
@@ -317,6 +396,498 @@ re_render_healthcheck() {
 }
 
 # ---------------------------------------------------------------------------
+# HOST-SCRIPT SYNC — fetch sbin scripts + systemd units for the target tag,
+# verify against SHA256SUMS from the GitHub release, install atomically, and
+# daemon-reload + restart only the affected timer/service units.
+#
+# Design constraints:
+#   • Never regenerate identity (reality.*, AWG, service token) — scripts and
+#     units only, never config files under PREFIX_ETC.
+#   • Idempotent: sha256 match → skip (no restart, no daemon-reload noise).
+#   • Mirrors install-systemd.sh install logic; reuses its path conventions.
+#   • DOES NOT restart coturn/sfu/xray — those are the image path's concern.
+# ---------------------------------------------------------------------------
+
+# Sbin files managed by the host-script sync.  This mirrors EXPECTED_SBIN_FILES
+# in install-systemd.sh and must be kept in sync when scripts are added/removed.
+#
+# NOTE on path variants:
+#   • Most files → $PREFIX_SBIN (/usr/local/sbin)
+#   • oxpulse-xray-update.sh → $PREFIX_BIN (/usr/local/bin) per install-systemd.sh:265
+#     (ExecStart=/usr/local/bin/oxpulse-xray-update.sh in oxpulse-xray-update.service)
+#
+# Both are synced here so that oxpulse-xray-update.timer and
+# oxpulse-geoip-refresh.timer, which are restarted by _HOST_SCRIPT_RESTART_UNITS,
+# fire up-to-date script bodies (not stale pre-upgrade copies).
+_HOST_SCRIPT_SBIN_FILES=(
+	oxpulse-partner-edge-upgrade
+	oxpulse-partner-edge-hydrate
+	oxpulse-partner-edge-refresh
+	oxpulse-partner-edge-sni-rotate
+	oxpulse-channels-health-report
+	oxpulse-geoip-refresh
+	oxpulse-xray-update.sh
+	channel-render-lib.sh
+	ghcr-auth-lib.sh
+	render-channel-lib.sh
+	oxpulse-token-lib.sh
+	telegram-alert-lib.sh
+)
+
+# Remote path in the release bundle for each sbin file.  Maps installed name →
+# REPO_RAW-relative fetch path (the name under which the file lives in the repo
+# and is published to raw.githubusercontent.com).
+_host_script_remote_name() {
+	local installed_name="$1"
+	case "$installed_name" in
+		oxpulse-partner-edge-upgrade)    echo "upgrade.sh" ;;
+		oxpulse-partner-edge-hydrate)    echo "hydrate.sh" ;;
+		oxpulse-partner-edge-refresh)    echo "oxpulse-partner-edge-refresh.sh" ;;
+		oxpulse-partner-edge-sni-rotate) echo "oxpulse-partner-edge-sni-rotate.sh" ;;
+		oxpulse-channels-health-report)  echo "oxpulse-channels-health-report.sh" ;;
+		oxpulse-geoip-refresh)           echo "scripts/oxpulse-geoip-refresh.sh" ;;
+		oxpulse-xray-update.sh)          echo "scripts/oxpulse-xray-update.sh" ;;
+		channel-render-lib.sh)           echo "channel-render-lib.sh" ;;
+		ghcr-auth-lib.sh)                echo "ghcr-auth-lib.sh" ;;
+		render-channel-lib.sh)           echo "lib/render-channel-lib.sh" ;;
+		oxpulse-token-lib.sh)            echo "oxpulse-token-lib.sh" ;;
+		telegram-alert-lib.sh)           echo "lib/telegram-alert-lib.sh" ;;
+		*)                               echo "$installed_name" ;;
+	esac
+}
+
+# Installation directory for each sbin file.  Most go to PREFIX_SBIN;
+# oxpulse-xray-update.sh goes to PREFIX_BIN (/usr/local/bin) because its
+# systemd unit has ExecStart=/usr/local/bin/oxpulse-xray-update.sh.
+_host_script_install_dir() {
+	local installed_name="$1"
+	case "$installed_name" in
+		oxpulse-xray-update.sh) echo "$PREFIX_BIN" ;;
+		*)                       echo "$PREFIX_SBIN" ;;
+	esac
+}
+
+# Permissions for each sbin file (executable scripts vs sourced libs).
+_host_script_mode() {
+	local installed_name="$1"
+	case "$installed_name" in
+		channel-render-lib.sh|ghcr-auth-lib.sh|render-channel-lib.sh|oxpulse-token-lib.sh)
+			echo "0644" ;;
+		*)  echo "0755" ;;
+	esac
+}
+
+# Systemd units that must be restarted after a host-script change.
+# We restart only the units that exec the scripts we sync — NOT coturn/sfu/xray.
+_HOST_SCRIPT_RESTART_UNITS=(
+	oxpulse-channels-health-report.timer
+	oxpulse-partner-edge-refresh.timer
+	oxpulse-partner-edge-sni-rotate.timer
+	oxpulse-xray-update.timer
+	oxpulse-geoip-refresh.timer
+)
+
+# snapshot_host_scripts TAG — copy every managed sbin file + relevant systemd
+# units into PREV_HOST_SCRIPTS_DIR/TAG so rollback can restore them.
+snapshot_host_scripts() {
+	local tag="$1"
+	local snap_dir="$PREV_HOST_SCRIPTS_DIR"
+	rm -rf "$snap_dir"
+	mkdir -p "$snap_dir/sbin" "$snap_dir/systemd" "$snap_dir/share-config" \
+	         "$snap_dir/libdir"
+	printf '%s\n' "$tag" > "$snap_dir/tag"
+
+	local f installed_path install_dir
+	for f in "${_HOST_SCRIPT_SBIN_FILES[@]}"; do
+		install_dir=$(_host_script_install_dir "$f")
+		installed_path="$install_dir/$f"
+		[[ -f "$installed_path" ]] && cp -a "$installed_path" "$snap_dir/sbin/$f" || true
+	done
+
+	# Systemd units for the affected timers/services.
+	local unit
+	for unit in \
+		oxpulse-channels-health-report.service \
+		oxpulse-channels-health-report.timer \
+		oxpulse-partner-edge-refresh.service \
+		oxpulse-partner-edge-refresh.timer \
+		oxpulse-partner-edge-sni-rotate.service \
+		oxpulse-partner-edge-sni-rotate.timer \
+		oxpulse-xray-update.service \
+		oxpulse-xray-update.timer \
+		oxpulse-geoip-refresh.service \
+		oxpulse-geoip-refresh.timer \
+		oxpulse-partner-edge-hydrate.service \
+		oxpulse-partner-edge.service; do
+		[[ -f "$SYSTEMD_DIR/$unit" ]] && cp -a "$SYSTEMD_DIR/$unit" "$snap_dir/systemd/$unit" || true
+	done
+
+	# channel-health drop-in (carries OXPULSE_BACKEND_API env override).
+	local dropin_dir="$SYSTEMD_DIR/oxpulse-channels-health-report.service.d"
+	[[ -d "$dropin_dir" ]] && cp -a "$dropin_dir" "$snap_dir/systemd/oxpulse-channels-health-report.service.d" || true
+
+	# defaults.conf
+	local defaults_src="/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+	[[ -f "$defaults_src" ]] && cp -a "$defaults_src" "$snap_dir/share-config/defaults.conf" || true
+
+	# render-channel-lib.sh duplicate in PREFIX_LIBDIR
+	[[ -f "$PREFIX_LIBDIR/render-channel-lib.sh" ]] \
+		&& cp -a "$PREFIX_LIBDIR/render-channel-lib.sh" "$snap_dir/libdir/render-channel-lib.sh" || true
+
+	log "host-script snapshot saved to $snap_dir (from $tag)"
+}
+
+# restore_host_scripts — restore sbin files, units, and drop-ins from snapshot.
+restore_host_scripts() {
+	local snap_dir="$PREV_HOST_SCRIPTS_DIR"
+	[[ -d "$snap_dir/sbin" ]] || { warn "no host-script snapshot to restore"; return 0; }
+
+	local f restored=0 install_dir
+	for f in "${_HOST_SCRIPT_SBIN_FILES[@]}"; do
+		if [[ -f "$snap_dir/sbin/$f" ]]; then
+			local mode
+			mode=$(_host_script_mode "$f")
+			install_dir=$(_host_script_install_dir "$f")
+			install -d -m 0755 "$install_dir"
+			install -m "$mode" "$snap_dir/sbin/$f" "$install_dir/$f"
+			restored=1
+		fi
+	done
+
+	# Restore systemd units.
+	# NOTE (new-unit orphan edge): if this release introduces a brand-new unit
+	# that was never installed before the upgrade attempt, it will NOT be in the
+	# snapshot (snapshot only copies what already exists on disk).  Rollback
+	# therefore leaves the new unit installed — it is harmless because its exec
+	# script is also restored to the pre-upgrade version, and `daemon-reload` +
+	# restart below picks up the correct state.  Disabling or removing orphaned
+	# units is intentionally left to the operator to avoid silent data loss.
+	local unit
+	for unit in "$snap_dir/systemd/"*; do
+		[[ -e "$unit" ]] || continue
+		local base
+		base="$(basename "$unit")"
+		if [[ -d "$unit" ]]; then
+			mkdir -p "$SYSTEMD_DIR/$base"
+			cp -a "$unit/." "$SYSTEMD_DIR/$base/"
+		else
+			install -m 0644 "$unit" "$SYSTEMD_DIR/$base"
+		fi
+		restored=1
+	done
+
+	# Restore defaults.conf.
+	if [[ -f "$snap_dir/share-config/defaults.conf" ]]; then
+		install -d -m 0755 "/usr/local/share/oxpulse-partner-edge/config"
+		install -m 0644 "$snap_dir/share-config/defaults.conf" \
+			"/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+		restored=1
+	fi
+
+	# Restore render-channel-lib.sh in PREFIX_LIBDIR.
+	if [[ -f "$snap_dir/libdir/render-channel-lib.sh" ]]; then
+		install -d -m 0755 "$PREFIX_LIBDIR"
+		install -m 0644 "$snap_dir/libdir/render-channel-lib.sh" \
+			"$PREFIX_LIBDIR/render-channel-lib.sh"
+		restored=1
+	fi
+
+	if [[ "$restored" -eq 1 ]]; then
+		"$SYSTEMCTL_BIN" daemon-reload 2>/dev/null || true
+		log "host-scripts restored from snapshot"
+	fi
+}
+
+# sync_host_scripts TAG — download, verify, and install host-scripts for TAG.
+# Safe to call in dry-run mode (sets DRY_RUN_HOSTSCRIPT_CHANGED to indicate
+# what would change).  Returns 0 always; logs skip/apply per file.
+sync_host_scripts() {
+	local tag="$1"
+	local tmpdir
+	tmpdir=$(mktemp -d)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$tmpdir'" RETURN
+
+	# Resolve BACKEND_API for the channel-health drop-in.  Prefer env (already
+	# exported by caller or operator) then fall back to install.env.
+	local _backend_api="${BACKEND_API:-}"
+	if [[ -z "$_backend_api" && -r "$STATE_FILE" ]]; then
+		# shellcheck disable=SC1090
+		_backend_api=$(. "$STATE_FILE" 2>/dev/null && printf '%s' "${BACKEND_API:-}")
+	fi
+	_backend_api="${_backend_api:-https://api.oxpulse.chat}"
+
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		log "[dry-run] host-script sync: would fetch + install sbin scripts and systemd units for tag=$tag"
+		log "[dry-run]   scripts: ${_HOST_SCRIPT_SBIN_FILES[*]}"
+		log "[dry-run]   BACKEND_API for channel-health drop-in: $_backend_api"
+		log "[dry-run]   units: oxpulse-channels-health-report.{service,timer} + refresh/sni-rotate/xray-update/geoip-refresh"
+		log "[dry-run]   reload: $SYSTEMCTL_BIN daemon-reload + restart affected timers"
+		log "[dry-run]   idempotency: sha256 comparison (no-op if already current)"
+		return 0
+	fi
+
+	# ------------------------------------------------------------------
+	# Step 1: fetch SHA256SUMS from the GitHub release for checksum guard.
+	# The release asset name is "SHA256SUMS" (as built by release.yml).
+	# Map sbin filenames → asset names used in SHA256SUMS.
+	# ------------------------------------------------------------------
+	local sha256sums_url sha256sums_file sha256sums_ok=0
+	if [[ "$tag" != "latest" ]]; then
+		sha256sums_url="$RELEASES_BASE/$tag/SHA256SUMS"
+		sha256sums_file="$tmpdir/SHA256SUMS"
+		if curl -fsSL --max-time 30 "$sha256sums_url" -o "$sha256sums_file" 2>/dev/null; then
+			sha256sums_ok=1
+			log "fetched SHA256SUMS for $tag"
+		else
+			warn "could not fetch SHA256SUMS from $sha256sums_url — proceeding without checksum guard"
+		fi
+	else
+		warn "target is 'latest' — SHA256SUMS not available from a floating tag; skipping checksum guard"
+	fi
+
+	# Helper: look up expected sha256 for a release asset name from SHA256SUMS.
+	# Returns empty string if not found or checksum guard is unavailable.
+	_lookup_sha256() {
+		local asset_name="$1"
+		[[ "$sha256sums_ok" -eq 1 ]] || return 0
+		awk -v name="$asset_name" '$2 == name || $2 == "./" name { print $1; exit }' \
+			"$sha256sums_file" 2>/dev/null || true
+	}
+
+	# ------------------------------------------------------------------
+	# Step 2: fetch and install each managed sbin file.
+	# ------------------------------------------------------------------
+	local _any_changed=0
+
+	local f remote_name fetch_url fetch_tmp mode expected_sha actual_sha installed_sha install_dir
+	for f in "${_HOST_SCRIPT_SBIN_FILES[@]}"; do
+		remote_name=$(_host_script_remote_name "$f")
+		install_dir=$(_host_script_install_dir "$f")
+		# Self-update special case (MINOR-1):
+		# release.yml stages a @RELEASE_TAG@-substituted copy of upgrade.sh as
+		# "partner-edge-upgrade.sh" in the release assets (not in REPO_RAW, which
+		# serves the raw committed tree with the literal placeholder).  Fetching from
+		# REPO_RAW would yield bytes that DON'T match the SHA256SUMS entry for
+		# "partner-edge-upgrade.sh" (substituted bytes), so the guard would reject
+		# every self-update attempt.  Instead we fetch the SUBSTITUTED asset from
+		# RELEASES_BASE when the tag is not a floating "latest".
+		local use_releases_asset=0
+		case "$f" in
+			oxpulse-partner-edge-upgrade)
+				if [[ "$tag" != "latest" ]]; then
+					use_releases_asset=1
+				fi
+				;;
+		esac
+
+		if [[ "$use_releases_asset" -eq 1 ]]; then
+			# Fetch substituted partner-edge-upgrade.sh from release assets.
+			# SHA256SUMS asset name is "partner-edge-upgrade.sh".
+			fetch_url="$RELEASES_BASE/$tag/partner-edge-upgrade.sh"
+			fetch_tmp="$tmpdir/partner-edge-upgrade.sh"
+		else
+			fetch_url="$REPO_RAW/$remote_name"
+			fetch_tmp="$tmpdir/$(basename "$remote_name")"
+		fi
+		mode=$(_host_script_mode "$f")
+
+		if ! curl -fsSL --max-time 30 "$fetch_url" -o "$fetch_tmp" 2>/dev/null; then
+			warn "host-script sync: could not fetch $fetch_url — skipping $f"
+			continue
+		fi
+
+		# Checksum guard: verify fetched file against SHA256SUMS if available.
+		# asset_name in SHA256SUMS is the release-staged name (the basename, no lib/ prefix).
+		local sha256_asset_name
+		sha256_asset_name=$(basename "$remote_name")
+		# Map installed names to SHA256SUMS asset names where they differ.
+		case "$f" in
+			oxpulse-partner-edge-upgrade)   sha256_asset_name="partner-edge-upgrade.sh" ;;
+			oxpulse-partner-edge-hydrate)   sha256_asset_name="hydrate.sh" ;;
+			# render-channel-lib.sh staged as render-channel-lib.sh (not lib/render-channel-lib.sh)
+			render-channel-lib.sh)          sha256_asset_name="render-channel-lib.sh" ;;
+			# xray-update and geoip-refresh: staged without scripts/ prefix
+			oxpulse-xray-update.sh)        sha256_asset_name="oxpulse-xray-update.sh" ;;
+			oxpulse-geoip-refresh)         sha256_asset_name="oxpulse-geoip-refresh.sh" ;;
+		esac
+
+		expected_sha=$(_lookup_sha256 "$sha256_asset_name")
+		if [[ -n "$expected_sha" ]]; then
+			actual_sha=$(sha256sum "$fetch_tmp" | awk '{print $1}')
+			if [[ "$actual_sha" != "$expected_sha" ]]; then
+				warn "host-script sync: SHA256 MISMATCH for $f (expected=$expected_sha actual=$actual_sha) — skipping (possible MITM or stale CDN)"
+				continue
+			fi
+		fi
+
+		# Idempotency: skip if installed file already matches.
+		local installed_path="$install_dir/$f"
+		if [[ -f "$installed_path" ]]; then
+			installed_sha=$(sha256sum "$installed_path" | awk '{print $1}')
+			actual_sha=$(sha256sum "$fetch_tmp" | awk '{print $1}')
+			if [[ "$installed_sha" == "$actual_sha" ]]; then
+				log "  host-script: $f up-to-date (sha256 match)"
+				continue
+			fi
+		fi
+
+		# Atomic install: sibling temp + rename(2).
+		install -d -m 0755 "$install_dir"
+		local tmp_inst="$install_dir/$f.new.$$"
+		install -m "$mode" "$fetch_tmp" "$tmp_inst"
+		mv -f "$tmp_inst" "$installed_path"
+		log "  host-script: installed $f (mode=$mode, dir=$install_dir)"
+		_any_changed=1
+	done
+
+	# ------------------------------------------------------------------
+	# Step 3: defaults.conf (sourced by channel-render-lib + health-report).
+	# ------------------------------------------------------------------
+	local defaults_url="$REPO_RAW/config/defaults.conf"
+	local defaults_dst="/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+	local defaults_tmp="$tmpdir/defaults.conf"
+	if curl -fsSL --max-time 30 "$defaults_url" -o "$defaults_tmp" 2>/dev/null; then
+		# SHA256 guard (staged as config-defaults.conf in release assets).
+		expected_sha=$(_lookup_sha256 "config-defaults.conf")
+		if [[ -n "$expected_sha" ]]; then
+			actual_sha=$(sha256sum "$defaults_tmp" | awk '{print $1}')
+			if [[ "$actual_sha" != "$expected_sha" ]]; then
+				warn "host-script sync: SHA256 MISMATCH for defaults.conf — skipping"
+				defaults_tmp=""
+			fi
+		fi
+		if [[ -n "$defaults_tmp" && -f "$defaults_tmp" ]]; then
+			install -d -m 0755 "$(dirname "$defaults_dst")"
+			if [[ -f "$defaults_dst" ]]; then
+				installed_sha=$(sha256sum "$defaults_dst" | awk '{print $1}')
+				actual_sha=$(sha256sum "$defaults_tmp" | awk '{print $1}')
+				if [[ "$installed_sha" == "$actual_sha" ]]; then
+					log "  host-script: defaults.conf up-to-date"
+				else
+					install -m 0644 "$defaults_tmp" "$defaults_dst"
+					log "  host-script: installed defaults.conf"
+					_any_changed=1
+				fi
+			else
+				install -m 0644 "$defaults_tmp" "$defaults_dst"
+				log "  host-script: installed defaults.conf (new)"
+				_any_changed=1
+			fi
+		fi
+	else
+		warn "host-script sync: could not fetch defaults.conf from $defaults_url — skipping"
+	fi
+
+	# ------------------------------------------------------------------
+	# Step 4: render-channel-lib.sh also goes into PREFIX_LIBDIR (Bug 17 fix
+	# mirroring install-systemd.sh — both PREFIX_SBIN and PREFIX_LIBDIR).
+	# ------------------------------------------------------------------
+	local rcl_sbin="$PREFIX_SBIN/render-channel-lib.sh"
+	local rcl_libdir="$PREFIX_LIBDIR/render-channel-lib.sh"
+	if [[ -f "$rcl_sbin" ]]; then
+		if [[ ! -f "$rcl_libdir" ]] || ! diff -q "$rcl_sbin" "$rcl_libdir" >/dev/null 2>&1; then
+			install -d -m 0755 "$PREFIX_LIBDIR"
+			if [[ ! "$rcl_sbin" -ef "$rcl_libdir" ]]; then
+				install -m 0644 "$rcl_sbin" "$rcl_libdir"
+				log "  host-script: synced render-channel-lib.sh to $PREFIX_LIBDIR"
+			fi
+		fi
+	fi
+
+	# ------------------------------------------------------------------
+	# Step 5: systemd units for affected services.
+	# ------------------------------------------------------------------
+	local units_to_fetch=(
+		oxpulse-partner-edge.service
+		oxpulse-partner-edge-hydrate.service
+		oxpulse-partner-edge-refresh.service
+		oxpulse-partner-edge-refresh.timer
+		oxpulse-partner-edge-sni-rotate.service
+		oxpulse-partner-edge-sni-rotate.timer
+		oxpulse-xray-update.service
+		oxpulse-xray-update.timer
+		oxpulse-geoip-refresh.service
+		oxpulse-geoip-refresh.timer
+		oxpulse-channels-health-report.service
+		oxpulse-channels-health-report.timer
+	)
+	local unit unit_url unit_tmp unit_dst unit_expected_sha unit_actual_sha
+	for unit in "${units_to_fetch[@]}"; do
+		unit_url="$REPO_RAW/systemd/$unit"
+		unit_tmp="$tmpdir/$unit"
+		unit_dst="$SYSTEMD_DIR/$unit"
+		if ! curl -fsSL --max-time 30 "$unit_url" -o "$unit_tmp" 2>/dev/null; then
+			warn "host-script sync: could not fetch systemd/$unit — skipping"
+			continue
+		fi
+		# Checksum guard: unit is staged as <unit-name> in SHA256SUMS (basename only).
+		unit_expected_sha=$(_lookup_sha256 "$unit")
+		if [[ -n "$unit_expected_sha" ]]; then
+			unit_actual_sha=$(sha256sum "$unit_tmp" | awk '{print $1}')
+			if [[ "$unit_actual_sha" != "$unit_expected_sha" ]]; then
+				warn "host-script sync: SHA256 MISMATCH for systemd/$unit (expected=$unit_expected_sha actual=$unit_actual_sha) — skipping (possible MITM or stale CDN)"
+				continue
+			fi
+		fi
+		if [[ -f "$unit_dst" ]]; then
+			installed_sha=$(sha256sum "$unit_dst" | awk '{print $1}')
+			actual_sha=$(sha256sum "$unit_tmp" | awk '{print $1}')
+			if [[ "$installed_sha" == "$actual_sha" ]]; then
+				continue
+			fi
+		fi
+		install -m 0644 "$unit_tmp" "$unit_dst"
+		log "  host-script: installed systemd/$unit"
+		_any_changed=1
+	done
+
+	# ------------------------------------------------------------------
+	# Step 6: channel-health drop-in — set OXPULSE_BACKEND_API so the
+	# health reporter reaches the central node (not the local edge IP).
+	# Mirrors _systemd_render_channel_health_dropin() in install-systemd.sh.
+	# ------------------------------------------------------------------
+	local dropin_dir="$SYSTEMD_DIR/oxpulse-channels-health-report.service.d"
+	local dropin_path="$dropin_dir/10-central-url.conf"
+	local dropin_content
+	dropin_content="$(printf '[Service]\nEnvironment=OXPULSE_BACKEND_API=%s\n' "$_backend_api")"
+	mkdir -p "$dropin_dir"
+	if [[ -f "$dropin_path" ]]; then
+		local existing_content
+		existing_content=$(cat "$dropin_path")
+		if [[ "$existing_content" != "$dropin_content" ]]; then
+			printf '%s\n' "$dropin_content" > "$dropin_dir/10-central-url.conf.new.$$"
+			mv -f "$dropin_dir/10-central-url.conf.new.$$" "$dropin_path"
+			log "  host-script: updated channel-health drop-in (BACKEND_API=$_backend_api)"
+			_any_changed=1
+		fi
+	else
+		printf '%s\n' "$dropin_content" > "$dropin_path"
+		log "  host-script: installed channel-health drop-in (BACKEND_API=$_backend_api)"
+		_any_changed=1
+	fi
+
+	# ------------------------------------------------------------------
+	# Step 7: daemon-reload + targeted restart of affected timers only.
+	# Coturn/sfu/xray images are the image path's concern — never touched here.
+	# ------------------------------------------------------------------
+	if [[ "$_any_changed" -eq 1 ]]; then
+		"$SYSTEMCTL_BIN" daemon-reload 2>/dev/null \
+			|| warn "daemon-reload failed — units may not reflect latest changes"
+		local timer
+		for timer in "${_HOST_SCRIPT_RESTART_UNITS[@]}"; do
+			if "$SYSTEMCTL_BIN" is-active --quiet "$timer" 2>/dev/null; then
+				"$SYSTEMCTL_BIN" restart "$timer" 2>/dev/null \
+					|| warn "could not restart $timer — it will pick up changes at next trigger"
+			fi
+		done
+		log "host-script sync complete (tag=$tag)"
+	else
+		log "host-script sync: all files up-to-date for $tag (no-op)"
+	fi
+}
+
+# ---------------------------------------------------------------------------
 # do_rollback_templates — restore Caddyfile, healthcheck, and install.env
 # from .prev backups. Called by --rollback when template backups exist, and
 # auto-triggered after --with-templates healthcheck failure.
@@ -393,11 +964,15 @@ if [[ "$MODE" == rollback ]]; then
 	_have_image_prev=0
 	[[ -r "$PREV_STATE_FILE" && -r "$PREV_COMPOSE_FILE" ]] && _have_image_prev=1
 
-	[[ "$_have_template_prev" -eq 1 || "$_have_image_prev" -eq 1 ]] \
+	_have_host_scripts_prev=0
+	[[ -d "$PREV_HOST_SCRIPTS_DIR/sbin" ]] && _have_host_scripts_prev=1
+
+	[[ "$_have_template_prev" -eq 1 || "$_have_image_prev" -eq 1 || "$_have_host_scripts_prev" -eq 1 ]] \
 		|| die "no previous version recorded — nothing to roll back to"
 
 	log "rolling back to previous state"
-	do_rollback_templates  # restores all .prev files it can find
+	do_rollback_templates  # restores Caddyfile, healthcheck, compose, install.env .prev files
+	restore_host_scripts   # restores sbin scripts + systemd units from snapshot
 
 	if [[ "$DRY_RUN" -eq 0 ]]; then
 		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull)
@@ -897,11 +1472,12 @@ if [[ "$MODE" == with_templates ]]; then
 		exit "$_conflict_exit"
 	fi
 
-	# Step 1: backup current state before any mutation.
+	# Step 1: backup current state before any mutation (images + templates + host-scripts).
 	[[ -f "$PREFIX_ETC/Caddyfile" ]]  && cp -a "$PREFIX_ETC/Caddyfile" "$PREV_CADDYFILE"
 	[[ -f "$HEALTHCHECK" ]]           && cp -a "$HEALTHCHECK" "$PREV_HEALTHCHECK"
 	cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
 	cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
+	snapshot_host_scripts "$CURRENT"
 
 	# Step 2+3: fetch + render templates. die()s on fetch failure — no state
 	# has been mutated yet (backups exist but originals are untouched).
@@ -913,7 +1489,11 @@ if [[ "$MODE" == with_templates ]]; then
 		"$COMPOSE_FILE"
 	sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 
-	# Step 5: pull new images.
+	# Step 5: sync host-scripts for the target tag (health-report, sbin libs, units).
+	log "syncing host-scripts to $TARGET"
+	sync_host_scripts "$TARGET"
+
+	# Step 6: pull new images.
 	ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
 	log "pulling images (tag=$TARGET)"
 	pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull 2>&1)
@@ -925,24 +1505,27 @@ if [[ "$MODE" == with_templates ]]; then
 		fi
 		warn "pull failed — rolling back"
 		do_rollback_templates
+		restore_host_scripts
 		die "pull failed — rolled back to previous state"
 	fi
 
-	# Step 6: recreate services.
+	# Step 7: recreate services.
 	log "recreating services"
 	if ! (cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d); then
 		warn "compose up failed — rolling back"
 		do_rollback_templates
+		restore_host_scripts
 		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull) || true
 		(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d) || true
 		die "--with-templates upgrade rolled back due to compose up failure"
 	fi
 
-	# Step 7: verify.
+	# Step 8: verify.
 	sleep 10
 	if ! "$HEALTHCHECK" --local; then
 		warn "healthcheck red after --with-templates upgrade — rolling back"
 		do_rollback_templates
+		restore_host_scripts
 		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull) || true
 		(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d) || true
 		if ! "$HEALTHCHECK" --local; then
@@ -968,14 +1551,21 @@ if [[ "$MODE" == check ]]; then
 	exit 10
 fi
 
-# ---- Backup current config before mutating ----
+# ---- Backup current config + host-scripts before mutating ----
 cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
 cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
+snapshot_host_scripts "$CURRENT"
 
 # Rewrite image tags in place.
 sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
 	"$COMPOSE_FILE"
 sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
+
+# Sync host-scripts for the target tag before pulling images so that a
+# failed image pull leaves the host-scripts already at the new version —
+# rollback restores both atomically from the snapshot taken above.
+log "syncing host-scripts to $TARGET"
+sync_host_scripts "$TARGET"
 
 # Refresh ghcr auth from stored token (no-op if file absent).
 ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
@@ -990,7 +1580,11 @@ if [[ $pull_rc -ne 0 ]]; then
 	if ! ghcr_pull_diagnose "$pull_out"; then
 		warn "ghcr: pull failed but not for an auth reason (see output above)"
 	fi
-	die "pull failed — previous config preserved at $PREV_COMPOSE_FILE"
+	# Restore host-scripts to pre-upgrade state since image pull failed.
+	restore_host_scripts
+	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
+	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
+	die "pull failed — previous config and host-scripts restored"
 fi
 
 log "recreating services"
@@ -998,6 +1592,7 @@ if ! (cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate); then
 	warn "up failed — rolling back to $CURRENT"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
+	restore_host_scripts
 	(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate) || true
 	die "upgrade rolled back"
 fi
@@ -1013,6 +1608,7 @@ if ! "$HEALTHCHECK" --local; then
 	warn "healthcheck red after upgrade — rolling back"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
+	restore_host_scripts
 	(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull)
 	(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate) || true
 	die "upgrade rolled back due to post-upgrade healthcheck failure"
