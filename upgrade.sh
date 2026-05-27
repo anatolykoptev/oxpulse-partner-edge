@@ -796,6 +796,49 @@ recreate_changed_services() {
 	(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --no-deps "${changed_services[@]}")
 }
 
+# settle_healthcheck_with_retry — poll healthcheck after container recreation.
+#
+# Background: xray Reality tunnel establishment on first connection takes up to
+# 8s (uTLS cipher randomisation per connection, measured on rvpn during the
+# v0.12.20 upgrade incident 2026-05-09).  A single `sleep 10` leaves only a 2s
+# slack margin, which is exceeded on a loaded edge, producing a false-negative
+# healthcheck failure and an automatic rollback.
+#
+# This function polls healthcheck.sh --local every POLL_INTERVAL seconds, up to
+# MAX_ATTEMPTS times (total budget ≈ MAX_ATTEMPTS × POLL_INTERVAL).
+#
+# Defaults (env-configurable via OXPULSE_UPGRADE_HEALTH_TIMEOUT):
+#   OXPULSE_UPGRADE_HEALTH_TIMEOUT=30  — total poll budget in seconds
+#   POLL_INTERVAL=3                    — seconds between attempts
+#   MAX_ATTEMPTS=10                    — budget/interval (rounded up); at
+#                                        3s × 10 = 30s we have 4× the observed
+#                                        worst-case (8s) plus a 6s margin for a
+#                                        loaded edge — safe for production.
+#
+# Returns 0 as soon as healthcheck passes; non-zero if ALL attempts exhausted.
+settle_healthcheck_with_retry() {
+	local label="${1:-post-upgrade}"  # context for log messages
+	local budget="${OXPULSE_UPGRADE_HEALTH_TIMEOUT:-30}"
+	local interval=3
+	local max_attempts=$(( (budget + interval - 1) / interval ))  # ceil(budget/interval)
+
+	local attempt=1
+	while [[ "$attempt" -le "$max_attempts" ]]; do
+		log "healthcheck attempt $attempt/$max_attempts (${label})…"
+		if "$HEALTHCHECK" --local; then
+			log "healthcheck passed on attempt $attempt/$max_attempts (${label})"
+			return 0
+		fi
+		if [[ "$attempt" -lt "$max_attempts" ]]; then
+			log "healthcheck not yet passing — retrying in ${interval}s"
+			sleep "$interval"
+		fi
+		attempt=$(( attempt + 1 ))
+	done
+	warn "healthcheck still failing after $max_attempts attempt(s) (budget=${budget}s) — ${label}"
+	return 1
+}
+
 # sync_host_scripts TAG — download, verify, and install host-scripts for TAG.
 # Safe to call in dry-run mode (sets DRY_RUN_HOSTSCRIPT_CHANGED to indicate
 # what would change).  Returns 0 always; logs skip/apply per file.
@@ -1761,9 +1804,8 @@ if [[ "$MODE" == with_templates ]]; then
 		die "--with-templates upgrade rolled back due to compose up failure"
 	fi
 
-	# Step 8: verify.
-	sleep 10
-	if ! "$HEALTHCHECK" --local; then
+	# Step 8: verify with retry (same settle_healthcheck_with_retry as plain path).
+	if ! settle_healthcheck_with_retry "with-templates-upgrade"; then
 		warn "healthcheck red after --with-templates upgrade — rolling back"
 		do_rollback_templates
 		restore_host_scripts
@@ -1814,7 +1856,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 	log "  6. sync host-scripts to $RELEASE_TAG"
 	log "  7. docker compose pull (images rewritten to $TARGET before pull)"
 	log "  8. recreate services whose digest changed (running → $TARGET)"
-	log "  9. sleep 10 + healthcheck --local"
+	log "  9. settle-retry healthcheck (poll ${OXPULSE_UPGRADE_HEALTH_TIMEOUT:-30}s budget, 3s interval)"
 	log "  10. on failure: rollback compose + host-scripts + compose pull + up"
 	log "[dry-run] no docker pull, no container recreate, no rollback performed"
 	exit 0
@@ -1890,14 +1932,13 @@ if ! recreate_changed_services _before_digests _after_digests; then
 	die "upgrade rolled back"
 fi
 
-# Wait for services to stabilize after container recreation.
-# 10s instead of the previous 5s: xray 26.5.3 Reality tunnel establishment
-# on first connection takes up to 8s, especially when the uTLS handshake
-# performs per-connection cipher randomisation. 5s was too short and caused
-# false-negative failures on check 10 (SPA GET /) during the v0.12.20 upgrade
-# on rvpn (2026-05-09 rollback incident).
-sleep 10
-if ! "$HEALTHCHECK" --local; then
+# Wait for services to stabilize after container recreation, with retry.
+# settle_healthcheck_with_retry polls every 3s up to OXPULSE_UPGRADE_HEALTH_TIMEOUT
+# seconds (default 30s = 10 attempts × 3s).  The budget is 4× the documented
+# worst-case xray Reality establishment time (~8s on rvpn v0.12.20 incident),
+# with added margin for a loaded edge.  A single sleep 10 was replaced because
+# the 2s slack was insufficient on loaded edges (see function definition comment).
+if ! settle_healthcheck_with_retry "plain-upgrade"; then
 	warn "healthcheck red after upgrade — rolling back"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
