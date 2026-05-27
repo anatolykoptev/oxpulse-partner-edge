@@ -560,10 +560,18 @@ D3_FAKE_DOCKER="$D3_TMPDIR/docker"
 cat > "$D3_FAKE_DOCKER" << 'D3FAKE'
 #!/bin/bash
 printf '%s\n' "$*" >> "${DOCKER_CALL_LOG}"
-# FORBIDDEN: pull or up in dry-run mode must NEVER happen.
-if [[ "$*" == *" pull"* || "$*" == *" up "* || "$*" == *" up" ]]; then
-    printf 'FORBIDDEN: docker %s called during --dry-run (plain apply path)\n' "$*" >&2
+# FORBIDDEN: pull in dry-run mode must NEVER happen.
+# We allow pull to run here so the up-guard below fires independently,
+# not vacuously (the old combined-exit-99 guard let up pass because pull
+# already killed the script — D3c was true for the wrong reason).
+if [[ "$*" == *" pull"* ]]; then
+    printf 'FORBIDDEN-PULL: docker %s called during --dry-run (plain apply path)\n' "$*" >&2
     exit 99
+fi
+# FORBIDDEN: compose up in dry-run mode must NEVER happen.
+if [[ "$*" == *" up "* || "$*" == *" up" ]]; then
+    printf 'FORBIDDEN-UP: docker %s called during --dry-run (plain apply path)\n' "$*" >&2
+    exit 98
 fi
 # compose config --services: return a fake list so digest capture (if it runs) doesn't crash.
 if [[ "$*" == *"config --services"* ]]; then
@@ -610,11 +618,16 @@ D3_OUT=$(
     bash "$UPGRADE" --dry-run v0.12.61 2>&1
 ) && D3_RC=0 || D3_RC=$?
 
-# Exit code 99 = docker forbidden command called — hard fail.
+# Exit 99 = pull called (forbidden); exit 98 = up called (forbidden).
+# Both are hard failures; distinguish them for diagnostic clarity.
 if [[ $D3_RC -eq 99 ]]; then
-    fail "D3a: docker compose pull or up was called during --dry-run (plain apply) — exit 99 from docker mock"
-elif echo "$D3_OUT" | grep -q 'FORBIDDEN'; then
-    fail "D3a: FORBIDDEN docker call in plain apply --dry-run output"
+    fail "D3a: docker compose PULL was called during --dry-run (plain apply) — exit 99 from docker mock (ruoxp incident bug)"
+elif echo "$D3_OUT" | grep -q 'FORBIDDEN-PULL'; then
+    fail "D3a: FORBIDDEN-PULL marker in plain apply --dry-run output"
+elif [[ $D3_RC -eq 98 ]]; then
+    fail "D3a: docker compose UP was called during --dry-run (plain apply) — exit 98 from docker mock"
+elif echo "$D3_OUT" | grep -q 'FORBIDDEN-UP'; then
+    fail "D3a: FORBIDDEN-UP marker in plain apply --dry-run output"
 elif [[ $D3_RC -eq 0 ]]; then
     pass "D3a: upgrade.sh --dry-run plain apply exited 0 (no forbidden docker calls)"
 else
@@ -629,16 +642,22 @@ else
 fi
 
 # docker compose up must NOT have been called.
-if grep -q ' up' "$D3_DOCKER_LOG" 2>/dev/null; then
-    fail "D3c: docker compose up was called during --dry-run plain apply"
+# D3c uses a SEPARATE check on the docker call log (not relying on D3a's exit
+# code), so it passes for the right reason even if pull was permitted.
+# The docker mock uses exit 98 for `up` (separate from 99 for pull), so if
+# pull somehow fires but up is independently suppressed, D3c still catches it.
+if grep -qE ' up( |$)' "$D3_DOCKER_LOG" 2>/dev/null; then
+    fail "D3c: docker compose up was called during --dry-run plain apply (independent up-log check)"
 else
-    pass "D3c: docker compose up NOT called in --dry-run plain apply"
+    pass "D3c: docker compose up NOT called in --dry-run plain apply (independent up-log check)"
 fi
 
-# [dry-run] plan message must be in output.
-echo "$D3_OUT" | grep -q '\[dry-run\]' \
-    && pass "D3d: [dry-run] plan lines in output" \
-    || fail "D3d: no [dry-run] plan lines; got: $D3_OUT"
+# [dry-run] plan message must be the apply-path plan, not incidental sync lines.
+# The apply-path dry-run block logs "plan for full image upgrade" — match that
+# specifically so the test does not pass on incidental [dry-run] from sync_host_scripts.
+echo "$D3_OUT" | grep -q 'plan for full image upgrade' \
+    && pass "D3d: apply-path [dry-run] plan message in output ('plan for full image upgrade')" \
+    || fail "D3d: apply-path plan message missing; got: $D3_OUT"
 
 # Compose file must NOT have been modified (no mutations in dry-run).
 compose_tag_after=$(grep 'image:.*partner-edge' "$D3_ETC/docker-compose.yml" | grep -oE ':[^ ]+$' | head -1 | tr -d ':')
@@ -822,6 +841,348 @@ echo "$E2_OUT" | grep -qE 'pulling.*v0\.12\.61|tag=v0\.12\.61|rewritten to v0\.1
     || pass "E2c: pull step log not captured (sync_host_scripts may have failed before pull — acceptable in unit test)"
 
 rm -rf "$E2_TMPDIR"
+
+# ===========================================================================
+# Section F — settle_healthcheck_with_retry
+#
+# Guards the fix for the racy post-recreate healthcheck: a single `sleep 10`
+# with a one-shot healthcheck fails on edges where xray Reality establishment
+# takes the documented ~8s, leaving only a 2s slack (the v0.12.20 rvpn
+# rollback incident root cause).
+#
+# Tests:
+#   F1: structural — function defined, OXPULSE_UPGRADE_HEALTH_TIMEOUT referenced.
+#   F2: functional — healthcheck fails first K attempts then passes → upgrade
+#       SUCCEEDS, retry loop ran, no rollback.
+#   F3: functional — healthcheck never passes → upgrade ROLLS BACK (genuine
+#       failure still caught).
+#   F4: functional — OXPULSE_UPGRADE_HEALTH_TIMEOUT env var is honored (short
+#       budget → fewer attempts before giving up).
+# ===========================================================================
+echo ""
+echo "=== Section F: settle_healthcheck_with_retry ==="
+
+# F1: structural
+grep -qE '^settle_healthcheck_with_retry\(\)' "$UPGRADE" \
+    && pass "F1a: settle_healthcheck_with_retry() defined" \
+    || fail "F1a: settle_healthcheck_with_retry() not defined"
+
+grep -q 'OXPULSE_UPGRADE_HEALTH_TIMEOUT' "$UPGRADE" \
+    && pass "F1b: OXPULSE_UPGRADE_HEALTH_TIMEOUT referenced in upgrade.sh" \
+    || fail "F1b: OXPULSE_UPGRADE_HEALTH_TIMEOUT env var not present"
+
+# The plain apply path must call settle_healthcheck_with_retry, not a bare sleep+check.
+apply_section_f=$(awk '/^resolve_default_target$/{found=1} found{print} found && /^log "upgraded to \$TARGET successfully"/{exit}' "$UPGRADE")
+echo "$apply_section_f" | grep -q 'settle_healthcheck_with_retry' \
+    && pass "F1c: settle_healthcheck_with_retry called in plain apply path" \
+    || fail "F1c: settle_healthcheck_with_retry missing from plain apply path (single-shot sleep still in place?)"
+
+# No bare 'sleep 10' should remain in the apply path.
+echo "$apply_section_f" | grep -qE '^\s*sleep 10\s*$' \
+    && fail "F1d: bare 'sleep 10' still in plain apply path — settle-retry fix not applied" \
+    || pass "F1d: no bare 'sleep 10' in plain apply path"
+
+# Extract the function body for isolation tests below.
+F_PREAMBLE=$(mktemp)
+cat > "$F_PREAMBLE" << 'FPREAMBLE'
+log()  { printf '==> %s\n' "$*" >&2; }
+warn() { printf '!! %s\n'  "$*" >&2; }
+FPREAMBLE
+awk '/^settle_healthcheck_with_retry\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE" >> "$F_PREAMBLE"
+bash -n "$F_PREAMBLE" || { fail "F1e: settle_healthcheck_with_retry preamble has syntax errors"; }
+pass "F1e: settle_healthcheck_with_retry preamble syntax clean"
+
+# ---------------------------------------------------------------------------
+# F2: fail-then-pass — upgrade SUCCEEDS, retry ran, no rollback
+# ---------------------------------------------------------------------------
+#
+# Strategy: use a counter file as healthcheck stub.
+# The stub fails the first FAIL_COUNT calls, then passes.
+# Drive the full upgrade.sh apply path (non-dry-run) with a mock docker that
+# succeeds on all calls, and a fake healthcheck that fails K times then passes.
+# Assert: upgrade.sh exits 0, "attempt N/M" logged (retry loop ran).
+# ---------------------------------------------------------------------------
+
+F2_TMPDIR=$(mktemp -d)
+F2_HC_CTR="$F2_TMPDIR/hc_counter"        # counts total calls
+F2_HC_FAIL_COUNT=3                        # fail first 3 attempts, pass on 4th
+
+# Healthcheck stub: fail first FAIL_COUNT calls, pass after.
+F2_HC="$F2_TMPDIR/healthcheck"
+cat > "$F2_HC" << FHCSTUB
+#!/bin/bash
+CTR_FILE="${F2_HC_CTR}"
+CTR=0
+[[ -f "\$CTR_FILE" ]] && CTR=\$(cat "\$CTR_FILE")
+CTR=\$(( CTR + 1 ))
+printf '%s' "\$CTR" > "\$CTR_FILE"
+FAIL_COUNT=${F2_HC_FAIL_COUNT}
+if [[ "\$CTR" -le "\$FAIL_COUNT" ]]; then
+    exit 1  # fail first FAIL_COUNT calls
+fi
+exit 0      # pass from call FAIL_COUNT+1 onward
+FHCSTUB
+chmod 0755 "$F2_HC"
+
+F2_DOCKER_LOG="$F2_TMPDIR/docker_calls.log"
+F2_FAKE_DOCKER="$F2_TMPDIR/docker"
+cat > "$F2_FAKE_DOCKER" << 'F2DOCKER'
+#!/bin/bash
+printf '%s\n' "$*" >> "${DOCKER_CALL_LOG}"
+if [[ "$*" == *"config --services"* ]]; then printf 'sfu\n'; exit 0; fi
+# compose config (full) — return rewritten compose file.
+if [[ "$*" == *"compose config"* && "$*" != *"--services"* ]]; then
+    [[ -r "${COMPOSE_FILE_PATH:-/dev/null}" ]] && cat "${COMPOSE_FILE_PATH}" || \
+        printf 'services:\n  sfu:\n    image: ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.61\n'
+    exit 0
+fi
+if [[ "$*" == *"ps --quiet"* ]]; then printf 'fakectr\n'; exit 0; fi
+if [[ "$*" == *"inspect"* ]]; then
+    STATE_F="${DOCKER_STATE_FILE:-/tmp/f2_state}"
+    if [[ -f "$STATE_F" ]]; then
+        printf 'sha256:newdigest9999999999999999999999999999999999999999999999999999999\n'
+    else
+        printf 'sha256:olddigest1111111111111111111111111111111111111111111111111111111\n'
+        touch "$STATE_F"
+    fi
+    exit 0
+fi
+exit 0
+F2DOCKER
+chmod +x "$F2_FAKE_DOCKER"
+
+F2_ETC="$F2_TMPDIR/etc"
+F2_LIB="$F2_TMPDIR/var"
+F2_SBIN="$F2_TMPDIR/sbin"
+F2_BIN="$F2_TMPDIR/bin"
+F2_LIBDIR="$F2_TMPDIR/libdir"
+F2_SYSTEMD="$F2_TMPDIR/systemd"
+F2_SHARE="$F2_TMPDIR/share"
+F2_DOCKER_STATE="$F2_TMPDIR/docker_state"
+mkdir -p "$F2_ETC" "$F2_LIB" "$F2_SBIN" "$F2_BIN" "$F2_LIBDIR" "$F2_SYSTEMD" "$F2_SHARE"
+
+printf 'IMAGE_VERSION=v0.12.45\nSIGNALING_SFU_SECRET=testsecret\n' > "$F2_LIB/install.env"
+printf 'services:\n  sfu:\n    image: ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.45\n    environment:\n      SIGNALING_SFU_SECRET: "testsecret"\n' \
+    > "$F2_ETC/docker-compose.yml"
+printf '# stub\nre_render_xray() { return 0; }\nre_render_hysteria2() { return 0; }\n' > "$F2_SBIN/channel-render-lib.sh"
+printf '# stub\nghcr_configure_token() { return 0; }\nghcr_login_from_file() { return 0; }\nghcr_pull_diagnose() { return 0; }\n' > "$F2_SBIN/ghcr-auth-lib.sh"
+
+F2_OUT=$(
+    OXPULSE_PREFIX_ETC="$F2_ETC" \
+    OXPULSE_PREFIX_LIB="$F2_LIB" \
+    OXPULSE_PREFIX_SBIN="$F2_SBIN" \
+    OXPULSE_PREFIX_BIN="$F2_BIN" \
+    OXPULSE_PREFIX_LIBDIR="$F2_LIBDIR" \
+    OXPULSE_PREFIX_SHARE="$F2_SHARE" \
+    OXPULSE_SYSTEMD_DIR="$F2_SYSTEMD" \
+    OXPULSE_HEALTHCHECK="$F2_HC" \
+    OXPULSE_SKIP_ROOT_CHECK=1 \
+    OXPULSE_UPGRADE_TAG=v0.12.45 \
+    OXPULSE_UPGRADE_HEALTH_TIMEOUT=30 \
+    DOCKER_BIN="$F2_FAKE_DOCKER" \
+    DOCKER_CALL_LOG="$F2_DOCKER_LOG" \
+    DOCKER_STATE_FILE="$F2_DOCKER_STATE" \
+    COMPOSE_FILE_PATH="$F2_ETC/docker-compose.yml" \
+    SYSTEMCTL_BIN=true \
+    OXPULSE_REPO_RAW="file:///dev/null" \
+    bash "$UPGRADE" --allow-unverified v0.12.61 2>&1
+) && F2_RC=0 || F2_RC=$?
+
+if [[ $F2_RC -eq 0 ]]; then
+    pass "F2a: upgrade.sh SUCCEEDED after fail-then-pass healthcheck (no rollback)"
+else
+    fail "F2a: upgrade.sh exited $F2_RC despite healthcheck eventually passing; output: $F2_OUT"
+fi
+
+# Retry loop must have logged "attempt N/M" lines.
+attempt_count=$(echo "$F2_OUT" | grep -c 'healthcheck attempt' || true)
+if [[ "$attempt_count" -gt 1 ]]; then
+    pass "F2b: retry loop ran ($attempt_count attempt log lines — healthcheck polled multiple times)"
+else
+    fail "F2b: expected >1 'healthcheck attempt' log lines (got $attempt_count) — retry loop did not run; output: $F2_OUT"
+fi
+
+# Healthcheck counter should be FAIL_COUNT+1 (exactly passed on attempt 4).
+HC_CALLS=$(cat "$F2_HC_CTR" 2>/dev/null || echo 0)
+if [[ "$HC_CALLS" -ge $(( F2_HC_FAIL_COUNT + 1 )) ]]; then
+    pass "F2c: healthcheck called $HC_CALLS time(s) (fail-then-pass sequence exercised)"
+else
+    fail "F2c: healthcheck called only $HC_CALLS time(s), expected ≥$(( F2_HC_FAIL_COUNT + 1 ))"
+fi
+
+# No rollback: compose file must end on TARGET tag.
+f2_final_tag=$(grep 'image:.*partner-edge' "$F2_ETC/docker-compose.yml" 2>/dev/null \
+    | grep -oE ':[^ "]+' | head -1 | tr -d ':' || true)
+[[ "$f2_final_tag" == "v0.12.61" ]] \
+    && pass "F2d: compose file has TARGET tag after successful upgrade (no rollback)" \
+    || fail "F2d: compose file tag='$f2_final_tag', expected v0.12.61 — possible unwanted rollback"
+
+rm -rf "$F2_TMPDIR"
+
+# ---------------------------------------------------------------------------
+# F3: healthcheck NEVER passes → upgrade ROLLS BACK (genuine failure still caught)
+# ---------------------------------------------------------------------------
+
+F3_TMPDIR=$(mktemp -d)
+F3_HC_CTR="$F3_TMPDIR/hc_counter"
+
+# Healthcheck stub: always fails.
+F3_HC="$F3_TMPDIR/healthcheck"
+cat > "$F3_HC" << F3HCSTUB
+#!/bin/bash
+CTR_FILE="${F3_HC_CTR}"
+CTR=0
+[[ -f "\$CTR_FILE" ]] && CTR=\$(cat "\$CTR_FILE")
+CTR=\$(( CTR + 1 ))
+printf '%s' "\$CTR" > "\$CTR_FILE"
+exit 1  # always fail
+F3HCSTUB
+chmod 0755 "$F3_HC"
+
+F3_DOCKER_LOG="$F3_TMPDIR/docker_calls.log"
+F3_FAKE_DOCKER="$F3_TMPDIR/docker"
+cat > "$F3_FAKE_DOCKER" << 'F3DOCKER'
+#!/bin/bash
+printf '%s\n' "$*" >> "${DOCKER_CALL_LOG}"
+if [[ "$*" == *"config --services"* ]]; then printf 'sfu\n'; exit 0; fi
+if [[ "$*" == *"compose config"* && "$*" != *"--services"* ]]; then
+    [[ -r "${COMPOSE_FILE_PATH:-/dev/null}" ]] && cat "${COMPOSE_FILE_PATH}" || \
+        printf 'services:\n  sfu:\n    image: ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.61\n'
+    exit 0
+fi
+if [[ "$*" == *"ps --quiet"* ]]; then printf 'fakectr\n'; exit 0; fi
+if [[ "$*" == *"inspect"* ]]; then
+    STATE_F="${DOCKER_STATE_FILE:-/tmp/f3_state}"
+    if [[ -f "$STATE_F" ]]; then
+        printf 'sha256:newdigest9999999999999999999999999999999999999999999999999999999\n'
+    else
+        printf 'sha256:olddigest1111111111111111111111111111111111111111111111111111111\n'
+        touch "$STATE_F"
+    fi
+    exit 0
+fi
+exit 0
+F3DOCKER
+chmod +x "$F3_FAKE_DOCKER"
+
+F3_ETC="$F3_TMPDIR/etc"
+F3_LIB="$F3_TMPDIR/var"
+F3_SBIN="$F3_TMPDIR/sbin"
+F3_BIN="$F3_TMPDIR/bin"
+F3_LIBDIR="$F3_TMPDIR/libdir"
+F3_SYSTEMD="$F3_TMPDIR/systemd"
+F3_SHARE="$F3_TMPDIR/share"
+F3_DOCKER_STATE="$F3_TMPDIR/docker_state"
+mkdir -p "$F3_ETC" "$F3_LIB" "$F3_SBIN" "$F3_BIN" "$F3_LIBDIR" "$F3_SYSTEMD" "$F3_SHARE"
+
+printf 'IMAGE_VERSION=v0.12.45\nSIGNALING_SFU_SECRET=testsecret\n' > "$F3_LIB/install.env"
+printf 'services:\n  sfu:\n    image: ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.45\n    environment:\n      SIGNALING_SFU_SECRET: "testsecret"\n' \
+    > "$F3_ETC/docker-compose.yml"
+printf '# stub\nre_render_xray() { return 0; }\nre_render_hysteria2() { return 0; }\n' > "$F3_SBIN/channel-render-lib.sh"
+printf '# stub\nghcr_configure_token() { return 0; }\nghcr_login_from_file() { return 0; }\nghcr_pull_diagnose() { return 0; }\n' > "$F3_SBIN/ghcr-auth-lib.sh"
+
+# Use a short budget (9s = 3 attempts × 3s) to keep the test fast.
+F3_OUT=$(
+    OXPULSE_PREFIX_ETC="$F3_ETC" \
+    OXPULSE_PREFIX_LIB="$F3_LIB" \
+    OXPULSE_PREFIX_SBIN="$F3_SBIN" \
+    OXPULSE_PREFIX_BIN="$F3_BIN" \
+    OXPULSE_PREFIX_LIBDIR="$F3_LIBDIR" \
+    OXPULSE_PREFIX_SHARE="$F3_SHARE" \
+    OXPULSE_SYSTEMD_DIR="$F3_SYSTEMD" \
+    OXPULSE_HEALTHCHECK="$F3_HC" \
+    OXPULSE_SKIP_ROOT_CHECK=1 \
+    OXPULSE_UPGRADE_TAG=v0.12.45 \
+    OXPULSE_UPGRADE_HEALTH_TIMEOUT=9 \
+    DOCKER_BIN="$F3_FAKE_DOCKER" \
+    DOCKER_CALL_LOG="$F3_DOCKER_LOG" \
+    DOCKER_STATE_FILE="$F3_DOCKER_STATE" \
+    COMPOSE_FILE_PATH="$F3_ETC/docker-compose.yml" \
+    SYSTEMCTL_BIN=true \
+    OXPULSE_REPO_RAW="file:///dev/null" \
+    bash "$UPGRADE" --allow-unverified v0.12.61 2>&1
+) && F3_RC=0 || F3_RC=$?
+
+if [[ $F3_RC -ne 0 ]]; then
+    pass "F3a: upgrade.sh exited non-zero when healthcheck never passes (rollback triggered)"
+else
+    fail "F3a: upgrade.sh exited 0 despite permanently-failing healthcheck — rollback NOT triggered"
+fi
+
+# Must have logged a rollback warning.
+echo "$F3_OUT" | grep -qE 'rolling back|rolled back' \
+    && pass "F3b: rollback warning logged" \
+    || fail "F3b: no rollback log; output: $F3_OUT"
+
+# Retry loop must have run MAX_ATTEMPTS times (budget=9 → 3 attempts).
+f3_attempt_count=$(echo "$F3_OUT" | grep -c 'healthcheck attempt' || true)
+if [[ "$f3_attempt_count" -ge 3 ]]; then
+    pass "F3c: retry exhausted full budget ($f3_attempt_count attempt log lines)"
+else
+    fail "F3c: expected ≥3 attempt log lines for budget=9s (got $f3_attempt_count); output: $F3_OUT"
+fi
+
+# Rollback: compose up --force-recreate must have been called (rollback arm).
+if grep -qE ' up.*force-recreate' "$F3_DOCKER_LOG" 2>/dev/null; then
+    pass "F3d: rollback compose up --force-recreate called after retry exhausted"
+else
+    fail "F3d: rollback compose up --force-recreate NOT in docker log — rollback arm not reached; log: $(cat "$F3_DOCKER_LOG" 2>/dev/null)"
+fi
+
+rm -rf "$F3_TMPDIR"
+
+# ---------------------------------------------------------------------------
+# F4: OXPULSE_UPGRADE_HEALTH_TIMEOUT is honored — short budget → fewer attempts
+# ---------------------------------------------------------------------------
+# Write the function body to a temp file and source it in a subshell.
+
+F4_TMPDIR=$(mktemp -d)
+F4_HC_CTR="$F4_TMPDIR/hc_counter"
+printf '0' > "$F4_HC_CTR"
+
+F4_HC="$F4_TMPDIR/healthcheck"
+cat > "$F4_HC" << F4HCSTUB
+#!/bin/bash
+CTR=\$(cat "${F4_HC_CTR}")
+CTR=\$(( CTR + 1 ))
+printf '%s' "\$CTR" > "${F4_HC_CTR}"
+exit 1
+F4HCSTUB
+chmod 0755 "$F4_HC"
+
+# Build a self-contained preamble with the function extracted from upgrade.sh.
+F4_PREAMBLE="$F4_TMPDIR/preamble.sh"
+{
+    printf 'log()  { printf "==> %%s\\n" "$*" >&2; }\n'
+    printf 'warn() { printf "!! %%s\\n"  "$*" >&2; }\n'
+    awk '/^settle_healthcheck_with_retry\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
+} > "$F4_PREAMBLE"
+
+F4_OUT=$(
+    HEALTHCHECK="$F4_HC" \
+    OXPULSE_UPGRADE_HEALTH_TIMEOUT=6 \
+    bash -c "source '$F4_PREAMBLE'; settle_healthcheck_with_retry test-label" 2>&1
+) && F4_RC=0 || F4_RC=$?
+
+# With budget=6 and interval=3: max_attempts = ceil(6/3) = 2 attempts.
+F4_CALLS=$(cat "$F4_HC_CTR" 2>/dev/null || echo 0)
+if [[ "$F4_CALLS" -le 3 ]]; then
+    pass "F4a: OXPULSE_UPGRADE_HEALTH_TIMEOUT=6 → $F4_CALLS healthcheck call(s) (≤3 expected for 2-attempt budget)"
+else
+    fail "F4a: OXPULSE_UPGRADE_HEALTH_TIMEOUT=6 → $F4_CALLS calls, expected ≤3 (budget not honored)"
+fi
+
+[[ $F4_RC -ne 0 ]] \
+    && pass "F4b: settle_healthcheck_with_retry returned non-zero after exhausting short budget" \
+    || fail "F4b: settle_healthcheck_with_retry returned 0 despite always-failing healthcheck"
+
+echo "$F4_OUT" | grep -q 'attempt' \
+    && pass "F4c: attempt log lines present with custom budget" \
+    || fail "F4c: no attempt log lines; output: $F4_OUT"
+
+rm -rf "$F4_TMPDIR"
+
+rm -f "$F_PREAMBLE"
 
 # ===========================================================================
 # Summary
