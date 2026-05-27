@@ -5,6 +5,19 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.56](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.55...partner-edge-v0.12.56) (2026-05-26)
+
+
+### Features
+
+* **health:** add ch4 coturn TURN-allocate probe to channels-health reporter ([#253](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/253)) ([7ee7c59](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7ee7c5999e5054443e0623b5ddde0db256cae26b))
+
+
+### Bug Fixes
+
+* **installer:** channel-health reporter → api.oxpulse.chat (RCA 2026-05-26 heartbeat outage) ([8ae7866](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/8ae78663c3f8b8a6d91ae68a9347bd4b63e112a1))
+* **installer:** channel-health reporter must target api.oxpulse.chat, not oxpulse.chat ([516f138](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/516f138b8b901e72143fceef7005233c6429d748))
+
 ## [0.12.55](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.54...partner-edge-v0.12.55) (2026-05-26)
 
 
