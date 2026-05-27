@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.61](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.60...v0.12.61) (2026-05-27)
+
+
+### Features
+
+* **sfu:** multi-hub relay failover (B0) ([#266](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/266)) ([836fa30](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/836fa30d139640dcda8aec57a69edead7e943201))
+
 ## [0.12.60](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.59...v0.12.60) (2026-05-27)
 
 
