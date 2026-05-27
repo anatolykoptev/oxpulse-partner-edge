@@ -13,7 +13,7 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 pub struct RelayJwt {
     /// Claim: room ID being relayed.
     pub room_id: String,
-    /// Claim: WebSocket URL of the upstream SFU room endpoint.
+    /// Claim: WebSocket URL of the upstream SFU room endpoint (primary / legacy single-hub).
     pub upstream_url: String,
     /// Claim: Room token for the upstream SFU join.
     pub upstream_room_token: String,
@@ -23,6 +23,14 @@ pub struct RelayJwt {
     pub exp: u64,
     /// Claim: JWT ID for replay prevention.
     pub jti: String,
+    /// B0: Ordered list of upstream hub WebSocket URLs to try in sequence.
+    ///
+    /// When present and non-empty, the edge attempts each candidate in order
+    /// until one connects, providing failover if a hub is dark.  When absent
+    /// (tokens from central before B0), `#[serde(default)]` yields an empty Vec
+    /// and the edge falls back to the single `upstream_url` — fully back-compat.
+    #[serde(default)]
+    pub upstream_candidates: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -45,7 +53,8 @@ impl RelayJwt {
         let key = DecodingKey::from_secret(secret);
         let mut validation = Validation::new(Algorithm::HS256);
         validation.validate_exp = true;
-        // We validate jti ourselves in the handler; don't require it as a spec claim.
+        validation.leeway = 0; // SEC-CR-201: match the replay-cache GC (evicts at exp) and verify_ed25519 -- no replay window past exp
+                               // We validate jti ourselves in the handler; don't require it as a spec claim.
         validation.required_spec_claims = std::collections::HashSet::new();
 
         let claims = decode::<RelayJwt>(token, &key, &validation)
@@ -119,6 +128,7 @@ mod tests {
             iat: now,
             exp: now + 300,
             jti: "test-jti".to_string(),
+            upstream_candidates: vec![],
         }
     }
 
@@ -131,6 +141,7 @@ mod tests {
             iat: now - 600,
             exp: now - 300,
             jti: "test-jti-exp".to_string(),
+            upstream_candidates: vec![],
         }
     }
 
@@ -179,6 +190,7 @@ mod tests {
             jti: "j".to_string(),
             iat: now_unix_secs() + 600, // 10 minutes in the future
             exp: now_unix_secs() + 660,
+            upstream_candidates: vec![],
         };
         let token = jwt.sign(b"s").unwrap();
         assert!(matches!(
@@ -202,6 +214,31 @@ mod tests {
             RelayJwt::verify(&tampered, b"s"),
             Err(RelayJwtError::InvalidSignature | RelayJwtError::Malformed)
         ));
+    }
+
+    /// SEC-CR-201: HS256 verify() must reject tokens expired by even 5 seconds.
+    /// Before the fix (leeway=0), jsonwebtoken v10.4.0 default 60s leeway accepted
+    /// tokens in [exp, exp+60s] — exactly the window after the replay-cache GC evicts
+    /// the jti. This test proves the fix closes that window.
+    #[test]
+    fn verify_hs256_rejects_just_expired_token_no_leeway() {
+        let secret = b"test-secret-at-least-32-bytes-long-x";
+        let now = now_unix_secs();
+        let jwt = RelayJwt {
+            jti: "leeway-test".to_string(),
+            room_id: "r".to_string(),
+            upstream_url: "ws://10.9.0.2:8907/ws/call/r".to_string(),
+            upstream_room_token: "t".to_string(),
+            upstream_candidates: vec![],
+            iat: now.saturating_sub(120),
+            exp: now.saturating_sub(5), // expired 5s ago — within OLD 60s leeway, must now be REJECTED
+        };
+        let token = jwt.sign(secret).expect("sign");
+        let res = RelayJwt::verify(&token, secret);
+        assert!(
+            res.is_err(),
+            "expired HS256 token must be rejected with leeway=0 (was accepted within default 60s leeway)"
+        );
     }
     // --- Ed25519 (EdDSA) test helpers ---
 
@@ -234,6 +271,7 @@ mod tests {
             iat,
             exp,
             jti: "ed-test-jti".to_string(),
+            upstream_candidates: vec![],
         }
     }
 
@@ -279,11 +317,50 @@ mod tests {
             jti: "j".to_string(),
             iat: now_unix_secs() + 600,
             exp: now_unix_secs() + 660,
+            upstream_candidates: vec![],
         };
         let token = sign_ed25519_for_test(&jwt, &priv_pem);
         assert!(matches!(
             RelayJwt::verify_ed25519(&token, &pub_pem),
             Err(RelayJwtError::Malformed)
         ));
+    }
+}
+
+#[cfg(test)]
+mod b0_candidates_tests {
+    use super::*;
+
+    // Build a minimal RelayJwt JSON string WITHOUT the upstream_candidates field.
+    // After the field is added with #[serde(default)], this must deserialise to an
+    // empty Vec (back-compat guarantee — central tokens from before B0 remain valid).
+    #[test]
+    fn upstream_candidates_defaults_to_empty_vec_when_absent() {
+        let now = now_unix_secs();
+        let json = format!(
+            r#"{{"room_id":"r","upstream_url":"ws://10.9.0.2:8907/ws","upstream_room_token":"tok","iat":{now},"exp":{},"jti":"j"}}"#,
+            now + 300
+        );
+        let jwt: RelayJwt = serde_json::from_str(&json).expect("must deserialise");
+        assert!(
+            jwt.upstream_candidates.is_empty(),
+            "absent upstream_candidates must deserialise to empty Vec, got {:?}",
+            jwt.upstream_candidates
+        );
+    }
+
+    // A token WITH the field must populate the Vec correctly.
+    #[test]
+    fn upstream_candidates_populated_when_present() {
+        let now = now_unix_secs();
+        let json = format!(
+            r#"{{"room_id":"r","upstream_url":"ws://10.9.0.2:8907/ws","upstream_room_token":"tok","iat":{now},"exp":{},"jti":"j","upstream_candidates":["ws://10.9.0.2:8907/ws","ws://10.9.0.3:8907/ws"]}}"#,
+            now + 300
+        );
+        let jwt: RelayJwt = serde_json::from_str(&json).expect("must deserialise");
+        assert_eq!(
+            jwt.upstream_candidates,
+            vec!["ws://10.9.0.2:8907/ws", "ws://10.9.0.3:8907/ws"]
+        );
     }
 }
