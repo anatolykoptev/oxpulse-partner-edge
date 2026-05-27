@@ -24,6 +24,13 @@
 #   oxpulse-partner-edge-upgrade --ghcr-token=ghp_xxx  # persist GHCR PAT before pull (one-time)
 #   oxpulse-partner-edge-upgrade --dry-run             # print plan, skip docker and file writes
 #   oxpulse-partner-edge-upgrade --dry-run --skip-check=1,3  # skip specific conflict checks (1-8)
+#   oxpulse-partner-edge-upgrade --allow-unverified    # skip SHA256SUMS check (dev/test only, NEVER on relay)
+#
+# Tag-form note: starting with v0.12.60, git tags, GitHub release tags, and GHCR
+# image tags ALL use the same vX.Y.Z form — no component prefix. release-please-config.json
+# has no "component" key, so release-please no longer prepends "partner-edge-".
+# Releases ≤v0.12.59 used partner-edge-vX.Y.Z; upgrade.sh handles that old form
+# gracefully via normalize_target() so edges mid-flight are not broken.
 #
 # --dry-run conflict checks (--with-templates only):
 #   1 [CATASTROPHIC] Caddyfile validates against currently-running image
@@ -58,10 +65,10 @@ PREV_HEALTHCHECK="$PREFIX_LIB/healthcheck.prev"
 # Directory where pre-upgrade host-script snapshots are stored for rollback.
 PREV_HOST_SCRIPTS_DIR="$PREFIX_LIB/host-scripts.prev"
 HEALTHCHECK="${OXPULSE_HEALTHCHECK:-/usr/local/sbin/oxpulse-partner-edge-healthcheck}"
-# @RELEASE_TAG@ is substituted by release.yml at publish time (same mechanism as
-# install.sh) so REPO_RAW fetches are pinned to the exact release tag, not main HEAD.
-# Without this pin the bytes fetched from raw.githubusercontent.com do not match the
-# SHA256SUMS released for that tag (main is always ahead of any tag).
+# @RELEASE_TAG@ is substituted by release.yml at publish time to the release tag
+# (vX.Y.Z starting at v0.12.60) so REPO_RAW fetches are pinned to the exact release
+# ref, not main HEAD. Without this pin the bytes fetched from raw.githubusercontent.com
+# do not match the SHA256SUMS released for that tag (main is always ahead of any tag).
 # Tests and operator overrides can still use OXPULSE_REPO_RAW to point at a fixture.
 OXPULSE_UPGRADE_TAG="${OXPULSE_UPGRADE_TAG:-@RELEASE_TAG@}"
 # Initialize OXPULSE_MIRROR_BASE to empty string so the strip at line 92 and
@@ -122,6 +129,7 @@ elif [[ -n "${OXPULSE_MIRROR_BASE:-}" ]]; then
 else
     RELEASES_BASE="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/download"
 fi
+# shellcheck disable=SC2034  # used by channel-render-lib.sh (sourced via _source_lib)
 NODE_CFG="$PREFIX_ETC/node-config.json"
 XRAY_CFG="$PREFIX_ETC/xray-client.json"
 # Allow tests to override docker binary (e.g. DOCKER_BIN=true for dry-run).
@@ -133,36 +141,58 @@ log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
 
+# _source_lib NAME LOCAL_PATH INSTALLED_PATH REPO_RAW_PATH — source a shared library.
+# Resolution order:
+#   1. Adjacent to upgrade.sh (local checkout / same-dir download)
+#   2. Installed sbin path (/usr/local/sbin/<name>)
+#   3. Fetch from REPO_RAW (standalone upgrade.sh downloaded without adjacent libs)
+# Tier 3 requires curl and a reachable REPO_RAW.  Fetched file is written to a
+# temp dir and sourced from there; it is NOT installed to disk (sync_host_scripts
+# handles the verified install later in the run).
+# Note: when OXPULSE_UPGRADE_TAG is the real tag (not the @RELEASE_TAG@ sentinel),
+# REPO_RAW already points at the pinned release ref — fetched bytes match the
+# tag snapshot, not main HEAD.
+_source_lib() {
+    local name="$1" local_path="$2" installed_path="$3" raw_path="$4"
+    if [[ -f "$local_path" ]]; then
+        # shellcheck source=/dev/null
+        source "$local_path"
+        return 0
+    elif [[ -f "$installed_path" ]]; then
+        # shellcheck source=/dev/null
+        source "$installed_path"
+        return 0
+    fi
+    # Tier 3: fetch from REPO_RAW for standalone operator-download runs.
+    local _fetch_tmp
+    _fetch_tmp=$(mktemp "/tmp/oxpulse-lib-${name}-XXXXXX.sh")
+    # shellcheck disable=SC2064
+    trap "rm -f '$_fetch_tmp'" RETURN
+    if curl -fsSL --max-time 30 "$raw_path" -o "$_fetch_tmp" 2>/dev/null; then
+        warn "$name not found locally; fetched from $raw_path (standalone run)"
+        warn "For verified install run 'oxpulse-partner-edge-upgrade' after the sync completes"
+        # shellcheck source=/dev/null
+        source "$_fetch_tmp"
+        return 0
+    fi
+    die "$name not found (tried: $local_path, $installed_path, $raw_path).
+On a standalone upgrade.sh download ensure network access to REPO_RAW or stage
+the lib files adjacent to upgrade.sh."
+}
+
 # Source shared channel render functions (re_render_xray, future re_render_awg, etc.)
-# Prefer local checkout copy; fall back to installed sbin path.
-_lib_local="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/channel-render-lib.sh"
-_lib_installed="/usr/local/sbin/channel-render-lib.sh"
-if [[ -f "$_lib_local" ]]; then
-    # shellcheck source=channel-render-lib.sh
-    source "$_lib_local"
-elif [[ -f "$_lib_installed" ]]; then
-    # shellcheck source=/dev/null
-    source "$_lib_installed"
-else
-    die "channel-render-lib.sh not found (tried: $_lib_local and $_lib_installed)"
-fi
-unset _lib_local _lib_installed
+# shellcheck source=channel-render-lib.sh
+_source_lib "channel-render-lib.sh" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/channel-render-lib.sh" \
+    "${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh" \
+    "$REPO_RAW/channel-render-lib.sh"
 
 # Source ghcr auth helpers (ghcr_save_token / ghcr_login_from_file /
-# ghcr_pull_diagnose / ghcr_configure_token). Same lookup pattern as
-# channel-render-lib.sh.
-_ghcr_local="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/ghcr-auth-lib.sh"
-_ghcr_installed="/usr/local/sbin/ghcr-auth-lib.sh"
-if [[ -f "$_ghcr_local" ]]; then
-    # shellcheck source=ghcr-auth-lib.sh
-    source "$_ghcr_local"
-elif [[ -f "$_ghcr_installed" ]]; then
-    # shellcheck source=/dev/null
-    source "$_ghcr_installed"
-else
-    die "ghcr-auth-lib.sh not found (tried: $_ghcr_local and $_ghcr_installed)"
-fi
-unset _ghcr_local _ghcr_installed
+# ghcr_pull_diagnose / ghcr_configure_token).
+_source_lib "ghcr-auth-lib.sh" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/ghcr-auth-lib.sh" \
+    "${PREFIX_SBIN:-/usr/local/sbin}/ghcr-auth-lib.sh" \
+    "$REPO_RAW/ghcr-auth-lib.sh"
 
 [[ $EUID -eq 0 || "${OXPULSE_SKIP_ROOT_CHECK:-0}" == "1" ]] || die "must run as root"
 [[ -r "$COMPOSE_FILE" ]] || die "no installed bundle at $COMPOSE_FILE"
@@ -214,6 +244,7 @@ MODE=apply
 TARGET=""
 DRY_RUN=0
 SKIPPED_CHECKS=""
+ALLOW_UNVERIFIED=0
 # GHCR PAT supplied via --ghcr-token=ghp_xxx flag OR OXPULSE_GHCR_TOKEN env.
 # Flag wins over env. Empty string disables the auth path (anonymous pull).
 GHCR_TOKEN_ARG="${OXPULSE_GHCR_TOKEN:-}"
@@ -225,6 +256,7 @@ for arg in "$@"; do
 		--with-templates)     MODE=with_templates ;;
 		--host-scripts-only)  MODE=host_scripts_only ;;
 		--dry-run)            DRY_RUN=1 ;;
+		--allow-unverified)   ALLOW_UNVERIFIED=1 ;;
 		--skip-check=*)
 			_sc=" ${arg#--skip-check=} "
 			SKIPPED_CHECKS="${_sc//,/ }"
@@ -268,6 +300,37 @@ resolve_default_target() {
 	warn "TARGET unspecified and VERSION file missing — defaulting to 'latest' (floating tag, not recommended)"
 	TARGET=latest
 }
+
+# Helper: normalize_target handles the tag-form transition.
+#
+# Starting with v0.12.60, git/release/image tags are ALL vX.Y.Z — one form,
+# no component prefix.  release-please-config.json has no "component" key.
+#
+# Edges running a pre-v0.12.60 installer may call upgrade.sh with an old-form
+# target (partner-edge-vX.Y.Z).  Strip the prefix so those edges can upgrade
+# cleanly to the new tag format without operator intervention.
+#
+# Resolution order:
+#   partner-edge-vX.Y.Z → strip prefix → vX.Y.Z (transition: old-form input)
+#   vX.Y.Z              → unchanged             (canonical new form)
+#   latest              → unchanged             (floating; SHA256SUMS guard skipped)
+#
+# Sets RELEASE_TAG = TARGET (same value; no dual forms post-v0.12.60).
+# Always called after resolve_default_target.
+normalize_target() {
+	case "$TARGET" in
+		partner-edge-v*)
+			# Transition: old-form input from pre-v0.12.60 installer. Strip prefix.
+			TARGET="${TARGET#partner-edge-}"
+			warn "old tag form detected — treating as $TARGET (releases ≥v0.12.60 use vX.Y.Z)"
+			;;
+	esac
+	# One-form world: RELEASE_TAG = TARGET (git tag = image tag = release tag).
+	RELEASE_TAG="$TARGET"
+}
+
+# Alias kept for callers that still use the old name (host-scripts-only path etc.)
+derive_release_tag() { normalize_target; }
 
 # Skip for read-only modes: --dry-run and --check never mutate state.
 if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
@@ -764,7 +827,9 @@ sync_host_scripts() {
 	# ------------------------------------------------------------------
 	# Step 1: fetch SHA256SUMS from the GitHub release for checksum guard.
 	# The release asset name is "SHA256SUMS" (as built by release.yml).
-	# Map sbin filenames → asset names used in SHA256SUMS.
+	# $tag is the release tag (vX.Y.Z starting at v0.12.60, or the caller-
+	# supplied tag for pre-v0.12.60 edges that were normalized by normalize_target).
+	# GitHub release URL: .../releases/download/vX.Y.Z/SHA256SUMS.
 	# ------------------------------------------------------------------
 	local sha256sums_url sha256sums_file sha256sums_ok=0
 	if [[ "$tag" != "latest" ]]; then
@@ -774,7 +839,24 @@ sync_host_scripts() {
 			sha256sums_ok=1
 			log "fetched SHA256SUMS for $tag"
 		else
-			warn "could not fetch SHA256SUMS from $sha256sums_url — proceeding without checksum guard"
+			# FAIL-LOUD: a pinned-tag relay upgrade MUST NOT install unverified scripts.
+			# SHA256SUMS 404 means wrong tag form, network failure, or missing release asset —
+			# all of which indicate a configuration/supply-chain problem that must not be
+			# papered over with a silent "proceed without checksum guard".
+			# Use --allow-unverified only for developer/test runs where the release does not
+			# exist yet.
+			if [[ "${ALLOW_UNVERIFIED:-0}" -eq 1 ]]; then
+				warn "could not fetch SHA256SUMS from $sha256sums_url — proceeding WITHOUT checksum guard (--allow-unverified)"
+			else
+				die "could not fetch SHA256SUMS from $sha256sums_url
+Supply-chain integrity check FAILED for pinned tag $tag.
+Possible causes:
+  • Network/mirror unreachable
+  • Release $tag does not exist on GitHub (releases ≥v0.12.60 use vX.Y.Z, earlier used partner-edge-vX.Y.Z)
+  • Old-form tag passed: if you meant partner-edge-$tag, it was normalized to $tag automatically
+If this is a dev/test run against a local fixture, re-run with --allow-unverified.
+Aborting: host-scripts NOT installed (no unverified installs on relay)."
+			fi
 		fi
 	else
 		warn "target is 'latest' — SHA256SUMS not available from a floating tag; skipping checksum guard"
@@ -1131,15 +1213,16 @@ fi
 # edges where the container image is pinned and must not be disturbed.
 if [[ "$MODE" == host_scripts_only ]]; then
 	resolve_default_target
-	log "--host-scripts-only: syncing host-scripts to $TARGET (containers untouched)"
+	derive_release_tag
+	log "--host-scripts-only: syncing host-scripts to $RELEASE_TAG (containers untouched)"
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "[dry-run] would call sync_host_scripts $TARGET"
+		log "[dry-run] would call sync_host_scripts $RELEASE_TAG"
 		log "[dry-run] would restart: ${_HOST_SCRIPT_RESTART_UNITS[*]}"
 		log "[dry-run] image pull and container recreate: not performed (--host-scripts-only)"
 		exit 0
 	fi
-	sync_host_scripts "$TARGET"
-	log "--host-scripts-only complete (tag=$TARGET); no image pull or container recreate"
+	sync_host_scripts "$RELEASE_TAG"
+	log "--host-scripts-only complete (release_tag=$RELEASE_TAG target=$TARGET); no image pull or container recreate"
 	exit 0
 fi
 
@@ -1566,7 +1649,8 @@ run_conflict_checks() {
 # ---- --with-templates mode ----
 if [[ "$MODE" == with_templates ]]; then
 	resolve_default_target
-	log "--with-templates: atomic Caddyfile + healthcheck + image upgrade (target=$TARGET)"
+	derive_release_tag
+	log "--with-templates: atomic Caddyfile + healthcheck + image upgrade (target=$TARGET release_tag=$RELEASE_TAG)"
 
 	if [[ "$DRY_RUN" -eq 1 ]]; then
 		log "[dry-run] plan:"
@@ -1642,9 +1726,9 @@ if [[ "$MODE" == with_templates ]]; then
 		"$COMPOSE_FILE"
 	sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 
-	# Step 5: sync host-scripts for the target tag (health-report, sbin libs, units).
-	log "syncing host-scripts to $TARGET"
-	sync_host_scripts "$TARGET"
+	# Step 5: sync host-scripts for the release tag (health-report, sbin libs, units).
+	log "syncing host-scripts to $RELEASE_TAG (image tag=$TARGET)"
+	sync_host_scripts "$RELEASE_TAG"
 
 	# Step 6: pull new images (with per-service digest capture for zero-downtime recreate).
 	ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
@@ -1696,7 +1780,8 @@ if [[ "$MODE" == with_templates ]]; then
 fi
 
 resolve_default_target
-log "current=$CURRENT target=$TARGET"
+derive_release_tag
+log "current=$CURRENT target=$TARGET release_tag=$RELEASE_TAG"
 
 if [[ "$CURRENT" == "$TARGET" && "$MODE" != rollback ]]; then
 	log "already on $TARGET — nothing to do"
@@ -1717,11 +1802,12 @@ sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${T
 	"$COMPOSE_FILE"
 sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 
-# Sync host-scripts for the target tag before pulling images so that a
+# Sync host-scripts for the release tag before pulling images so that a
 # failed image pull leaves the host-scripts already at the new version —
 # rollback restores both atomically from the snapshot taken above.
-log "syncing host-scripts to $TARGET"
-sync_host_scripts "$TARGET"
+# RELEASE_TAG = TARGET = vX.Y.Z (single tag form starting at v0.12.60).
+log "syncing host-scripts to $RELEASE_TAG (image tag=$TARGET)"
+sync_host_scripts "$RELEASE_TAG"
 
 # Refresh ghcr auth from stored token (no-op if file absent).
 ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
