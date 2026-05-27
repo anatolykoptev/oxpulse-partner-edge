@@ -312,6 +312,9 @@ EXPECTED_SBIN_FILES=(
 	channel-render-lib.sh
 	render-channel-lib.sh
 	oxpulse-token-lib.sh
+	# CL-2: split-routing scripts (suffixless executables — matches sbin convention)
+	oxpulse-partner-edge-split-routing
+	oxpulse-partner-edge-split-disable
 )
 
 # Scan PREFIX_SBIN for oxpulse-* files not in EXPECTED_SBIN_FILES.
