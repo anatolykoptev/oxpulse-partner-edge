@@ -258,4 +258,25 @@ mod tests {
         assert!(!is_allowed_upstream("wss://attacker.com/ssrf"));
         assert!(!is_allowed_upstream("ws://8.8.8.8/x"));
     }
+
+    // Refused-port Err test: proves connect_relay returns Err quickly when TCP is refused.
+    // Validates the Err->next-candidate path in the timeout wrapper (GREEN after impl).
+    // A true elapsed-timeout test (TCP accept but hang WS) needs a live mesh; deploy-verified.
+    // wss://127.0.0.1 is allow-listed (see accepts_localhost_dev in handler tests).
+    #[tokio::test]
+    async fn connect_relay_refused_port_returns_err_quickly() {
+        let addr: std::net::SocketAddr = "127.0.0.1:12345".parse().expect("parse addr");
+        let result = connect_relay(
+            "wss://127.0.0.1:1/ws/call/r",
+            "test-token",
+            addr,
+            "test-room".to_string(),
+            0,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "connect_relay must Err on refused port, got Ok"
+        );
+    }
 }
