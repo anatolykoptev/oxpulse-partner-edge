@@ -38,6 +38,25 @@ pub fn spawn_relay_api(
     Ok(handle)
 }
 
+/// B0: Build an allow-list-filtered, ordered candidate list from a verified JWT.
+///
+/// When `jwt.upstream_candidates` is non-empty, use it (B0 path — signed ordered
+/// list from central).  When empty, fall back to the single `jwt.upstream_url`
+/// (pre-B0 / legacy path — back-compat guaranteed by `#[serde(default)]`).
+/// Every URL is individually checked against the allow-list; disallowed entries
+/// are silently dropped.  An empty return means no candidate survived and the
+/// handler MUST reject the request.
+pub(crate) fn select_candidates(jwt: &RelayJwt) -> Vec<String> {
+    let raw: Vec<String> = if jwt.upstream_candidates.is_empty() {
+        vec![jwt.upstream_url.clone()]
+    } else {
+        jwt.upstream_candidates.clone()
+    };
+    raw.into_iter()
+        .filter(|u| crate::relay::allowlist::is_allowed_upstream(u))
+        .collect()
+}
+
 #[instrument(skip_all, fields(otel.kind = "server", relay.endpoint = "/relay/connect"))]
 async fn relay_connect(
     State((secret, signing_public_key, task_tx, seen_jtis)): State<AppState>,
@@ -81,10 +100,16 @@ async fn relay_connect(
         }
     };
 
-    // Defense-in-depth: validate upstream URL against allow-list even though
-    // it comes from a signed JWT. See relay/allowlist.rs for policy details.
-    if !crate::relay::allowlist::is_allowed_upstream(&jwt.upstream_url) {
-        tracing::warn!(upstream_url = %jwt.upstream_url, "relay_connect: upstream URL not in allow-list");
+    // B0: Build allow-list-filtered candidate list from the signed JWT.
+    // Falls back to [upstream_url] when candidates absent (pre-B0 central, back-compat).
+    // Defense-in-depth: every candidate is re-checked against the allow-list even
+    // though it comes from a signed JWT.  See relay/allowlist.rs for policy details.
+    let allowed = select_candidates(&jwt);
+    if allowed.is_empty() {
+        tracing::warn!(
+            upstream_url = %jwt.upstream_url,
+            "relay_connect: no upstream candidate passed the allow-list"
+        );
         return error_response("upstream URL not allowed");
     }
 
@@ -114,10 +139,14 @@ async fn relay_connect(
     }
 
     let relay_id = format!("relay-{}", jwt.room_id.chars().take(8).collect::<String>());
+    // upstream_url is set to the first allowed candidate for back-compat with
+    // code that reads task.upstream_url directly; upstream_candidates carries the
+    // full ordered list for the B0 failover loop in the runner.
     let task = RelayTask {
         room_id: jwt.room_id.clone(),
-        upstream_url: jwt.upstream_url.clone(), // from JWT (signed), not body
+        upstream_url: allowed[0].clone(),
         upstream_room_token: jwt.upstream_room_token.clone(), // from JWT (signed), not body
+        upstream_candidates: allowed,
     };
 
     if task_tx.send(task).await.is_err() {
@@ -206,5 +235,70 @@ mod allow_list_tests {
     fn rejects_empty_host() {
         assert!(!is_allowed_upstream("wss:///path"));
         assert!(!is_allowed_upstream("wss://"));
+    }
+}
+
+#[cfg(test)]
+mod b0_select_candidates_tests {
+    use super::select_candidates;
+    use crate::relay::{now_unix_secs, RelayJwt};
+
+    fn make_jwt(upstream_url: &str, candidates: Vec<&str>) -> RelayJwt {
+        let now = now_unix_secs();
+        RelayJwt {
+            room_id: "r".to_string(),
+            upstream_url: upstream_url.to_string(),
+            upstream_room_token: "tok".to_string(),
+            iat: now,
+            exp: now + 300,
+            jti: "j".to_string(),
+            upstream_candidates: candidates.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // When upstream_candidates is empty, falls back to [upstream_url] (back-compat).
+    #[test]
+    fn empty_candidates_falls_back_to_upstream_url() {
+        let jwt = make_jwt("ws://10.9.0.2:8907/ws", vec![]);
+        let result = select_candidates(&jwt);
+        assert_eq!(result, vec!["ws://10.9.0.2:8907/ws"]);
+    }
+
+    // A list with one allowed + one disallowed: only the allowed one survives.
+    #[test]
+    fn mixed_list_filters_to_allowed_only() {
+        let jwt = make_jwt(
+            "ws://10.9.0.2:8907/ws",
+            vec!["ws://10.9.0.2:8907/ws", "ws://8.8.8.8/x"],
+        );
+        let result = select_candidates(&jwt);
+        assert_eq!(result, vec!["ws://10.9.0.2:8907/ws"]);
+    }
+
+    // All disallowed → empty Vec (handler must reject).
+    #[test]
+    fn all_disallowed_returns_empty() {
+        let jwt = make_jwt("ws://8.8.8.8/x", vec!["ws://8.8.8.8/x", "ws://1.1.1.1/y"]);
+        let result = select_candidates(&jwt);
+        assert!(
+            result.is_empty(),
+            "all-disallowed candidates must return empty Vec, got {:?}",
+            result
+        );
+    }
+
+    // Order is preserved from the signed candidate list.
+    #[test]
+    fn candidate_order_is_preserved() {
+        let jwt = make_jwt(
+            "ws://10.9.0.2:8907/ws",
+            vec!["ws://10.9.0.5:8907/ws", "ws://10.9.0.2:8907/ws"],
+        );
+        let result = select_candidates(&jwt);
+        assert_eq!(
+            result,
+            vec!["ws://10.9.0.5:8907/ws", "ws://10.9.0.2:8907/ws"],
+            "order must match the signed candidate list"
+        );
     }
 }

@@ -28,6 +28,7 @@ fn make_token(secret: &[u8], room_id: &str) -> String {
         iat: now,
         exp: now + 60,
         jti: uuid_v4_simple(),
+        upstream_candidates: vec![],
     }
     .sign(secret)
     .unwrap()

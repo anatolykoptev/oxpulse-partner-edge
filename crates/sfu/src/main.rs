@@ -239,33 +239,46 @@ async fn main() -> anyhow::Result<()> {
         let stats_interval_secs = config.stats_interval_secs;
         tokio::spawn(async move {
             while let Some(task) = relay_rx.recv().await {
-                let url = task.upstream_url.clone();
+                let candidates = task.upstream_candidates.clone();
                 let token = task.upstream_room_token.clone();
                 let room = task.room_id.clone();
                 let tx = relay_inject_tx.clone();
                 tokio::spawn(async move {
-                    match connect_relay(
-                        &url,
-                        &token,
-                        host_candidate_addr,
-                        room.clone(),
-                        stats_interval_secs,
-                    )
-                    .await
-                    {
-                        Ok(pending) => {
-                            if let Err(e) = tx.send(pending).await {
+                    // B0: iterate signed candidates in order; first success wins.
+                    let mut last_err: Option<anyhow::Error> = None;
+                    for candidate in &candidates {
+                        match connect_relay(
+                            candidate,
+                            &token,
+                            host_candidate_addr,
+                            room.clone(),
+                            stats_interval_secs,
+                        )
+                        .await
+                        {
+                            Ok(pending) => {
+                                if let Err(e) = tx.send(pending).await {
+                                    tracing::warn!(
+                                        error = %e, room_id = %room,
+                                        "relay inject channel closed — relay Rtc dropped"
+                                    );
+                                } else {
+                                    tracing::info!(room_id = %room, upstream = %candidate, "relay handshake complete, PendingRelay sent to registry");
+                                }
+                                return;
+                            }
+                            Err(e) => {
                                 tracing::warn!(
-                                    error = %e, room_id = %room,
-                                    "relay inject channel closed — relay Rtc dropped"
+                                    upstream = %candidate, room_id = %room,
+                                    "relay candidate failed, trying next"
                                 );
-                            } else {
-                                tracing::info!(room_id = %room, "relay handshake complete, PendingRelay sent to registry");
+                                last_err = Some(e);
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, room_id = %room, "relay connection failed")
-                        }
+                    }
+                    // All candidates exhausted.
+                    if let Some(e) = last_err {
+                        tracing::warn!(error = %e, room_id = %room, "relay connection failed — all candidates exhausted");
                     }
                 });
             }
