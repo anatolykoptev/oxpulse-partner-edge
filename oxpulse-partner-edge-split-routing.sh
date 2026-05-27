@@ -16,7 +16,7 @@
 #   --vpn-if       VPN interface  (default: awg0)
 #   --conf         awg conf path  (default: /etc/amnezia/amneziawg/awg0.conf)
 #   --ru-file      RU subnet list (default: /etc/oxpulse-partner-edge/ru-subnets.txt)
-#   --state-dir    runtime state  (default: /run)
+#   --state-dir    persistent state (default: /var/lib/oxpulse-partner-edge)
 #   --sysctl-persist-dir          (default: /etc/sysctl.d)
 #
 # All can also be set via VPN_IF / CONF / RU_FILE / STATE_DIR / SYSCTL_PERSIST_DIR env vars.
@@ -26,7 +26,7 @@ set -euo pipefail
 VPN_IF="${VPN_IF:-awg0}"
 CONF="${CONF:-}"
 RU_FILE="${RU_FILE:-}"
-STATE_DIR="${STATE_DIR:-/run}"
+STATE_DIR="${STATE_DIR:-/var/lib/oxpulse-partner-edge}"
 SYSCTL_PERSIST_DIR="${SYSCTL_PERSIST_DIR:-/etc/sysctl.d}"
 
 while [[ $# -gt 0 ]]; do
@@ -60,21 +60,25 @@ WAN_GW=$(ip -4 route show default | awk '/default/{print $3; exit}')
 [[ -n "$WAN_IF" && -n "$WAN_GW" ]] || { echo "ERR: no default route — cannot auto-detect WAN" >&2; exit 1; }
 
 
-# ── save original rp_filter values for disable to restore ─────────────────────
-# Judgment call: эталон §10 does not specify where to store originals.
-# We snapshot current kernel values before overwriting them so disable can
-# restore the box to its pre-apply state. If apply is re-run, values are
-# already 2 — restore would set them back to 2 on disable, which is benign.
+# ── save original rp_filter + ip_forward values for disable to restore ────────
+# CRITICAL: STATE_DIR is /var/lib/oxpulse-partner-edge (persistent across reboots).
+# Snapshot is guarded by [[ ! -f STATE_FILE ]] — first apply only. This ensures
+# the "pristine" values (before sysctl.d takes effect at boot) are recorded once
+# and survive reboots. A second apply after reboot will find the STATE_FILE and
+# skip re-snapshotting — so disable always restores the true pre-apply original,
+# NOT the post-sysctl.d value that would be in the kernel on subsequent applies.
 mkdir -p "$STATE_DIR"
 STATE_FILE="$STATE_DIR/oxpulse-split-routing.state"
 if [[ ! -f "$STATE_FILE" ]]; then
     _rp_all=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo 1)
     _rp_wan=$(sysctl -n "net.ipv4.conf.${WAN_IF}.rp_filter" 2>/dev/null || echo 1)
     _rp_vpn=$(sysctl -n "net.ipv4.conf.${VPN_IF}.rp_filter" 2>/dev/null || echo 1)
+    _ip_fwd=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)
     cat >"$STATE_FILE" <<STATE
 SAVED_RP_FILTER_ALL=${_rp_all}
 SAVED_RP_FILTER_WAN=${_rp_wan}
 SAVED_RP_FILTER_VPN=${_rp_vpn}
+SAVED_IP_FORWARD=${_ip_fwd}
 SAVED_WAN_IF=${WAN_IF}
 STATE
 fi
@@ -139,7 +143,13 @@ table ip mangle {
 NFT
 
 # Load ru_nets into the mangle set atomically.
-{ printf 'add element ip mangle ru_nets { '; paste -sd, "$RU_FILE"; printf ' }\n'; } | nft -f -
+# Filter comments (#) and blank lines before joining — bare paste -sd, would
+# produce malformed nft set elements (e.g. "# comment,1.2.3.0/24") which abort
+# the nft -f - call under set -e AFTER mangle/sysctl/nat are already applied.
+_ru_elements=$(grep -vE '^[[:space:]]*(#|$)' "$RU_FILE" | paste -sd, - || true)
+if [[ -n "$_ru_elements" ]]; then
+    printf 'add element ip mangle ru_nets { %s }\n' "$_ru_elements" | nft -f -
+fi
 
 # ── 4. masquerade scoped to FOREIGN dst (§4) ──────────────────────────────────
 # mesh-internal ${MESH_SUBNET} is NOT SNAT'd — protects container→krolik SFU relay.
@@ -169,6 +179,10 @@ awg set "$VPN_IF" fwmark "$WG_FWMARK"
 #
 # IPv4-only note: Endpoint parse splits on first ':' — does not handle IPv6
 # '[::1]:443', but the mesh is v4-only (эталон §11.4).
+#
+# NOTE (B0 multi-hub future work): currently widens AllowedIPs on the FIRST peer
+# only (head -1). When B0 multi-hub ships multiple awg peers, ALL foreign-routing
+# peers will need widening here. At that point remove head -1 and loop over peers.
 ENDPOINT_HOST=$(awk -F'= *' '/^[[:space:]]*Endpoint/{split($2,a,":"); print a[1]; exit}' "$CONF")
 ENDPOINT_IP=""
 if [[ -n "$ENDPOINT_HOST" ]]; then

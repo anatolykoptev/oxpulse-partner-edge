@@ -380,3 +380,197 @@ _run_disable() {
     ! grep -q "unbound" "$CALLS/argv.log" || { echo "unbound found — must not configure DNS"; false; }
     ! grep -q "unbound" "$CALLS/nft.stdin.log" || { echo "unbound in nft — must not configure DNS"; false; }
 }
+# ─── NEW TEST: reboot-lifecycle ──────────────────────────────────────────────
+# BLOCKER fix: STATE_DIR must default to /var/lib/oxpulse-partner-edge (persistent).
+# Proof: apply#1 snapshots rp_filter=1 (mock). We simulate post-reboot by
+# starting fresh (no state dir deletion needed because the dir IS persistent).
+# apply#2 mock returns rp_filter=2 (sysctl.d took effect). Because the guard
+# `[[ ! -f STATE_FILE ]]` SKIPS snapshot on second apply, STATE_FILE still has
+# the original value from apply#1 → disable restores 1 (not 2).
+@test "NEW1: reboot-lifecycle — persistent STATE_DIR retains pristine rp_filter after 2nd apply" {
+    # Assert the script default is the persistent path.
+    grep -q 'STATE_DIR.*=.*\${STATE_DIR:-/var/lib/oxpulse-partner-edge}' "$APPLY" || {
+        echo "BLOCKER: apply script default STATE_DIR is not /var/lib/oxpulse-partner-edge"
+        grep 'STATE_DIR.*:-' "$APPLY" || echo "(no STATE_DIR default found)"
+        false
+    }
+    grep -q 'STATE_DIR.*=.*\${STATE_DIR:-/var/lib/oxpulse-partner-edge}' "$DISABLE" || {
+        echo "BLOCKER: disable script default STATE_DIR is not /var/lib/oxpulse-partner-edge"
+        grep 'STATE_DIR.*:-' "$DISABLE" || echo "(no STATE_DIR default found)"
+        false
+    }
+
+    # Mock sysctl to return rp_filter=1 on first reads (pristine state before sysctl.d).
+    cat >"$TMP/mocks/sysctl" <<'MOCK'
+#!/usr/bin/env bash
+echo "sysctl $*" >> "$CALLS_DIR/argv.log"
+# For snapshot reads (-n), return 1 (strict RPF = pristine value before sysctl.d changes things).
+if [[ "$*" == *"-n"* ]]; then
+    echo "1"
+fi
+exit 0
+MOCK
+    chmod +x "$TMP/mocks/sysctl"
+
+    # Apply#1: snapshot captures rp_filter=1.
+    _run_apply
+    [ "$status" -eq 0 ] || { echo "APPLY#1 FAILED: $output"; false; }
+
+    # Verify state file was written with original=1.
+    STATE_FILE="$STATE_DIR/oxpulse-split-routing.state"
+    [ -f "$STATE_FILE" ] || { echo "STATE_FILE not created: $STATE_FILE"; false; }
+    grep -q "SAVED_RP_FILTER_ALL=1" "$STATE_FILE" || {
+        echo "STATE_FILE does not record rp_filter=1"
+        cat "$STATE_FILE"
+        false
+    }
+
+    # Now simulate a reboot: sysctl.d applied ip_forward=1 and rp_filter=2.
+    # The STATE_FILE survives (persistent dir). Mock now returns 2 for reads.
+    cat >"$TMP/mocks/sysctl" <<'MOCK'
+#!/usr/bin/env bash
+echo "sysctl $*" >> "$CALLS_DIR/argv.log"
+# Post-reboot: sysctl.d has set rp_filter=2, ip_forward=1.
+if [[ "$*" == *"-n"* ]]; then
+    echo "2"
+fi
+exit 0
+MOCK
+    chmod +x "$TMP/mocks/sysctl"
+
+    # Reset call log before apply#2.
+    rm -f "$CALLS/argv.log"
+
+    # Apply#2: guard [[ ! -f STATE_FILE ]] MUST skip re-snapshot → FILE UNCHANGED.
+    _run_apply
+    [ "$status" -eq 0 ] || { echo "APPLY#2 FAILED: $output"; false; }
+
+    # STATE_FILE must still record the pristine value (1), NOT the post-sysctl.d value (2).
+    grep -q "SAVED_RP_FILTER_ALL=1" "$STATE_FILE" || {
+        echo "REBOOT LIFECYCLE BUG: STATE_FILE was overwritten on 2nd apply with post-sysctl.d value"
+        cat "$STATE_FILE"
+        false
+    }
+
+    # Disable must restore rp_filter=1 (the pristine value, not 2).
+    rm -f "$CALLS/argv.log"
+    _run_disable
+    [ "$status" -eq 0 ] || { echo "DISABLE FAILED: $output"; false; }
+
+    # Assert disable issued sysctl with =1 (the restored pristine), not =2.
+    grep -q "sysctl.*rp_filter=1" "$CALLS/argv.log" || {
+        echo "DISABLE did not restore rp_filter=1"
+        cat "$CALLS/argv.log"
+        false
+    }
+    ! grep -q "sysctl.*rp_filter=2" "$CALLS/argv.log" || {
+        echo "DISABLE incorrectly restored rp_filter=2 (the post-sysctl.d value, not pristine)"
+        cat "$CALLS/argv.log"
+        false
+    }
+
+    # ip_forward must also be saved and restored.
+    grep -q "SAVED_IP_FORWARD=" "$STATE_FILE" 2>/dev/null || {
+        # Check if disable restored ip_forward (it may have been deleted by now).
+        # At minimum, apply must have saved it. Check the restored state from the disable call.
+        # Since disable already deleted STATE_FILE, check that disable did restore ip_forward.
+        grep -q "sysctl.*ip_forward=" "$CALLS/argv.log" || {
+            echo "MAJOR: disable did not restore ip_forward"
+            cat "$CALLS/argv.log"
+            false
+        }
+    }
+}
+
+# ─── NEW TEST: malformed RU file ─────────────────────────────────────────────
+# MAJOR fix: paste -sd, blindly joins comments/blank lines → malformed nft set.
+# After fix, grep/filter must strip comments and blanks before building the element.
+@test "NEW2: malformed-RU-file — comments and blanks stripped before nft set element" {
+    # Fixture with comment, blank, and valid CIDRs.
+    MALFORMED_RU="$TMP/malformed-ru.txt"
+    printf '# This is a comment\n\n1.2.3.0/24\n4.5.6.0/24\n\n# another comment\n7.8.9.0/24\n' \
+        >"$MALFORMED_RU"
+
+    run bash "$APPLY" \
+        --vpn-if awg0 \
+        --conf "$AWG_CONF_FIXTURE" \
+        --ru-file "$MALFORMED_RU" \
+        --state-dir "$STATE_DIR" \
+        --sysctl-persist-dir "$SYSCTL_PERSIST_DIR"
+    [ "$status" -eq 0 ] || { echo "APPLY FAILED with malformed RU: $output"; false; }
+
+    # The nft add element line must contain valid CIDRs only — no '#' or empty tokens.
+    grep "add element ip mangle ru_nets" "$CALLS/nft.stdin.log" || {
+        echo "nft add element not found"
+        cat "$CALLS/nft.stdin.log"
+        false
+    }
+    # Must NOT contain '#' anywhere in the element line.
+    ! grep "add element ip mangle ru_nets" "$CALLS/nft.stdin.log" | grep -q '#' || {
+        echo "Comment appeared in nft set element — sanitization broken"
+        grep "add element ip mangle ru_nets" "$CALLS/nft.stdin.log"
+        false
+    }
+    # Must contain the 3 valid CIDRs.
+    grep "add element ip mangle ru_nets" "$CALLS/nft.stdin.log" | grep -q "1.2.3.0/24" || {
+        echo "Valid CIDR 1.2.3.0/24 missing from nft element"
+        grep "add element ip mangle ru_nets" "$CALLS/nft.stdin.log"
+        false
+    }
+    grep "add element ip mangle ru_nets" "$CALLS/nft.stdin.log" | grep -q "7.8.9.0/24" || {
+        echo "Valid CIDR 7.8.9.0/24 missing from nft element"
+        grep "add element ip mangle ru_nets" "$CALLS/nft.stdin.log"
+        false
+    }
+}
+
+# ─── NEW TEST: auto-bump table id ─────────────────────────────────────────────
+# MAJOR fix: disable must flush the RECORDED table id, not hardcoded 13573.
+# This test: mock ip route show table 13573 as occupied → apply bumps to 13574,
+# records 13574 in TBL_FILE. Then disable must flush 13574, not 13573.
+@test "NEW3: auto-bump — bumped table id recorded in TBL_FILE; disable flushes bumped id" {
+    # ip mock: 13573 is occupied, 13574 is empty.
+    cat >"$TMP/mocks/ip" <<'MOCK'
+#!/usr/bin/env bash
+echo "ip $*" >> "$CALLS_DIR/argv.log"
+if [[ "$*" == *"route show default"* || "$*" == "-4 route show default"* ]]; then
+    echo "default via 10.0.0.1 dev ens3 proto dhcp src 10.0.0.100 metric 100"
+fi
+if [[ "$*" == *"route show table 13573"* ]]; then
+    # Table 13573 is occupied — return a non-empty route to trigger auto-bump.
+    echo "someuser via 10.0.0.1 dev ens3"
+fi
+# 13574 and others: empty (available)
+exit 0
+MOCK
+    chmod +x "$TMP/mocks/ip"
+
+    _run_apply
+    [ "$status" -eq 0 ] || { echo "APPLY FAILED: $output"; false; }
+
+    # TBL_FILE must record 13574 (the bumped id).
+    TBL_FILE="$STATE_DIR/oxpulse-split-routing.tbl"
+    [ -f "$TBL_FILE" ] || { echo "TBL_FILE not created"; false; }
+    recorded=$(cat "$TBL_FILE")
+    [ "$recorded" = "13574" ] || {
+        echo "TBL_FILE records '$recorded' instead of 13574"
+        false
+    }
+
+    # Disable must flush table 13574 (the bumped id), NOT 13573.
+    rm -f "$CALLS/argv.log"
+    _run_disable
+    [ "$status" -eq 0 ] || { echo "DISABLE FAILED: $output"; false; }
+
+    grep -q "ip route flush table 13574" "$CALLS/argv.log" || {
+        echo "DISABLE did not flush the bumped table id 13574"
+        cat "$CALLS/argv.log"
+        false
+    }
+    # Must NOT flush 13573 (the wrong/hardcoded id).
+    ! grep -q "ip route flush table 13573" "$CALLS/argv.log" || {
+        echo "DISABLE flushed hardcoded 13573 instead of the recorded 13574"
+        cat "$CALLS/argv.log"
+        false
+    }
+}
