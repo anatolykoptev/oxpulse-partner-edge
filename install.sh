@@ -313,6 +313,8 @@ _install_lib_source install-awg.sh
 _install_lib_source install-awg-params-agent.sh
 # shellcheck source=lib/install-firewall.sh
 _install_lib_source install-firewall.sh
+# shellcheck source=lib/install-split-routing.sh
+_install_lib_source install-split-routing.sh
 
 preflight_run
 
@@ -1450,6 +1452,12 @@ fi  # end BAKE_MODE=0 (hydrate path)
 
 # ---------- Step 8: systemd ----------
 systemd_run
+
+# ---------- Step 9: russia profile ----------
+if [[ "${PROFILE:-}" == "russia" ]]; then
+	log "[profile=russia] activating split-routing installation"
+	split_routing_run
+fi
 
 # ---------- Step 10: report ----------
 log "[10/10] done"
