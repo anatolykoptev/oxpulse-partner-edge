@@ -238,10 +238,17 @@ http://www.{{PARTNER_DOMAIN}} {
 # DO NOT add to any public-facing listener or firewall rule.
 # =============================================================================
 http://127.0.0.1:9080 {
-    # /canary/tunnel -- probe xray-client via /health path.
-    # 2xx = tunnel reachable; non-2xx = upstream sick but container up.
+    # /canary/tunnel -- probe the full edge→backend tunnel end-to-end.
+    # Rewrites to /api/health/live (always-200 liveness probe) before proxying
+    # so the upstream address is a bare host:port -- Caddy forbids paths on
+    # reverse_proxy dial addresses (see Caddy docs: "Upstream addresses cannot
+    # contain paths or query strings"). The original xray-client:3080/health
+    # produced "dial": "xray-client:3080/health:80" in adapted JSON → undefined
+    # dial behavior → 502 on every request since #122 (never green).
+    # 2xx = tunnel reachable and backend alive; non-2xx = tunnel or backend sick.
     handle /canary/tunnel {
-        reverse_proxy xray-client:3080/health {
+        rewrite * /api/health/live
+        reverse_proxy xray-client:3080 {
             transport http {
                 dial_timeout 2s
                 response_header_timeout 2s
