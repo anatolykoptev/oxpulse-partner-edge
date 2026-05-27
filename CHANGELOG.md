@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.63](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.62...v0.12.63) (2026-05-27)
+
+
+### Bug Fixes
+
+* **caddy:** canary /canary/tunnel — rewrite to backend liveness path, drop illegal upstream path (502 since [#122](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/122)) ([#273](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/273)) ([afe18ff](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/afe18ff02bc5be18f3a49244a843960b49caec90))
+* **upgrade:** settle-retry post-recreate healthcheck (was single sleep 10, racy vs ~8s xray settle) ([#271](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/271)) ([7ddb973](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7ddb973a736b3b9fca431cbb5a270135bf5203a9))
+
 ## [0.12.62](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.61...v0.12.62) (2026-05-27)
 
 
