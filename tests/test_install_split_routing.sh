@@ -1,5 +1,4 @@
 #!/usr/bin/env bats
-bats_require_minimum_version 1.5.0
 # tests/test_install_split_routing.sh — bats coverage for lib/install-split-routing.sh
 #
 # Verifies (CL-2 spec):
@@ -235,7 +234,8 @@ ENVEOF
 	# enable must be called
 	grep -q 'systemctl enable.*oxpulse-partner-edge-split-routing' "$FAKE_LOG"
 	# must NOT use enable --now in bake mode
-	run ! grep -q 'systemctl enable --now' "$FAKE_LOG"
+	run grep -q 'systemctl enable --now' "$FAKE_LOG"
+	[ "$status" -ne 0 ]  # enable --now must NOT be used (After=awg-quick ordering)
 }
 
 # ─── 10. IR-5: warn emitted when is-enabled returns disabled ─────────────────
