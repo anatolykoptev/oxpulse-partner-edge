@@ -11,8 +11,14 @@
 # NOTE: this script runs in system.slice (unmarked = direct egress) under systemd.
 # On an RU edge, direct foreign egress may be ТСПУ-throttled.  That is why:
 #   - Both RIPE and ipdeny fallback are tried (resilience to single-source throttle).
-#   - Persistent=true in the timer means a missed weekly run retries on next boot.
+#   - Persistent=true in the timer means a missed daily run retries on next boot.
 #   - keep-last-good ensures a throttled fetch leaves the routing table intact.
+#
+# RIPE count→CIDR: the delegated-stats `count` field is NOT always a power of 2
+# (legacy ERX merges, aggregated sub-allocations).  Power-of-2 rounding would
+# over-cover adjacent non-RU space and route it direct (un-tunneled) into ТСПУ.
+# Fix: awk emits RANGE lines; python3 uses summarize_address_range to produce the
+# exact minimal aligned CIDR set covering [start, start+count-1] with no over-cover.
 #
 # Variables overridable for testing:
 #   OUTFILE        destination path (default /etc/oxpulse-partner-edge/ru-subnets.txt)
@@ -35,19 +41,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── fetch raw CIDR lines ────────────────────────────────────────────────────
+# ── fetch raw lines ─────────────────────────────────────────────────────────
 RAW_FILE="$(mktemp /tmp/ru-ripe-raw-XXXXXX)"
 trap 'rm -f "$RAW_FILE"; cleanup' EXIT
 
 SOURCE=""
 
-# Primary: RIPE delegated stats → awk RU ipv4 → CIDR notation
+# Primary: RIPE delegated stats → awk emits "RANGE <start_ip> <count>" per RU ipv4 row.
+# count is NOT assumed to be a power of 2 — python3 does exact range decomposition via
+# summarize_address_range(start, start+count-1) to avoid over-covering non-RU space.
 if curl -sf --proto '=https' --tlsv1.2 --max-time 60 "$RIPE_URL" \
-    | awk -F'|' '/^ripencc\|RU\|ipv4\|/ {
-        ip=$4; count=$5; bits=0; n=count
-        while (n>1) { n/=2; bits++ }
-        cidr=32-bits; print ip "/" cidr
-    }' > "$RAW_FILE" && [ -s "$RAW_FILE" ]; then
+    | awk -F'|' '/^ripencc\|RU\|ipv4\|/ { print "RANGE " $4 " " $5 }' \
+    > "$RAW_FILE" && [ -s "$RAW_FILE" ]; then
     SOURCE="RIPE"
 elif curl -sf --proto '=https' --tlsv1.2 --max-time 60 "$IPDENY_URL" \
     > "$RAW_FILE" && [ -s "$RAW_FILE" ]; then
@@ -58,6 +63,9 @@ else
 fi
 
 # ── python3 collapse_addresses aggregation ──────────────────────────────────
+# Handles two line formats:
+#   RANGE <start_ip> <count>  — from RIPE; exact range decomposition
+#   <cidr>                    — from ipdeny; fed directly to ip_network
 PYAGG="$(mktemp /tmp/ru-aggregate-XXXXXX.py)"
 trap 'rm -f "$RAW_FILE" "$PYAGG"; cleanup' EXIT
 
@@ -70,10 +78,23 @@ for line in sys.stdin:
     line = line.strip()
     if not line or line.startswith("#"):
         continue
-    try:
-        networks.append(ipaddress.ip_network(line, strict=False))
-    except ValueError:
-        pass
+    if line.startswith("RANGE "):
+        # RIPE format: exact range decomposition via summarize_address_range.
+        # Avoids power-of-2 rounding that would over-cover adjacent non-RU space.
+        _, start_str, count_str = line.split()
+        start = ipaddress.ip_address(start_str)
+        count = int(count_str)
+        end = ipaddress.ip_address(int(start) + count - 1)
+        try:
+            networks.extend(ipaddress.summarize_address_range(start, end))
+        except (ValueError, TypeError):
+            pass
+    else:
+        # ipdeny format: plain CIDR — fed directly.
+        try:
+            networks.append(ipaddress.ip_network(line, strict=False))
+        except ValueError:
+            pass
 
 aggregated = list(ipaddress.collapse_addresses(networks))
 for net in sorted(aggregated):
@@ -100,4 +121,5 @@ echo "OK: $COUNT aggregated RU subnets written to $OUTFILE (source: $SOURCE)"
 # ── reload the live nft set ──────────────────────────────────────────────────
 # try-restart is idempotent: no-op if the unit is not active; re-apply is idempotent.
 # Do NOT hard-fail if the unit is absent (edge may not have split-routing active yet).
-systemctl try-restart oxpulse-partner-edge-split-routing.service 2>/dev/null || true
+# stderr NOT suppressed: failures land in the journal for operator diagnostics.
+systemctl try-restart oxpulse-partner-edge-split-routing.service || true

@@ -1,12 +1,12 @@
 [Unit]
-Description=Weekly RU-subnet list refresh for OxPulse partner-edge split-routing
+Description=Daily RU-subnet list refresh for OxPulse partner-edge split-routing
 After=network-online.target
 
-# Weekly on Sunday at 03:33 UTC.  Persistent=true means a missed run (box was
-# offline that Sunday) fires on the next boot — ensures the list is always
-# refreshed even on edges that are rebooted infrequently.
+# Daily at 03:33 UTC.  Persistent=true means a missed run (box was offline)
+# fires on the next boot — ensures the list is always refreshed even on edges
+# that are rebooted infrequently.
 [Timer]
-OnCalendar=Sun *-*-* 03:33:00
+OnCalendar=*-*-* 03:33:00
 Persistent=true
 
 [Install]

@@ -187,9 +187,13 @@ _subnets_update_install_units() {
 	fi
 }
 
-# Enable the weekly timer and verify with is-enabled (IR-5 lesson).
+# Enable the daily timer and verify with is-enabled + is-active (IR-5 lesson).
 # daemon-reload is called by _split_routing_enable_unit before this runs.
 # No --now: the timer fires on its schedule; no network-dependent side-effects at enable time.
+# IR-5 lesson (feedback_systemctl_enable_not_running): for a .timer unit, is-enabled alone
+# is insufficient — a hard Requires= on a missing unit drops the timer to inactive(dead)
+# silently.  Always verify is-active as well.  (This timer has no Requires=, so the risk
+# is narrow, but the verify pattern is mandated by the lesson.)
 _subnets_update_enable_timer() {
 	systemctl enable "${_SUBNETS_UPDATE_TIMER}"
 	# IR-5: always verify is-enabled; enable exit=0 is not sufficient.
@@ -200,6 +204,14 @@ _subnets_update_enable_timer() {
 		warn "  check: systemctl status ${_SUBNETS_UPDATE_TIMER}"
 	else
 		log "  split-routing: ${_SUBNETS_UPDATE_TIMER} enabled"
+	fi
+	# IR-5: for .timer units, is-enabled ≠ running (lesson: feedback_systemctl_enable_not_running).
+	# is-active catches the case where the timer dropped to inactive(dead) despite enable exit=0.
+	if ! systemctl is-active --quiet "${_SUBNETS_UPDATE_TIMER}" 2>/dev/null; then
+		warn "  split-routing: timer not yet active (normal if daemon-reload pending or at bake time)"
+		warn "  verify: systemctl list-timers --all | grep ${_SUBNETS_UPDATE_TIMER}"
+	else
+		log "  split-routing: ${_SUBNETS_UPDATE_TIMER} active"
 	fi
 }
 

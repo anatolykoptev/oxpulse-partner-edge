@@ -414,3 +414,85 @@ STUB
         false
     }
 }
+
+# ─── RU13: RIPE non-power-of-2 count: exact range decomposition ──────────────
+#
+# Regression for the MAJOR finding in CL-3 review:
+# The old awk `while(n>1){n/=2;bits++}; cidr=32-bits` assumes count is a power of 2.
+# For a non-power-of-2 count AND a non-zero-aligned start (e.g. 10.0.0.128, count=768):
+#   - awk emits 10.0.0.128/22 → python ip_network(strict=False) zeros host bits → 10.0.0.0/22
+#   - 10.0.0.0/22 covers 1024 addresses, over-covering by 256 relative to the range
+#     [10.0.0.128, 10.0.3.127]. Sends NON-RU traffic un-tunneled into ТСПУ.
+# The fix: awk emits RANGE lines; python3 uses summarize_address_range to produce the
+# exact minimal aligned CIDR set covering [start, start+count-1] with no over-cover.
+#
+# Expected CIDRs for 10.0.0.128+768: 10.0.0.128/25 + 10.0.1.0/24 + 10.0.2.0/24 + 10.0.3.0/25
+# Total = 768 addresses, all within [10.0.0.128, 10.0.3.127].
+@test "RU13: RIPE non-power-of-2 count decomposes to exact range; no over-cover outside [start,start+count-1]" {
+    # Single RIPE row: non-power-of-2 count + non-zero-aligned start.
+    # count=768 is not a power of 2; 10.0.0.128 is not aligned to /22.
+    FIXTURE_RU13="$TMP/ripe-ru13.txt"
+    printf 'ripencc|RU|ipv4|10.0.0.128|768|20230101|allocated\n' > "$FIXTURE_RU13"
+
+    cat > "$TMP/bin/curl" << 'STUB'
+#!/usr/bin/env bash
+echo "curl $*" >> "$CALLS_FILE"
+if echo "$*" | grep -q "ripe.net"; then
+    cat "$RU13_FIXTURE"
+    exit 0
+fi
+exit 1
+STUB
+    chmod +x "$TMP/bin/curl"
+
+    run env \
+        CALLS_FILE="$CALLS" OUTFILE="$OUTFILE" \
+        RU13_FIXTURE="$FIXTURE_RU13" \
+        PATH="$TMP/bin:$PATH" MIN_ENTRIES=1 \
+        bash "$SCRIPT"
+    [ "$status" -eq 0 ] || { echo "SCRIPT FAILED: $output"; false; }
+
+    [ -f "$OUTFILE" ] || { echo "OUTFILE not written"; false; }
+
+    # Count total addresses covered by all output CIDRs
+    total=$(python3 -c "
+import ipaddress, sys
+total = 0
+for line in open('$OUTFILE'):
+    line = line.strip()
+    if line:
+        total += ipaddress.ip_network(line, strict=True).num_addresses
+print(total)
+")
+    # Must cover EXACTLY 768 addresses (the range), not 1024 (power-of-2 over-cover)
+    [ "$total" -eq 768 ] || {
+        echo "FAIL: expected 768 addresses covered, got $total"
+        echo "Output CIDRs:"
+        cat "$OUTFILE"
+        false
+    }
+
+    # No emitted CIDR may contain an address outside [10.0.0.128, 10.0.3.127]
+    outside=$(python3 -c "
+import ipaddress, sys
+start = int(ipaddress.ip_address('10.0.0.128'))
+end   = int(ipaddress.ip_address('10.0.3.127'))
+bad = 0
+for line in open('$OUTFILE'):
+    line = line.strip()
+    if not line:
+        continue
+    net = ipaddress.ip_network(line, strict=True)
+    if int(net.network_address) < start or int(net.broadcast_address) > end:
+        bad += 1
+        print(f'OVER-COVER: {net} extends outside [{\"10.0.0.128\"}, {\"10.0.3.127\"}]', file=sys.stderr)
+print(bad)
+" 2>&1)
+    [ "$outside" = "0" ] || {
+        echo "FAIL: some CIDRs extend outside the expected range"
+        echo "$outside"
+        echo "Output CIDRs:"
+        cat "$OUTFILE"
+        false
+    }
+}
