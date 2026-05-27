@@ -19,32 +19,6 @@ pub type SeenJtis = Arc<Mutex<HashSet<String>>>;
 /// When `None`, falls back to HS256 via `hs256_secret` (deprecated path).
 type AppState = (Arc<[u8]>, Option<Arc<String>>, Sender<RelayTask>, SeenJtis);
 
-/// Allow-list: upstream must be a wss:// URL on a trusted host.
-/// Prevents SSRF even if JWT is somehow forged or RELAY_JWT_SECRET leaks.
-///
-/// Extracts the hostname strictly (before first `/` or `:`) and matches
-/// against an allow-list. Rejects path-component spoofs like
-/// `wss://attacker.com/.oxpulse.chat/foo` that a naive `contains()`
-/// check would let through.
-fn is_allowed_upstream(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("wss://") else {
-        return false;
-    };
-    let host = rest.split(['/', ':']).next().unwrap_or("");
-    if host.is_empty() {
-        return false;
-    }
-    const ALLOWED: &[&str] = &[".oxpulse.chat", "localhost", "127.0.0.1", "::1"];
-    ALLOWED.iter().any(|&pattern| {
-        if let Some(suffix) = pattern.strip_prefix('.') {
-            // suffix-match `.oxpulse.chat` matches `oxpulse.chat` and `*.oxpulse.chat`
-            host == suffix || host.ends_with(pattern)
-        } else {
-            host == pattern
-        }
-    })
-}
-
 /// Spawn the relay API HTTP server on the given `listener`.
 pub fn spawn_relay_api(
     listener: TcpListener,
@@ -108,8 +82,8 @@ async fn relay_connect(
     };
 
     // Defense-in-depth: validate upstream URL against allow-list even though
-    // it comes from a signed JWT.
-    if !is_allowed_upstream(&jwt.upstream_url) {
+    // it comes from a signed JWT. See relay/allowlist.rs for policy details.
+    if !crate::relay::allowlist::is_allowed_upstream(&jwt.upstream_url) {
         tracing::warn!(upstream_url = %jwt.upstream_url, "relay_connect: upstream URL not in allow-list");
         return error_response("upstream URL not allowed");
     }
@@ -174,7 +148,7 @@ fn error_response(msg: &str) -> (StatusCode, Json<RelayConnectResponse>) {
 
 #[cfg(test)]
 mod allow_list_tests {
-    use super::is_allowed_upstream;
+    use crate::relay::allowlist::is_allowed_upstream;
 
     #[test]
     fn accepts_apex_oxpulse_chat() {
@@ -214,10 +188,18 @@ mod allow_list_tests {
     }
 
     #[test]
-    fn rejects_non_wss() {
+    fn rejects_non_wss_non_mesh() {
+        // ws:// to public internet is rejected; ws:// to mesh is allowed (tested in allowlist.rs).
         assert!(!is_allowed_upstream("ws://oxpulse.chat/x"));
         assert!(!is_allowed_upstream("http://oxpulse.chat/x"));
         assert!(!is_allowed_upstream("https://oxpulse.chat/x"));
+    }
+
+    #[test]
+    fn accepts_mesh_ws() {
+        // AWG mesh subnet ws:// is allowed per new policy.
+        assert!(is_allowed_upstream("ws://10.9.0.1/ws/call/r"));
+        assert!(is_allowed_upstream("ws://10.9.0.254:8907/ws/call/r"));
     }
 
     #[test]
