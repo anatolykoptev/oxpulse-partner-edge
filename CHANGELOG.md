@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.57](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.56...partner-edge-v0.12.57) (2026-05-27)
+
+
+### Features
+
+* **sfu:** trust AWG mesh subnet for ws:// relay upstream (siege transport) ([#255](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/255)) ([0d579c5](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0d579c5a91024b01289e0b19280702b7e72468fd))
+
 ## [0.12.56](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.55...partner-edge-v0.12.56) (2026-05-26)
 
 
