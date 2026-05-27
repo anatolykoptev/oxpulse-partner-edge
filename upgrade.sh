@@ -20,6 +20,7 @@
 #   oxpulse-partner-edge-upgrade --rollback            # restore previous tag + host-scripts
 #   oxpulse-partner-edge-upgrade --templates-only      # re-render xray config from upstream template, no image pull
 #   oxpulse-partner-edge-upgrade --with-templates      # re-render Caddyfile + healthcheck + pull new image (atomic)
+#   oxpulse-partner-edge-upgrade --host-scripts-only   # sync host-scripts only; NO image pull/recreate
 #   oxpulse-partner-edge-upgrade --ghcr-token=ghp_xxx  # persist GHCR PAT before pull (one-time)
 #   oxpulse-partner-edge-upgrade --dry-run             # print plan, skip docker and file writes
 #   oxpulse-partner-edge-upgrade --dry-run --skip-check=1,3  # skip specific conflict checks (1-8)
@@ -46,6 +47,7 @@ PREFIX_LIB="${OXPULSE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
 PREFIX_SBIN="${OXPULSE_PREFIX_SBIN:-/usr/local/sbin}"
 PREFIX_BIN="${OXPULSE_PREFIX_BIN:-/usr/local/bin}"
 PREFIX_LIBDIR="${OXPULSE_PREFIX_LIBDIR:-/usr/local/lib/partner-edge}"
+PREFIX_SHARE="${OXPULSE_PREFIX_SHARE:-/usr/local/share}"
 SYSTEMD_DIR="${OXPULSE_SYSTEMD_DIR:-/etc/systemd/system}"
 COMPOSE_FILE="$PREFIX_ETC/docker-compose.yml"
 STATE_FILE="$PREFIX_LIB/install.env"
@@ -62,6 +64,10 @@ HEALTHCHECK="${OXPULSE_HEALTHCHECK:-/usr/local/sbin/oxpulse-partner-edge-healthc
 # SHA256SUMS released for that tag (main is always ahead of any tag).
 # Tests and operator overrides can still use OXPULSE_REPO_RAW to point at a fixture.
 OXPULSE_UPGRADE_TAG="${OXPULSE_UPGRADE_TAG:-@RELEASE_TAG@}"
+# Initialize OXPULSE_MIRROR_BASE to empty string so the strip at line 92 and
+# the -n checks below are safe under set -u on edges with no mirror configured
+# (e.g. zvonilka GitHub-direct edges where install.env lacks OXPULSE_MIRROR_BASE).
+OXPULSE_MIRROR_BASE="${OXPULSE_MIRROR_BASE:-}"
 
 # Mirror awareness: OXPULSE_MIRROR_BASE is the plain-TLS mirror used by edges
 # DPI-blocked from GitHub (e.g. zvonilka RU relays).  install.sh sets
@@ -213,11 +219,12 @@ SKIPPED_CHECKS=""
 GHCR_TOKEN_ARG="${OXPULSE_GHCR_TOKEN:-}"
 for arg in "$@"; do
 	case "$arg" in
-		--check)          MODE=check ;;
-		--rollback)       MODE=rollback ;;
-		--templates-only) MODE=templates ;;
-		--with-templates) MODE=with_templates ;;
-		--dry-run)        DRY_RUN=1 ;;
+		--check)              MODE=check ;;
+		--rollback)           MODE=rollback ;;
+		--templates-only)     MODE=templates ;;
+		--with-templates)     MODE=with_templates ;;
+		--host-scripts-only)  MODE=host_scripts_only ;;
+		--dry-run)            DRY_RUN=1 ;;
 		--skip-check=*)
 			_sc=" ${arg#--skip-check=} "
 			SKIPPED_CHECKS="${_sc//,/ }"
@@ -225,7 +232,7 @@ for arg in "$@"; do
 		--ghcr-token=*)   GHCR_TOKEN_ARG="${arg#--ghcr-token=}" ;;
 		v*|latest)        TARGET="$arg" ;;
 		-h|--help)
-			sed -n '2,28p' "$0"; exit 0 ;;
+			sed -n '2,29p' "$0"; exit 0 ;;
 		*) die "unknown arg: $arg" ;;
 	esac
 done
@@ -527,7 +534,7 @@ snapshot_host_scripts() {
 	[[ -d "$dropin_dir" ]] && cp -a "$dropin_dir" "$snap_dir/systemd/oxpulse-channels-health-report.service.d" || true
 
 	# defaults.conf
-	local defaults_src="/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+	local defaults_src="$PREFIX_SHARE/oxpulse-partner-edge/config/defaults.conf"
 	[[ -f "$defaults_src" ]] && cp -a "$defaults_src" "$snap_dir/share-config/defaults.conf" || true
 
 	# render-channel-lib.sh duplicate in PREFIX_LIBDIR
@@ -578,9 +585,9 @@ restore_host_scripts() {
 
 	# Restore defaults.conf.
 	if [[ -f "$snap_dir/share-config/defaults.conf" ]]; then
-		install -d -m 0755 "/usr/local/share/oxpulse-partner-edge/config"
+		install -d -m 0755 "$PREFIX_SHARE/oxpulse-partner-edge/config"
 		install -m 0644 "$snap_dir/share-config/defaults.conf" \
-			"/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+			"$PREFIX_SHARE/oxpulse-partner-edge/config/defaults.conf"
 		restored=1
 	fi
 
@@ -596,6 +603,133 @@ restore_host_scripts() {
 		"$SYSTEMCTL_BIN" daemon-reload 2>/dev/null || true
 		log "host-scripts restored from snapshot"
 	fi
+}
+
+# ---------------------------------------------------------------------------
+# PER-CONTAINER DIGEST-SKIP — zero-downtime recreate
+#
+# capture_running_digests — snapshot the imageID (sha256:...) of every
+# currently-running container managed by compose.  Stores in a bash
+# associative array passed by name.
+#
+# Usage:
+#   declare -A before_digests
+#   capture_running_digests before_digests
+#
+# Each key is the compose service name; value is the running imageID or ""
+# if the container is absent / not running (first-pull or stopped).
+# ---------------------------------------------------------------------------
+capture_running_digests() {
+	local -n _crd_map="$1"
+	local svc container_name image_id
+	# List service names from the compose file.
+	local services
+	services=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose config --services 2>/dev/null || true)
+	[[ -n "$services" ]] || return 0
+
+	while IFS= read -r svc; do
+		[[ -n "$svc" ]] || continue
+		# docker compose ps --quiet returns container IDs for the service.
+		container_name=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose ps --quiet "$svc" 2>/dev/null | head -1 || true)
+		if [[ -n "$container_name" ]]; then
+			image_id=$($DOCKER_BIN inspect --format '{{.Image}}' "$container_name" 2>/dev/null || true)
+		else
+			image_id=""
+		fi
+		_crd_map["$svc"]="$image_id"
+	done <<< "$services"
+}
+
+# resolve_pulled_digests — after compose pull, resolve the imageID for the
+# currently configured image of each service (what compose would use on up).
+# Stores in a bash associative array passed by name.
+#
+# Fail-safe: if a service's image digest cannot be resolved, stores "" which
+# causes the caller to fall back to recreating that service.
+resolve_pulled_digests() {
+	local -n _rpd_map="$1"
+	local svc image_ref image_id
+	local services
+	services=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose config --services 2>/dev/null || true)
+	[[ -n "$services" ]] || return 0
+
+	while IFS= read -r svc; do
+		[[ -n "$svc" ]] || continue
+		# Resolve the image reference for this service from compose config output.
+		image_ref=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose config 2>/dev/null \
+			| awk -v svc="$svc" '
+				/^services:/{in_services=1; next}
+				in_services && /^  [^ ]/{
+					gsub(/:$/,""); current_svc=$0; gsub(/^  /,"",current_svc)
+					next
+				}
+				in_services && current_svc==svc && /image:/{
+					sub(/.*image:[[:space:]]*/,""); print; exit
+				}
+			' || true)
+		if [[ -n "$image_ref" ]]; then
+			image_id=$($DOCKER_BIN inspect --format '{{.Id}}' "$image_ref" 2>/dev/null || true)
+		else
+			image_id=""
+		fi
+		_rpd_map["$svc"]="$image_id"
+	done <<< "$services"
+}
+
+# recreate_changed_services BEFORE_MAP_NAME AFTER_MAP_NAME
+#
+# Compares before/after digests per service.  Services whose imageID changed
+# (or whose before digest was empty — first pull, container absent) are
+# recreated with `docker compose up -d --no-deps <svc>`.
+# If ALL services are unchanged, exits 0 without calling compose up at all
+# (true zero-downtime for no-op version bumps).
+#
+# Returns: 0 = success (all changed services restarted), non-zero = compose failure.
+# On failure the caller is responsible for rollback; this function does NOT roll back.
+recreate_changed_services() {
+	local -n _rcs_before="$1"
+	local -n _rcs_after="$2"
+
+	local changed_services=()
+	local svc
+
+	# Union of all service names from both maps.
+	local all_svcs=()
+	for svc in "${!_rcs_before[@]}"; do all_svcs+=("$svc"); done
+	for svc in "${!_rcs_after[@]}"; do
+		# Add only if not already present.
+		local found=0
+		local s
+		for s in "${all_svcs[@]}"; do [[ "$s" == "$svc" ]] && found=1 && break; done
+		[[ "$found" -eq 0 ]] && all_svcs+=("$svc")
+	done
+
+	for svc in "${all_svcs[@]}"; do
+		local before="${_rcs_before[$svc]:-}"
+		local after="${_rcs_after[$svc]:-}"
+
+		if [[ -z "$before" || -z "$after" || "$before" != "$after" ]]; then
+			# Empty digest (first pull / missing container / resolve failure) → fail-safe: recreate.
+			if [[ -z "$after" ]]; then
+				warn "digest-skip: could not resolve post-pull digest for '$svc' — recreating (fail-safe)"
+			elif [[ -z "$before" ]]; then
+				log "digest-skip: '$svc' has no running container before pull — recreating"
+			else
+				log "digest-skip: '$svc' digest changed ($before → $after) — recreating"
+			fi
+			changed_services+=("$svc")
+		else
+			log "digest-skip: '$svc' digest unchanged ($after) — skipping recreate (zero-downtime)"
+		fi
+	done
+
+	if [[ "${#changed_services[@]}" -eq 0 ]]; then
+		log "digest-skip: no service image changed — zero-downtime, no recreate"
+		return 0
+	fi
+
+	log "recreating changed services: ${changed_services[*]}"
+	(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --no-deps "${changed_services[@]}")
 }
 
 # sync_host_scripts TAG — download, verify, and install host-scripts for TAG.
@@ -745,7 +879,7 @@ sync_host_scripts() {
 	# Step 3: defaults.conf (sourced by channel-render-lib + health-report).
 	# ------------------------------------------------------------------
 	local defaults_url="$REPO_RAW/config/defaults.conf"
-	local defaults_dst="/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+	local defaults_dst="$PREFIX_SHARE/oxpulse-partner-edge/config/defaults.conf"
 	local defaults_tmp="$tmpdir/defaults.conf"
 	if curl -fsSL --max-time 30 "$defaults_url" -o "$defaults_tmp" 2>/dev/null; then
 		# SHA256 guard (staged as config-defaults.conf in release assets).
@@ -988,6 +1122,25 @@ if [[ "$MODE" == rollback ]]; then
 		log "[dry-run] would docker compose pull + up -d after rollback"
 		exit 0
 	fi
+fi
+
+# ---- --host-scripts-only mode ----
+# Sync sbin scripts + systemd units for the target tag and restart affected
+# timers.  Does NOT pull images or recreate containers — guaranteed zero-
+# downtime.  Use for host-script-only releases (e.g. ch4 coturn probe) on
+# edges where the container image is pinned and must not be disturbed.
+if [[ "$MODE" == host_scripts_only ]]; then
+	resolve_default_target
+	log "--host-scripts-only: syncing host-scripts to $TARGET (containers untouched)"
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		log "[dry-run] would call sync_host_scripts $TARGET"
+		log "[dry-run] would restart: ${_HOST_SCRIPT_RESTART_UNITS[*]}"
+		log "[dry-run] image pull and container recreate: not performed (--host-scripts-only)"
+		exit 0
+	fi
+	sync_host_scripts "$TARGET"
+	log "--host-scripts-only complete (tag=$TARGET); no image pull or container recreate"
+	exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -1493,8 +1646,10 @@ if [[ "$MODE" == with_templates ]]; then
 	log "syncing host-scripts to $TARGET"
 	sync_host_scripts "$TARGET"
 
-	# Step 6: pull new images.
+	# Step 6: pull new images (with per-service digest capture for zero-downtime recreate).
 	ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
+	declare -A _wt_before_digests
+	capture_running_digests _wt_before_digests
 	log "pulling images (tag=$TARGET)"
 	pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull 2>&1)
 	pull_rc=$?
@@ -1509,9 +1664,10 @@ if [[ "$MODE" == with_templates ]]; then
 		die "pull failed — rolled back to previous state"
 	fi
 
-	# Step 7: recreate services.
-	log "recreating services"
-	if ! (cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d); then
+	# Step 7: recreate only services whose image digest changed (zero-downtime).
+	declare -A _wt_after_digests
+	resolve_pulled_digests _wt_after_digests
+	if ! recreate_changed_services _wt_before_digests _wt_after_digests; then
 		warn "compose up failed — rolling back"
 		do_rollback_templates
 		restore_host_scripts
@@ -1570,6 +1726,12 @@ sync_host_scripts "$TARGET"
 # Refresh ghcr auth from stored token (no-op if file absent).
 ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
 
+# Capture per-service image digests BEFORE pull so we can skip recreating
+# services whose image did not actually change (e.g. no-op version bump where
+# the sfu image is byte-for-byte identical across tags).
+declare -A _before_digests
+capture_running_digests _before_digests
+
 log "pulling new images"
 pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull 2>&1)
 pull_rc=$?
@@ -1587,8 +1749,13 @@ if [[ $pull_rc -ne 0 ]]; then
 	die "pull failed — previous config and host-scripts restored"
 fi
 
-log "recreating services"
-if ! (cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate); then
+# Resolve post-pull digests and recreate only services that changed.
+# fail-safe: if digest resolution fails for a service, recreate_changed_services
+# treats an empty after-digest as "unknown → recreate" (not "skip").
+declare -A _after_digests
+resolve_pulled_digests _after_digests
+
+if ! recreate_changed_services _before_digests _after_digests; then
 	warn "up failed — rolling back to $CURRENT"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
