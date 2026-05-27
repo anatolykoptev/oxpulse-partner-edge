@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.59](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.58...partner-edge-v0.12.59) (2026-05-27)
+
+
+### Bug Fixes
+
+* **release:** drop self-cp of root-level host-scripts in Stage artifacts ([#259](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/259)) ([21709ec](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/21709ec13526c635781ac01de0cabbc16a65251d))
+* **upgrade:** init OXPULSE_MIRROR_BASE default + digest-skip recreate + --host-scripts-only mode ([#261](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/261)) ([be6d11e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/be6d11e2b40c5d8466c6c4d04e89176ae3672481))
+
 ## [0.12.58](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.57...partner-edge-v0.12.58) (2026-05-27)
 
 
