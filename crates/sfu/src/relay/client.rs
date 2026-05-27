@@ -59,28 +59,6 @@ pub fn join_message() -> String {
 /// 6. Apply answer; add local ICE candidate.
 /// 7. Return `PendingRelay` — the caller hands this to the main UDP loop
 ///    which drives ICE/DTLS/SRTP from that point on.
-///
-/// Returns true if the upstream URL is from an allowed host.
-/// Defense-in-depth against SSRF even if a signed JWT somehow contains a bad URL.
-fn is_allowed_upstream_host(url: &str) -> bool {
-    // Must be wss://
-    let Some(rest) = url.strip_prefix("wss://") else {
-        return false;
-    };
-    // Extract hostname (before first / or :)
-    let host = rest.split(['/', ':']).next().unwrap_or("");
-
-    // Allow-list: our own infrastructure + localhost for dev/test
-    let allowed = [".oxpulse.chat", "localhost", "127.0.0.1", "::1"];
-    allowed.iter().any(|&pattern| {
-        if pattern.starts_with('.') {
-            host.ends_with(pattern) || host == &pattern[1..]
-        } else {
-            host == pattern
-        }
-    })
-}
-
 #[tracing::instrument(skip(upstream_room_token, stats_interval_secs), fields(otel.kind = "client"))]
 pub async fn connect_relay(
     upstream_ws_url: &str,
@@ -90,7 +68,8 @@ pub async fn connect_relay(
     stats_interval_secs: u64,
 ) -> anyhow::Result<PendingRelay> {
     // Defense-in-depth: validate upstream host even though JWT is signed.
-    if !is_allowed_upstream_host(upstream_ws_url) {
+    // See relay/allowlist.rs for policy — wss://*.oxpulse.chat + ws://10.9.0.0/24 mesh.
+    if !crate::relay::allowlist::is_allowed_upstream(upstream_ws_url) {
         anyhow::bail!(
             "upstream URL host is not in the allow-list: {}",
             upstream_ws_url
@@ -204,6 +183,7 @@ pub async fn connect_relay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relay::allowlist::is_allowed_upstream;
 
     #[test]
     fn relay_source_message_contains_type_url_and_token() {
@@ -223,26 +203,30 @@ mod tests {
 
     #[test]
     fn upstream_allow_list_accepts_valid_hosts() {
-        assert!(is_allowed_upstream_host(
-            "wss://edge.oxpulse.chat/ws/sfu/room1"
-        ));
-        assert!(is_allowed_upstream_host(
-            "wss://us-1.oxpulse.chat/ws/sfu/room1"
-        ));
-        assert!(is_allowed_upstream_host("wss://localhost/ws/sfu/room1"));
-        assert!(is_allowed_upstream_host(
-            "wss://127.0.0.1:8911/ws/sfu/room1"
-        ));
-        assert!(is_allowed_upstream_host("wss://oxpulse.chat/ws/sfu/room1"));
+        assert!(is_allowed_upstream("wss://edge.oxpulse.chat/ws/sfu/room1"));
+        assert!(is_allowed_upstream("wss://us-1.oxpulse.chat/ws/sfu/room1"));
+        assert!(is_allowed_upstream("wss://localhost/ws/sfu/room1"));
+        assert!(is_allowed_upstream("wss://127.0.0.1:8911/ws/sfu/room1"));
+        assert!(is_allowed_upstream("wss://oxpulse.chat/ws/sfu/room1"));
+    }
+
+    #[test]
+    fn upstream_allow_list_accepts_mesh_ws() {
+        // AWG mesh subnet — new policy: ws:// to 10.9.0.0/24 is allowed.
+        assert!(is_allowed_upstream("ws://10.9.0.1/ws/sfu/room1"));
+        assert!(is_allowed_upstream("ws://10.9.0.254:8907/ws/sfu/room1"));
     }
 
     #[test]
     fn upstream_allow_list_rejects_external_hosts() {
-        assert!(!is_allowed_upstream_host("wss://attacker.example.com/ssrf"));
-        assert!(!is_allowed_upstream_host("wss://10.0.0.1/internal"));
-        assert!(!is_allowed_upstream_host("http://localhost/not-wss"));
-        assert!(!is_allowed_upstream_host("wss://evil-oxpulse.chat/bypass"));
-        assert!(!is_allowed_upstream_host("wss://notoxpulse.chat/bypass"));
+        assert!(!is_allowed_upstream("wss://attacker.example.com/ssrf"));
+        // wss:// to a non-mesh IP: rejected (not in .oxpulse.chat allow-list).
+        assert!(!is_allowed_upstream("wss://10.0.0.1/internal"));
+        assert!(!is_allowed_upstream("http://localhost/not-wss"));
+        assert!(!is_allowed_upstream("wss://evil-oxpulse.chat/bypass"));
+        assert!(!is_allowed_upstream("wss://notoxpulse.chat/bypass"));
+        // ws:// to a non-mesh IP: rejected.
+        assert!(!is_allowed_upstream("ws://10.0.0.1/internal"));
     }
 
     #[test]
@@ -269,9 +253,9 @@ mod tests {
     }
 
     #[test]
-    fn is_allowed_upstream_host_still_works() {
-        assert!(is_allowed_upstream_host("wss://edge.oxpulse.chat/ws/sfu/r"));
-        assert!(is_allowed_upstream_host("wss://127.0.0.1:9999/ws/sfu/r"));
-        assert!(!is_allowed_upstream_host("wss://attacker.com/ssrf"));
+    fn allow_list_still_rejects_public_ws() {
+        // ws:// to public internet (non-mesh) must still be rejected.
+        assert!(!is_allowed_upstream("wss://attacker.com/ssrf"));
+        assert!(!is_allowed_upstream("ws://8.8.8.8/x"));
     }
 }
