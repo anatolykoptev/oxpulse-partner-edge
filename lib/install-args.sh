@@ -24,7 +24,7 @@
 #   BRAND_CTA_URL_RU, BRAND_CTA_URL_EN, BRAND_CTA_URL_ZH, BRAND_CTA_URL_FA,
 #   BRAND_CTA_TEXT_RU, BRAND_CTA_TEXT_EN, BRAND_CTA_TEXT_ZH, BRAND_CTA_TEXT_FA,
 #   BRAND_LEGAL_ENTITY, BRAND_LEGAL_COUNTRY, BRAND_LEGAL_CONTACT,
-#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN, CLEAN_SBIN, SERVE_COUNTRIES
+#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN, CLEAN_SBIN, SERVE_COUNTRIES, PROFILE
 
 _args_usage() {
 	sed -n '2,18p' "$0" >&2
@@ -54,6 +54,9 @@ Optional:
                              (e.g. --serve-countries=RU,BY). Operator-declared,
                              upper-folded server-side. Optional — falls back to
                              MaxMind country of public_ip.
+  --profile=<russia>         Deployment profile. Currently accepted: "russia".
+                             Activates RU-profile extras (split-routing) on top of the
+                             base install. Omit for standard partner-edge installs.
 
 Brand shortcut flags (used when --branding-config is NOT set; install.sh
 assembles a minimal BrandingConfig payload from whichever flags are set):
@@ -136,6 +139,8 @@ args_parse() {
 	REGION="${REGION:-}"
 	# Comma-separated client countries this edge serves (e.g. RU,BY). Absent = derive from MaxMind.
 	SERVE_COUNTRIES="${SERVE_COUNTRIES:-}"
+	# Deployment profile. Empty = standard install. "russia" activates split-routing extras.
+	PROFILE="${PROFILE:-}"
 	# Step 7 healthcheck loop deadline (seconds). ACME first-issuance can
 	# legitimately take 2–4 minutes when DNS is slow to propagate or the LE
 	# rate limiter throttles; 120 was too tight on call.cheburator.bot and
@@ -255,6 +260,7 @@ args_parse() {
 			--brand-legal-entity=*)    BRAND_LEGAL_ENTITY="${1#*=}" ;;
 			--brand-legal-country=*)   BRAND_LEGAL_COUNTRY="${1#*=}" ;;
 			--brand-legal-contact=*)   BRAND_LEGAL_CONTACT="${1#*=}" ;;
+			--profile=*)        PROFILE="${1#*=}" ;;
 			--check)            CHECK_MODE=1 ;;
 			--dry-run)          DRY_RUN=1 ;;
 			--bake)             BAKE_MODE=1 ;;
@@ -332,6 +338,10 @@ args_parse() {
 	case "$TUNNEL" in
 		vless|wg|https) : ;;
 		*) die "--tunnel must be one of: vless, wg, https" ;;
+	esac
+	case "${PROFILE:-}" in
+		""|russia) : ;;
+		*) die "--profile must be one of: russia (got: ${PROFILE})" ;;
 	esac
 
 	# Interactive prompts for SFU port overrides (non-interactive / OXPULSE_NONINTERACTIVE=1 skips).
