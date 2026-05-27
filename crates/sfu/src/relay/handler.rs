@@ -38,22 +38,37 @@ pub fn spawn_relay_api(
     Ok(handle)
 }
 
+/// Maximum number of relay candidates processed from a JWT.
+/// Bounds the failover loop against a buggy or compromised central sending thousands.
+const MAX_RELAY_CANDIDATES: usize = 8;
+
 /// B0: Build an allow-list-filtered, ordered candidate list from a verified JWT.
 ///
 /// When `jwt.upstream_candidates` is non-empty, use it (B0 path — signed ordered
 /// list from central).  When empty, fall back to the single `jwt.upstream_url`
 /// (pre-B0 / legacy path — back-compat guaranteed by `#[serde(default)]`).
 /// Every URL is individually checked against the allow-list; disallowed entries
-/// are silently dropped.  An empty return means no candidate survived and the
-/// handler MUST reject the request.
+/// are silently dropped.  Duplicates are removed (first occurrence wins).
+/// Result is capped at `MAX_RELAY_CANDIDATES`.  An empty return means no candidate
+/// survived and the handler MUST reject the request.
 pub(crate) fn select_candidates(jwt: &RelayJwt) -> Vec<String> {
     let raw: Vec<String> = if jwt.upstream_candidates.is_empty() {
         vec![jwt.upstream_url.clone()]
     } else {
         jwt.upstream_candidates.clone()
     };
+    if raw.len() > MAX_RELAY_CANDIDATES {
+        tracing::warn!(
+            count = raw.len(),
+            max = MAX_RELAY_CANDIDATES,
+            "relay JWT contains more candidates than MAX_RELAY_CANDIDATES — truncating"
+        );
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     raw.into_iter()
         .filter(|u| crate::relay::allowlist::is_allowed_upstream(u))
+        .filter(|u| seen.insert(u.clone()))
+        .take(MAX_RELAY_CANDIDATES)
         .collect()
 }
 
@@ -300,5 +315,46 @@ mod b0_select_candidates_tests {
             vec!["ws://10.9.0.5:8907/ws", "ws://10.9.0.2:8907/ws"],
             "order must match the signed candidate list"
         );
+    }
+
+    // Dedup: [A, A, B] → [A, B] preserving first occurrence.
+    // Tests fix for review finding: duplicates waste slots + retries against same dark hub.
+    #[test]
+    fn dedup_preserves_first_occurrence() {
+        // ws://10.9.0.2 is allow-listed mesh; appearing twice should collapse to one.
+        let jwt = make_jwt(
+            "ws://10.9.0.2/x",
+            vec!["ws://10.9.0.2/x", "ws://10.9.0.2/x", "ws://10.9.0.3/x"],
+        );
+        let result = select_candidates(&jwt);
+        assert_eq!(
+            result,
+            vec!["ws://10.9.0.2/x", "ws://10.9.0.3/x"],
+            "duplicate URLs must be deduplicated keeping first occurrence"
+        );
+    }
+
+    // Cap: > MAX_RELAY_CANDIDATES allowed mesh IPs → exactly MAX returned, order preserved.
+    // Tests fix for review finding: buggy/compromised central could send thousands.
+    #[test]
+    fn cap_truncates_to_max() {
+        // Build 9 unique allow-listed mesh IPs (MAX is 8).
+        let candidates: Vec<&str> = vec![
+            "ws://10.9.0.1/x",
+            "ws://10.9.0.2/x",
+            "ws://10.9.0.3/x",
+            "ws://10.9.0.4/x",
+            "ws://10.9.0.5/x",
+            "ws://10.9.0.6/x",
+            "ws://10.9.0.7/x",
+            "ws://10.9.0.8/x",
+            "ws://10.9.0.9/x",
+        ];
+        let jwt = make_jwt("ws://10.9.0.1/x", candidates);
+        let result = select_candidates(&jwt);
+        assert_eq!(result.len(), 8, "must cap at MAX_RELAY_CANDIDATES=8");
+        // Order preserved: first 8 IPs in original order.
+        assert_eq!(result[0], "ws://10.9.0.1/x");
+        assert_eq!(result[7], "ws://10.9.0.8/x");
     }
 }

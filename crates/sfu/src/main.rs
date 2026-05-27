@@ -14,6 +14,11 @@ use oxpulse_sfu::{
     telemetry, udp_loop, SfuConfig, SfuMetrics,
 };
 
+/// Per-candidate connect timeout for the relay failover loop.
+/// A dark/filtered hub can hang TCP connect (~75 s) or the SDP-answer recv indefinitely.
+/// 8 s bounds the entire per-candidate attempt (TCP + WS upgrade + SDP answer).
+const RELAY_CANDIDATE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = SfuConfig::from_env();
@@ -245,18 +250,26 @@ async fn main() -> anyhow::Result<()> {
                 let tx = relay_inject_tx.clone();
                 tokio::spawn(async move {
                     // B0: iterate signed candidates in order; first success wins.
+                    // Invariant: select_candidates() guarantees non-empty before enqueue.
+                    debug_assert!(
+                        !candidates.is_empty(),
+                        "relay task enqueued with no candidates"
+                    );
                     let mut last_err: Option<anyhow::Error> = None;
                     for candidate in &candidates {
-                        match connect_relay(
-                            candidate,
-                            &token,
-                            host_candidate_addr,
-                            room.clone(),
-                            stats_interval_secs,
+                        match tokio::time::timeout(
+                            RELAY_CANDIDATE_CONNECT_TIMEOUT,
+                            connect_relay(
+                                candidate,
+                                &token,
+                                host_candidate_addr,
+                                room.clone(),
+                                stats_interval_secs,
+                            ),
                         )
                         .await
                         {
-                            Ok(pending) => {
+                            Ok(Ok(pending)) => {
                                 if let Err(e) = tx.send(pending).await {
                                     tracing::warn!(
                                         error = %e, room_id = %room,
@@ -267,12 +280,23 @@ async fn main() -> anyhow::Result<()> {
                                 }
                                 return;
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 tracing::warn!(
-                                    upstream = %candidate, room_id = %room,
+                                    upstream = %candidate, room_id = %room, error = %e,
                                     "relay candidate failed, trying next"
                                 );
                                 last_err = Some(e);
+                            }
+                            Err(_elapsed) => {
+                                tracing::warn!(
+                                    upstream = %candidate, room_id = %room,
+                                    timeout_s = RELAY_CANDIDATE_CONNECT_TIMEOUT.as_secs(),
+                                    "relay candidate timed out, trying next"
+                                );
+                                last_err = Some(anyhow::anyhow!(
+                                    "connect timed out after {:?}",
+                                    RELAY_CANDIDATE_CONNECT_TIMEOUT
+                                ));
                             }
                         }
                     }
