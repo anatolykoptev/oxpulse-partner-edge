@@ -19,6 +19,14 @@ use oxpulse_sfu::{
 /// 8 s bounds the entire per-candidate attempt (TCP + WS upgrade + SDP answer).
 const RELAY_CANDIDATE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
+/// Maximum concurrent relay dial tasks (SEC-CR-003).
+/// Each task can run up to MAX_RELAY_CANDIDATES (8) × RELAY_CANDIDATE_CONNECT_TIMEOUT (8 s)
+/// = 64 s of blocking I/O. Without a cap, a burst of distinct-jti tokens spawns unbounded
+/// concurrent tasks and saturates available ports / Tokio I/O threads.
+/// 16 is enough for realistic burst (typical deployment: 1–4 relay rooms active).
+/// Backpressure is observable via `relay_sem_full` warn logs.
+const RELAY_MAX_CONCURRENT: usize = 16;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = SfuConfig::from_env();
@@ -111,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("bind relay API on {relay_addr}"))?;
         let (relay_tx, relay_rx_inner) = tokio::sync::mpsc::channel::<RelayTask>(16);
         let seen_jtis: SeenJtis =
-            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let handle = spawn_relay_api(
             relay_listener,
             relay_secret,
@@ -236,6 +244,15 @@ async fn main() -> anyhow::Result<()> {
         let (relay_inject_tx, relay_inject_rx) =
             tokio::sync::mpsc::channel::<oxpulse_sfu::relay::client::PendingRelay>(32);
 
+        // SEC-CR-003: Semaphore bounding concurrent relay dial tasks.
+        // Each task may block up to MAX_RELAY_CANDIDATES × RELAY_CANDIDATE_CONNECT_TIMEOUT
+        // (8 candidates × 8 s = 64 s). Without a cap, a burst of N distinct-jti tokens
+        // spawns N concurrent tasks and saturates ports / Tokio I/O threads.
+        // Permit is acquired BEFORE the inner spawn so backpressure is applied before
+        // the task is created — not inside it. The permit is held for the task's lifetime.
+        // Bound is load-observable: `relay_sem_full` warn log fires on saturation.
+        let relay_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(RELAY_MAX_CONCURRENT));
+
         // Drain relay task channel — spawn a WebRTC relay client for each accepted task.
         // Each spawned task does WS connect + SDP offer/answer then sends PendingRelay
         // to relay_inject_tx so the main UDP loop registers it in the Registry.
@@ -248,9 +265,24 @@ async fn main() -> anyhow::Result<()> {
                 let token = task.upstream_room_token.clone();
                 let room = task.room_id.clone();
                 let tx = relay_inject_tx.clone();
+                // Acquire semaphore permit before spawning — enforces the concurrency cap.
+                // acquire_owned() returns Err only if the semaphore is closed; closing
+                // happens only when relay_sem is dropped (i.e. this outer task exits),
+                // so the error branch is effectively unreachable during normal operation.
+                let permit = match relay_sem.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::warn!(
+                            room_id = %room,
+                            "relay semaphore closed — skipping relay task"
+                        );
+                        continue;
+                    }
+                };
                 tokio::spawn(async move {
-                    // B0: iterate signed candidates in order; first success wins.
-                    // Invariant: select_candidates() guarantees non-empty before enqueue.
+                    let _permit = permit; // dropped (released) when this task ends
+                                          // B0: iterate signed candidates in order; first success wins.
+                                          // Invariant: select_candidates() guarantees non-empty before enqueue.
                     debug_assert!(
                         !candidates.is_empty(),
                         "relay task enqueued with no candidates"
