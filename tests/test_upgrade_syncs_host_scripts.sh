@@ -52,10 +52,13 @@ grep -qE '^restore_host_scripts\(\)' "$UPGRADE" \
     && pass "1d: restore_host_scripts() defined" \
     || fail "1d: restore_host_scripts() not defined"
 
-# sync_host_scripts must be called in the plain apply path.
-grep -q 'sync_host_scripts "$TARGET"' "$UPGRADE" \
-    && pass "1e: sync_host_scripts called in apply path" \
-    || fail "1e: sync_host_scripts not called in apply path"
+# sync_host_scripts must be called with RELEASE_TAG (not TARGET) in the apply path.
+# The tag-form fix (2026-05-26) changed all call sites from "$TARGET" to "$RELEASE_TAG"
+# so that the GitHub release URL form (partner-edge-vX.Y.Z) is used, not the docker
+# image tag form (vX.Y.Z).
+grep -q 'sync_host_scripts "$RELEASE_TAG"' "$UPGRADE" \
+    && pass "1e: sync_host_scripts called with RELEASE_TAG in apply path" \
+    || fail "1e: sync_host_scripts not called with RELEASE_TAG (tag-form regression)"
 
 # snapshot_host_scripts must be called before image pull in apply path.
 grep -q 'snapshot_host_scripts "$CURRENT"' "$UPGRADE" \
@@ -163,6 +166,7 @@ OUT2=$(
     SYSTEMCTL_BIN=true \
     REPO_RAW="http://127.0.0.1:$SERVE_PORT" \
     RELEASES_BASE="http://127.0.0.1:$SERVE_PORT/NOSUCHRELEASE" \
+    ALLOW_UNVERIFIED=1 \
     DRY_RUN=0 \
     STATE_FILE=/dev/null \
     bash -c "source '$PREAMBLE'; sync_host_scripts v0.99.0-test" 2>&1
@@ -201,6 +205,7 @@ OUT3=$(
     SYSTEMCTL_BIN=true \
     REPO_RAW="http://127.0.0.1:$SERVE_PORT" \
     RELEASES_BASE="http://127.0.0.1:$SERVE_PORT/NOSUCHRELEASE" \
+    ALLOW_UNVERIFIED=1 \
     DRY_RUN=0 \
     STATE_FILE=/dev/null \
     bash -c "source '$PREAMBLE'; sync_host_scripts v0.99.0-test" 2>&1
@@ -573,6 +578,8 @@ T10_DOCKER_STATE="$TMPDIR_ROOT/t10/docker_state"
 
 # Drive the actual compose-up-failure arm of upgrade.sh.
 # This exercises: snapshot → sync → pull (succeeds) → up (fails) → restore_host_scripts.
+# --allow-unverified skips the SHA256SUMS guard so the test focuses on the
+# compose-up-failure rollback path, not supply-chain verification.
 OUT10=$(
     OXPULSE_PREFIX_ETC="$T10_ETC" \
     OXPULSE_PREFIX_LIB="$T10_LIB" \
@@ -589,7 +596,7 @@ OUT10=$(
     OXPULSE_REPO_RAW="http://127.0.0.1:$SERVE_PORT" \
     RELEASES_BASE="http://127.0.0.1:$SERVE_PORT/NOSUCHRELEASE" \
     OXPULSE_UPGRADE_TAG=v0.10.0-pre \
-    bash "$UPGRADE" v0.99.0-test 2>&1
+    bash "$UPGRADE" --allow-unverified v0.99.0-test 2>&1
 ) && RC10=0 || RC10=$?
 
 # upgrade.sh must exit non-zero (compose up failed → rolled back → die).
@@ -722,6 +729,155 @@ grep -q "printf 'OXPULSE_MIRROR_BASE=" "$(dirname "$UPGRADE")/install.sh" \
 grep -q "grep '^OXPULSE_MIRROR_BASE='" "$UPGRADE" \
     && pass "12d: upgrade.sh reads OXPULSE_MIRROR_BASE from install.env" \
     || fail "12d: upgrade.sh missing install.env OXPULSE_MIRROR_BASE read"
+
+# ---------------------------------------------------------------------------
+# Test 13: single-tag form — no partner-edge- prefix constructed in fetch URLs.
+# Guards the fix: releases ≥v0.12.60 use vX.Y.Z everywhere (git/release/image).
+# Verifies that a canonical vX.Y.Z input reaches RELEASES_BASE/$tag/SHA256SUMS
+# without any partner-edge- prefix being prepended.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 13: single-tag form — vX.Y.Z fetches without partner-edge- prefix ==="
+
+T13_RELEASE_DIR="$TMPDIR_ROOT/t13/release"
+T13_TAG="v0.12.60"
+T13_RELEASE_ASSET_DIR="$T13_RELEASE_DIR/$T13_TAG"
+mkdir -p "$T13_RELEASE_ASSET_DIR"
+T13_SBIN="$TMPDIR_ROOT/t13/sbin"
+T13_BIN="$TMPDIR_ROOT/t13/bin"
+T13_LIBDIR="$TMPDIR_ROOT/t13/libdir"
+T13_SYSTEMD="$TMPDIR_ROOT/t13/systemd"
+mkdir -p "$T13_SBIN" "$T13_BIN" "$T13_LIBDIR" "$T13_SYSTEMD"
+
+# Fetch real health-report bytes from fixture server (what sync would fetch).
+T13_ACTUAL_FILE="$T13_RELEASE_ASSET_DIR/oxpulse-channels-health-report.sh"
+curl -fsSL --max-time 10 \
+    "http://127.0.0.1:$SERVE_PORT/oxpulse-channels-health-report.sh" \
+    -o "$T13_ACTUAL_FILE" \
+    || { fail "13: could not fetch health-report from fixture server"; }
+
+# Compute correct sha256 and build SHA256SUMS at the BARE vX.Y.Z path.
+# If upgrade.sh were adding partner-edge- prefix, it would fetch from
+# $RELEASES_BASE/partner-edge-v0.12.60/SHA256SUMS (404) and die.
+T13_HASH=$(sha256sum "$T13_ACTUAL_FILE" | awk '{print $1}')
+printf '%s  oxpulse-channels-health-report.sh\n' "$T13_HASH" > "$T13_RELEASE_ASSET_DIR/SHA256SUMS"
+printf '%s  partner-edge-upgrade.sh\n' "0000000000000000000000000000000000000000000000000000000000000000" \
+    >> "$T13_RELEASE_ASSET_DIR/SHA256SUMS"
+
+T13_PORT=18764
+python3 -m http.server "$T13_PORT" --directory "$T13_RELEASE_DIR" \
+    >/tmp/test-single-tag-httpd.log 2>&1 &
+T13_HTTP_PID=$!
+sleep 1
+
+# Plant stale sentinel — must be replaced if SHA256SUMS is fetched from the
+# bare vX.Y.Z path (no prefix).
+printf '#!/bin/bash\n# STALE sentinel for test 13\n' > "$T13_SBIN/oxpulse-channels-health-report"
+chmod 0755 "$T13_SBIN/oxpulse-channels-health-report"
+
+OUT13=$(
+    PREFIX_SBIN="$T13_SBIN" \
+    OXPULSE_PREFIX_BIN="$T13_BIN" \
+    PREFIX_LIBDIR="$T13_LIBDIR" \
+    SYSTEMD_DIR="$T13_SYSTEMD" \
+    SYSTEMCTL_BIN=true \
+    REPO_RAW="http://127.0.0.1:$SERVE_PORT" \
+    RELEASES_BASE="http://127.0.0.1:$T13_PORT" \
+    DRY_RUN=0 \
+    STATE_FILE=/dev/null \
+    bash -c "source '$PREAMBLE'; sync_host_scripts $T13_TAG" 2>&1
+) && RC13=0 || RC13=$?
+
+kill "$T13_HTTP_PID" 2>/dev/null || true
+
+[[ $RC13 -eq 0 ]] \
+    && pass "13a: sync_host_scripts exited 0 with bare vX.Y.Z tag ($T13_TAG)" \
+    || fail "13a: sync_host_scripts failed (RC=$RC13) — possible partner-edge- prefix still added; output: $OUT13"
+
+if ! grep -q 'STALE sentinel' "$T13_SBIN/oxpulse-channels-health-report" 2>/dev/null; then
+    pass "13b: health-report installed (SHA256SUMS fetched from bare vX.Y.Z path)"
+else
+    fail "13b: health-report NOT installed — SHA256SUMS may have been fetched from wrong path; output: $OUT13"
+fi
+
+echo "$OUT13" | grep -q 'installed oxpulse-channels-health-report' \
+    && pass "13c: log confirms 'installed' on SHA match (single-tag form)" \
+    || fail "13c: expected 'installed' log; output: $OUT13"
+
+# Structural: normalize_target must exist and map vX.Y.Z → RELEASE_TAG=TARGET.
+grep -qE '^normalize_target\(\)' "$UPGRADE" \
+    && pass "13d: normalize_target() defined in upgrade.sh" \
+    || fail "13d: normalize_target() missing from upgrade.sh"
+
+# No partner-edge-v construction in RELEASE_TAG assignment inside normalize_target.
+normalize_fn=$(awk '/^normalize_target\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE")
+if echo "$normalize_fn" | grep -qE 'RELEASE_TAG.*partner-edge-'; then
+    fail "13e: normalize_target still constructs RELEASE_TAG with partner-edge- prefix"
+else
+    pass "13e: normalize_target does NOT prepend partner-edge- to RELEASE_TAG"
+fi
+
+# ---------------------------------------------------------------------------
+# Test 14: transition — old partner-edge-vX.Y.Z input is stripped gracefully.
+# An edge using a pre-v0.12.60 installer that somehow passes partner-edge-v0.12.59
+# as TARGET must not 404 on assets but instead normalize to v0.12.59.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 14: transition — old partner-edge-vX.Y.Z input normalized gracefully ==="
+
+# Structural: normalize_target must handle partner-edge-v* input.
+normalize_fn=$(awk '/^normalize_target\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE")
+
+# Must strip partner-edge- prefix and set TARGET to bare vX.Y.Z.
+echo "$normalize_fn" | grep -qE 'partner-edge-v\*|partner-edge-\)' \
+    && pass "14a: normalize_target() has partner-edge-v* case" \
+    || fail "14a: normalize_target() missing partner-edge-v* transition case"
+
+echo "$normalize_fn" | grep -qE 'TARGET=.*#partner-edge-|TARGET=.*\{TARGET#' \
+    && pass "14b: normalize_target() strips partner-edge- prefix from TARGET" \
+    || fail "14b: normalize_target() missing prefix-strip assignment"
+
+# Functional: drive normalize_target + derive_release_tag via a subshell.
+RESULT14=$(bash -c "
+log() { printf '==> %s\n' \"\$*\" >&2; }
+warn() { printf '!! %s\n' \"\$*\" >&2; }
+TARGET='partner-edge-v0.12.59'
+$(awk '/^normalize_target\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE")
+normalize_target
+printf '%s %s\n' \"\$TARGET\" \"\$RELEASE_TAG\"
+" 2>/dev/null)
+
+RESULT14_TARGET=$(echo "$RESULT14" | awk '{print $1}')
+RESULT14_RTAG=$(echo "$RESULT14" | awk '{print $2}')
+
+[[ "$RESULT14_TARGET" == "v0.12.59" ]] \
+    && pass "14c: old-form TARGET='partner-edge-v0.12.59' normalized to 'v0.12.59'" \
+    || fail "14c: TARGET normalization wrong: got '$RESULT14_TARGET' expected 'v0.12.59'"
+
+[[ "$RESULT14_RTAG" == "v0.12.59" ]] \
+    && pass "14d: RELEASE_TAG='v0.12.59' (identity with normalized TARGET)" \
+    || fail "14d: RELEASE_TAG wrong: got '$RESULT14_RTAG' expected 'v0.12.59'"
+
+# And a canonical vX.Y.Z input must pass through unchanged.
+RESULT14B=$(bash -c "
+log() { printf '==> %s\n' \"\$*\" >&2; }
+warn() { printf '!! %s\n' \"\$*\" >&2; }
+TARGET='v0.12.60'
+$(awk '/^normalize_target\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE")
+normalize_target
+printf '%s %s\n' \"\$TARGET\" \"\$RELEASE_TAG\"
+" 2>/dev/null)
+
+RESULT14B_TARGET=$(echo "$RESULT14B" | awk '{print $1}')
+RESULT14B_RTAG=$(echo "$RESULT14B" | awk '{print $2}')
+
+[[ "$RESULT14B_TARGET" == "v0.12.60" ]] \
+    && pass "14e: canonical TARGET='v0.12.60' unchanged after normalize_target" \
+    || fail "14e: canonical TARGET mangled: got '$RESULT14B_TARGET'"
+
+[[ "$RESULT14B_RTAG" == "v0.12.60" ]] \
+    && pass "14f: RELEASE_TAG='v0.12.60' = TARGET (single-tag identity)" \
+    || fail "14f: RELEASE_TAG wrong for canonical input: got '$RESULT14B_RTAG'"
 
 # ---------------------------------------------------------------------------
 # Summary
