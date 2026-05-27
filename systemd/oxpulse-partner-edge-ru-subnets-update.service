@@ -1,0 +1,8 @@
+[Unit]
+Description=OxPulse partner-edge RU-subnet list refresh (RIPE/ipdeny feed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/oxpulse-partner-edge-ru-subnets-update
