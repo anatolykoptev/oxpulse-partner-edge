@@ -129,8 +129,9 @@ elif [[ -n "${OXPULSE_MIRROR_BASE:-}" ]]; then
 else
     RELEASES_BASE="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/download"
 fi
-# shellcheck disable=SC2034  # used by channel-render-lib.sh (sourced via _source_lib)
+# shellcheck disable=SC2034  # NODE_CFG + XRAY_CFG used by channel-render-lib.sh (sourced via _source_lib)
 NODE_CFG="$PREFIX_ETC/node-config.json"
+# shellcheck disable=SC2034
 XRAY_CFG="$PREFIX_ETC/xray-client.json"
 # Allow tests to override docker binary (e.g. DOCKER_BIN=true for dry-run).
 DOCKER_BIN="${DOCKER_BIN:-docker}"
