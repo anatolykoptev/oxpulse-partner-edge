@@ -739,6 +739,15 @@
 													"handler": "subroute",
 													"routes": [
 														{
+															"group": "group3",
+															"handle": [
+																{
+																	"handler": "rewrite",
+																	"uri": "/api/health/live"
+																}
+															]
+														},
+														{
 															"handle": [
 																{
 																	"handler": "reverse_proxy",
@@ -749,7 +758,7 @@
 																	},
 																	"upstreams": [
 																		{
-																			"dial": "xray-client:3080/health:80"
+																			"dial": "xray-client:3080"
 																		}
 																	]
 																}
