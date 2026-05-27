@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.62](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.61...v0.12.62) (2026-05-27)
+
+
+### Bug Fixes
+
+* **upgrade:** honor --dry-run in image path + rewrite compose tag to target before pull ([#268](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/268)) ([58e01d5](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/58e01d5548abf788291bbed2a2f2bd594d58a6a7))
+
 ## [0.12.61](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.60...v0.12.61) (2026-05-27)
 
 
