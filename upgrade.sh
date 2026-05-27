@@ -1793,15 +1793,48 @@ if [[ "$MODE" == check ]]; then
 	exit 10
 fi
 
+# ---- --dry-run gate for the full image upgrade path ----
+# BUG FIX: The plain apply path previously ran every mutating operation
+# (compose tag rewrite, host-script sync, compose pull, container recreate,
+# healthcheck, rollback) unconditionally even with --dry-run, causing a real
+# prod recreate + rollback cycle on ruoxp during a dry-run upgrade v0.12.45→v0.12.61
+# (~49s downtime). The --with-templates path already exited early at its own
+# dry-run block above; this gate covers the plain apply path.
+#
+# In dry-run: read-only inspection (capture_running_digests calls docker inspect,
+# which is safe) is intentionally skipped too — printing the plan is sufficient.
+if [[ "$DRY_RUN" -eq 1 ]]; then
+	log "[dry-run] plan for full image upgrade $CURRENT → $TARGET:"
+	log "  1. backup $COMPOSE_FILE → $PREV_COMPOSE_FILE"
+	log "  2. backup $STATE_FILE → $PREV_STATE_FILE"
+	log "  3. snapshot host-scripts ($CURRENT)"
+	log "  4. rewrite compose image tags: *:$CURRENT → *:$TARGET"
+	log "     (sed -E 's|(ghcr.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\\1:$TARGET|g')"
+	log "  5. update IMAGE_VERSION=$TARGET in $STATE_FILE"
+	log "  6. sync host-scripts to $RELEASE_TAG"
+	log "  7. docker compose pull (images rewritten to $TARGET before pull)"
+	log "  8. recreate services whose digest changed (running → $TARGET)"
+	log "  9. sleep 10 + healthcheck --local"
+	log "  10. on failure: rollback compose + host-scripts + compose pull + up"
+	log "[dry-run] no docker pull, no container recreate, no rollback performed"
+	exit 0
+fi
+
 # ---- Backup current config + host-scripts before mutating ----
 cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
 cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
 snapshot_host_scripts "$CURRENT"
 
-# Rewrite image tags in place.
+# BUG FIX (tag-rewrite): rewrite image tags to TARGET in the compose file
+# BEFORE docker compose pull so that pull fetches the correct target images.
+# The regex captures the full image name up to the colon and replaces the
+# tag portion with TARGET. This must happen before any pull invocation so
+# that both the pull and the subsequent `compose up` use the target tag, not
+# the currently-running tag.
 sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
 	"$COMPOSE_FILE"
 sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
+log "compose image tags rewritten to $TARGET (pre-pull)"
 
 # Sync host-scripts for the release tag before pulling images so that a
 # failed image pull leaves the host-scripts already at the new version —
@@ -1816,10 +1849,11 @@ ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt
 # Capture per-service image digests BEFORE pull so we can skip recreating
 # services whose image did not actually change (e.g. no-op version bump where
 # the sfu image is byte-for-byte identical across tags).
+# NOTE: capture uses `docker inspect` on running containers — read-only, safe.
 declare -A _before_digests
 capture_running_digests _before_digests
 
-log "pulling new images"
+log "pulling new images (tag=$TARGET)"
 pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull 2>&1)
 pull_rc=$?
 if [[ $pull_rc -ne 0 ]]; then
@@ -1837,6 +1871,11 @@ if [[ $pull_rc -ne 0 ]]; then
 fi
 
 # Resolve post-pull digests and recreate only services that changed.
+# resolve_pulled_digests reads the (already-rewritten) compose file to get
+# the TARGET image references, then inspects local Docker state after pull.
+# This correctly compares running-digest (before_digests) vs TARGET-digest
+# (after_digests), so only services whose TARGET image differs from what is
+# currently running are recreated (zero-downtime for no-op version bumps).
 # fail-safe: if digest resolution fails for a service, recreate_changed_services
 # treats an empty after-digest as "unknown → recreate" (not "skip").
 declare -A _after_digests

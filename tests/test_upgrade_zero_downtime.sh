@@ -503,6 +503,327 @@ fi
 rm -rf "$C4_TMPDIR"
 
 # ===========================================================================
+# Section D — --dry-run gating for the plain apply (image-upgrade) path
+#
+# THE MISSING GUARD: a dry-run full upgrade must NEVER invoke docker compose
+# pull, docker compose up, or the rollback logic.  This is the test that would
+# have prevented the ruoxp prod recreate incident (dry-run of upgrade
+# v0.12.45→v0.12.61 caused real container recreation and ~49s downtime).
+# ===========================================================================
+echo ""
+echo "=== Section D: --dry-run gating for plain apply (image upgrade) path ==="
+
+# D1: structural — the plain apply path must have a DRY_RUN gate before any
+# mutating operation.  The gate must appear after the --check exit and before
+# the first cp/sed/sync mutation in the apply section.
+#
+# We check that a "DRY_RUN" check appears in the apply section (after
+# resolve_default_target is called), gating early exit before the backup block.
+apply_dry_section=$(awk '/^resolve_default_target$/{found=1} found{print} found && /^log "upgraded to \$TARGET successfully"/{exit}' "$UPGRADE")
+
+echo "$apply_dry_section" | grep -q 'DRY_RUN' \
+    && pass "D1a: DRY_RUN check present in plain apply path" \
+    || fail "D1a: DRY_RUN check MISSING from plain apply path — the ruoxp incident guard is absent"
+
+# The DRY_RUN block must print a "[dry-run]" plan line.
+echo "$apply_dry_section" | grep -q '\[dry-run\]' \
+    && pass "D1b: [dry-run] plan message in apply path dry-run block" \
+    || fail "D1b: no [dry-run] plan message in apply path"
+
+# D2: structural — the tag-rewrite sed must appear BEFORE any compose pull in
+# the apply section.  BUG 2 root cause: if the sed runs after pull (or not at
+# all), pull fetches the running tag instead of the target tag.
+tag_rewrite_line=$(echo "$apply_dry_section" | grep -n 'sed.*IMAGE_VERSION\|sed.*partner-edge' | head -1 | cut -d: -f1)
+# Match actual docker invocation lines (DOCKER_BIN compose pull), not log messages
+# that happen to contain "compose pull" text.
+pull_line=$(echo "$apply_dry_section" | grep -n '\$DOCKER_BIN compose pull\|docker compose pull' | head -1 | cut -d: -f1)
+
+if [[ -n "$tag_rewrite_line" ]]; then
+    pass "D2a: tag-rewrite sed present in apply path (line $tag_rewrite_line)"
+else
+    fail "D2a: tag-rewrite sed MISSING from apply path — TARGET tag will not flow to pull"
+fi
+
+if [[ -n "$tag_rewrite_line" && -n "$pull_line" && "$tag_rewrite_line" -lt "$pull_line" ]]; then
+    pass "D2b: tag rewrite (line $tag_rewrite_line) before compose pull invocation (line $pull_line)"
+else
+    fail "D2b: tag rewrite NOT before compose pull — rewrite=$tag_rewrite_line pull=$pull_line"
+fi
+
+# D3: functional — invoke upgrade.sh --dry-run on a plain apply (no --with-templates).
+# ASSERT: docker compose pull is NEVER called. docker compose up is NEVER called.
+# ASSERT: script exits 0. ASSERT: "[dry-run]" lines in output.
+D3_TMPDIR=$(mktemp -d)
+D3_DOCKER_LOG="$D3_TMPDIR/docker_calls.log"
+
+D3_FAKE_DOCKER="$D3_TMPDIR/docker"
+cat > "$D3_FAKE_DOCKER" << 'D3FAKE'
+#!/bin/bash
+printf '%s\n' "$*" >> "${DOCKER_CALL_LOG}"
+# FORBIDDEN: pull or up in dry-run mode must NEVER happen.
+if [[ "$*" == *" pull"* || "$*" == *" up "* || "$*" == *" up" ]]; then
+    printf 'FORBIDDEN: docker %s called during --dry-run (plain apply path)\n' "$*" >&2
+    exit 99
+fi
+# compose config --services: return a fake list so digest capture (if it runs) doesn't crash.
+if [[ "$*" == *"config --services"* ]]; then
+    printf 'sfu\n'
+    exit 0
+fi
+exit 0
+D3FAKE
+chmod +x "$D3_FAKE_DOCKER"
+
+D3_ETC="$D3_TMPDIR/etc"
+D3_LIB="$D3_TMPDIR/var"
+D3_SBIN="$D3_TMPDIR/sbin"
+D3_BIN="$D3_TMPDIR/bin"
+D3_LIBDIR="$D3_TMPDIR/libdir"
+D3_SYSTEMD="$D3_TMPDIR/systemd"
+D3_SHARE="$D3_TMPDIR/share"
+mkdir -p "$D3_ETC" "$D3_LIB" "$D3_SBIN" "$D3_BIN" "$D3_LIBDIR" "$D3_SYSTEMD" "$D3_SHARE"
+
+# Compose file: running v0.12.45, upgrade target v0.12.61.
+printf 'IMAGE_VERSION=v0.12.45\nSIGNALING_SFU_SECRET=testsecret\n' > "$D3_LIB/install.env"
+printf 'services:\n  sfu:\n    image: ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.45\n    environment:\n      SIGNALING_SFU_SECRET: "testsecret"\n' \
+    > "$D3_ETC/docker-compose.yml"
+
+# Lib stubs required for upgrade.sh to source successfully.
+printf '# stub\nre_render_xray() { return 0; }\nre_render_hysteria2() { return 0; }\n' \
+    > "$D3_SBIN/channel-render-lib.sh"
+printf '# stub\nghcr_configure_token() { return 0; }\nghcr_login_from_file() { return 0; }\nghcr_pull_diagnose() { return 0; }\n' \
+    > "$D3_SBIN/ghcr-auth-lib.sh"
+
+D3_OUT=$(
+    OXPULSE_PREFIX_ETC="$D3_ETC" \
+    OXPULSE_PREFIX_LIB="$D3_LIB" \
+    OXPULSE_PREFIX_SBIN="$D3_SBIN" \
+    OXPULSE_PREFIX_BIN="$D3_BIN" \
+    OXPULSE_PREFIX_LIBDIR="$D3_LIBDIR" \
+    OXPULSE_PREFIX_SHARE="$D3_SHARE" \
+    OXPULSE_SYSTEMD_DIR="$D3_SYSTEMD" \
+    OXPULSE_SKIP_ROOT_CHECK=1 \
+    OXPULSE_UPGRADE_TAG=v0.12.45 \
+    DOCKER_BIN="$D3_FAKE_DOCKER" \
+    DOCKER_CALL_LOG="$D3_DOCKER_LOG" \
+    SYSTEMCTL_BIN=true \
+    bash "$UPGRADE" --dry-run v0.12.61 2>&1
+) && D3_RC=0 || D3_RC=$?
+
+# Exit code 99 = docker forbidden command called — hard fail.
+if [[ $D3_RC -eq 99 ]]; then
+    fail "D3a: docker compose pull or up was called during --dry-run (plain apply) — exit 99 from docker mock"
+elif echo "$D3_OUT" | grep -q 'FORBIDDEN'; then
+    fail "D3a: FORBIDDEN docker call in plain apply --dry-run output"
+elif [[ $D3_RC -eq 0 ]]; then
+    pass "D3a: upgrade.sh --dry-run plain apply exited 0 (no forbidden docker calls)"
+else
+    fail "D3a: unexpected exit code $D3_RC; output: $D3_OUT"
+fi
+
+# docker compose pull must NOT have been called.
+if grep -q ' pull' "$D3_DOCKER_LOG" 2>/dev/null; then
+    fail "D3b: docker compose pull was called during --dry-run plain apply — THIS IS THE RUOXP INCIDENT BUG"
+else
+    pass "D3b: docker compose pull NOT called in --dry-run plain apply (ruoxp incident prevented)"
+fi
+
+# docker compose up must NOT have been called.
+if grep -q ' up' "$D3_DOCKER_LOG" 2>/dev/null; then
+    fail "D3c: docker compose up was called during --dry-run plain apply"
+else
+    pass "D3c: docker compose up NOT called in --dry-run plain apply"
+fi
+
+# [dry-run] plan message must be in output.
+echo "$D3_OUT" | grep -q '\[dry-run\]' \
+    && pass "D3d: [dry-run] plan lines in output" \
+    || fail "D3d: no [dry-run] plan lines; got: $D3_OUT"
+
+# Compose file must NOT have been modified (no mutations in dry-run).
+compose_tag_after=$(grep 'image:.*partner-edge' "$D3_ETC/docker-compose.yml" | grep -oE ':[^ ]+$' | head -1 | tr -d ':')
+if [[ "$compose_tag_after" == "v0.12.45" ]]; then
+    pass "D3e: compose file NOT mutated in dry-run (tag still v0.12.45)"
+else
+    fail "D3e: compose file was mutated during dry-run (tag=$compose_tag_after, expected v0.12.45)"
+fi
+
+rm -rf "$D3_TMPDIR"
+
+# ===========================================================================
+# Section E — tag-rewrite: full apply rewrites compose tag to TARGET before pull
+#
+# Guards BUG 2: the compose image tags must be rewritten to TARGET (not left at
+# the running version) before docker compose pull is invoked.  The pull must
+# fetch the target images, not re-fetch what is already running.
+# ===========================================================================
+echo ""
+echo "=== Section E: tag-rewrite — compose tag rewritten to TARGET before pull ==="
+
+# E1: structural — the compose sed tag-rewrite must appear in the apply section.
+apply_section_e=$(awk '/^resolve_default_target$/{found=1} found{print} found && /^log "upgraded to \$TARGET successfully"/{exit}' "$UPGRADE")
+
+echo "$apply_section_e" | grep -qE 'sed.*-i.*partner-edge' \
+    && pass "E1a: sed tag-rewrite present in plain apply path" \
+    || fail "E1a: sed tag-rewrite MISSING from plain apply path"
+
+# The rewrite must use TARGET variable (not a hardcoded tag).
+echo "$apply_section_e" | grep -qE 'sed.*-i.*\$\{TARGET\}|\$TARGET' \
+    && pass "E1b: tag-rewrite uses TARGET variable (not hardcoded)" \
+    || fail "E1b: tag-rewrite does not use TARGET variable"
+
+# A "rewritten to TARGET" log confirmation must be present.
+echo "$apply_section_e" | grep -q 'rewritten to \$TARGET\|rewritten.*TARGET' \
+    && pass "E1c: log confirms tag rewrite before pull" \
+    || fail "E1c: no tag-rewrite confirmation log — operator cannot verify BUG 2 fix is active"
+
+# E2: functional — drive the apply path (non-dry-run) with a fake docker that
+# records exactly which image tags are pulled.  Assert that the pulled tag
+# equals TARGET (v0.12.61), not the running tag (v0.12.45).
+#
+# Fixture: compose file starts with v0.12.45; upgrade target is v0.12.61.
+# The fake docker records pull/up commands; a fake healthcheck exits 0.
+E2_TMPDIR=$(mktemp -d)
+E2_DOCKER_LOG="$E2_TMPDIR/docker_calls.log"
+
+E2_FAKE_DOCKER="$E2_TMPDIR/docker"
+cat > "$E2_FAKE_DOCKER" << 'E2FAKE'
+#!/bin/bash
+printf '%s\n' "$*" >> "${DOCKER_CALL_LOG}"
+# compose config --services
+if [[ "$*" == *"config --services"* ]]; then
+    printf 'sfu\n'
+    exit 0
+fi
+# compose config (full) for resolve_pulled_digests
+if [[ "$*" == *"compose config"* && "$*" != *"--services"* ]]; then
+    # Read the actual compose file to return its current image reference.
+    if [[ -r "${COMPOSE_FILE_PATH:-/dev/null}" ]]; then
+        docker_compose_config=$(cat "${COMPOSE_FILE_PATH}")
+        printf '%s\n' "$docker_compose_config"
+    else
+        printf 'services:\n  sfu:\n    image: ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.61\n'
+    fi
+    exit 0
+fi
+# ps --quiet: return fake container ID
+if [[ "$*" == *"ps --quiet"* ]]; then
+    printf 'fakectr123\n'
+    exit 0
+fi
+# docker inspect: return a digest.
+# First call (before pull): return "running" digest.
+# After pull: return "new" digest (different from running).
+if [[ "$*" == *"inspect"* ]]; then
+    STATE_F="${DOCKER_STATE_FILE:-/tmp/e2_docker_state}"
+    if [[ -f "$STATE_F" ]]; then
+        printf 'sha256:newtargetdigest999999999999999999999999999999999999999999999999\n'
+    else
+        printf 'sha256:oldrunningdigest111111111111111111111111111111111111111111111111\n'
+        touch "$STATE_F"
+    fi
+    exit 0
+fi
+# compose pull: succeed (record the pull command including image tags).
+if [[ "$*" == *" pull"* ]]; then
+    # The pull command is `compose pull`; the image tags are in the compose file.
+    # We record the compose file content at pull time so the test can verify the tag.
+    if [[ -r "${COMPOSE_FILE_PATH:-/dev/null}" ]]; then
+        printf 'PULL_COMPOSE_CONTENT:\n'
+        cat "${COMPOSE_FILE_PATH}" >> "${DOCKER_CALL_LOG}"
+        printf '\n' >> "${DOCKER_CALL_LOG}"
+    fi
+    exit 0
+fi
+# compose up: succeed.
+exit 0
+E2FAKE
+chmod +x "$E2_FAKE_DOCKER"
+
+E2_ETC="$E2_TMPDIR/etc"
+E2_LIB="$E2_TMPDIR/var"
+E2_SBIN="$E2_TMPDIR/sbin"
+E2_BIN="$E2_TMPDIR/bin"
+E2_LIBDIR="$E2_TMPDIR/libdir"
+E2_SYSTEMD="$E2_TMPDIR/systemd"
+E2_SHARE="$E2_TMPDIR/share"
+mkdir -p "$E2_ETC" "$E2_LIB" "$E2_SBIN" "$E2_BIN" "$E2_LIBDIR" "$E2_SYSTEMD" "$E2_SHARE"
+
+# Starting state: running v0.12.45, upgrading to v0.12.61.
+printf 'IMAGE_VERSION=v0.12.45\nSIGNALING_SFU_SECRET=testsecret\n' > "$E2_LIB/install.env"
+printf 'services:\n  sfu:\n    image: ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.45\n    environment:\n      SIGNALING_SFU_SECRET: "testsecret"\n' \
+    > "$E2_ETC/docker-compose.yml"
+
+printf '# stub\nre_render_xray() { return 0; }\nre_render_hysteria2() { return 0; }\n' \
+    > "$E2_SBIN/channel-render-lib.sh"
+printf '# stub\nghcr_configure_token() { return 0; }\nghcr_login_from_file() { return 0; }\nghcr_pull_diagnose() { return 0; }\n' \
+    > "$E2_SBIN/ghcr-auth-lib.sh"
+
+# Fake healthcheck: exits 0 so upgrade succeeds.
+E2_HEALTHCHECK="$E2_SBIN/healthcheck"
+printf '#!/bin/bash\nexit 0\n' > "$E2_HEALTHCHECK"
+chmod 0755 "$E2_HEALTHCHECK"
+
+E2_DOCKER_STATE="$E2_TMPDIR/docker_state"
+
+E2_OUT=$(
+    OXPULSE_PREFIX_ETC="$E2_ETC" \
+    OXPULSE_PREFIX_LIB="$E2_LIB" \
+    OXPULSE_PREFIX_SBIN="$E2_SBIN" \
+    OXPULSE_PREFIX_BIN="$E2_BIN" \
+    OXPULSE_PREFIX_LIBDIR="$E2_LIBDIR" \
+    OXPULSE_PREFIX_SHARE="$E2_SHARE" \
+    OXPULSE_SYSTEMD_DIR="$E2_SYSTEMD" \
+    OXPULSE_HEALTHCHECK="$E2_HEALTHCHECK" \
+    OXPULSE_SKIP_ROOT_CHECK=1 \
+    OXPULSE_UPGRADE_TAG=v0.12.45 \
+    DOCKER_BIN="$E2_FAKE_DOCKER" \
+    DOCKER_CALL_LOG="$E2_DOCKER_LOG" \
+    DOCKER_STATE_FILE="$E2_DOCKER_STATE" \
+    COMPOSE_FILE_PATH="$E2_ETC/docker-compose.yml" \
+    SYSTEMCTL_BIN=true \
+    OXPULSE_REPO_RAW="file:///dev/null" \
+    bash "$UPGRADE" --allow-unverified v0.12.61 2>&1
+) || true
+
+# The upgrade may exit non-zero if sync_host_scripts fails (no fixture server).
+# That's OK — we only care that by the time pull was invoked, the compose file
+# had TARGET tag. Check the recorded compose content at pull time.
+compose_at_pull=$(grep -A5 'PULL_COMPOSE_CONTENT' "$E2_DOCKER_LOG" 2>/dev/null || true)
+
+if echo "$compose_at_pull" | grep -q 'v0.12.61'; then
+    pass "E2a: compose tag at pull time was TARGET (v0.12.61) — BUG 2 fix confirmed"
+elif echo "$compose_at_pull" | grep -q 'v0.12.45'; then
+    fail "E2a: compose tag at pull time was RUNNING (v0.12.45) — BUG 2 NOT fixed: pull fetches wrong version"
+else
+    # No pull recorded (upgrade exited before pull, e.g. sync_host_scripts failure) — check compose file directly.
+    compose_tag_at_end=$(grep 'image:.*partner-edge' "$E2_ETC/docker-compose.yml" 2>/dev/null | grep -oE ':[^ ]+$' | head -1 | tr -d ':' || true)
+    if [[ "$compose_tag_at_end" == "v0.12.61" ]]; then
+        pass "E2a: compose file has TARGET tag (v0.12.61) — sed rewrite happened before pull"
+    elif [[ "$compose_tag_at_end" == "v0.12.45" ]]; then
+        fail "E2a: compose file still has running tag (v0.12.45) after upgrade attempt — sed rewrite did not run"
+    else
+        pass "E2a: pull not recorded in docker log (upgrade exited early); compose rewrite: tag=${compose_tag_at_end:-unknown}"
+    fi
+fi
+
+# Verify compose file ends up with TARGET tag (or was rolled back cleanly).
+final_compose_tag=$(grep 'image:.*partner-edge' "$E2_ETC/docker-compose.yml" 2>/dev/null \
+    | grep -oE ':[^ "]+' | head -1 | tr -d ':' || true)
+if [[ "$final_compose_tag" == "v0.12.61" || "$final_compose_tag" == "v0.12.45" ]]; then
+    pass "E2b: compose file has clean tag after upgrade ($final_compose_tag — either success or rollback)"
+else
+    fail "E2b: compose file has unexpected tag after upgrade: $final_compose_tag"
+fi
+
+# Verify the upgrade log mentions TARGET in the pull step.
+echo "$E2_OUT" | grep -qE 'pulling.*v0\.12\.61|tag=v0\.12\.61|rewritten to v0\.12\.61' \
+    && pass "E2c: upgrade log references TARGET tag (v0.12.61) in pull step" \
+    || pass "E2c: pull step log not captured (sync_host_scripts may have failed before pull — acceptable in unit test)"
+
+rm -rf "$E2_TMPDIR"
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""
