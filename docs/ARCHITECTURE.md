@@ -117,6 +117,14 @@ Ed25519-signed JWTs (public key fetched from the control plane) but
 never possesses media decryption keys. Listens on port 8912 for the
 cascade relay API.
 
+The relay upstream URL carried in that JWT must also pass an SSRF allow-list
+(`crates/sfu/src/relay/allowlist.rs`): `wss://` only to `*.oxpulse.chat` /
+localhost, or `ws://` only to the AWG mesh subnet `10.9.0.0/24` (plaintext is
+safe inside the AmneziaWG tunnel, which already provides confidentiality + peer
+authentication). Under blocking the relay reaches the central signaling over the
+mesh (`ws://10.9.0.2:8907`, the bootstrap hub's `oxpulse-awg-bridge`) rather than
+public DNS — the besieged-fortress edge→central transport (since v0.12.57).
+
 Configuration: environment variables in `sfu-extra.env`; see the SFU
 environment variables table in `README.md`.
 
