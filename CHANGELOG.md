@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.70](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.69...v0.12.70) (2026-05-28)
+
+
+### Bug Fixes
+
+* **sfu:** strip CIDR prefix from AWG IP before passing to SFU bind env ([#288](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/288)) ([783c2ab](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/783c2ab90770602d88412b8c44b78430e1203348))
+
 ## [0.12.69](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.68...v0.12.69) (2026-05-28)
 
 
