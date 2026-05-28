@@ -139,13 +139,13 @@ jobs:
           #   test_hydrate_render_identical.sh — Caddyfile upstream refactored from
           #     `10.9.0.2:8907 host.docker.internal:18443` to `xray-client:3080`;
           #     fixture not updated.
-          #   test_install_lib_checksum.sh — REAL BUG: lib/lib-checksums.txt
-          #     sha256 for render-channel-lib.sh is stale → followup PR needed.
           #   test_install_opec_parity.sh — install.sh `render_with_opec xray`
           #     call-site removed during OPEC Phase 3 absorb; assertion stale.
           #   test_release_assets.sh — release.yml uninstall.sh staging path
           #     changed (Bug15 closed differently); test asserts old pattern.
-          BATS_SKIP="test_hydrate_render_identical.sh test_install_lib_checksum.sh \
+          # test_install_lib_checksum.sh — REMOVED from skip list: checksums drift fixed
+          #     (lib/lib-checksums.txt regenerated to match release pipeline, PR #285).
+          BATS_SKIP="test_hydrate_render_identical.sh \
             test_install_opec_parity.sh test_release_assets.sh"
           for entry in $BATS_SKIP; do
             if [ ! -f "tests/$entry" ]; then
