@@ -5,6 +5,21 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.64](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.63...v0.12.64) (2026-05-27)
+
+
+### Features
+
+* **split-routing:** RU-subnet feed (RIPE/ipdeny) + daily timer + install wiring ([#278](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/278)) ([7c512c6](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7c512c6f6544110a635e36d1a254b574952701ce))
+* **split-routing:** selective cgroup split-routing apply/disable scripts (RU profile) ([#274](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/274)) ([842f267](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/842f267a2d8d4b8d20af0bf6ecc0da85c6dcd141))
+* **split-routing:** wire into install.sh behind --profile=russia ([#279](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/279)) ([3dccaad](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3dccaade91f9ff1427241381bb21ad19c4b907c7))
+
+
+### Bug Fixes
+
+* **split-routing:** address CL-2 code-quality review findings ([#276](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/276)) ([d7402bb](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d7402bb9dcad28d970545fc42491207332f2b0e7))
+* **split-routing:** bats 1.4-compat in test (CI runner has bats &lt;1.5) ([#277](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/277)) ([479169f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/479169f3e84f2fc786c03a9c3647d65547752086))
+
 ## [0.12.63](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.62...v0.12.63) (2026-05-27)
 
 
