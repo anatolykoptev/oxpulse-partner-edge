@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.72](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.71...v0.12.72) (2026-05-28)
+
+
+### Bug Fixes
+
+* **healthcheck:** probe SFU /metrics on SFU_METRICS_BIND, not 127.0.0.1 (bug [#7](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/7)) ([#295](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/295)) ([be4a52b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/be4a52b90eaef85ed48310f2098360847b529fd7))
+
 ## [0.12.71](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.70...v0.12.71) (2026-05-28)
 
 
