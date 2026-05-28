@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.69](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.68...v0.12.69) (2026-05-28)
+
+
+### Bug Fixes
+
+* **compose:** SFU healthcheck probes mesh IP for metrics+relay-API (bug [#4](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/4)) ([#289](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/289)) ([627c1c8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/627c1c807a30a60fe125e1d460b5403d49255b85))
+
 ## [0.12.68](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.67...v0.12.68) (2026-05-28)
 
 
