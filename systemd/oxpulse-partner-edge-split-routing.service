@@ -1,0 +1,14 @@
+[Unit]
+Description=OxPulse partner-edge selective split-routing (user.slice -> mesh)
+After=network-online.target awg-quick@awg0.service oxpulse-awg-params-agent.service
+Wants=network-online.target
+ConditionPathExists=/etc/oxpulse-partner-edge/ru-subnets.txt
+ConditionPathExists=/etc/amnezia/amneziawg/awg0.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/oxpulse-partner-edge-split-routing
+
+[Install]
+WantedBy=multi-user.target
