@@ -458,6 +458,14 @@ jobs:
           cp systemd/oxpulse-geoip-refresh.timer               oxpulse-geoip-refresh.timer
           cp systemd/oxpulse-channels-health-report.service    oxpulse-channels-health-report.service
           cp systemd/oxpulse-channels-health-report.timer      oxpulse-channels-health-report.timer
+          # Split-routing artifacts (PR #280): static unit + lib module + 3 sbin scripts.
+          # The 3 sbin scripts (split-routing.sh, split-disable.sh, ru-subnets-update)
+          # already live at repo root with the right name — no cp needed (same pattern as
+          # oxpulse-channels-health-report.sh). Only the subdir files need staging.
+          cp systemd/oxpulse-partner-edge-split-routing.service oxpulse-partner-edge-split-routing.service
+          cp systemd/oxpulse-partner-edge-ru-subnets-update.service oxpulse-partner-edge-ru-subnets-update.service
+          cp systemd/oxpulse-partner-edge-ru-subnets-update.timer    oxpulse-partner-edge-ru-subnets-update.timer
+          cp lib/install-split-routing.sh                            install-split-routing.sh
           # Bug 8 fix: ship defaults.conf so install-systemd.sh can fetch it
           # from REPO_RAW on fresh installs (tier-4 fallback path).
           cp config/defaults.conf         config-defaults.conf
@@ -473,6 +481,7 @@ jobs:
             install-healthcheck.sh \
             install-network.sh \
             install-preflight.sh \
+            install-split-routing.sh \
             install-systemd.sh \
             render-channel-lib.sh \
           ) > lib/lib-checksums.txt
@@ -518,6 +527,13 @@ jobs:
             oxpulse-geoip-refresh.timer \
             oxpulse-channels-health-report.service \
             oxpulse-channels-health-report.timer \
+            oxpulse-partner-edge-split-routing.sh \
+            oxpulse-partner-edge-split-disable.sh \
+            oxpulse-partner-edge-ru-subnets-update \
+            install-split-routing.sh \
+            oxpulse-partner-edge-split-routing.service \
+            oxpulse-partner-edge-ru-subnets-update.service \
+            oxpulse-partner-edge-ru-subnets-update.timer \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
@@ -581,6 +597,13 @@ jobs:
             oxpulse-awg-params-agent-amd64 \
             oxpulse-awg-params-agent-arm64 \
             install-awg-params-agent.sh \
+            oxpulse-partner-edge-split-routing.sh \
+            oxpulse-partner-edge-split-disable.sh \
+            oxpulse-partner-edge-ru-subnets-update \
+            install-split-routing.sh \
+            oxpulse-partner-edge-split-routing.service \
+            oxpulse-partner-edge-ru-subnets-update.service \
+            oxpulse-partner-edge-ru-subnets-update.timer \
             SHA256SUMS \
             --clobber
 
