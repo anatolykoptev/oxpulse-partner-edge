@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.66](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.65...v0.12.66) (2026-05-28)
+
+
+### Features
+
+* **enable-hy2:** add oxpulse-partner-edge-enable-hy2 host-script ([#282](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/282)) ([6960ca2](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/6960ca2225651336ee883e9cd7d387549a2fd295))
+
 ## [0.12.65](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.64...v0.12.65) (2026-05-28)
 
 
