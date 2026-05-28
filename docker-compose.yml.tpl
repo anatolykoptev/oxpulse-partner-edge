@@ -113,13 +113,15 @@ services:
       # privileged HTTP sockets (Prometheus /metrics + relay API): mesh-only,
       # so they are not reachable from the public internet regardless of
       # host firewall state. Audit 2026-05-21 found these were leaking on the
-      # public NIC across all 3 production partners. AWG_ALLOCATED_IP is the
-      # partner's own mesh IP (e.g. 10.9.0.6 for zvonilka), allocated by
-      # motherly during /api/partner/register. Empty when mesh disabled — SFU
+      # public NIC across all 3 production partners. AWG_HOST_IP is the
+      # partner's own mesh IP without CIDR prefix (e.g. 10.9.0.6 for
+      # zvonilka), stripped from AWG_ALLOCATED_IP (e.g. 10.9.0.6/24) which
+      # central returns with prefix for awg0.conf. SFU v0.12.67+ strict
+      # getaddrinfo rejects the /24 form. Empty when mesh disabled — SFU
       # then falls back to bind_address.
       SFU_BIND_ADDRESS: "0.0.0.0"
-      SFU_METRICS_BIND: "{{AWG_ALLOCATED_IP}}"
-      SFU_RELAY_API_BIND: "{{AWG_ALLOCATED_IP}}"
+      SFU_METRICS_BIND: "{{AWG_HOST_IP}}"
+      SFU_RELAY_API_BIND: "{{AWG_HOST_IP}}"
       SFU_UDP_PORT: "{{SFU_UDP_PORT}}"
       SFU_METRICS_PORT: "{{SFU_METRICS_PORT}}"
       # Per-edge label baked into every Prometheus series via the SFU's
