@@ -1,4 +1,4 @@
-.PHONY: build test test-doc test-all lint deny check
+.PHONY: build test test-doc test-all lint deny check lib-checksums
 
 # Build all targets (locked — matches dozor production build)
 build:
@@ -25,3 +25,20 @@ deny:
 
 # Full pre-PR gate: build + tests + lint + deny
 check: build test-all lint deny
+
+# Regenerate lib/lib-checksums.txt to match release pipeline order.
+# Run after editing any lib/install-*.sh or lib/render-*.sh file.
+lib-checksums:
+	(cd lib && sha256sum \
+	  install-args.sh \
+	  install-awg.sh \
+	  install-awg-params-agent.sh \
+	  install-deps.sh \
+	  install-healthcheck.sh \
+	  install-network.sh \
+	  install-preflight.sh \
+	  install-split-routing.sh \
+	  install-systemd.sh \
+	  render-channel-lib.sh \
+	) > lib/lib-checksums.txt
+	@echo "lib/lib-checksums.txt regenerated — commit the result"
