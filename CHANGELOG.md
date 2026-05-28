@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.67](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.66...v0.12.67) (2026-05-28)
+
+
+### Features
+
+* **refresh:** self-bootstrap hy2 channel when node-config provides hysteria2_server ([#284](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/284)) ([bb646f5](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/bb646f58819730c3a7a62b8304c20a8c781c9038))
+
 ## [0.12.66](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.65...v0.12.66) (2026-05-28)
 
 
