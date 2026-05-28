@@ -427,6 +427,9 @@ jobs:
           cp lib/install-args.sh          install-args.sh
           cp lib/install-awg.sh           install-awg.sh
           cp lib/install-awg-params-agent.sh install-awg-params-agent.sh
+          # Bug #5 fix: ship install-firewall.sh so _install_lib_source can
+          # verify its sha256 against lib-checksums.txt on tier-4 installs.
+          cp lib/install-firewall.sh          install-firewall.sh
           # Phase 5.5 MAJOR 1: fail-soft render helpers (sourced by install/hydrate/update/refresh).
           cp lib/render-channel-lib.sh    render-channel-lib.sh
           # Host-script sync assets: stage every file in _HOST_SCRIPT_SBIN_FILES so
@@ -478,6 +481,7 @@ jobs:
             install-awg.sh \
             install-awg-params-agent.sh \
             install-deps.sh \
+            install-firewall.sh \
             install-healthcheck.sh \
             install-network.sh \
             install-preflight.sh \

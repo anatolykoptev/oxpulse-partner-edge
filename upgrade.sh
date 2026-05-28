@@ -65,7 +65,7 @@ PREV_HEALTHCHECK="$PREFIX_LIB/healthcheck.prev"
 # Directory where pre-upgrade host-script snapshots are stored for rollback.
 PREV_HOST_SCRIPTS_DIR="$PREFIX_LIB/host-scripts.prev"
 HEALTHCHECK="${OXPULSE_HEALTHCHECK:-/usr/local/sbin/oxpulse-partner-edge-healthcheck}"
-# @RELEASE_TAG@ is substituted by release.yml at publish time to the release tag
+# @RELEASE_TAG_PLACEHOLDER@ in the default below is substituted by release.yml to the release tag
 # (vX.Y.Z starting at v0.12.60) so REPO_RAW fetches are pinned to the exact release
 # ref, not main HEAD. Without this pin the bytes fetched from raw.githubusercontent.com
 # do not match the SHA256SUMS released for that tag (main is always ahead of any tag).
@@ -109,9 +109,10 @@ if [[ -n "${OXPULSE_REPO_RAW:-}" ]]; then
 elif [[ -n "${OXPULSE_MIRROR_BASE:-}" ]]; then
     # Mirror installed: raw files come from $MIRROR_BASE/raw (same as install.sh).
     REPO_RAW="$OXPULSE_MIRROR_BASE/raw"
-elif [[ "${OXPULSE_UPGRADE_TAG}" == "@RELEASE_TAG@" ]]; then
-    # Running from a local checkout (placeholder not substituted). Fall back to main
-    # so developer/test runs still work.  Live relay operators get the substituted tag.
+elif [[ ! "${OXPULSE_UPGRADE_TAG}" =~ ^v[0-9]+\. ]]; then
+    # Placeholder not substituted or not a real vX.Y.Z tag. Fall back to main
+    # so developer/test runs still work. Released upgrade.sh has OXPULSE_UPGRADE_TAG
+    # set to the real tag (vX.Y.Z form) by release.yml sed substitution.
     REPO_RAW="https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main"
 else
     REPO_RAW="https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/${OXPULSE_UPGRADE_TAG}"
@@ -150,7 +151,7 @@ die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" 
 # Tier 3 requires curl and a reachable REPO_RAW.  Fetched file is written to a
 # temp dir and sourced from there; it is NOT installed to disk (sync_host_scripts
 # handles the verified install later in the run).
-# Note: when OXPULSE_UPGRADE_TAG is the real tag (not the @RELEASE_TAG@ sentinel),
+# Note: when OXPULSE_UPGRADE_TAG is the real tag (not the @RELEASE_TAG_UNSUBSTITUTED@ sentinel),
 # REPO_RAW already points at the pinned release ref — fetched bytes match the
 # tag snapshot, not main HEAD.
 _source_lib() {
@@ -949,7 +950,7 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 		remote_name=$(_host_script_remote_name "$f")
 		install_dir=$(_host_script_install_dir "$f")
 		# Self-update special case (MINOR-1):
-		# release.yml stages a @RELEASE_TAG@-substituted copy of upgrade.sh as
+		# release.yml stages a @RELEASE_TAG_PLACEHOLDER@-substituted copy of upgrade.sh as
 		# "partner-edge-upgrade.sh" in the release assets (not in REPO_RAW, which
 		# serves the raw committed tree with the literal placeholder).  Fetching from
 		# REPO_RAW would yield bytes that DON'T match the SHA256SUMS entry for
