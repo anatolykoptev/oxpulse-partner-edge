@@ -31,13 +31,17 @@ SYSTEMD_DIR=/etc/systemd/system
 REGISTRY="${OXPULSE_IMAGE_REGISTRY:-ghcr.io/anatolykoptev}"
 # Bug R: pin REPO_RAW to release tag so released installers fetch lib/* from
 # the same commit as the release (not main HEAD). release.yml replaces the
-# @RELEASE_TAG@ placeholder with the real tag before uploading the installer.
+# @RELEASE_TAG_PLACEHOLDER@ in the default below with the real tag on release.
+# Comparison uses =~ ^v[0-9]+\. to detect a real tag (vX.Y.Z form).
+# @RELEASE_TAG@ placeholder never matches (no leading v+digits) so dev
+# checkouts fall back to /main; released installers with the real tag
+# (vX.Y.Z) match and pin REPO_RAW to the tag.
 # When running from a dev checkout or main (placeholder not substituted), falls
 # back to main. Operator can always override via OXPULSE_REPO_RAW env var.
 OXPULSE_RELEASE_TAG="${OXPULSE_RELEASE_TAG:-@RELEASE_TAG@}"
 if [[ -n "${OXPULSE_REPO_RAW:-}" ]]; then
 	REPO_RAW="$OXPULSE_REPO_RAW"
-elif [[ "${OXPULSE_RELEASE_TAG}" != "@RELEASE_TAG@" ]]; then
+elif [[ "${OXPULSE_RELEASE_TAG}" =~ ^v[0-9]+\. ]]; then
 	REPO_RAW="https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/${OXPULSE_RELEASE_TAG}"
 else
 	REPO_RAW="https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main"
