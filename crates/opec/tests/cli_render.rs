@@ -63,7 +63,8 @@ fn frozen_env() -> Vec<(&'static str, &'static str)> {
         // refactored to take both the AWG/SFU-relay backend AND a hysteria2
         // fallback. Fixture at expected/caddy.txt encodes these literals.
         ("AWG_MOTHERLY_IP", "10.9.0.2"),
-        ("AWG_ALLOCATED_IP", "10.9.0.6"),
+        ("AWG_ALLOCATED_IP", "10.9.0.6/24"),  // realistic CIDR form as central returns it
+        ("AWG_HOST_IP", "10.9.0.6"),              // stripped from AWG_ALLOCATED_IP%%/* by install.sh
         ("HY2_FALLBACK_HOST", "host.docker.internal"),
         ("HY2_FALLBACK_PORT", "18443"),
     ]
