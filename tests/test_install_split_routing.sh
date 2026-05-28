@@ -81,6 +81,8 @@ STUB
 		> "$CHECKOUT/systemd/oxpulse-partner-edge-ru-subnets-update.service"
 	printf '[Timer]\nOnCalendar=weekly\n[Install]\nWantedBy=timers.target\n' \
 		> "$CHECKOUT/systemd/oxpulse-partner-edge-ru-subnets-update.timer"
+	cp "$REPO_ROOT/systemd/oxpulse-partner-edge-split-routing.service" \
+		"$CHECKOUT/systemd/oxpulse-partner-edge-split-routing.service"
 
 	# Destination dirs
 	DEST_SYSTEMD="$TMP/systemd"
@@ -164,7 +166,8 @@ ENVEOF
 		_split_routing_install_unit
 	"
 	[ "$status" -eq 0 ]
-	grep -q "ExecStart=${DEST_SBIN}/oxpulse-partner-edge-split-routing" \
+	# Static file has hard-coded /usr/local/sbin (default PREFIX_SBIN, verified on cheburator).
+	grep -q "ExecStart=/usr/local/sbin/oxpulse-partner-edge-split-routing" \
 		"$DEST_SYSTEMD/oxpulse-partner-edge-split-routing.service"
 }
 

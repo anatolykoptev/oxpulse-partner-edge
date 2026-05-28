@@ -73,6 +73,8 @@ STUB
         > "$CHECKOUT/systemd/oxpulse-partner-edge-ru-subnets-update.service"
     printf '[Timer]\nOnCalendar=weekly\n[Install]\nWantedBy=timers.target\n' \
         > "$CHECKOUT/systemd/oxpulse-partner-edge-ru-subnets-update.timer"
+    cp "$REPO_ROOT/systemd/oxpulse-partner-edge-split-routing.service" \
+        "$CHECKOUT/systemd/oxpulse-partner-edge-split-routing.service"
 
     DEST_SYSTEMD="$TMP/systemd"
     DEST_SBIN="$TMP/sbin"
