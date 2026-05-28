@@ -916,6 +916,31 @@ fi
 [[ -z "$REALITY_SERVER_NAME" ]] && REALITY_SERVER_NAME="www.samsung.com"
 [[ -z "$REALITY_ENCRYPTION" ]] && REALITY_ENCRYPTION="none"
 [[ -n "$REGISTER_TURNS_SUBDOMAIN" ]] && TURNS_SUBDOMAIN="$REGISTER_TURNS_SUBDOMAIN"
+# SNI-mismatch guard (2026-05-28): the canonical server-generated subdomain
+# has the form api-<6-hex> (register.rs L131). If TURNS_SUBDOMAIN is still
+# "turns" here it means either:
+#   a) opec pre-v0.12.48 wrote the request body instead of response body
+#      to --out-json (fixed in commit 634874f / PR #215); or
+#   b) a very old backend that does not emit turns_subdomain (pre-Apr 2026).
+# In both cases the rendered Caddyfile will NOT match the DB value, and
+# TURNS-443 TLS relay will be permanently broken for censored clients.
+#
+# We warn (not die) for backward-compat with pre-34874f opec binaries that
+# some operators may still have in PATH before this installer auto-updates.
+# The operator must then run scripts/migrate-turns-subdomain.sh after
+# the opec binary is updated.
+if [[ "${TURNS_SUBDOMAIN:-}" == "turns" || -z "${TURNS_SUBDOMAIN:-}" ]]; then
+	warn "TURNS_SUBDOMAIN is '${TURNS_SUBDOMAIN:-<empty>}' — expected api-<hex> from backend."
+	warn "Possible causes:"
+	warn "  1. opec pre-v0.12.48 (fixed in PR #215): upgrade opec binary and re-run install.sh"
+	warn "  2. Backend older than Apr 2026: the central must be updated to return turns_subdomain"
+	warn "Caddy will render 'turns.$DOMAIN' as the SNI; the backend stores"
+	warn "'api-<hex>.$DOMAIN' — TURNS-443 TLS relay will be broken for RU clients."
+	warn "After opec is current: sudo bash scripts/migrate-turns-subdomain.sh"
+elif [[ ! "${TURNS_SUBDOMAIN}" =~ ^api- ]]; then
+	warn "TURNS_SUBDOMAIN='$TURNS_SUBDOMAIN' does not match expected api-<hex> format."
+	warn "Verify the backend returned the correct value; check $BACKEND_API/api/partner/register response."
+fi
 
 # Phase 4.3d: Fetch Ed25519 SFU signing public key from /api/partner/keys at
 # install time so the SFU container starts with the correct key on day 1
