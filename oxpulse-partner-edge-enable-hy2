@@ -193,7 +193,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
 fi
 
 log "activating ch3 compose profile"
-(cd "$PREFIX_ETC" && COMPOSE_PROFILES=ch3 docker compose --profile ch3 up -d --no-recreate hysteria2-client)
+(cd "$PREFIX_ETC" && COMPOSE_PROFILES=ch3 docker compose --profile ch3 up -d hysteria2-client)
 
 # ── step 5: verify container health ──────────────────────────────────────────
 log "waiting for hysteria2-client to become healthy (up to 60s)"
