@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+# oxpulse-partner-edge-enable-hy2 — activate Hysteria2 (CH3) channel on an
+# already-installed partner-edge without a full install.sh re-run.
+#
+# Idempotent: re-running detects no-op state (file unchanged, container
+# healthy) and exits 0 without side effects.
+#
+# Behavior mirrors install.sh Phase 1.7 exactly — same API call, same render
+# function, same compose activation. This is a standalone entry point that
+# removes the node-config gate (operator-invoked, not config-gated).
+#
+# Usage:
+#   oxpulse-partner-edge-enable-hy2 [--server HOST:PORT] [--listen ADDR:PORT]
+#       [--backend ADDR:PORT] [--backend-api URL] [--dry-run] [--force] [--help]
+#
+# Exit codes:
+#   0  — success or clean no-op
+#   1  — usage / argument error
+#   2  — runtime error (API, render, container health)
+
+set -euo pipefail
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+HY2_SERVER="${HY2_SERVER:-203.0.113.10:51822}"
+HY2_LOCAL_LISTEN="${HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
+HY2_REMOTE_BACKEND="${HY2_REMOTE_BACKEND:-127.0.0.1:8907}"
+BACKEND_API="${BACKEND_API:-https://api.oxpulse.chat}"
+PREFIX_ETC="${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+PREFIX_SBIN="${PREFIX_SBIN:-/usr/local/sbin}"
+DRY_RUN=0
+FORCE=0
+
+# ── logging ───────────────────────────────────────────────────────────────────
+log()  { printf '[enable-hy2] %s\n' "$*" >&2; }
+warn() { printf '[enable-hy2] WARN: %s\n' "$*" >&2; }
+die()  { printf '[enable-hy2] ERR: %s\n' "$*" >&2; exit 2; }
+die_usage() { printf '[enable-hy2] ERR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat >&2 <<'USAGE'
+oxpulse-partner-edge-enable-hy2 — activate Hysteria2 (CH3) channel
+
+Usage:
+  oxpulse-partner-edge-enable-hy2 [OPTIONS]
+
+Options:
+  --server   HOST:PORT    Hysteria2 server (default: 203.0.113.10:51822)
+  --listen   ADDR:PORT    Local TCP-forward listen address (default: 0.0.0.0:18443)
+  --backend  ADDR:PORT    Remote backend forwarded to (default: 127.0.0.1:8907)
+  --backend-api URL       Central API base URL (default: https://api.oxpulse.chat)
+  --dry-run               Print actions without executing
+  --force                 Skip "already done" short-circuits; re-render and restart
+  --help                  Show this help
+
+Environment overrides:
+  HY2_SERVER, HY2_LOCAL_LISTEN, HY2_REMOTE_BACKEND, BACKEND_API,
+  PREFIX_ETC, PREFIX_SBIN
+USAGE
+}
+
+# ── argument parsing ──────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --server)      HY2_SERVER="$2";      shift 2 ;;
+        --listen)      HY2_LOCAL_LISTEN="$2"; shift 2 ;;
+        --backend)     HY2_REMOTE_BACKEND="$2"; shift 2 ;;
+        --backend-api) BACKEND_API="$2";     shift 2 ;;
+        --dry-run)     DRY_RUN=1;            shift ;;
+        --force)       FORCE=1;              shift ;;
+        --help|-h)     usage; exit 0 ;;
+        *) die_usage "unknown argument: $1" ;;
+    esac
+done
+
+# ── preflight checks ──────────────────────────────────────────────────────────
+[[ -d "$PREFIX_ETC" ]] || die "PREFIX_ETC not found: $PREFIX_ETC — is partner-edge installed?"
+
+_compose_file="$PREFIX_ETC/docker-compose.yml"
+[[ -f "$_compose_file" ]] || die "docker-compose.yml not found: $_compose_file"
+
+# Verify ch3 profile exists in compose file.
+grep -q 'profiles:.*ch3\|ch3.*profiles' "$_compose_file" || \
+    die "docker-compose.yml has no ch3 profile — edge may predate Phase 1.7; reinstall required"
+
+# ── source dependencies ───────────────────────────────────────────────────────
+_lib_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" 2>/dev/null && pwd)"
+
+# Source channel-render-lib.sh: look in same dir first, then installed sbin.
+_render_lib=""
+for _candidate in "$_lib_dir/channel-render-lib.sh" "$PREFIX_SBIN/channel-render-lib.sh"; do
+    if [[ -f "$_candidate" ]]; then
+        _render_lib="$_candidate"
+        break
+    fi
+done
+[[ -n "$_render_lib" ]] || die "channel-render-lib.sh not found (checked $_lib_dir and $PREFIX_SBIN)"
+# shellcheck source=channel-render-lib.sh
+source "$_render_lib"
+
+# Source oxpulse-token-lib.sh for read_service_token.
+_token_lib=""
+for _candidate in "$_lib_dir/oxpulse-token-lib.sh" "$PREFIX_SBIN/oxpulse-token-lib.sh"; do
+    if [[ -f "$_candidate" ]]; then
+        _token_lib="$_candidate"
+        break
+    fi
+done
+[[ -n "$_token_lib" ]] || die "oxpulse-token-lib.sh not found (checked $_lib_dir and $PREFIX_SBIN)"
+# shellcheck source=oxpulse-token-lib.sh
+source "$_token_lib"
+
+# ── step 1: read service token ────────────────────────────────────────────────
+log "reading service token"
+_service_token=$(read_service_token) || die "service token not found — check $PREFIX_ETC/token or set OXPULSE_SERVICE_TOKEN"
+
+# ── step 2: fetch hy2 credentials from central ───────────────────────────────
+log "fetching hy2 credentials from $BACKEND_API/api/partner/hy2-credentials"
+_creds_url="${BACKEND_API}/api/partner/hy2-credentials"
+if [[ $DRY_RUN -eq 1 ]]; then
+    log "[dry-run] would curl $BACKEND_API/api/partner/hy2-credentials"
+    _creds_json='{"auth_pass": "DRY_RUN_AUTH", "obfs_pass": "DRY_RUN_OBFS"}'
+else
+    _http_code=""
+    _creds_raw=$(curl -fsS --max-time 10 \
+        -w '\n__HTTP_CODE__:%{http_code}' \
+        -H "Authorization: Bearer $_service_token" \
+        "$_creds_url" 2>/dev/null) || true
+    _http_code=$(printf '%s' "$_creds_raw" | grep -o '__HTTP_CODE__:[0-9]*' | cut -d: -f2 || echo "000")
+    _creds_json=$(printf '%s' "$_creds_raw" | sed 's/__HTTP_CODE__:[0-9]*$//' | tr -d '\n')
+
+    case "$_http_code" in
+        200) ;;
+        401) die "service token rejected (HTTP 401) — rotate via partner-cli or check /etc/oxpulse-partner-edge/token" ;;
+        404) die "hy2-credentials endpoint not found (HTTP 404) — central not yet running Phase 1.7 API" ;;
+        503) die "service unavailable (HTTP 503) — central HYSTERIA2_*_PASSWORD env not set on central" ;;
+        000) die "network error reaching $BACKEND_API — check connectivity" ;;
+        *)   die "unexpected HTTP $_http_code from $_creds_url" ;;
+    esac
+    [[ -n "$_creds_json" ]] || die "empty response from hy2-credentials endpoint"
+fi
+
+HY2_AUTH_PASS=$(printf '%s' "$_creds_json" | jq -r '.auth_pass // empty' 2>/dev/null || true)
+HY2_OBFS_PASS=$(printf '%s' "$_creds_json" | jq -r '.obfs_pass // empty' 2>/dev/null || true)
+
+# Fallback to env vars (for offline/pre-API-deploy).
+HY2_AUTH_PASS="${HY2_AUTH_PASS:-${OXPULSE_HY2_AUTH_PASS:-}}"
+HY2_OBFS_PASS="${HY2_OBFS_PASS:-${OXPULSE_HY2_OBFS_PASS:-}}"
+
+[[ -n "$HY2_AUTH_PASS" ]] || die "hy2 auth_pass missing from API response and OXPULSE_HY2_AUTH_PASS not set"
+[[ -n "$HY2_OBFS_PASS" ]] || die "hy2 obfs_pass missing from API response and OXPULSE_HY2_OBFS_PASS not set"
+
+# ── step 3: render hysteria2-client.yaml ──────────────────────────────────────
+_hy2_yaml="$PREFIX_ETC/hysteria2-client.yaml"
+_tpl="${OXPULSE_REPO_DIR:-/usr/local/share/oxpulse-partner-edge}/hysteria2-client.yaml.tpl"
+
+export HY2_AUTH_PASS HY2_OBFS_PASS HY2_SERVER HY2_LOCAL_LISTEN HY2_REMOTE_BACKEND
+export OXPULSE_REPO_DIR="${OXPULSE_REPO_DIR:-/usr/local/share/oxpulse-partner-edge}"
+
+# Idempotency: compare what would be rendered vs current file.
+_needs_render=1
+if [[ $FORCE -eq 0 && -f "$_hy2_yaml" && -f "$_tpl" ]]; then
+    _proposed_tmp=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -f '$_proposed_tmp'" EXIT
+    _render_hysteria2_to "$_tpl" "$_proposed_tmp" \
+        "$HY2_SERVER" "$HY2_AUTH_PASS" "$HY2_OBFS_PASS" \
+        "$HY2_LOCAL_LISTEN" "$HY2_REMOTE_BACKEND"
+    if diff -q "$_proposed_tmp" "$_hy2_yaml" >/dev/null 2>&1; then
+        log "hysteria2-client.yaml unchanged — skipping render"
+        _needs_render=0
+    fi
+    rm -f "$_proposed_tmp"
+fi
+
+if [[ $_needs_render -eq 1 ]]; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+        log "[dry-run] would call re_render_hysteria2 (server=$HY2_SERVER listen=$HY2_LOCAL_LISTEN backend=$HY2_REMOTE_BACKEND)"
+    else
+        log "rendering hysteria2-client.yaml"
+        re_render_hysteria2
+        # Match install.sh Phase 1.7 perms (L1252): mode 0640 post-render.
+        chmod 0640 "$_hy2_yaml"
+        log "hysteria2-client.yaml written ($HY2_SERVER → $HY2_LOCAL_LISTEN → $HY2_REMOTE_BACKEND)"
+    fi
+fi
+
+# ── step 4: start hysteria2-client via ch3 profile ───────────────────────────
+if [[ $DRY_RUN -eq 1 ]]; then
+    log "[dry-run] would: docker compose --profile ch3 up -d hysteria2-client"
+    log "[dry-run] would: verify container healthy within 60s"
+    log "dry-run complete — no state changed"
+    exit 0
+fi
+
+log "activating ch3 compose profile"
+(cd "$PREFIX_ETC" && COMPOSE_PROFILES=ch3 docker compose --profile ch3 up -d hysteria2-client)
+
+# ── step 5: verify container health ──────────────────────────────────────────
+log "waiting for hysteria2-client to become healthy (up to 60s)"
+_deadline=$(( $(date +%s) + 60 ))
+_healthy=0
+while [[ $(date +%s) -lt $_deadline ]]; do
+    _state=$(docker inspect --format '{{.State.Health.Status}}' oxpulse-partner-hysteria2 2>/dev/null || echo "missing")
+    case "$_state" in
+        healthy)
+            _healthy=1
+            break
+            ;;
+        unhealthy)
+            break
+            ;;
+        starting|"")
+            sleep 3
+            ;;
+        missing)
+            # Container doesn't exist yet or no health check defined — wait briefly.
+            sleep 3
+            ;;
+    esac
+done
+
+if [[ $_healthy -eq 0 ]]; then
+    warn "container did not become healthy within 60s — last state: $_state"
+    warn "last 30 log lines:"
+    docker logs --tail 30 oxpulse-partner-hysteria2 2>&1 | while IFS= read -r _line; do
+        warn "  $_line"
+    done
+    die "hysteria2-client startup failed — check logs above and retry with --force"
+fi
+
+_listen_port="${HY2_LOCAL_LISTEN##*:}"
+_container_id=$(docker inspect --format '{{.Id}}' oxpulse-partner-hysteria2 2>/dev/null | cut -c1-12 || echo "unknown")
+
+log "CH3 active — container=${_container_id} listen=:${_listen_port} server=${HY2_SERVER}"
+log "To verify: nc -z 127.0.0.1 ${_listen_port} && echo OK"
