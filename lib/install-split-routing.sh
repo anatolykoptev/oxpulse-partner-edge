@@ -75,9 +75,12 @@ _split_routing_install_scripts() {
 	fi
 }
 
-# Render and install the systemd oneshot unit.
-# Rendered to a tmp file then installed at mode 0644 (mirrors install-awg-params-agent.sh
-# convention) — guarantees mode regardless of umask.
+# Install the systemd oneshot unit from the static file in systemd/.
+# The static file (systemd/oxpulse-partner-edge-split-routing.service) is the
+# source of truth; its content was extracted from the rendered heredoc so that
+# the upgrade pipeline can install/update it without re-running install.sh.
+# ExecStart hard-codes /usr/local/sbin (default PREFIX_SBIN) — matches cheburator
+# and all standard partner-edge deployments.
 #
 # After= ordering (canon §8): awg-quick@awg0.service THEN oxpulse-awg-params-agent.service
 # so the unit re-asserts AllowedIPs/FwMark AFTER the federation agent applies at boot.
@@ -88,26 +91,14 @@ _split_routing_install_scripts() {
 #   - awg0.conf: awg set / route ops fail if awg0 is unconfigured; same skip logic.
 _split_routing_install_unit() {
 	local _unit_dst="${SYSTEMD_DIR}/${_SPLIT_ROUTING_UNIT}"
-	local _unit_tmp
-	_unit_tmp="$(mktemp /tmp/${_SPLIT_ROUTING_UNIT}.XXXXXX)"
-	cat > "$_unit_tmp" <<UNIT
-[Unit]
-Description=OxPulse partner-edge selective split-routing (user.slice -> mesh)
-After=network-online.target awg-quick@awg0.service oxpulse-awg-params-agent.service
-Wants=network-online.target
-ConditionPathExists=/etc/oxpulse-partner-edge/ru-subnets.txt
-ConditionPathExists=/etc/amnezia/amneziawg/awg0.conf
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=${PREFIX_SBIN}/oxpulse-partner-edge-split-routing
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-	install -m 0644 "$_unit_tmp" "$_unit_dst"
-	rm -f "$_unit_tmp"
+	if [[ -n "${src_dir:-}" && -f "${src_dir}/systemd/${_SPLIT_ROUTING_UNIT}" ]]; then
+		install -m 0644 "${src_dir}/systemd/${_SPLIT_ROUTING_UNIT}" "$_unit_dst"
+	else
+		curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 \
+			"${REPO_RAW}/systemd/${_SPLIT_ROUTING_UNIT}" -o "$_unit_dst" \
+			|| die "split-routing: failed to fetch unit file from REPO_RAW"
+		chmod 0644 "$_unit_dst"
+	fi
 }
 
 # Enable the unit and verify it is enabled (IR-5 lesson: enable exit=0 ≠ active).

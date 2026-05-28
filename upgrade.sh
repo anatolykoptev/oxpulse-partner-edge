@@ -503,6 +503,10 @@ _HOST_SCRIPT_SBIN_FILES=(
 	render-channel-lib.sh
 	oxpulse-token-lib.sh
 	telegram-alert-lib.sh
+	# Split-routing scripts (PR #280; RU profile only, ship to all edges for idempotency).
+	oxpulse-partner-edge-split-routing
+	oxpulse-partner-edge-split-disable
+	oxpulse-partner-edge-ru-subnets-update
 )
 
 # Remote path in the release bundle for each sbin file.  Maps installed name →
@@ -523,6 +527,9 @@ _host_script_remote_name() {
 		render-channel-lib.sh)           echo "lib/render-channel-lib.sh" ;;
 		oxpulse-token-lib.sh)            echo "oxpulse-token-lib.sh" ;;
 		telegram-alert-lib.sh)           echo "lib/telegram-alert-lib.sh" ;;
+		oxpulse-partner-edge-split-routing)    echo "oxpulse-partner-edge-split-routing.sh" ;;
+		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
+		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;
 		*)                               echo "$installed_name" ;;
 	esac
 }
@@ -556,6 +563,31 @@ _HOST_SCRIPT_RESTART_UNITS=(
 	oxpulse-partner-edge-sni-rotate.timer
 	oxpulse-xray-update.timer
 	oxpulse-geoip-refresh.timer
+	# Split-routing (PR #280): restart timer + re-apply oneshot on script update.
+	oxpulse-partner-edge-ru-subnets-update.timer
+	oxpulse-partner-edge-split-routing.service
+)
+
+# Systemd unit files synced by sync_host_scripts (Step 5).
+# Adding a unit here is sufficient to have it fetched, checksum-verified, and installed
+# on every upgrade.  No need to touch sync_host_scripts internals.
+_HOST_SCRIPT_SYSTEMD_FILES=(
+	oxpulse-partner-edge.service
+	oxpulse-partner-edge-hydrate.service
+	oxpulse-partner-edge-refresh.service
+	oxpulse-partner-edge-refresh.timer
+	oxpulse-partner-edge-sni-rotate.service
+	oxpulse-partner-edge-sni-rotate.timer
+	oxpulse-xray-update.service
+	oxpulse-xray-update.timer
+	oxpulse-geoip-refresh.service
+	oxpulse-geoip-refresh.timer
+	oxpulse-channels-health-report.service
+	oxpulse-channels-health-report.timer
+	# Split-routing (PR #280).
+	oxpulse-partner-edge-split-routing.service
+	oxpulse-partner-edge-ru-subnets-update.service
+	oxpulse-partner-edge-ru-subnets-update.timer
 )
 
 # snapshot_host_scripts TAG — copy every managed sbin file + relevant systemd
@@ -576,20 +608,9 @@ snapshot_host_scripts() {
 	done
 
 	# Systemd units for the affected timers/services.
+	# Driven by _HOST_SCRIPT_SYSTEMD_FILES — same set as sync_host_scripts installs.
 	local unit
-	for unit in \
-		oxpulse-channels-health-report.service \
-		oxpulse-channels-health-report.timer \
-		oxpulse-partner-edge-refresh.service \
-		oxpulse-partner-edge-refresh.timer \
-		oxpulse-partner-edge-sni-rotate.service \
-		oxpulse-partner-edge-sni-rotate.timer \
-		oxpulse-xray-update.service \
-		oxpulse-xray-update.timer \
-		oxpulse-geoip-refresh.service \
-		oxpulse-geoip-refresh.timer \
-		oxpulse-partner-edge-hydrate.service \
-		oxpulse-partner-edge.service; do
+	for unit in "${_HOST_SCRIPT_SYSTEMD_FILES[@]}"; do
 		[[ -f "$SYSTEMD_DIR/$unit" ]] && cp -a "$SYSTEMD_DIR/$unit" "$snap_dir/systemd/$unit" || true
 	done
 
@@ -1057,23 +1078,11 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 
 	# ------------------------------------------------------------------
 	# Step 5: systemd units for affected services.
+	# Driven by the top-level _HOST_SCRIPT_SYSTEMD_FILES constant — add new units
+	# there, not here.
 	# ------------------------------------------------------------------
-	local units_to_fetch=(
-		oxpulse-partner-edge.service
-		oxpulse-partner-edge-hydrate.service
-		oxpulse-partner-edge-refresh.service
-		oxpulse-partner-edge-refresh.timer
-		oxpulse-partner-edge-sni-rotate.service
-		oxpulse-partner-edge-sni-rotate.timer
-		oxpulse-xray-update.service
-		oxpulse-xray-update.timer
-		oxpulse-geoip-refresh.service
-		oxpulse-geoip-refresh.timer
-		oxpulse-channels-health-report.service
-		oxpulse-channels-health-report.timer
-	)
 	local unit unit_url unit_tmp unit_dst unit_expected_sha unit_actual_sha
-	for unit in "${units_to_fetch[@]}"; do
+	for unit in "${_HOST_SCRIPT_SYSTEMD_FILES[@]}"; do
 		unit_url="$REPO_RAW/systemd/$unit"
 		unit_tmp="$tmpdir/$unit"
 		unit_dst="$SYSTEMD_DIR/$unit"
