@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.71](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.70...v0.12.71) (2026-05-28)
+
+
+### Bug Fixes
+
+* **install:** restore install-firewall.sh in checksums + fix release tag sed scope ([#5](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/5) [#6](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/6)) ([#294](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/294)) ([3b8836b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3b8836bb13a609625ae171235c201b34a119a012))
+* **install:** warn on legacy TURNS_SUBDOMAIN + add migration script ([#292](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/292)) ([19cec02](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/19cec02aa1c88129ac21568ec80c47eaf9fddd9b))
+
 ## [0.12.70](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.69...v0.12.70) (2026-05-28)
 
 
