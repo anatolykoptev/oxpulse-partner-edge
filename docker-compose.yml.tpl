@@ -166,8 +166,17 @@ services:
     # SFU_CLIENT_WS_PORT / SFU_RELAY_API_PORT env overrides. CMD-SHELL
     # is a /bin/sh -c context, so $VAR expands at container runtime
     # against the service's environment block.
+    #
+    # Bug #4 fix (2026-05-28 ruoxp): SFU metrics and relay-API listeners bind
+    # on {{AWG_ALLOCATED_IP}} (mesh-only, not 0.0.0.0). Probing 127.0.0.1 for
+    # those planes → connection refused → container marked unhealthy → false
+    # positive operator alarm. client_ws stays on 127.0.0.1 (SFU_BIND_ADDRESS
+    # is 0.0.0.0). {{AWG_ALLOCATED_IP}} is substituted at install time by opec
+    # (same value SFU_METRICS_BIND / SFU_RELAY_API_BIND receive) — no compose
+    # env-escape needed. Empty AWG_ALLOCATED_IP (mesh disabled) → probe fails
+    # → unhealthy (correct: SFU shouldn't run without mesh).
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:{{SFU_METRICS_PORT}}/metrics >/dev/null 2>&1 && { [ -z \"$SIGNALING_SFU_SECRET\" ] || nc -z 127.0.0.1 \"${SFU_CLIENT_WS_PORT:-8920}\"; } && { [ -z \"$RELAY_JWT_SECRET\" ] || nc -z 127.0.0.1 \"${SFU_RELAY_API_PORT:-8912}\"; } || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://{{AWG_ALLOCATED_IP}}:{{SFU_METRICS_PORT}}/metrics >/dev/null 2>&1 && { [ -z \"$SIGNALING_SFU_SECRET\" ] || nc -z 127.0.0.1 \"${SFU_CLIENT_WS_PORT:-8920}\"; } && { [ -z \"$RELAY_JWT_SECRET\" ] || nc -z {{AWG_ALLOCATED_IP}} \"${SFU_RELAY_API_PORT:-8912}\"; } || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
