@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.68](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.67...v0.12.68) (2026-05-28)
+
+
+### Bug Fixes
+
+* **checksums:** regenerate lib/lib-checksums.txt + CI guard against drift ([#286](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/286)) ([fd582d7](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/fd582d72d2b1c804f45b5948a1d91b55c220d2a2))
+
 ## [0.12.67](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.66...v0.12.67) (2026-05-28)
 
 
