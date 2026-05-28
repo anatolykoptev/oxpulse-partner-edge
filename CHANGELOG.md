@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.65](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.64...v0.12.65) (2026-05-28)
+
+
+### Features
+
+* **split-routing:** ship artifacts via release pipeline + upgrade.sh ([#280](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/280)) ([f55a0f2](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/f55a0f2b7e825715baeb61e8888c11f43ea03945))
+
 ## [0.12.64](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.63...v0.12.64) (2026-05-27)
 
 
