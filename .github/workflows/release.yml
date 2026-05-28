@@ -534,6 +534,7 @@ jobs:
             oxpulse-partner-edge-split-routing.service \
             oxpulse-partner-edge-ru-subnets-update.service \
             oxpulse-partner-edge-ru-subnets-update.timer \
+            oxpulse-partner-edge-enable-hy2 \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
@@ -604,6 +605,7 @@ jobs:
             oxpulse-partner-edge-split-routing.service \
             oxpulse-partner-edge-ru-subnets-update.service \
             oxpulse-partner-edge-ru-subnets-update.timer \
+            oxpulse-partner-edge-enable-hy2 \
             SHA256SUMS \
             --clobber
 
