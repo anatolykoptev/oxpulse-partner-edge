@@ -705,6 +705,11 @@ SIGNALING_SFU_SECRET=$(json_get signaling_sfu_secret "$tmp_cfg")
 # from the nested `awg` object via python — sed-based json_get only handles
 # top-level scalars. awg_extract() defined in lib/install-awg.sh.
 AWG_ALLOCATED_IP=$(awg_extract     "$tmp_cfg" allocated_ip)
+# Strip CIDR prefix for SFU bind vars. SFU v0.12.67+ strict getaddrinfo
+# rejects "10.9.0.7/24"; needs plain host IP "10.9.0.7". Central always
+# returns CIDR form, correct for awg0.conf Address= but not for bind.
+# AWG_ALLOCATED_IP is kept intact for all other consumers (ip addr add, awg0.conf).
+AWG_HOST_IP="${AWG_ALLOCATED_IP%%/*}"
 AWG_MOTHERLY_PUBKEY=$(awg_extract  "$tmp_cfg" motherly_pubkey)
 AWG_MOTHERLY_ENDPOINT=$(awg_extract "$tmp_cfg" motherly_endpoint)
 AWG_MOTHERLY_AWG_IP=$(awg_extract  "$tmp_cfg" motherly_awg_ip)
@@ -1024,7 +1029,7 @@ AWG_MOTHERLY_IP="${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"
 HY2_FALLBACK_HOST="${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"
 HY2_FALLBACK_PORT="${OXPULSE_HY2_FALLBACK_PORT:-18443}"
 export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
-       AWG_MOTHERLY_IP AWG_ALLOCATED_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
+       AWG_MOTHERLY_IP AWG_ALLOCATED_IP AWG_HOST_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
        TURN_SECRET \
        REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
        REALITY_ENCRYPTION TURNS_SUBDOMAIN \

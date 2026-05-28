@@ -57,7 +57,8 @@ set_frozen_vars() {
   HY2_REMOTE_BACKEND=
   # Caddy tunnel upstream vars (extracted from Caddyfile hardcodes in PR #146 follow-up)
   AWG_MOTHERLY_IP=10.9.0.2
-  AWG_ALLOCATED_IP=10.9.0.6
+  AWG_ALLOCATED_IP=10.9.0.6/24  # central returns CIDR form; kept intact for awg0.conf
+  AWG_HOST_IP=10.9.0.6           # stripped from AWG_ALLOCATED_IP via %%/* — SFU bind only
   HY2_FALLBACK_HOST=host.docker.internal
   HY2_FALLBACK_PORT=18443
   NAIVE_SERVER=
@@ -75,7 +76,7 @@ set_frozen_vars() {
 mirror_install_exports() {
   PARTNER_DOMAIN="$DOMAIN"
   export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
-         AWG_MOTHERLY_IP AWG_ALLOCATED_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
+         AWG_MOTHERLY_IP AWG_ALLOCATED_IP AWG_HOST_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
          TURN_SECRET \
          REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
          REALITY_ENCRYPTION TURNS_SUBDOMAIN \
