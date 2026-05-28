@@ -61,6 +61,8 @@ set_frozen_vars() {
   OTEL_EXPORTER_OTLP_ENDPOINT=
   SFU_SIGNING_PUBLIC_KEY=single-line-ascii-pem-stand-in
   SIGNALING_SFU_SECRET=
+  # AWG vars are empty in hydrate context; AWG mesh is provisioned by install.sh.
+  AWG_HOST_IP=
   HY2_SERVER=
   HY2_AUTH_PASS=
   HY2_OBFS_PASS=
@@ -82,6 +84,7 @@ mirror_hydrate_exports() {
          NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT \
          SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID OTEL_EXPORTER_OTLP_ENDPOINT \
          SFU_SIGNING_PUBLIC_KEY SIGNALING_SFU_SECRET \
+         AWG_HOST_IP \
          HY2_SERVER HY2_AUTH_PASS HY2_OBFS_PASS HY2_LOCAL_LISTEN HY2_REMOTE_BACKEND
 }
 

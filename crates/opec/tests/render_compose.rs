@@ -45,10 +45,13 @@ fn set_frozen_env() {
     );
     env::set_var("RELAY_JWT_SECRET", "test-relay-jwt-secret");
     env::set_var("SIGNALING_SFU_SECRET", "test-signaling-sfu-secret");
-    // AWG_ALLOCATED_IP — this partner's own mesh IP. Wired into the SFU
-    // SFU_METRICS_BIND / SFU_RELAY_API_BIND env vars by the compose template
-    // so the privileged HTTP sockets are mesh-only. Audit 2026-05-21.
-    env::set_var("AWG_ALLOCATED_IP", "10.9.0.6");
+    // AWG_ALLOCATED_IP — central returns CIDR form (e.g. 10.9.0.6/24);
+    // correct for awg0.conf Address= and ip addr add.
+    env::set_var("AWG_ALLOCATED_IP", "10.9.0.6/24");
+    // AWG_HOST_IP — stripped by install.sh (AWG_ALLOCATED_IP%%/*); used by
+    // SFU_METRICS_BIND / SFU_RELAY_API_BIND. SFU v0.12.67+ rejects /24 form.
+    // Audit 2026-05-21 + bug fix 2026-05-28.
+    env::set_var("AWG_HOST_IP", "10.9.0.6");
     env::set_var("HYSTERIA2_SOCKS_PORT", "18891");
     env::set_var("NAIVE_SOCKS_PORT", "18892");
     env::set_var("HY2_SERVER", "");
