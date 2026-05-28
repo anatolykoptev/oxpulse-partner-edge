@@ -507,6 +507,8 @@ _HOST_SCRIPT_SBIN_FILES=(
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable
 	oxpulse-partner-edge-ru-subnets-update
+	# Hysteria2 CH3 activation helper (Phase 1.7 standalone entry point).
+	oxpulse-partner-edge-enable-hy2
 )
 
 # Remote path in the release bundle for each sbin file.  Maps installed name →
@@ -530,6 +532,7 @@ _host_script_remote_name() {
 		oxpulse-partner-edge-split-routing)    echo "oxpulse-partner-edge-split-routing.sh" ;;
 		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
 		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;
+		oxpulse-partner-edge-enable-hy2)        echo "oxpulse-partner-edge-enable-hy2" ;;
 		*)                               echo "$installed_name" ;;
 	esac
 }
