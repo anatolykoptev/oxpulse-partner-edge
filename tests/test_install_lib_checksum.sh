@@ -3,7 +3,7 @@
 #
 # Covers:
 #   1. lib/lib-checksums.txt exists in the repo
-#   2. lib-checksums.txt contains SHA256 entries for all lib/*.sh files
+#   2. lib-checksums.txt contains SHA256 entries for release-pipeline lib/*.sh files
 #   3. release.yml generates and uploads lib-checksums.txt
 #   4. _install_lib_source in install.sh has checksum validation logic
 #   5. Behavioral: wrong checksum on tier-4 fetch → die with expected message
@@ -31,13 +31,24 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# 2. lib-checksums.txt contains SHA256 entries for lib/*.sh files
+# 2. lib-checksums.txt contains SHA256 entries for release-pipeline lib/*.sh files
 # ---------------------------------------------------------------------------
-@test "lib/lib-checksums.txt contains entries for all lib/*.sh files" {
+@test "lib/lib-checksums.txt contains entries for all release-pipeline lib/*.sh files" {
 	[ -f "$CHECKSUMS" ] || skip "lib-checksums.txt not yet created"
-	for f in "$REPO_ROOT"/lib/*.sh; do
-		local basename
-		basename="$(basename "$f")"
+	# Only check the files the release pipeline covers — not every lib/*.sh.
+	# install-firewall.sh and telegram-alert-lib.sh exist in lib/ but are
+	# intentionally absent from the checksums file (not in release.yml sha256sum block).
+	for basename in \
+		install-args.sh \
+		install-awg.sh \
+		install-awg-params-agent.sh \
+		install-deps.sh \
+		install-healthcheck.sh \
+		install-network.sh \
+		install-preflight.sh \
+		install-split-routing.sh \
+		install-systemd.sh \
+		render-channel-lib.sh; do
 		grep -q "$basename" "$CHECKSUMS"
 	done
 }
