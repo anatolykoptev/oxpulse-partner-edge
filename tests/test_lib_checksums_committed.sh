@@ -27,6 +27,7 @@ setup() {
 		install-awg.sh
 		install-awg-params-agent.sh
 		install-deps.sh
+		install-firewall.sh
 		install-healthcheck.sh
 		install-network.sh
 		install-preflight.sh
