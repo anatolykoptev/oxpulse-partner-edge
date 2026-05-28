@@ -1274,7 +1274,6 @@ elif [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
 	# _hy2_status stays "failed_at_start"
 fi
 if [[ "${_hy2_status}" == "active" ]]; then
-	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
 	log "  hysteria2 CH3 profile enabled"
 	# MAJOR #1 fix: set restrictive perms on hysteria2-client.yaml.
 	# re_render_hysteria2() writes with umask 077 (mode 0600), which is correct for
@@ -1465,8 +1464,13 @@ fi
 log "[6/10] starting services"
 if [[ $DRY_RUN -eq 0 ]]; then
 	# Pass extra profiles (ch3, ch5) when bypass channels were provisioned.
+	# Persist to $PREFIX_ETC/.env so subsequent compose ops (upgrade.sh, refresh.sh)
+	# also activate the correct profiles without explicit flags.
 	if [[ -n "${COMPOSE_PROFILES_EXTRA:-}" ]]; then
-		(cd "$PREFIX_ETC" && COMPOSE_PROFILES="$COMPOSE_PROFILES_EXTRA" docker compose --profile "$COMPOSE_PROFILES_EXTRA" up -d)
+		printf 'COMPOSE_PROFILES=%s\n' "${COMPOSE_PROFILES_EXTRA}" > "${PREFIX_ETC}/.env"
+		chmod 0644 "${PREFIX_ETC}/.env"
+		log "  compose profiles persisted: ${COMPOSE_PROFILES_EXTRA}"
+		(cd "$PREFIX_ETC" && COMPOSE_PROFILES="${COMPOSE_PROFILES_EXTRA}" docker compose up -d)
 	else
 		(cd "$PREFIX_ETC" && docker compose up -d)
 	fi
