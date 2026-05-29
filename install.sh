@@ -859,12 +859,37 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	# Merge channels[] into node-config.json if server returned it.
 	# The raw tmp_cfg already has all other fields; we just ensure channels
 	# key is present for re_render_xray and future channel renderers.
+	#
+	# Fix (PR feat/installer-version-header-and-channels-id, 2026-05-28):
+	# Inject `id` field per channel when absent. The server now returns
+	# .channels[].id (e.g. "ch1") since the channels-id PR; older server
+	# versions omit the field. oxpulse-channels-health-report.sh dispatches
+	# probes by .channels[].id — without it, all health probes silently fail.
+	# Root cause: hot-patch on rvpn-seed 2026-05-28 confirmed: adding ids
+	# caused partner_node_channel_heartbeat_total{channel_name=ch1} to appear.
+	# Mapping (canonical, matches probe_ch* function dispatch):
+	#   vless-reality → ch1   (probe_ch1 = xray dokodemo-door)
+	#   hysteria2     → ch3   (probe_ch3 = Hysteria2)
+	#   naive         → ch5   (probe_ch5 = NaïveProxy)
+	#   other/unknown → ch0   (preserved; no probe — future-proof)
 	if [[ "$CHANNELS_JSON" != "[]" ]]; then
 		python3 - "$PREFIX_ETC/node-config.json" "$CHANNELS_JSON" << 'PYEOF'
 import json, sys
+
+PROTOCOL_ID_MAP = {
+    "vless-reality": "ch1",
+    "hysteria2":     "ch3",
+    "naive":         "ch5",
+}
+
 cfg = json.load(open(sys.argv[1]))
-cfg['channels'] = json.loads(sys.argv[2])
-open(sys.argv[1], 'w').write(json.dumps(cfg, indent=2))
+channels = json.loads(sys.argv[2])
+for ch in channels:
+    proto = ch.get("protocol", "")
+    if "id" not in ch or not ch["id"]:
+        ch["id"] = PROTOCOL_ID_MAP.get(proto, "ch0")
+cfg["channels"] = channels
+open(sys.argv[1], "w").write(json.dumps(cfg, indent=2))
 PYEOF
 		log "  channels[] written to node-config.json (${#CHANNELS_JSON} bytes)"
 	fi
