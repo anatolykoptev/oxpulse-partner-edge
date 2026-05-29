@@ -5,6 +5,19 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.73](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.72...v0.12.73) (2026-05-29)
+
+
+### Features
+
+* **channels:** X-Installer-Version header + installer_version body + channels[].id permanent fix ([7f5f1a9](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7f5f1a975b724d228c00ac0ca3a095000d740778))
+* **channels:** X-Installer-Version header + installer_version body + channels[].id permanent fix ([d8d361a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d8d361a947773a52a462927b96cc7f6227809085))
+
+
+### Bug Fixes
+
+* **installer-version:** install VERSION file path + tighten test regex + drop probe_ch5 mapping ([c58733c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c58733c2ea3aa876115befde658f4d36537b8814))
+
 ## [0.12.72](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.71...v0.12.72) (2026-05-28)
 
 
