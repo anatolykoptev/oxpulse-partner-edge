@@ -870,8 +870,10 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	# Mapping (canonical, matches probe_ch* function dispatch):
 	#   vless-reality → ch1   (probe_ch1 = xray dokodemo-door)
 	#   hysteria2     → ch3   (probe_ch3 = Hysteria2)
-	#   naive         → ch5   (probe_ch5 = NaïveProxy)
 	#   other/unknown → ch0   (preserved; no probe — future-proof)
+	# Note: naive protocol removed from map; probe for it does not exist in
+	# oxpulse-channels-health-report.sh (ch5*/ch6* dispatcher logs
+	# "$_chan not yet wired on edge — skipping"). Naive channels receive ch0.
 	if [[ "$CHANNELS_JSON" != "[]" ]]; then
 		python3 - "$PREFIX_ETC/node-config.json" "$CHANNELS_JSON" << 'PYEOF'
 import json, sys
@@ -879,7 +881,6 @@ import json, sys
 PROTOCOL_ID_MAP = {
     "vless-reality": "ch1",
     "hysteria2":     "ch3",
-    "naive":         "ch5",
 }
 
 cfg = json.load(open(sys.argv[1]))

@@ -17,8 +17,9 @@
 # Mapping (canonical):
 #   vless-reality → id: "ch1"   (probe_ch1 = xray dokodemo-door)
 #   hysteria2     → id: "ch3"   (probe_ch3 = Hysteria2)
-#   naive         → id: "ch5"   (probe_ch5 = NaïveProxy)
 #   (other / unknown protocol → id: "ch0", preserved)
+# Note: naive → ch5 mapping was removed; probe_ch5 does not exist in the
+# health-reporter (ch5*/ch6* arm logs "$_chan not yet wired on edge — skipping").
 #
 # Test method: static analysis + direct python3 execution of the merge logic.
 # We do NOT execute install.sh (requires root + infra); we extract and run the
@@ -38,21 +39,26 @@ trap 'rm -rf "$TMP"' EXIT
 
 FAIL=0
 
-# ── Case 1: channels[] merge block exists in install.sh (static) ──────────────
-echo "==> Case 1: channels[] merge python3 heredoc is present in install.sh"
+# ── Case 1: channels[] merge block exists in install.sh with PROTOCOL_ID_MAP ──
+echo "==> Case 1: channels[] merge python3 heredoc with PROTOCOL_ID_MAP is present in install.sh"
 
-if grep -qE "cfg\[.channels.\]" "$INSTALL"; then
-    echo "  OK: channels merge python3 block found"
+# Require both the channels merge python block AND the canonical map keys.
+# This catches a silent revert of the map block even if cfg["channels"] logic survives.
+if grep -qE "cfg\[.channels.\]" "$INSTALL" \
+   && grep -q '"vless-reality":' "$INSTALL" \
+   && grep -q '"hysteria2":' "$INSTALL"; then
+    echo "  OK: channels merge python3 block + PROTOCOL_ID_MAP dict literal found"
 else
-    echo "  FAIL [case1]: channels merge block not found in install.sh"
+    echo "  FAIL [case1]: channels merge block or PROTOCOL_ID_MAP (\"vless-reality\": / \"hysteria2\":) not found in install.sh"
     FAIL=1
 fi
 
-# ── Case 2: id injection logic present in the merge block ────────────────────
-echo "==> Case 2: id injection mapping (vless-reality/ch1, hysteria2/ch3, naive/ch5) in merge"
+# ── Case 2: id injection logic present — vless-reality/ch1 and hysteria2/ch3 ─
+echo "==> Case 2: id injection mapping (vless-reality/ch1, hysteria2/ch3) in merge"
 
-# All three protocol→id mappings must be present in install.sh
-for pattern in "vless-reality.*ch1" "hysteria2.*ch3" "naive.*ch5"; do
+# Only the two wired channels — naive was removed because probe_ch5 does not
+# exist (ch5*/ch6* dispatcher logs "$_chan not yet wired on edge — skipping").
+for pattern in "vless-reality.*ch1" "hysteria2.*ch3"; do
     if grep -qE "$pattern" "$INSTALL"; then
         echo "  OK: mapping '$pattern' found"
     else
@@ -60,9 +66,16 @@ for pattern in "vless-reality.*ch1" "hysteria2.*ch3" "naive.*ch5"; do
         FAIL=1
     fi
 done
+# Confirm naive→ch5 entry is absent (dead wiring guard).
+if grep -qE 'naive.*ch5' "$INSTALL" 2>/dev/null; then
+    echo "  FAIL [case2]: naive→ch5 mapping is present but probe_ch5 does not exist; remove it"
+    FAIL=1
+else
+    echo "  OK: naive→ch5 dead-wire absent"
+fi
 
 # ── Case 3: functional — id field appears in node-config.json after merge ────
-echo "==> Case 3: python3 merge sets id=ch1 for vless-reality channel"
+echo "==> Case 3: python3 merge sets id=ch1/ch3 for vless-reality/hysteria2; naive → ch0"
 
 # Simulate the node-config.json before channels merge
 NODE_CFG="$TMP/node-config.json"
@@ -74,8 +87,8 @@ cat > "$NODE_CFG" << 'EOF'
 }
 EOF
 
-# channels[] as returned by the server (with id already from server, or without — test both)
-# Simulate server returning channels WITHOUT id (old-server scenario): installer must inject
+# channels[] as returned by the server (without id — old-server scenario).
+# naive is included to verify it falls through to ch0 (probe_ch5 not wired).
 CHANNELS_JSON='[{"protocol":"vless-reality","host":"192.0.2.1","port":5349},{"protocol":"hysteria2","host":"192.0.2.1","port":4443},{"protocol":"naive","host":"192.0.2.1","port":8443}]'
 
 # Extract and run the merge python3 logic from install.sh (lines between PYEOF markers
@@ -86,7 +99,6 @@ import json, sys
 PROTOCOL_ID_MAP = {
     "vless-reality": "ch1",
     "hysteria2":     "ch3",
-    "naive":         "ch5",
 }
 
 cfg = json.load(open(sys.argv[1]))
@@ -102,13 +114,14 @@ PYEOF
 # Verify node-config.json now has channels with id fields
 CH1_ID=$(jq -r '.channels[] | select(.protocol=="vless-reality") | .id' "$NODE_CFG" 2>/dev/null || echo "")
 CH3_ID=$(jq -r '.channels[] | select(.protocol=="hysteria2") | .id' "$NODE_CFG" 2>/dev/null || echo "")
-CH5_ID=$(jq -r '.channels[] | select(.protocol=="naive") | .id' "$NODE_CFG" 2>/dev/null || echo "")
+# naive has no probe_ch5 — expect ch0 fallback, not ch5
+NAIVE_ID=$(jq -r '.channels[] | select(.protocol=="naive") | .id' "$NODE_CFG" 2>/dev/null || echo "")
 
 [[ "$CH1_ID" == "ch1" ]] || { echo "  FAIL [case3]: vless-reality id expected=ch1 got=$CH1_ID"; FAIL=1; }
 [[ "$CH3_ID" == "ch3" ]] || { echo "  FAIL [case3]: hysteria2 id expected=ch3 got=$CH3_ID"; FAIL=1; }
-[[ "$CH5_ID" == "ch5" ]] || { echo "  FAIL [case3]: naive id expected=ch5 got=$CH5_ID"; FAIL=1; }
+[[ "$NAIVE_ID" == "ch0" ]] || { echo "  FAIL [case3]: naive id expected=ch0 (no probe) got=$NAIVE_ID"; FAIL=1; }
 
-[[ $FAIL -eq 0 ]] && echo "  OK: vless-reality→ch1, hysteria2→ch3, naive→ch5"
+[[ $FAIL -eq 0 ]] && echo "  OK: vless-reality→ch1, hysteria2→ch3, naive→ch0 (no probe)"
 
 # ── Case 4: server already has id → preserve, don't overwrite ────────────────
 echo "==> Case 4: id from server is preserved when already set"
@@ -130,7 +143,6 @@ import json, sys
 PROTOCOL_ID_MAP = {
     "vless-reality": "ch1",
     "hysteria2":     "ch3",
-    "naive":         "ch5",
 }
 
 cfg = json.load(open(sys.argv[1]))
@@ -163,7 +175,6 @@ import json, sys
 PROTOCOL_ID_MAP = {
     "vless-reality": "ch1",
     "hysteria2":     "ch3",
-    "naive":         "ch5",
 }
 
 cfg = json.load(open(sys.argv[1]))
