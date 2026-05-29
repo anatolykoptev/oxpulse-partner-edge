@@ -472,6 +472,10 @@ jobs:
           # Bug 8 fix: ship defaults.conf so install-systemd.sh can fetch it
           # from REPO_RAW on fresh installs (tier-4 fallback path).
           cp config/defaults.conf         config-defaults.conf
+          # VERSION file: oxpulse-channels-health-report.sh reads installer_version
+          # from /usr/local/share/oxpulse-partner-edge/VERSION; sync_host_scripts
+          # fetches it from REPO_RAW/VERSION on upgrade.  Must be a release asset
+          # so SHA256SUMS covers it.  (File is already at repo root, no cp needed.)
           # Phase 5.7 Item 3: regenerate lib-checksums.txt from the lib/*.sh
           # files at release time so the integrity is pinned to this exact
           # release. install.sh _install_lib_source validates tier-4 fetches
@@ -509,6 +513,7 @@ jobs:
             render-channel-lib.sh \
             lib-checksums.txt \
             config-defaults.conf \
+            VERSION \
             oxpulse-channels-health-report.sh \
             hydrate.sh \
             oxpulse-partner-edge-refresh.sh \
@@ -573,6 +578,7 @@ jobs:
             render-channel-lib.sh \
             lib-checksums.txt \
             config-defaults.conf \
+            VERSION \
             oxpulse-channels-health-report.sh \
             hydrate.sh \
             oxpulse-partner-edge-refresh.sh \
