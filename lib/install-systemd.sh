@@ -152,6 +152,18 @@ _systemd_install_lib_scripts() {
 		curl -fsSL "$REPO_RAW/config/defaults.conf" \
 			-o "/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
 	fi
+
+	# VERSION file: oxpulse-channels-health-report.sh reads installer_version from
+	# /usr/local/share/oxpulse-partner-edge/VERSION (canonical path, line 96).
+	# Without this install the field is always absent from health-report payloads.
+	install -d -m 0755 "/usr/local/share/oxpulse-partner-edge"
+	if [[ -n "$src_dir" && -f "$src_dir/VERSION" ]]; then
+		install -m 0644 "$src_dir/VERSION" \
+			"/usr/local/share/oxpulse-partner-edge/VERSION"
+	else
+		curl -fsSL "$REPO_RAW/VERSION" \
+			-o "/usr/local/share/oxpulse-partner-edge/VERSION"
+	fi
 }
 
 # Install pre-made systemd unit files (no placeholder substitution).
