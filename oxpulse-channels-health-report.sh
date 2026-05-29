@@ -85,6 +85,22 @@ command -v curl  >/dev/null 2>&1 || die "curl not found"
 NODE_ID=$(jq -r '.node_id // empty' "$_NODE_CONFIG" 2>/dev/null)
 [[ -n "$NODE_ID" ]] || die "node_id missing in $_NODE_CONFIG"
 
+# ---------- installer version (defence-in-depth freshness signal) ----------
+# Read installer bundle version from the VERSION file (same source as hydrate.sh).
+# Canonical install path: /usr/local/share/oxpulse-partner-edge/VERSION.
+# Local-dev / CI fallback: script-dir VERSION.
+# Operator override: OXPULSE_INSTALLER_VERSION env (matches OXPULSE_BACKEND_API pattern).
+# Test override: _VERSION_FILE env (set by tests to avoid hitting the real install path).
+# If the file is unreadable or empty, the field is omitted from the payload;
+# the server COALESCE-preserves the prior value — no DB write, no failure.
+_VERSION_FILE="${_VERSION_FILE:-/usr/local/share/oxpulse-partner-edge/VERSION}"
+_installer_version=""
+if [[ -n "${OXPULSE_INSTALLER_VERSION:-}" ]]; then
+    _installer_version="$OXPULSE_INSTALLER_VERSION"
+elif [[ -r "$_VERSION_FILE" ]]; then
+    _installer_version=$(awk '{print $1; exit}' "$_VERSION_FILE" 2>/dev/null || true)
+fi
+
 # ---------- helper: elapsed milliseconds ----------
 # Args: t0 t1 (EPOCHREALTIME floats)
 _elapsed_ms() {
@@ -338,7 +354,8 @@ _post_channel() {
     full_payload=$(printf '%s' "$payload" | jq \
         --arg node_id "$NODE_ID" \
         --arg ts "$probed_at" \
-        '. + {node_id: $node_id, channel_probed_at: $ts}')
+        --arg iv "$_installer_version" \
+        '. + {node_id: $node_id, channel_probed_at: $ts} + (if $iv == "" then {} else {installer_version: $iv} end)')
 
     local channel_name
     channel_name=$(printf '%s' "$payload" | jq -r '.channel_name // "?"')

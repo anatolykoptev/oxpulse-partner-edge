@@ -142,6 +142,7 @@ if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
     "${cacert_flag[@]}" \
     -X POST "$BACKEND_URL/api/partner/register" \
     -H 'Content-Type: application/json' \
+    -H "X-Installer-Version: ${IMAGE_VERSION}" \
     -d "{\"partner_id\":\"$PARTNER_ID\",\"domain\":\"$PARTNER_DOMAIN\",\"token\":\"$REGISTRATION_TOKEN\",\"public_ip\":\"$PUBLIC_IP\"}" \
     -o "$tmp_resp"; then
     die "registration POST failed — check $BACKEND_URL is reachable and token is valid"
