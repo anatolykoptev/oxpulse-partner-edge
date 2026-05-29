@@ -626,6 +626,10 @@ snapshot_host_scripts() {
 	local defaults_src="$PREFIX_SHARE/oxpulse-partner-edge/config/defaults.conf"
 	[[ -f "$defaults_src" ]] && cp -a "$defaults_src" "$snap_dir/share-config/defaults.conf" || true
 
+	# VERSION file (read by oxpulse-channels-health-report.sh for installer_version)
+	local version_src="$PREFIX_SHARE/oxpulse-partner-edge/VERSION"
+	[[ -f "$version_src" ]] && cp -a "$version_src" "$snap_dir/share-config/VERSION" || true
+
 	# render-channel-lib.sh duplicate in PREFIX_LIBDIR
 	[[ -f "$PREFIX_LIBDIR/render-channel-lib.sh" ]] \
 		&& cp -a "$PREFIX_LIBDIR/render-channel-lib.sh" "$snap_dir/libdir/render-channel-lib.sh" || true
@@ -677,6 +681,14 @@ restore_host_scripts() {
 		install -d -m 0755 "$PREFIX_SHARE/oxpulse-partner-edge/config"
 		install -m 0644 "$snap_dir/share-config/defaults.conf" \
 			"$PREFIX_SHARE/oxpulse-partner-edge/config/defaults.conf"
+		restored=1
+	fi
+
+	# Restore VERSION file.
+	if [[ -f "$snap_dir/share-config/VERSION" ]]; then
+		install -d -m 0755 "$PREFIX_SHARE/oxpulse-partner-edge"
+		install -m 0644 "$snap_dir/share-config/VERSION" \
+			"$PREFIX_SHARE/oxpulse-partner-edge/VERSION"
 		restored=1
 	fi
 
@@ -890,6 +902,7 @@ sync_host_scripts() {
 		log "[dry-run]   units: oxpulse-channels-health-report.{service,timer} + refresh/sni-rotate/xray-update/geoip-refresh"
 		log "[dry-run]   reload: $SYSTEMCTL_BIN daemon-reload + restart affected timers"
 		log "[dry-run]   idempotency: sha256 comparison (no-op if already current)"
+		log "[dry-run]   VERSION: would install to $PREFIX_SHARE/oxpulse-partner-edge/VERSION"
 		return 0
 	fi
 
@@ -1062,6 +1075,45 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 		fi
 	else
 		warn "host-script sync: could not fetch defaults.conf from $defaults_url — skipping"
+	fi
+
+	# ------------------------------------------------------------------
+	# Step 3b: VERSION file — read by oxpulse-channels-health-report.sh:96 to
+	# populate installer_version in the channel-health payload.  Without this
+	# sync the field stays empty after upgrade (hydrate only runs on first boot).
+	# ------------------------------------------------------------------
+	local version_url="$REPO_RAW/VERSION"
+	local version_dst="$PREFIX_SHARE/oxpulse-partner-edge/VERSION"
+	local version_tmp="$tmpdir/VERSION"
+	if curl -fsSL --max-time 30 "$version_url" -o "$version_tmp" 2>/dev/null; then
+		expected_sha=$(_lookup_sha256 "VERSION")
+		if [[ -n "$expected_sha" ]]; then
+			actual_sha=$(sha256sum "$version_tmp" | awk '{print $1}')
+			if [[ "$actual_sha" != "$expected_sha" ]]; then
+				warn "host-script sync: SHA256 MISMATCH for VERSION — skipping"
+				version_tmp=""
+			fi
+		fi
+		if [[ -n "$version_tmp" && -f "$version_tmp" ]]; then
+			install -d -m 0755 "$(dirname "$version_dst")"
+			if [[ -f "$version_dst" ]]; then
+				installed_sha=$(sha256sum "$version_dst" | awk '{print $1}')
+				actual_sha=$(sha256sum "$version_tmp" | awk '{print $1}')
+				if [[ "$installed_sha" == "$actual_sha" ]]; then
+					log "  host-script: VERSION up-to-date"
+				else
+					install -m 0644 "$version_tmp" "$version_dst"
+					log "  host-script: installed VERSION"
+					_any_changed=1
+				fi
+			else
+				install -m 0644 "$version_tmp" "$version_dst"
+				log "  host-script: installed VERSION (new)"
+				_any_changed=1
+			fi
+		fi
+	else
+		warn "host-script sync: could not fetch VERSION from $version_url — skipping"
 	fi
 
 	# ------------------------------------------------------------------
