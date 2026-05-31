@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.74](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.73...v0.12.74) (2026-05-31)
+
+
+### Bug Fixes
+
+* **coturn:** raise user-quota 4→16 — WebRTC relay-policy clients exhausted it ([297e5ec](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/297e5ec64a6a631b06ccee370a9afabc735144b1))
+* **coturn:** raise user-quota 4→16 — WebRTC relay-policy clients exhausted it ([aef441c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/aef441c1b84aad96c7177b58916be59f795bcb37))
+
 ## [0.12.73](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.72...v0.12.73) (2026-05-29)
 
 
