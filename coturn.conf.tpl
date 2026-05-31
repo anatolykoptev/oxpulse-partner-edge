@@ -27,8 +27,11 @@ realm={{PARTNER_DOMAIN}}
 # ─── Capacity / rate limits (R1 §5.3) ───────────────────────────────────
 # Sized for ~100 concurrent calls. Each call has ~2 TURN channels.
 total-quota=250
-# Per-credential limit: handles multi-tab/multi-device; blocks runaway abuse.
-user-quota=4
+# Per-credential cap. Must exceed a single client's interface count — WebRTC
+# relay-policy clients allocate one relay per local interface (IPv4 + IPv6 + VPN)
+# under one ephemeral username; user-quota=4 caused 486 Allocation Quota Reached
+# and broke relay-only (RU) calls. 16 gives headroom; total-quota still bounds the box.
+user-quota=16
 # Bandwidth cap per session: 2 Mbps (video call at 1080p30 peaks ~1.5 Mbps).
 max-bps=250000
 # Total server bandwidth cap: 200 Mbps conservative.
