@@ -28,7 +28,7 @@ realm=zvonilka.net
 # Sized for ~100 concurrent calls. Each call has ~2 TURN channels.
 total-quota=250
 # Per-credential limit: handles multi-tab/multi-device; blocks runaway abuse.
-user-quota=4
+user-quota=16
 # Bandwidth cap per session: 2 Mbps (video call at 1080p30 peaks ~1.5 Mbps).
 max-bps=250000
 # Total server bandwidth cap: 200 Mbps conservative.
