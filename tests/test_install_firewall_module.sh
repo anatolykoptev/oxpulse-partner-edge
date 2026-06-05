@@ -50,6 +50,7 @@ grep -q "ufw allow 80/tcp"                                                      
 grep -q "ufw allow 443/tcp"                                                      "$TMP/calls.log" || { echo "FAIL test1: 443/tcp"; exit 1; }
 grep -q "ufw allow 443/udp"                                                      "$TMP/calls.log" || { echo "FAIL test1: 443/udp (quic)"; exit 1; }
 grep -q "ufw allow 7878/udp"                                                     "$TMP/calls.log" || { echo "FAIL test1: 7878/udp"; exit 1; }
+grep -q "ufw allow 49152:65535/udp"                                              "$TMP/calls.log" || { echo "FAIL test1: relay range 49152:65535/udp"; exit 1; }
 grep -q "ufw allow 18443/tcp"                                                    "$TMP/calls.log" || { echo "FAIL test1: 18443/tcp"; exit 1; }
 grep -q "ufw allow 18443/udp"                                                    "$TMP/calls.log" || { echo "FAIL test1: 18443/udp"; exit 1; }
 grep -q "ufw allow 44321/udp"                                                    "$TMP/calls.log" || { echo "FAIL test1: AWG port"; exit 1; }
@@ -66,6 +67,7 @@ AWG_LISTEN_PORT=44322 firewall_apply
 grep -q "firewall-cmd --permanent --zone=public --add-service=ssh"               "$TMP/calls.log" || { echo "FAIL test2: ssh"; cat "$TMP/calls.log"; exit 1; }
 grep -q "firewall-cmd --permanent --zone=public --add-port=443/tcp"              "$TMP/calls.log" || { echo "FAIL test2: 443/tcp"; exit 1; }
 grep -q "firewall-cmd --permanent --zone=public --add-port=443/udp"              "$TMP/calls.log" || { echo "FAIL test2: 443/udp"; exit 1; }
+grep -q "firewall-cmd --permanent --zone=public --add-port=49152-65535/udp"      "$TMP/calls.log" || { echo "FAIL test2: relay range 49152-65535/udp"; exit 1; }
 grep -q "firewall-cmd --permanent --zone=public --add-port=44322/udp"            "$TMP/calls.log" || { echo "FAIL test2: AWG port"; exit 1; }
 grep -q "firewall-cmd --permanent --zone=public --remove-port=9317/tcp"          "$TMP/calls.log" || { echo "FAIL test2: strip 9317"; exit 1; }
 grep -q "firewall-cmd --permanent --zone=public --add-rich-rule rule family=ipv4 source address=10.9.0.0/24 port port=9317 protocol=tcp accept" \
