@@ -32,6 +32,10 @@ setup() {
 	touch "$FAKE_SRC/oxpulse-token-lib.sh"
 	mkdir -p "$FAKE_SRC/config"
 	touch "$FAKE_SRC/config/defaults.conf"
+	# c58733c added VERSION-file install to _systemd_install_lib_scripts —
+	# plant a stub so the install branch wins over the curl branch
+	# (REPO_RAW points to a bogus IP for hermeticity).
+	echo "v0.0.0-test" > "$FAKE_SRC/VERSION"
 
 	# `install` shim: actually copies src→dest so [ -f dest ] assertions work.
 	# Also creates parent directories as needed.
