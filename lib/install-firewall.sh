@@ -30,6 +30,14 @@
 _PE_FW_PUB_TCP=(22 80 443 18443 3478 5349)
 # Public UDP:
 _PE_FW_PUB_UDP=(443 18443 3478 5349 7878)
+# Public UDP RANGES — coturn/SFU ephemeral relay range for cascade-relay
+# RTP and RFC 7675 STUN consent-freshness traffic. Without this, peer-edge
+# consent packets (~104-128 byte UDP) get dropped at our INPUT chain,
+# causing silent mid-call disconnect at 25-35s on RU↔diaspora cross-TURN
+# routes. Evidence: zvonilka /var/log/ufw.log* (2026-06-05 investigation,
+# reports/oxpulse-chat/research/2026-06-05-partner-edge-relay-disconnect-class.md).
+# Range matches coturn defaults (min-port=49152 max-port=65535).
+_PE_FW_PUB_UDP_RANGES=(49152:65535)
 # Mesh-only TCP (sources restricted to 10.9.0.0/24):
 _PE_FW_MESH_TCP=(9317 8912)
 
@@ -83,6 +91,10 @@ _firewall_apply_ufw() {
 	for p in "${_PE_FW_PUB_UDP[@]}"; do
 		ufw allow "${p}/udp" comment 'partner-edge pub' >/dev/null
 	done
+	local r
+	for r in "${_PE_FW_PUB_UDP_RANGES[@]}"; do
+		ufw allow "${r}/udp" comment 'partner-edge ephemeral relay' >/dev/null
+	done
 	ufw allow "${awg_port}/udp" comment "amneziawg ${awg_port}" >/dev/null
 	for p in "${_PE_FW_MESH_TCP[@]}"; do
 		ufw allow from 10.9.0.0/24 to any port "$p" proto tcp \
@@ -102,6 +114,12 @@ _firewall_apply_firewalld() {
 	done
 	for p in "${_PE_FW_PUB_UDP[@]}"; do
 		firewall-cmd --permanent --zone=$zone --add-port="${p}/udp" >/dev/null
+	done
+	local r fr
+	for r in "${_PE_FW_PUB_UDP_RANGES[@]}"; do
+		# firewalld wants dashes; our array uses ufw-style colons.
+		fr="${r/:/-}"
+		firewall-cmd --permanent --zone=$zone --add-port="${fr}/udp" >/dev/null
 	done
 	firewall-cmd --permanent --zone=$zone --add-port="${awg_port}/udp" >/dev/null
 
