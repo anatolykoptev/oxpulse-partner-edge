@@ -612,6 +612,277 @@ fi
 trap - EXIT
 rm -rf "$T11"
 
+# ── Test 12: ch4 probe targets the PUBLIC external-ip, NOT 127.0.0.1 ──────────
+# Regression guard for the anti-SSRF-vs-loopback collision: the -y self-test
+# relayed peer is reached via the server-address argument; pointing it at
+# 127.0.0.1 trips denied-peer-ip=127.0.0.0-127.255.255.255 → timeout → false
+# negative + leaked allocations (7-day RU media outage, zvonilka 2026-06-11).
+#
+# NOTE on fixture IPs: stubs below use 203.0.113.77 (TEST-NET-3, RFC 5737) and
+# elsewhere 198.51.100.9 (TEST-NET-2, RFC 5737) as placeholder "public" IPs.
+# These are IANA documentation ranges — guaranteed non-routable and never owned
+# by any real host — chosen ONLY to verify that the correct address is passed
+# through to argv.  A real probe target MUST be outside all denied-peer-ip
+# ranges in coturn.conf.tpl (RFC 1918, loopback, link-local, TEST-NET-*, etc.).
+# The probe must resolve external-ip from the container config and pass THAT.
+T12=$(mktemp -d)
+trap 'rm -rf "$T12"' EXIT
+
+make_bin "$T12"
+mkdir -p "$T12/etc"
+write_node_config "$T12/etc" '{"id":"ch4"}'
+
+UCLIENT_ARGV_LOG="$T12/uclient_argv.log"
+
+# docker stub: serve secret + external-ip; record uclient argv; succeed.
+cat > "$T12/docker" <<STUB
+#!/bin/bash
+if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then
+    echo "probe-test-secret"; exit 0
+fi
+if [[ "\$*" == *"sed"* && "\$*" == *"external-ip"* ]]; then
+    echo "203.0.113.77"; exit 0
+fi
+if [[ "\$*" == *"turnutils_uclient"* ]]; then
+    printf '%s\n' "\$*" >> "$UCLIENT_ARGV_LOG"
+    exit 0
+fi
+exit 1
+STUB
+chmod +x "$T12/docker"
+
+set +e
+OUTPUT12=$(PATH="$T12:/usr/bin:/bin" \
+    _NODE_CONFIG="$T12/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+if grep -q '203.0.113.77' "$UCLIENT_ARGV_LOG" 2>/dev/null; then
+    ok "test12: uclient targets the public external-ip (203.0.113.77)"
+else
+    fail "test12: uclient did not target the external-ip; argv: $(cat "$UCLIENT_ARGV_LOG" 2>/dev/null); payload: $OUTPUT12"
+fi
+# CORE REGRESSION GUARD: must NOT target loopback when a public target resolves.
+if grep -q '127.0.0.1' "$UCLIENT_ARGV_LOG" 2>/dev/null; then
+    fail "test12: REGRESSION — uclient targeted 127.0.0.1 (anti-SSRF denial); argv: $(cat "$UCLIENT_ARGV_LOG")"
+else
+    ok "test12: uclient does NOT target 127.0.0.1 (anti-SSRF collision avoided)"
+fi
+
+trap - EXIT
+rm -rf "$T12"
+
+# ── Test 13: OXPULSE_COTURN_PROBE_TARGET env override wins ─────────────────────
+T13=$(mktemp -d)
+trap 'rm -rf "$T13"' EXIT
+
+make_bin "$T13"
+mkdir -p "$T13/etc"
+write_node_config "$T13/etc" '{"id":"ch4"}'
+
+UCLIENT_ARGV_LOG13="$T13/uclient_argv.log"
+cat > "$T13/docker" <<STUB
+#!/bin/bash
+if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then
+    echo "probe-test-secret"; exit 0
+fi
+if [[ "\$*" == *"sed"* && "\$*" == *"external-ip"* ]]; then
+    echo "203.0.113.77"; exit 0
+fi
+if [[ "\$*" == *"turnutils_uclient"* ]]; then
+    printf '%s\n' "\$*" >> "$UCLIENT_ARGV_LOG13"; exit 0
+fi
+exit 1
+STUB
+chmod +x "$T13/docker"
+
+set +e
+PATH="$T13:/usr/bin:/bin" \
+    _NODE_CONFIG="$T13/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    OXPULSE_COTURN_PROBE_TARGET="198.51.100.9" \
+    bash "$SCRIPT" --dry-run >/dev/null 2>&1
+set -e
+
+if grep -q '198.51.100.9' "$UCLIENT_ARGV_LOG13" 2>/dev/null \
+   && ! grep -q '203.0.113.77' "$UCLIENT_ARGV_LOG13" 2>/dev/null; then
+    ok "test13: OXPULSE_COTURN_PROBE_TARGET overrides external-ip"
+else
+    fail "test13: env override not honoured; argv: $(cat "$UCLIENT_ARGV_LOG13" 2>/dev/null)"
+fi
+
+trap - EXIT
+rm -rf "$T13"
+
+# ── Test 14: NAT external-ip "public/private" strips to the public part ───────
+T14=$(mktemp -d)
+trap 'rm -rf "$T14"' EXIT
+
+make_bin "$T14"
+mkdir -p "$T14/etc"
+write_node_config "$T14/etc" '{"id":"ch4"}'
+
+UCLIENT_ARGV_LOG14="$T14/uclient_argv.log"
+cat > "$T14/docker" <<STUB
+#!/bin/bash
+if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then
+    echo "probe-test-secret"; exit 0
+fi
+if [[ "\$*" == *"sed"* && "\$*" == *"external-ip"* ]]; then
+    # NAT form: install.sh renders "public/private" behind NAT.
+    echo "203.0.113.77/10.0.0.5"; exit 0
+fi
+if [[ "\$*" == *"turnutils_uclient"* ]]; then
+    printf '%s\n' "\$*" >> "$UCLIENT_ARGV_LOG14"; exit 0
+fi
+exit 1
+STUB
+chmod +x "$T14/docker"
+
+set +e
+PATH="$T14:/usr/bin:/bin" \
+    _NODE_CONFIG="$T14/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run >/dev/null 2>&1
+set -e
+
+if grep -q '203.0.113.77' "$UCLIENT_ARGV_LOG14" 2>/dev/null \
+   && ! grep -q '10.0.0.5' "$UCLIENT_ARGV_LOG14" 2>/dev/null; then
+    ok "test14: NAT external-ip strips /private → public part only"
+else
+    fail "test14: NAT strip failed; argv: $(cat "$UCLIENT_ARGV_LOG14" 2>/dev/null)"
+fi
+
+trap - EXIT
+rm -rf "$T14"
+
+# ── Test 15: timeout-killed probe (exit 124) → channel_probe_reason="timeout" ─
+# The false-negative class must carry its cause to the central server so an
+# opaque handshake_ok=false is no longer indistinguishable from a real failure.
+T15=$(mktemp -d)
+trap 'rm -rf "$T15"' EXIT
+
+make_bin "$T15"
+mkdir -p "$T15/etc"
+write_node_config "$T15/etc" '{"id":"ch4"}'
+
+# docker stub: secret + external-ip OK; uclient simulates a timeout-kill (124).
+cat > "$T15/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then
+    echo "probe-test-secret"; exit 0
+fi
+if [[ "$*" == *"sed"* && "$*" == *"external-ip"* ]]; then
+    echo "203.0.113.77"; exit 0
+fi
+if [[ "$*" == *"turnutils_uclient"* ]]; then
+    exit 124   # timeout(1) SIGTERM exit code
+fi
+exit 1
+STUB
+chmod +x "$T15/docker"
+
+set +e
+OUTPUT15=$(PATH="$T15:/usr/bin:/bin" \
+    _NODE_CONFIG="$T15/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+if printf '%s\n' "$OUTPUT15" | jq -e 'select(.channel_name=="coturn" and .channel_handshake_ok==false and .channel_probe_reason=="timeout")' >/dev/null 2>&1; then
+    ok "test15: timeout-killed probe → handshake_ok=false + channel_probe_reason=timeout"
+else
+    fail "test15: expected channel_probe_reason=timeout on exit 124; got: $OUTPUT15"
+fi
+
+trap - EXIT
+rm -rf "$T15"
+
+# ── Test 16: all probe-target sources absent → loopback-fallback, exit 0 ──────
+# Regression guard for the case where OXPULSE_COTURN_PROBE_TARGET is unset,
+# the container has no external-ip line, and node-config.json has no public_ip.
+# The script MUST still exit 0 (degraded operation, not crash), the ch4 payload
+# must be valid JSON, and COTURN_PROBE_TARGET_SOURCE must be "loopback-fallback"
+# in the state file.  The probe itself times out (127.0.0.1 denied by
+# denied-peer-ip / no-loopback-peers), so channel_probe_reason must be
+# "loopback-fallback" in the payload — distinguishable from a real dead relay.
+T16=$(mktemp -d)
+trap 'rm -rf "$T16"' EXIT
+
+make_bin "$T16"
+mkdir -p "$T16/etc" "$T16/var/lib/oxpulse-partner-edge"
+
+# node-config: only id, NO public_ip field.
+printf '{"node_id":"test-node","channels":[{"id":"ch4"}]}\n' > "$T16/etc/node-config.json"
+
+# docker stub: no external-ip line (sed returns empty); secret OK;
+# uclient exits 124 (simulated timeout — the loopback target would be
+# denied-peer-ip'd on real coturn, causing this same exit).
+cat > "$T16/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then
+    echo "probe-test-secret"; exit 0
+fi
+if [[ "$*" == *"sed"* && "$*" == *"external-ip"* ]]; then
+    # No external-ip line — simulate missing config.
+    exit 0
+fi
+if [[ "$*" == *"turnutils_uclient"* ]]; then
+    # Simulate timeout-kill (anti-SSRF loopback denial exits 124).
+    exit 124
+fi
+exit 1
+STUB
+chmod +x "$T16/docker"
+
+STATE_DIR16="$T16/var/lib/oxpulse-partner-edge"
+set +e
+OUTPUT16=$(PATH="$T16:/usr/bin:/bin" \
+    _NODE_CONFIG="$T16/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    STATE_DIR="$STATE_DIR16" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+EXIT16=$?
+set -e
+
+# 16a: script exits 0 (degraded but not crashed)
+if [[ "$EXIT16" -eq 0 ]]; then
+    ok "test16a: all-sources-fail → script exits 0 (degraded, not crash)"
+else
+    fail "test16a: all-sources-fail → unexpected exit $EXIT16"
+fi
+
+# 16b: ch4 payload is valid JSON
+if printf '%s\n' "$OUTPUT16" | jq -e 'select(.channel_name=="coturn")' >/dev/null 2>&1; then
+    ok "test16b: all-sources-fail → ch4 payload is valid JSON"
+else
+    fail "test16b: all-sources-fail → ch4 payload not valid JSON; got: $OUTPUT16"
+fi
+
+# 16c: state file records COTURN_PROBE_TARGET_SOURCE=loopback-fallback
+STATE_FILE16="$STATE_DIR16/coturn-probe-mode.env"
+if grep -q 'COTURN_PROBE_TARGET_SOURCE=loopback-fallback' "$STATE_FILE16" 2>/dev/null; then
+    ok "test16c: all-sources-fail → state file records COTURN_PROBE_TARGET_SOURCE=loopback-fallback"
+else
+    fail "test16c: all-sources-fail → COTURN_PROBE_TARGET_SOURCE!=loopback-fallback; state: $(cat "$STATE_FILE16" 2>/dev/null)"
+fi
+
+# 16d: payload channel_probe_reason=loopback-fallback (distinguishable from dead relay)
+if printf '%s\n' "$OUTPUT16" | jq -e 'select(.channel_name=="coturn" and .channel_probe_reason=="loopback-fallback")' >/dev/null 2>&1; then
+    ok "test16d: all-sources-fail → channel_probe_reason=loopback-fallback in payload"
+else
+    fail "test16d: all-sources-fail → expected channel_probe_reason=loopback-fallback; got: $OUTPUT16"
+fi
+
+trap - EXIT
+rm -rf "$T16"
+
 # ---------- syntax check ----------
 bash -n "$SCRIPT" && ok "syntax check: oxpulse-channels-health-report.sh"
 
