@@ -208,15 +208,28 @@ probe_ch3() {
 # PROBE TARGET (anti-SSRF-vs-loopback-self-test collision — see below):
 # the `-y` self-test relays between two allocations via a peer reached at the
 # server-address argument.  When that argument is 127.0.0.1 the relayed peer is
-# a loopback address, which the production anti-SSRF guard
-# `denied-peer-ip=127.0.0.0-127.255.255.255` (turnserver.conf) DENIES at
-# CreatePermission — the data round-trip never completes, `timeout` kills the
+# a loopback address, which TWO independent guards in the production config DENY
+# at CreatePermission:
+#   1. `denied-peer-ip=127.0.0.0-127.255.255.255` (coturn.conf.tpl) — explicit
+#      RFC-defined loopback SSRF block.
+#   2. `no-loopback-peers` (coturn.conf.tpl:42) — coturn's built-in flag that
+#      independently denies any peer address that is a loopback address, even if
+#      denied-peer-ip were removed.
+# Either guard alone is sufficient to deny the self-test peer; both are present.
+# The data round-trip never completes, `timeout` kills the
 # client (exit 124), handshake_ok is reported false on a perfectly healthy
 # coturn, AND the killed client leaks its two allocations every tick (no
-# graceful dealloc) which can wedge the public allocation quota into a
-# persistent 486.  The fix is to point the probe at the address real clients
-# use — the server's PUBLIC/external IP, which is NOT in the denied range — so
-# the relayed peer is a public relay address and CreatePermission succeeds.
+# graceful dealloc — turnutils_uclient has no --lifetime/allocation-duration
+# flag; `-l` controls message length, not allocation lifetime).  At a 60 s tick
+# rate this is ~10 leaked allocations outstanding at steady state (600 s coturn
+# default expiry); the default per-user quota is 16, so a continuously-timing-
+# out probe wedges into 486 Allocation Quota Reached after ~8 min.  The fix is
+# to point the probe at the address real clients use — the server's PUBLIC/
+# external IP, which is NOT in the denied range — so the relayed peer is a
+# public relay address and CreatePermission succeeds and the client exits 0
+# (sending a graceful Refresh(0)).  On pure-NAT edges where hairpin is dropped,
+# set OXPULSE_COTURN_PROBE_TARGET to a non-hairpin reachable address.  See
+# FOLLOWUPS.md 'ch4 coturn probe — hairpin/NAT caveat' for the full analysis.
 # We do NOT loosen denied-peer-ip to make loopback work: that would re-open the
 # SSRF hole the guard exists to close.
 
@@ -289,7 +302,14 @@ probe_ch4() {
     probe_target="${_resolved%%$'\t'*}"
     probe_target_source="${_resolved##*$'\t'}"
     if [[ "$probe_target_source" == "loopback-fallback" ]]; then
-        warn "ch4: could not resolve public probe target — falling back to 127.0.0.1 (anti-SSRF denied-peer-ip will deny the -y self-test; expect a false negative)"
+        warn "ch4: could not resolve public probe target — falling back to 127.0.0.1 (anti-SSRF denied-peer-ip will deny the -y self-test; expect a false negative). On pure-NAT edges where hairpin is dropped this also occurs with a valid public IP; set OXPULSE_COTURN_PROBE_TARGET to a reachable non-hairpin address. See FOLLOWUPS.md 'ch4 coturn probe — hairpin/NAT caveat'."
+        # Seed the failure reason so that IF the probe fails (the expected
+        # outcome when the loopback target is denied-peer-ip'd), the central
+        # server can distinguish "loopback fallback → anti-SSRF denial" from
+        # a genuinely dead relay — both produce exit 124 / handshake_ok=false
+        # but have different remediation paths.  Overridden below by the
+        # exit-code classifier if a more specific reason is known.
+        probe_reason="loopback-fallback"
     fi
 
     # Read static-auth-secret from the running container's rendered config.
@@ -365,22 +385,28 @@ probe_ch4() {
         t1="${EPOCHREALTIME}"
 
         # Classify the failure so handshake_ok=false carries a reason.
+        # When probe_reason is already "loopback-fallback" (seeded above because
+        # all three resolution sources failed), preserve it — it is more specific
+        # than "timeout" and lets the central server distinguish a config gap
+        # from a genuinely dead relay.  Otherwise classify by exit code.
         if [[ "$exit_code" -ne 0 ]]; then
-            case "$exit_code" in
-                124|143)
-                    # timeout(1) SIGTERM/SIGKILL — the data round-trip never
-                    # completed (the classic anti-SSRF denied-peer collision, or
-                    # a genuinely dead relay path).
-                    probe_reason="timeout"
-                    ;;
-                *)
-                    if printf '%s' "$uclient_out" | grep -qiE '486|Allocation Quota Reached'; then
-                        probe_reason="auth-486"
-                    else
-                        probe_reason="other"
-                    fi
-                    ;;
-            esac
+            if [[ "$probe_reason" != "loopback-fallback" ]]; then
+                case "$exit_code" in
+                    124|143)
+                        # timeout(1) SIGTERM/SIGKILL — the data round-trip never
+                        # completed (the classic anti-SSRF denied-peer collision,
+                        # or a genuinely dead relay path).
+                        probe_reason="timeout"
+                        ;;
+                    *)
+                        if printf '%s' "$uclient_out" | grep -qiE '486|Allocation Quota Reached'; then
+                            probe_reason="auth-486"
+                        else
+                            probe_reason="other"
+                        fi
+                        ;;
+                esac
+            fi
             # Log the uclient tail locally (last 3 lines) so an investigator has
             # evidence even though the POST/stderr paths are swallowed upstream.
             warn "ch4: coturn probe failed (target=$probe_target source=$probe_target_source exit=$exit_code reason=$probe_reason): $(printf '%s' "$uclient_out" | tail -n3 | tr '\n' ' ')"
@@ -627,6 +653,9 @@ for _chan in "${_PROVISIONED[@]}"; do
             _payload=$(probe_ch3 2>/dev/null || printf '{"channel_name":"ch3","channel_rtt_ms":0}')
             ;;
         ch4*)
+            # The || here suppresses set -e for probe_ch4; probe_ch4 relies on
+            # this ||-shielded call site to remain safe under set -e — it must
+            # not be called bare (without ||) elsewhere in this script.
             _payload=$(probe_ch4 2>/dev/null || printf '{"channel_name":"coturn","channel_rtt_ms":0,"channel_handshake_ok":false,"channel_probe_mode":"error"}')
             ;;
         ch5*|ch6*)

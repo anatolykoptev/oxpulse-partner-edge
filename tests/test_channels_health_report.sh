@@ -617,6 +617,13 @@ rm -rf "$T11"
 # relayed peer is reached via the server-address argument; pointing it at
 # 127.0.0.1 trips denied-peer-ip=127.0.0.0-127.255.255.255 → timeout → false
 # negative + leaked allocations (7-day RU media outage, zvonilka 2026-06-11).
+#
+# NOTE on fixture IPs: stubs below use 203.0.113.77 (TEST-NET-3, RFC 5737) and
+# elsewhere 198.51.100.9 (TEST-NET-2, RFC 5737) as placeholder "public" IPs.
+# These are IANA documentation ranges — guaranteed non-routable and never owned
+# by any real host — chosen ONLY to verify that the correct address is passed
+# through to argv.  A real probe target MUST be outside all denied-peer-ip
+# ranges in coturn.conf.tpl (RFC 1918, loopback, link-local, TEST-NET-*, etc.).
 # The probe must resolve external-ip from the container config and pass THAT.
 T12=$(mktemp -d)
 trap 'rm -rf "$T12"' EXIT
@@ -795,6 +802,86 @@ fi
 
 trap - EXIT
 rm -rf "$T15"
+
+# ── Test 16: all probe-target sources absent → loopback-fallback, exit 0 ──────
+# Regression guard for the case where OXPULSE_COTURN_PROBE_TARGET is unset,
+# the container has no external-ip line, and node-config.json has no public_ip.
+# The script MUST still exit 0 (degraded operation, not crash), the ch4 payload
+# must be valid JSON, and COTURN_PROBE_TARGET_SOURCE must be "loopback-fallback"
+# in the state file.  The probe itself times out (127.0.0.1 denied by
+# denied-peer-ip / no-loopback-peers), so channel_probe_reason must be
+# "loopback-fallback" in the payload — distinguishable from a real dead relay.
+T16=$(mktemp -d)
+trap 'rm -rf "$T16"' EXIT
+
+make_bin "$T16"
+mkdir -p "$T16/etc" "$T16/var/lib/oxpulse-partner-edge"
+
+# node-config: only id, NO public_ip field.
+printf '{"node_id":"test-node","channels":[{"id":"ch4"}]}\n' > "$T16/etc/node-config.json"
+
+# docker stub: no external-ip line (sed returns empty); secret OK;
+# uclient exits 124 (simulated timeout — the loopback target would be
+# denied-peer-ip'd on real coturn, causing this same exit).
+cat > "$T16/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then
+    echo "probe-test-secret"; exit 0
+fi
+if [[ "$*" == *"sed"* && "$*" == *"external-ip"* ]]; then
+    # No external-ip line — simulate missing config.
+    exit 0
+fi
+if [[ "$*" == *"turnutils_uclient"* ]]; then
+    # Simulate timeout-kill (anti-SSRF loopback denial exits 124).
+    exit 124
+fi
+exit 1
+STUB
+chmod +x "$T16/docker"
+
+STATE_DIR16="$T16/var/lib/oxpulse-partner-edge"
+set +e
+OUTPUT16=$(PATH="$T16:/usr/bin:/bin" \
+    _NODE_CONFIG="$T16/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    STATE_DIR="$STATE_DIR16" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+EXIT16=$?
+set -e
+
+# 16a: script exits 0 (degraded but not crashed)
+if [[ "$EXIT16" -eq 0 ]]; then
+    ok "test16a: all-sources-fail → script exits 0 (degraded, not crash)"
+else
+    fail "test16a: all-sources-fail → unexpected exit $EXIT16"
+fi
+
+# 16b: ch4 payload is valid JSON
+if printf '%s\n' "$OUTPUT16" | jq -e 'select(.channel_name=="coturn")' >/dev/null 2>&1; then
+    ok "test16b: all-sources-fail → ch4 payload is valid JSON"
+else
+    fail "test16b: all-sources-fail → ch4 payload not valid JSON; got: $OUTPUT16"
+fi
+
+# 16c: state file records COTURN_PROBE_TARGET_SOURCE=loopback-fallback
+STATE_FILE16="$STATE_DIR16/coturn-probe-mode.env"
+if grep -q 'COTURN_PROBE_TARGET_SOURCE=loopback-fallback' "$STATE_FILE16" 2>/dev/null; then
+    ok "test16c: all-sources-fail → state file records COTURN_PROBE_TARGET_SOURCE=loopback-fallback"
+else
+    fail "test16c: all-sources-fail → COTURN_PROBE_TARGET_SOURCE!=loopback-fallback; state: $(cat "$STATE_FILE16" 2>/dev/null)"
+fi
+
+# 16d: payload channel_probe_reason=loopback-fallback (distinguishable from dead relay)
+if printf '%s\n' "$OUTPUT16" | jq -e 'select(.channel_name=="coturn" and .channel_probe_reason=="loopback-fallback")' >/dev/null 2>&1; then
+    ok "test16d: all-sources-fail → channel_probe_reason=loopback-fallback in payload"
+else
+    fail "test16d: all-sources-fail → expected channel_probe_reason=loopback-fallback; got: $OUTPUT16"
+fi
+
+trap - EXIT
+rm -rf "$T16"
 
 # ---------- syntax check ----------
 bash -n "$SCRIPT" && ok "syntax check: oxpulse-channels-health-report.sh"
