@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.75](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.74...v0.12.75) (2026-06-11)
+
+
+### Bug Fixes
+
+* **firewall:** open coturn ephemeral UDP range 49152-65535 ([#302](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/302)) ([4da21e1](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4da21e178f65ee76d1344f2942344438a4d95de9))
+* **health:** point ch4 coturn probe at public external-ip, not loopback ([#304](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/304)) ([d55410c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d55410c85b250a7c79239dfe06a204c21dfeb4e5))
+
 ## [0.12.74](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.73...v0.12.74) (2026-05-31)
 
 
