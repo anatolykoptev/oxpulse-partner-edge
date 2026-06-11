@@ -5,6 +5,50 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.75](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.74...v0.12.75) (2026-06-11)
+
+
+### Bug Fixes
+
+* **firewall:** open coturn ephemeral UDP range 49152-65535 ([#302](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/302)) ([4da21e1](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4da21e178f65ee76d1344f2942344438a4d95de9))
+* **health:** point ch4 coturn probe at public external-ip, not loopback ([#304](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/304)) ([d55410c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d55410c85b250a7c79239dfe06a204c21dfeb4e5))
+
+## [0.12.74](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.73...v0.12.74) (2026-05-31)
+
+
+### Bug Fixes
+
+* **coturn:** raise user-quota 4→16 — WebRTC relay-policy clients exhausted it ([297e5ec](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/297e5ec64a6a631b06ccee370a9afabc735144b1))
+* **coturn:** raise user-quota 4→16 — WebRTC relay-policy clients exhausted it ([aef441c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/aef441c1b84aad96c7177b58916be59f795bcb37))
+
+## [0.12.73](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.72...v0.12.73) (2026-05-29)
+
+
+### Features
+
+* **channels:** X-Installer-Version header + installer_version body + channels[].id permanent fix ([7f5f1a9](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7f5f1a975b724d228c00ac0ca3a095000d740778))
+* **channels:** X-Installer-Version header + installer_version body + channels[].id permanent fix ([d8d361a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d8d361a947773a52a462927b96cc7f6227809085))
+
+
+### Bug Fixes
+
+* **installer-version:** install VERSION file path + tighten test regex + drop probe_ch5 mapping ([c58733c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c58733c2ea3aa876115befde658f4d36537b8814))
+
+## [0.12.72](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.71...v0.12.72) (2026-05-28)
+
+
+### Bug Fixes
+
+* **healthcheck:** probe SFU /metrics on SFU_METRICS_BIND, not 127.0.0.1 (bug [#7](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/7)) ([#295](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/295)) ([be4a52b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/be4a52b90eaef85ed48310f2098360847b529fd7))
+
+## [0.12.71](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.70...v0.12.71) (2026-05-28)
+
+
+### Bug Fixes
+
+* **install:** restore install-firewall.sh in checksums + fix release tag sed scope ([#5](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/5) [#6](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/6)) ([#294](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/294)) ([3b8836b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3b8836bb13a609625ae171235c201b34a119a012))
+* **install:** warn on legacy TURNS_SUBDOMAIN + add migration script ([#292](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/292)) ([19cec02](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/19cec02aa1c88129ac21568ec80c47eaf9fddd9b))
+
 ## [0.12.70](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.69...v0.12.70) (2026-05-28)
 
 

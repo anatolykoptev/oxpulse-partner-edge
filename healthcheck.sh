@@ -161,10 +161,20 @@ check "11. UDP ${SFU_UDP_PORT} listening (sfu media)" bash -c '
 '
 
 # --- 12. SFU /metrics responds 200 (M1.5 endpoint) ---
+# Resolve the SFU metrics bind address from the compose file.
+# Post-#288 edges set SFU_METRICS_BIND to the AWG mesh IP (e.g. 10.9.0.7).
+# Probing 127.0.0.1 fails on those edges (mesh-only socket, not 0.0.0.0).
+# Fallback: 127.0.0.1 preserves behaviour on legacy edges without SFU_METRICS_BIND.
 SFU_METRICS_PORT="${SFU_METRICS_PORT:-9317}"
+_sfu_metrics_bind=$(grep -E '^\s*SFU_METRICS_BIND:' "$COMPOSE_FILE" \
+    | head -1 \
+    | sed -E 's/^\s*SFU_METRICS_BIND:\s*//' \
+    | tr -d '"' \
+    | cut -d/ -f1)
+_sfu_metrics_bind="${_sfu_metrics_bind:-127.0.0.1}"
 check "12. SFU /metrics → 200" bash -c '
 	code=$(curl -fso /dev/null -w "%{http_code}" --max-time 5 \
-		"http://127.0.0.1:'"${SFU_METRICS_PORT}"'/metrics" || true)
+		"http://'"${_sfu_metrics_bind}"':'"${SFU_METRICS_PORT}"'/metrics" || true)
 	[[ "$code" == "200" ]]
 '
 
