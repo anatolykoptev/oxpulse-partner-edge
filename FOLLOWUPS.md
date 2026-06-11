@@ -112,3 +112,64 @@ Tests: `chat_relay_active_channels_gauge_decremented_on_reap` +
 **Closed.** T10 fix-loop (commit `f92c54a`) added a `ch.buffered_amount() > VOICE_BUFFERED_AMOUNT_MAX` backpressure check in `crates/sfu/src/client/voice.rs:~101`. The drop counter `voice_relay_dropped{reason="buffered_amount_too_high"}` increments correctly at runtime, but no integration test in `tests/voice_relay.rs` covers the branch. Test seam approach: drive a mock channel that returns a non-zero `buffered_amount()` via `client::test_seed::new_client` + relay flush. Without coverage the counter can silently regress (wrong label, wrong threshold, missing `.inc()`) — exactly the class of bug T10 cycle was designed to catch. Reviewer (final) flagged as MINOR, deferred to keep T10 boundary clean.
 
 **Resolution:** Added `voice_relay_drops_when_subscriber_buffered_amount_too_high` in `crates/sfu/tests/voice_relay.rs` (10th test). Seam: `Client::set_buffered_amount_for_tests(usize)` in `test_seed.rs` + `buffered_amount_override: Option<usize>` field (cfg-gated). Override checked before `rtc.channel()` in voice.rs test path so the branch fires despite no live SCTP. Test asserts: `buffered_amount_too_high` counter +1 on overloaded subscriber; healthy subscriber still reaches relay attempt (`dc_closed` in test seam). <!-- closed: <!-- placeholder SHA --> -->
+
+---
+
+## ch4 coturn probe — hairpin/NAT caveat and allocation leak (PR #304)
+
+### Hairpin / pure-NAT edge
+
+On a **pure-NAT edge** where the public IP is NOT locally bound (e.g. AWS/GCP
+instances where the public IP lives on the gateway, not the NIC), the probe
+sends a TURN Allocate to `$probe_target` (the public IP).  Clouds that **drop
+hairpin** traffic from the instance back to its own public address will silently
+drop the packets; `timeout` kills `turnutils_uclient` with exit 124; the probe
+reports `handshake_ok=false` on a perfectly healthy coturn.
+
+**Remedy:** set `OXPULSE_COTURN_PROBE_TARGET` to an address that IS reachable
+from the instance without hairpin — typically the instance's private/LAN IP if
+coturn listens there, or a second IP on a peer box.  Example:
+
+```bash
+# In /etc/oxpulse-partner-edge.env or equivalent:
+OXPULSE_COTURN_PROBE_TARGET=10.0.0.5   # LAN IP coturn actually binds
+```
+
+The script's `warn` on repeated timeout in `probe_ch4` (around the
+`loopback-fallback` branch and the failure logger) references this env override;
+the `loopback-fallback` warn text in `oxpulse-channels-health-report.sh` also
+cites the env escape hatch.
+
+**Detection:** `COTURN_PROBE_TARGET_SOURCE=loopback-fallback` in
+`/var/lib/oxpulse-partner-edge/coturn-probe-mode.env` (written every tick by
+`_write_probe_mode_state`), or `channel_probe_reason=loopback-fallback` in the
+central server POST payload (written when the fallback path is taken).
+
+### Residual allocation leak on timeout
+
+When `timeout` kills `turnutils_uclient` (exit 124) on a dead relay or
+hairpin-drop edge, the client never sends a TURN Refresh(0) (graceful dealloc).
+Coturn holds two dangling allocations per probe tick until its default
+expiry (600 s).  At 60 s tick rate that is 2 leaks/60 s → **~10 leaked
+allocations** outstanding at steady state.  The default user quota is 16, so a
+probe username wedges into `486 Allocation Quota Reached` after roughly **8
+minutes of continuous failure** on the default per-user quota.
+
+`turnutils_uclient` has no `--lifetime` or allocation-duration flag (the `-l`
+flag controls message length, not allocation lifetime; coturn-exporter confirms
+no lifetime override exposed via the CLI).  The leak is therefore bounded only
+by **coturn's `allocation-default-timeout` (default 600 s)** — the quota
+recovers automatically once all timed-out allocations expire, but a
+continuously-timing-out probe will keep the quota wedged.
+
+**Mitigations:**
+1. Fix the root cause: resolve hairpin via `OXPULSE_COTURN_PROBE_TARGET`
+   (see above) so the probe succeeds and sends Refresh(0) gracefully.
+2. As a safety net, set `max-allocate-lifetime=120` and
+   `allocation-default-timeout=120` in `coturn.conf.tpl` to halve the wedge
+   window (not yet done — tracked here).
+3. The probe username `<ts>:healthprobe` is fixed per-edge, so the wedge is
+   per-username and does not pollute other users' quotas.
+
+**Comment updated** in `oxpulse-channels-health-report.sh` (around line 215)
+to state the residual leak honestly rather than claiming it is solved.
