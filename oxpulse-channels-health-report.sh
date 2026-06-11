@@ -204,6 +204,66 @@ probe_ch3() {
 # (486 Allocation Quota Reached) leaves no counter.  A coturn-exporter sidecar
 # that parses /var/log/turnserver/turn.log for 486 lines would close this gap —
 # tracked as a followup, out of scope here.
+#
+# PROBE TARGET (anti-SSRF-vs-loopback-self-test collision — see below):
+# the `-y` self-test relays between two allocations via a peer reached at the
+# server-address argument.  When that argument is 127.0.0.1 the relayed peer is
+# a loopback address, which the production anti-SSRF guard
+# `denied-peer-ip=127.0.0.0-127.255.255.255` (turnserver.conf) DENIES at
+# CreatePermission — the data round-trip never completes, `timeout` kills the
+# client (exit 124), handshake_ok is reported false on a perfectly healthy
+# coturn, AND the killed client leaks its two allocations every tick (no
+# graceful dealloc) which can wedge the public allocation quota into a
+# persistent 486.  The fix is to point the probe at the address real clients
+# use — the server's PUBLIC/external IP, which is NOT in the denied range — so
+# the relayed peer is a public relay address and CreatePermission succeeds.
+# We do NOT loosen denied-peer-ip to make loopback work: that would re-open the
+# SSRF hole the guard exists to close.
+
+# ---------- helper: resolve the coturn probe target (public relay IP) ----------
+# Resolution order:
+#   1. OXPULSE_COTURN_PROBE_TARGET   explicit operator/test override
+#   2. external-ip from the running container's turnserver.conf — the literal
+#      address coturn advertises as its relay; strip any "/private" NAT suffix
+#      (install.sh renders "public/private" behind NAT) to get the public part.
+#   3. public_ip from node-config.json — the same public IP sent to the backend
+#      at registration (hydrate.sh writes it); read with jq, already loaded, no
+#      extra network call.
+#   4. 127.0.0.1 — last-resort fallback so resolution never hard-fails; this is
+#      the broken loopback target, so the caller annotates the degraded reason.
+# Echoes "<target>\t<source>" so the caller can record provenance.
+_resolve_coturn_probe_target() {
+    local target source
+    if [[ -n "${OXPULSE_COTURN_PROBE_TARGET:-}" ]]; then
+        printf '%s\t%s' "$OXPULSE_COTURN_PROBE_TARGET" "env-override"
+        return 0
+    fi
+    # external-ip from the container's rendered turnserver.conf.  sed extracts
+    # the value; the public part is everything before the first '/' (NAT form
+    # "public/private"); no '/' → the whole value is public.
+    local ext_line
+    ext_line=$(timeout 10 docker exec oxpulse-partner-coturn \
+        sed -n 's/^external-ip=//p' \
+        /etc/coturn/turnserver.conf 2>/dev/null | head -n1 || true)
+    if [[ -n "$ext_line" ]]; then
+        target="${ext_line%%/*}"
+        if [[ -n "$target" ]]; then
+            printf '%s\t%s' "$target" "external-ip"
+            return 0
+        fi
+    fi
+    # public_ip persisted in node-config.json at registration.
+    if [[ -r "$_NODE_CONFIG" ]]; then
+        source=$(jq -r '.public_ip // empty' "$_NODE_CONFIG" 2>/dev/null || true)
+        if [[ -n "$source" ]]; then
+            printf '%s\t%s' "$source" "node-config"
+            return 0
+        fi
+    fi
+    # Last resort: the (broken) loopback target.  Caller flags this as degraded.
+    printf '%s\t%s' "127.0.0.1" "loopback-fallback"
+}
+
 probe_ch4() {
     local turn_secret turn_port turn_username turn_password t0 t1 exit_code rtt_ms
     # probe_mode is reported in the payload AND a state file so the degraded
@@ -212,8 +272,25 @@ probe_ch4() {
     # operators and they could silently run STUN-only (no auth/quota coverage,
     # the exact blind spot this probe exists to close).
     local probe_mode="allocate"
+    # probe_reason carries WHY a probe failed (timeout / auth-486 / other) so a
+    # false handshake_ok=false is no longer indistinguishable from a real one.
+    # Reported in the payload AND the state file (stderr is swallowed).
+    local probe_reason=""
+    local uclient_out=""
 
     turn_port="${OXPULSE_COTURN_PORT:-3478}"
+
+    # Resolve the address real clients use — NOT 127.0.0.1.  Pointing the -y
+    # self-test at the public/external relay IP avoids the anti-SSRF
+    # denied-peer-ip collision documented above (loopback peer → CreatePermission
+    # denied → timeout-kill → false-negative + leaked allocations).
+    local probe_target probe_target_source _resolved
+    _resolved=$(_resolve_coturn_probe_target)
+    probe_target="${_resolved%%$'\t'*}"
+    probe_target_source="${_resolved##*$'\t'}"
+    if [[ "$probe_target_source" == "loopback-fallback" ]]; then
+        warn "ch4: could not resolve public probe target — falling back to 127.0.0.1 (anti-SSRF denied-peer-ip will deny the -y self-test; expect a false negative)"
+    fi
 
     # Read static-auth-secret from the running container's rendered config.
     # OXPULSE_TURN_SECRET env allows dry-run / test override without a container.
@@ -273,16 +350,41 @@ probe_ch4() {
             "$turn_username")
 
         t0="${EPOCHREALTIME}"
-        timeout 10 docker exec oxpulse-partner-coturn \
+        # Capture combined output so the failure tail can be logged/classified
+        # locally — the dispatch command-substitution swallows stderr, so the
+        # next investigation would otherwise be blind to WHY the probe failed.
+        uclient_out=$(timeout 10 docker exec oxpulse-partner-coturn \
             turnutils_uclient \
                 -u "$turn_username" \
                 -w "$turn_password" \
                 -y -n 1 \
                 -p "$turn_port" \
-                127.0.0.1 \
-            >/dev/null 2>&1
+                "$probe_target" \
+            2>&1)
         exit_code=$?
         t1="${EPOCHREALTIME}"
+
+        # Classify the failure so handshake_ok=false carries a reason.
+        if [[ "$exit_code" -ne 0 ]]; then
+            case "$exit_code" in
+                124|143)
+                    # timeout(1) SIGTERM/SIGKILL — the data round-trip never
+                    # completed (the classic anti-SSRF denied-peer collision, or
+                    # a genuinely dead relay path).
+                    probe_reason="timeout"
+                    ;;
+                *)
+                    if printf '%s' "$uclient_out" | grep -qiE '486|Allocation Quota Reached'; then
+                        probe_reason="auth-486"
+                    else
+                        probe_reason="other"
+                    fi
+                    ;;
+            esac
+            # Log the uclient tail locally (last 3 lines) so an investigator has
+            # evidence even though the POST/stderr paths are swallowed upstream.
+            warn "ch4: coturn probe failed (target=$probe_target source=$probe_target_source exit=$exit_code reason=$probe_reason): $(printf '%s' "$uclient_out" | tail -n3 | tr '\n' ' ')"
+        fi
     else
         # Fallback: STUN Binding only — proves the process is alive, not
         # that auth or quota works.  Weaker than Allocate; annotated so
@@ -290,27 +392,39 @@ probe_ch4() {
         probe_mode="stun-degraded"
         warn "ch4: TURN secret unavailable — falling back to STUN Binding probe (degraded: no auth/quota coverage)"
         t0="${EPOCHREALTIME}"
-        timeout 10 docker exec oxpulse-partner-coturn \
-            turnutils_stunclient 127.0.0.1 -p "$turn_port" \
-            >/dev/null 2>&1
+        uclient_out=$(timeout 10 docker exec oxpulse-partner-coturn \
+            turnutils_stunclient "$probe_target" -p "$turn_port" \
+            2>&1)
         exit_code=$?
         t1="${EPOCHREALTIME}"
+        if [[ "$exit_code" -ne 0 ]]; then
+            case "$exit_code" in
+                124|143) probe_reason="timeout" ;;
+                *)       probe_reason="other" ;;
+            esac
+            warn "ch4: STUN probe failed (target=$probe_target source=$probe_target_source exit=$exit_code reason=$probe_reason): $(printf '%s' "$uclient_out" | tail -n3 | tr '\n' ' ')"
+        fi
     fi
 
     rtt_ms=$(_elapsed_ms "$t0" "$t1")
 
-    # Persist the probe mode to a state file (outside the swallowed stderr +
-    # the swallowed command-substitution) so operators / central tooling can
-    # detect degraded STUN-only mode even though the WARN never reaches them.
-    _write_probe_mode_state "$probe_mode"
+    # Persist the probe mode + target provenance + failure reason to a state
+    # file (outside the swallowed stderr + the swallowed command-substitution)
+    # so operators / central tooling can detect degraded STUN-only mode AND see
+    # which target the probe used + why it failed, even though the WARN never
+    # reaches them.
+    _write_probe_mode_state "$probe_mode" "$probe_target" "$probe_target_source" "$probe_reason"
 
     # channel_probe_mode is also emitted in the JSON payload — the central
     # server receives it over the wire (POST body is NOT swallowed), giving a
     # second, observable degraded signal independent of edge-local stderr.
+    # channel_probe_reason is added only on failure (the _post_channel jq filter
+    # preserves extra fields), so a false-negative carries its cause to the
+    # central server instead of an opaque handshake_ok=false.
     if [[ "$exit_code" -eq 0 ]]; then
         printf '{"channel_name":"coturn","channel_rtt_ms":%d,"channel_handshake_ok":true,"channel_probe_mode":"%s"}' "$rtt_ms" "$probe_mode"
     else
-        printf '{"channel_name":"coturn","channel_rtt_ms":%d,"channel_handshake_ok":false,"channel_probe_mode":"%s"}' "$rtt_ms" "$probe_mode"
+        printf '{"channel_name":"coturn","channel_rtt_ms":%d,"channel_handshake_ok":false,"channel_probe_mode":"%s","channel_probe_reason":"%s"}' "$rtt_ms" "$probe_mode" "${probe_reason:-unknown}"
     fi
 }
 
@@ -322,6 +436,9 @@ probe_ch4() {
 # in the POST payload).  Atomic write via mktemp + rename within the same dir.
 _write_probe_mode_state() {
     local mode="$1"
+    local target="${2:-}"
+    local target_source="${3:-}"
+    local reason="${4:-}"
     local state_dir="${STATE_DIR:-/var/lib/oxpulse-partner-edge}"
     local state_file="$state_dir/coturn-probe-mode.env"
     mkdir -p "$state_dir" 2>/dev/null || return 0
@@ -330,6 +447,9 @@ _write_probe_mode_state() {
     {
         echo "# Generated by oxpulse-channels-health-report.sh — do not edit"
         printf 'COTURN_PROBE_MODE=%s\n' "$mode"
+        printf 'COTURN_PROBE_TARGET=%s\n' "$target"
+        printf 'COTURN_PROBE_TARGET_SOURCE=%s\n' "$target_source"
+        printf 'COTURN_PROBE_REASON=%s\n' "$reason"
         printf 'COTURN_PROBE_AT=%s\n' "$(date +%s)"
     } > "$tmp"
     chmod 0640 "$tmp" 2>/dev/null || true
