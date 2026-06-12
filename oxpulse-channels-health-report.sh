@@ -482,6 +482,361 @@ _write_probe_mode_state() {
     mv -f "$tmp" "$state_file" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
 }
 
+# ============================================================================
+# P3b — edge cross-probe loop: probe each roster peer's TURNS:443 relay and
+# report a prober-attributed channel-health verdict to the central.
+#
+# Consumes (persisted by hydrate.sh / install.sh from the P3a register response):
+#   - peer-roster.json  ($STATE_DIR/peer-roster.json, 0644) — server-curated
+#       array of {node_id, turns_host, turns_port:443} PUBLIC endpoints only.
+#   - cross-probe-token ($PREFIX_ETC/cross-probe-token, 0600) — scoped xprb_
+#       bearer for the prober-attributed POST.
+# Both absent → loop self-skips (fail-closed: a pre-P3a central ships neither).
+#
+# Security invariants (mirror probe_ch4):
+#   * HMAC mint via env-$K/python3 (OXPULSE_HMAC_BIN seam) — secret NEVER on argv.
+#   * Roster hosts are UNTRUSTED: SSRF dial-time DNS recheck rejects any host
+#     that resolves to loopback / RFC-1918 / link-local / ULA / ::1 BEFORE the
+#     dial (closes P2-SEC-CR-001 at the actual dialer — defence-in-depth beyond
+#     the central's string-only classifier, which does no DNS resolution).
+#   * No shell interpolation of roster values into the dial — jq --arg builds
+#     the report body; turnutils_uclient args are quoted.
+# ============================================================================
+
+# ---------- resolve cross-probe token ----------
+# OXPULSE_CROSS_PROBE_TOKEN env (test/operator override) wins; else the 0600
+# file. Empty → caller skips the whole loop.
+_read_cross_probe_token() {
+    if [[ -n "${OXPULSE_CROSS_PROBE_TOKEN:-}" ]]; then
+        printf '%s' "$OXPULSE_CROSS_PROBE_TOKEN"
+        return 0
+    fi
+    local f="${_CROSS_PROBE_TOKEN_FILE:-${_PREFIX_ETC}/cross-probe-token}"
+    if [[ -r "$f" ]]; then
+        cat "$f"
+        return 0
+    fi
+    return 1
+}
+
+# ---------- resolve peer-roster path ----------
+_peer_roster_file() {
+    local state_dir="${STATE_DIR:-/var/lib/oxpulse-partner-edge}"
+    printf '%s' "${_PEER_ROSTER_FILE:-$state_dir/peer-roster.json}"
+}
+
+# ---------- SSRF dial-time recheck (closes P2-SEC-CR-001) ----------
+# Returns 0 (TRUE — internal, REJECT) when the host is, or resolves to, a
+# loopback / RFC-1918 / link-local / ULA / ::1 address. Returns 1 (public, OK).
+#
+# Defeats split-horizon / DNS-rebinding: the central SSRF-guards the roster
+# STRING at curation time but resolves no DNS (by design — TOCTOU). We resolve
+# here, at the dialer, and classify EVERY returned A/AAAA. A host that is an IP
+# literal is classified directly (no resolution needed).
+#
+# Resolution via getent ahosts (honours nsswitch; returns both v4 + v6). A
+# resolution failure (NXDOMAIN / timeout) is treated as INTERNAL=reject — we do
+# not dial a host we cannot vet (fail-closed). Override the resolver with
+# OXPULSE_GETENT_BIN for tests.
+_ip_is_internal() {
+    local ip="$1"
+    case "$ip" in
+        # IPv4 loopback 127.0.0.0/8
+        127.*) return 0 ;;
+        # RFC-1918 10.0.0.0/8
+        10.*) return 0 ;;
+        # RFC-1918 192.168.0.0/16
+        192.168.*) return 0 ;;
+        # link-local / cloud metadata 169.254.0.0/16
+        169.254.*) return 0 ;;
+        # RFC-1918 172.16.0.0/12 (172.16 – 172.31)
+        172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 0 ;;
+        # unspecified
+        0.0.0.0) return 0 ;;
+        # IPv6 loopback / unspecified
+        ::1|::) return 0 ;;
+        # IPv6 link-local fe80::/10  (fe80 – febf)
+        [Ff][Ee][89AaBb]*:*) return 0 ;;
+        # IPv6 ULA fc00::/7  (fc.. / fd..)
+        [Ff][CcDd]*:*) return 0 ;;
+        # IPv4-mapped IPv6 of an internal v4 (::ffff:127.0.0.1 etc.)
+        ::[Ff][Ff][Ff][Ff]:127.*|::[Ff][Ff][Ff][Ff]:10.*|::[Ff][Ff][Ff][Ff]:192.168.*|::[Ff][Ff][Ff][Ff]:169.254.*|::[Ff][Ff][Ff][Ff]:172.1[6-9].*|::[Ff][Ff][Ff][Ff]:172.2[0-9].*|::[Ff][Ff][Ff][Ff]:172.3[0-1].*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_host_is_internal() {
+    local host="$1"
+    [[ -z "$host" ]] && return 0   # empty host → reject
+
+    # If the host is itself an IP literal, classify it directly — no resolution.
+    if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$host" == *:* ]]; then
+        _ip_is_internal "$host" && return 0
+        return 1
+    fi
+
+    # Hostname → resolve and classify every returned address. Fail-closed:
+    # a resolution failure rejects (we never dial an un-vettable host).
+    local getent_bin resolved ip
+    getent_bin="${OXPULSE_GETENT_BIN:-getent}"
+    resolved=$(timeout 5 "$getent_bin" ahosts "$host" 2>/dev/null | awk '{print $1}' | sort -u)
+    if [[ -z "$resolved" ]]; then
+        return 0   # unresolvable → reject
+    fi
+    while IFS= read -r ip; do
+        [[ -z "$ip" ]] && continue
+        if _ip_is_internal "$ip"; then
+            return 0   # ANY internal address → reject the whole host
+        fi
+    done <<< "$resolved"
+    return 1   # all resolved addresses public → allow
+}
+
+# ---------- peer-probe-mode state file ----------
+# Records the last peer-probe cycle outcome (peer / degraded / disabled) plus
+# counts, atomically (mktemp+rename within the dir). Does NOT clobber the
+# self-probe marker (coturn-probe-mode.env) — separate file.
+_write_peer_probe_state() {
+    local mode="$1"
+    local probed="${2:-0}"
+    local ok="${3:-0}"
+    local rejected="${4:-0}"
+    local state_dir="${STATE_DIR:-/var/lib/oxpulse-partner-edge}"
+    local state_file="$state_dir/peer-probe-mode.env"
+    mkdir -p "$state_dir" 2>/dev/null || return 0
+    local tmp
+    tmp=$(mktemp -p "$state_dir" peer-probe-mode.XXXXXX 2>/dev/null) || return 0
+    {
+        echo "# Generated by oxpulse-channels-health-report.sh — do not edit"
+        printf 'PEER_PROBE_MODE=%s\n' "$mode"
+        printf 'PEER_PROBE_PROBED=%s\n' "$probed"
+        printf 'PEER_PROBE_OK=%s\n' "$ok"
+        printf 'PEER_PROBE_REJECTED=%s\n' "$rejected"
+        printf 'PEER_PROBE_AT=%s\n' "$(date +%s)"
+    } > "$tmp"
+    chmod 0640 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$state_file" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+}
+
+# ---------- probe one peer's TURNS:443 relay ----------
+# Args: turns_host turns_port turn_secret
+# Echoes "<handshake_ok>\t<rtt_ms>"  (handshake_ok = true|false).
+#
+# Mints an RFC-7635 ephemeral cred against the SHARED TURN_SECRET (identical on
+# every edge + krolik coturn) — EXACTLY the probe_ch4 mint block (env-$K/python3,
+# OXPULSE_HMAC_BIN seam; secret never on argv). Dials the PEER's TURNS:443 with
+# TLS (not the own-coturn plain turn:3478 path):
+#
+#   turnutils_uclient -S -t -c -p <port> -u <eph-user> -w <eph-pass> -n 1 -X <host>
+#
+#   -S  Secure SSL/TLS connection (TURNS) — caddy-l4 SNI-muxes :443 by SNI, and
+#       turnutils_uclient resolves the positional HOSTNAME and uses it as the
+#       TLS SNI, so the peer's caddy routes to its coturn. (verified: Debian
+#       coturn manpage + coturn#1333 — hostname positional → SNI.)
+#   -t  TCP client transport (TLS rides on TCP). Required with -S over :443.
+#   -c  no RTCP connection — one Allocate, lighter, fewer relays.
+#   -X  IPv4 relay address explicitly requested (matches real WebRTC clients).
+#   -n 1  one message attempt, then exit.
+#
+#   We do NOT pass -y (client-to-client self-test). The cross-probe signal is
+#   "TLS reaches the peer's caddy-l4 by SNI AND a TURN Allocate authenticates
+#   against the peer's shared secret" — i.e. the Allocate handshake. -y would
+#   relay loopback-to-loopback inside the peer's coturn, tripping its
+#   denied-peer-ip/no-loopback-peers guards (a false negative) AND leaking two
+#   allocations per probe — the exact failure probe_ch4 had to engineer around
+#   for the own-coturn path. A single Allocate with -n 1 then exit holds one
+#   short-lived allocation that coturn expires; at ≤cap peers / 60s the rate is
+#   bounded.
+#
+# We pass the HOSTNAME (not a resolved IP) so SNI is correct — the SSRF recheck
+# (_host_is_internal) has ALREADY validated every resolved address before this
+# function is called.
+_probe_peer_coturn() {
+    local turns_host="$1"
+    local turns_port="$2"
+    local turn_secret="$3"
+    local turn_username turn_password t0 t1 exit_code rtt_ms uclient_out
+
+    turn_username="$(( $(date +%s) + 600 )):healthprobe"
+    local hmac_bin="${OXPULSE_HMAC_BIN:-python3}"
+    turn_password=$(K="$turn_secret" "$hmac_bin" -c \
+        'import hmac,hashlib,os,sys,base64; print(base64.b64encode(hmac.new(os.environb[b"K"], sys.argv[1].encode(), hashlib.sha1).digest()).decode())' \
+        "$turn_username")
+
+    t0="${EPOCHREALTIME}"
+    # Dial the peer directly from the prober host/container — NOT docker exec
+    # into the peer. turnutils_uclient must run where coturn-utils is installed;
+    # the own-coturn container has it, so we exec turnutils_uclient there but
+    # TARGET the remote peer host (the container has outbound network).
+    uclient_out=$(timeout "${OXPULSE_PEER_PROBE_TIMEOUT:-10}" \
+        docker exec oxpulse-partner-coturn \
+        turnutils_uclient \
+            -S -t -c \
+            -p "$turns_port" \
+            -u "$turn_username" \
+            -w "$turn_password" \
+            -n 1 -X \
+            "$turns_host" \
+        2>&1)
+    exit_code=$?
+    t1="${EPOCHREALTIME}"
+    rtt_ms=$(_elapsed_ms "$t0" "$t1")
+
+    # Success classification: a peerless Allocate over TLS prints an allocation
+    # success line ("success" / "allocate" / a relay address) even though it
+    # receives 0 echoed bytes (no peer). exit 0 OR an explicit allocate-success
+    # in output = handshake_ok=true. A TLS/auth failure prints no allocate
+    # success and exits non-zero. We treat exit 0 as the primary signal and the
+    # output grep as a fallback so a clean Allocate that times out waiting for a
+    # (non-existent) peer echo is not misreported as a failure.
+    if [[ "$exit_code" -eq 0 ]] || \
+       printf '%s' "$uclient_out" | grep -qiE 'allocate[d]? (success|address)|relay address|success.*0x0003'; then
+        printf 'true\t%d' "$rtt_ms"
+    else
+        warn "peer-probe: $turns_host:$turns_port handshake failed (exit=$exit_code): $(printf '%s' "$uclient_out" | tail -n2 | tr '\n' ' ')"
+        printf 'false\t%d' "$rtt_ms"
+    fi
+}
+
+# ---------- POST a prober-attributed cross-probe report ----------
+# Mirrors _post_channel but uses the cross_probe_token (xprb_) bearer and the
+# CrossProbeReportRequest body. ALL untrusted values (target node_id / host) go
+# through jq --arg / --argjson — never shell-interpolated into the request.
+_post_cross_probe() {
+    local target_node_id="$1"
+    local handshake_ok="$2"     # "true" | "false" (JSON bool)
+    local rtt_ms="$3"
+    local token="$4"
+
+    local probed_at
+    probed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    local body
+    body=$(jq -nc \
+        --arg prober "$NODE_ID" \
+        --arg target "$target_node_id" \
+        --argjson ok "$handshake_ok" \
+        --argjson rtt "$rtt_ms" \
+        --arg ts "$probed_at" \
+        '{prober_node_id:$prober, target_node_id:$target, channel_name:"coturn", handshake_ok:$ok, rtt_ms:$rtt, probe_mode:"peer", probed_at:$ts}')
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf '%s\n' "$body"
+        if [[ "$CURL_TRACE" -eq 1 ]]; then
+            printf 'Authorization: Bearer %s\n' "$token" >&2
+        fi
+        return 0
+    fi
+
+    local http_code
+    http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+        --max-time 15 \
+        -X POST \
+        -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer $token" \
+        -d "$body" \
+        "${OXPULSE_BACKEND_API}/api/partner/channel-health" \
+        2>/dev/null || echo '000')
+
+    if [[ "$http_code" =~ ^2 ]]; then
+        log "cross-probe target=$target_node_id reported OK (HTTP $http_code)"
+        return 0
+    elif [[ "$http_code" =~ ^4 ]]; then
+        warn "cross-probe target=$target_node_id: HTTP $http_code — check cross-probe token / roster membership"
+        return 1
+    else
+        warn "cross-probe target=$target_node_id: HTTP $http_code — server/network hiccup, retry next tick"
+        return 0
+    fi
+}
+
+# ---------- peer-probe loop (P3b) ----------
+# Reads roster + token; skips cleanly (debug-log) if either is empty/absent.
+# For each peer (capped at OXPULSE_PEER_PROBE_MAX): SSRF dial-recheck → mint →
+# TLS Allocate → POST. Bounded for the 45s TimeoutStartSec budget.
+_run_peer_probe_loop() {
+    local token roster_file roster
+    token=$(_read_cross_probe_token 2>/dev/null || true)
+    if [[ -z "$token" ]]; then
+        log "peer-probe: no cross-probe token — skipping (pre-P3a central or token absent)"
+        _write_peer_probe_state "disabled" 0 0 0
+        return 0
+    fi
+
+    roster_file=$(_peer_roster_file)
+    if [[ ! -r "$roster_file" ]]; then
+        log "peer-probe: no roster file at $roster_file — skipping"
+        _write_peer_probe_state "disabled" 0 0 0
+        return 0
+    fi
+    roster=$(cat "$roster_file" 2>/dev/null || echo '[]')
+    local n
+    n=$(printf '%s' "$roster" | jq 'length' 2>/dev/null || echo 0)
+    if [[ "$n" -eq 0 ]]; then
+        log "peer-probe: empty roster — skipping"
+        _write_peer_probe_state "disabled" 0 0 0
+        return 0
+    fi
+
+    # Read the shared TURN secret once (same source as probe_ch4). Without it we
+    # cannot mint creds → skip.
+    local turn_secret
+    if [[ -n "${OXPULSE_TURN_SECRET:-}" ]]; then
+        turn_secret="$OXPULSE_TURN_SECRET"
+    else
+        turn_secret=$(timeout 10 docker exec oxpulse-partner-coturn \
+            sed -n 's/^static-auth-secret=//p' \
+            /etc/coturn/turnserver.conf 2>/dev/null || true)
+    fi
+    if [[ -z "$turn_secret" ]]; then
+        warn "peer-probe: TURN secret unavailable — cannot mint cross-probe creds; skipping"
+        _write_peer_probe_state "degraded" 0 0 0
+        return 0
+    fi
+
+    # BUDGET: cap the roster slice per cycle. N peers × ~10s timeout must fit the
+    # 45s TimeoutStartSec (one probe per peer per 60s cycle). Default cap = 3
+    # (3×10s = 30s, leaving headroom for the channel loop + POSTs). The central
+    # SEC-CR-201 has no per-prober write-rate bound; this cap partially bounds it
+    # from the producer side. Operators on a large mesh raise it knowingly.
+    local cap="${OXPULSE_PEER_PROBE_MAX:-3}"
+
+    local probed=0 ok_count=0 rejected=0
+    local i node_id turns_host turns_port handshake_ok rtt result
+    for (( i=0; i<n && probed<cap; i++ )); do
+        node_id=$(printf '%s' "$roster" | jq -r --argjson i "$i" '.[$i].node_id // empty')
+        turns_host=$(printf '%s' "$roster" | jq -r --argjson i "$i" '.[$i].turns_host // empty')
+        turns_port=$(printf '%s' "$roster" | jq -r --argjson i "$i" '.[$i].turns_port // 443')
+        # turns_port must be a clean integer; reject anything else (no shell use
+        # of an untrusted value as a numeric).
+        if ! [[ "$turns_port" =~ ^[0-9]+$ ]]; then
+            turns_port=443
+        fi
+        if [[ -z "$node_id" || -z "$turns_host" ]]; then
+            warn "peer-probe: roster entry $i missing node_id/turns_host — skipping"
+            continue
+        fi
+
+        # SSRF dial-time recheck — REJECT before any dial.
+        if _host_is_internal "$turns_host"; then
+            warn "peer-probe: REJECT $node_id ($turns_host) — resolves internal/unresolvable (SSRF guard)"
+            rejected=$((rejected + 1))
+            continue
+        fi
+
+        result=$(_probe_peer_coturn "$turns_host" "$turns_port" "$turn_secret")
+        handshake_ok="${result%%$'\t'*}"
+        rtt="${result##*$'\t'}"
+        probed=$((probed + 1))
+        [[ "$handshake_ok" == "true" ]] && ok_count=$((ok_count + 1))
+
+        _post_cross_probe "$node_id" "$handshake_ok" "$rtt" "$token" || true
+    done
+
+    log "peer-probe: cycle done — probed=$probed ok=$ok_count rejected=$rejected (roster=$n cap=$cap)"
+    _write_peer_probe_state "peer" "$probed" "$ok_count" "$rejected"
+}
+
 # ---------- post one channel payload ----------
 _post_channel() {
     local payload="$1"
@@ -632,6 +987,10 @@ mapfile -t _PROVISIONED < <(jq -r '.channels[]?.id // empty' "$_NODE_CONFIG" 2>/
 
 if [[ "${#_PROVISIONED[@]}" -eq 0 ]]; then
     log "no channels in node-config.json — nothing to report"
+    # A node with no local channels can still be a prober (P3b mesh producer);
+    # run the peer-probe pass before exiting. ||true shields set -e (mirrors the
+    # probe_ch4 ||-guard convention) — the loop self-skips on no token/roster.
+    _run_peer_probe_loop || true
     _check_upstream_transitions
     exit 0
 fi
@@ -672,6 +1031,12 @@ for _chan in "${_PROVISIONED[@]}"; do
         _AUTH_FAIL=$((_AUTH_FAIL + 1))
     fi
 done
+
+# P3b mesh producer — probe roster peers' TURNS:443 + report prober-attributed
+# verdicts. Hung after the self-channel loop, before the auth-fail gate, so a
+# peer-probe never masks a self-report auth failure. ||true shields set -e (the
+# loop returns 0 on every path; self-skips on no token/roster).
+_run_peer_probe_loop || true
 
 # auth failures = exit 1 (timer logs; no infinite loop)
 [[ "$_AUTH_FAIL" -eq 0 ]] || exit 1

@@ -197,6 +197,46 @@ BACKEND_PORT="${BACKEND_ENDPOINT##*:}"
 log "  node_id=$NODE_ID turns_subdomain=$TURNS_SUBDOMAIN reality_short_id=$REALITY_SHORT_ID"
 log "  secrets fetched (turn_secret len=${#TURN_SECRET}, reality_uuid len=${#REALITY_UUID})"
 
+# ---------- Step 3b: cross-probe mesh fields (P3b producer) ----------
+# The central (P3a) may return a server-curated peer_roster[] + a scoped
+# cross_probe_token (xprb_) so this edge can probe its peers' TURNS:443 relays
+# and report a prober-attributed channel-health verdict. Both fields are
+# OPTIONAL — a pre-P3a central omits them; the edge then simply never runs the
+# peer-probe loop (fail-closed, see oxpulse-channels-health-report.sh). We
+# persist them here so the 60s health-report timer can pick them up.
+#
+# Roster is NOT a secret (public TURNS endpoints) → 0644.
+# cross_probe_token IS a credential (bearer for the prober-report POST) → 0600,
+# mirroring the service-token file perms; atomic mktemp+rename.
+PEER_ROSTER=$(jq -c '.peer_roster // []' "$tmp_resp" 2>/dev/null || echo '[]')
+CROSS_PROBE_TOKEN=$(jq_get cross_probe_token)
+
+PEER_ROSTER_FILE="$PREFIX_LIB/peer-roster.json"
+_roster_tmp=$(mktemp "$PEER_ROSTER_FILE.XXXXXX")
+printf '%s\n' "$PEER_ROSTER" > "$_roster_tmp"
+chmod 0644 "$_roster_tmp"
+mv -f "$_roster_tmp" "$PEER_ROSTER_FILE"
+unset _roster_tmp
+_roster_count=$(printf '%s' "$PEER_ROSTER" | jq 'length' 2>/dev/null || echo 0)
+log "  peer roster persisted → $PEER_ROSTER_FILE ($_roster_count peer(s))"
+
+CROSS_PROBE_TOKEN_FILE="$PREFIX_ETC/cross-probe-token"
+if [[ -n "$CROSS_PROBE_TOKEN" ]]; then
+    _xprb_tmp=$(mktemp "$CROSS_PROBE_TOKEN_FILE.XXXXXX")
+    printf '%s' "$CROSS_PROBE_TOKEN" > "$_xprb_tmp"
+    chmod 0600 "$_xprb_tmp"
+    mv -f "$_xprb_tmp" "$CROSS_PROBE_TOKEN_FILE"
+    unset _xprb_tmp
+    log "  cross-probe token persisted → $CROSS_PROBE_TOKEN_FILE (raw value redacted)"
+else
+    # Pre-P3a central: no token returned. Remove any stale token so the edge
+    # cannot keep probing with a credential the central no longer recognises
+    # (fail-closed — an empty roster also disables the loop).
+    rm -f "$CROSS_PROBE_TOKEN_FILE"
+    log "  no cross-probe token in response — peer-probe loop disabled (pre-P3a central)"
+fi
+unset PEER_ROSTER CROSS_PROBE_TOKEN
+
 # Wipe raw response — no longer needed, don't leave secrets on disk.
 rm -f "$tmp_resp"
 

@@ -941,6 +941,48 @@ Or: re-run install.sh with OXPULSE_SERVICE_TOKEN=<raw> in the env
 			log "  service token reused from existing $SVC_TOKEN_FILE"
 		fi
 	fi
+	# ── cross-probe mesh persist (P3b producer) ───────────────────────────────
+	# The central (P3a) may return a server-curated peer_roster[] of public peer
+	# TURNS:443 endpoints + a scoped cross_probe_token (xprb_). Both OPTIONAL — a
+	# pre-P3a central omits them and the edge never runs the peer-probe loop
+	# (fail-closed; oxpulse-channels-health-report.sh skips on empty roster / no
+	# token). Roster is public (0644); the token is a bearer credential (0600,
+	# COALESCE-preserve like the service token so a re-register that omits it does
+	# not wipe a working credential).
+	#
+	# peer_roster is a JSON array → json_get_raw (json_get only handles scalars).
+	# json_get_raw echoes "null" when absent; normalise to "[]".
+	PEER_ROSTER=$(json_get_raw peer_roster "$tmp_cfg")
+	[[ "$PEER_ROSTER" == "null" || -z "$PEER_ROSTER" ]] && PEER_ROSTER="[]"
+	PEER_ROSTER_FILE="$PREFIX_LIB/peer-roster.json"
+	install -d -m 0755 "$PREFIX_LIB"
+	_roster_tmp=$(mktemp "$PEER_ROSTER_FILE.XXXXXX")
+	printf '%s\n' "$PEER_ROSTER" > "$_roster_tmp"
+	chmod 0644 "$_roster_tmp"
+	mv -f "$_roster_tmp" "$PEER_ROSTER_FILE"
+	unset _roster_tmp
+	_roster_count=$(printf '%s' "$PEER_ROSTER" | jq 'length' 2>/dev/null || echo 0)
+	log "  peer roster persisted → $PEER_ROSTER_FILE ($_roster_count peer(s))"
+
+	CROSS_PROBE_TOKEN=$(json_get cross_probe_token "$tmp_cfg")
+	XPRB_TOKEN_FILE="$PREFIX_ETC/cross-probe-token"
+	if [[ -n "$CROSS_PROBE_TOKEN" ]]; then
+		if [[ ! -e "$XPRB_TOKEN_FILE" ]]; then
+			_xprb_tmp=$(mktemp "$XPRB_TOKEN_FILE.XXXXXX")
+			printf '%s' "$CROSS_PROBE_TOKEN" > "$_xprb_tmp"
+			chmod 0600 "$_xprb_tmp"
+			mv -f "$_xprb_tmp" "$XPRB_TOKEN_FILE"
+			unset _xprb_tmp
+			log "  cross-probe token persisted → $XPRB_TOKEN_FILE (raw value redacted)"
+		else
+			# Operator may have a current token; server only returns it on fresh
+			# provision. Don't clobber.
+			log "  cross-probe token returned by server; preserved existing $XPRB_TOKEN_FILE"
+		fi
+	else
+		log "  no cross-probe token in response — peer-probe loop uses existing token if present, else stays disabled"
+	fi
+	unset PEER_ROSTER CROSS_PROBE_TOKEN
 fi
 [[ -z "$REALITY_SHORT_ID" ]]   && die "reality_short_id missing from config"
 [[ -z "$REALITY_SERVER_NAME" ]] && REALITY_SERVER_NAME="www.samsung.com"
