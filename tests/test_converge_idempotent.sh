@@ -103,6 +103,7 @@ AWG_MOTHERLY_IP=10.9.0.2
 HY2_FALLBACK_HOST=host.docker.internal
 HY2_FALLBACK_PORT=18443
 CADDYFILE_SHA=abc123
+TURN_SECRET=test-secret-i6
 STATE
 
 # Create a fake docker-compose.yml (caddy service present for non-SFU-only guard)
@@ -150,10 +151,15 @@ export REPO_DIR="$REPO_ROOT"
 # shellcheck disable=SC1090
 . "$LIB"
 
-# Override atomic_swap AFTER sourcing lib to count calls without writing.
+# Override atomic_swap AFTER sourcing lib.
+# Must actually copy the file so Phase 4b file-sha checks are idempotent on run2.
+# (caddy uses STATE sha; coturn/xray use installed-file sha — need real file.)
 atomic_swap() {
     _ATOMIC_SWAP_COUNT=$((_ATOMIC_SWAP_COUNT + 1))
-    log "atomic_swap: would swap $1 <- $2 (count=$_ATOMIC_SWAP_COUNT)"
+    local _dst="$1" _src="$2" _mode="${3:-0644}"
+    cp "$_src" "$_dst" 2>/dev/null || true  # actually install so run-2 sha matches
+    log "atomic_swap: swapped $_dst <- $_src (count=$_ATOMIC_SWAP_COUNT)"
+    rm -f "$_src"
 }
 
 # Override apply_caddy_reloads: idempotency test measures atomic_swap counts,
@@ -184,14 +190,32 @@ opec() {
         # BLOCKER-2 fix: WITHOUT this placeholder, pre-sub == post-sub and the broken
         # comparison was accidentally stable, masking BLOCKER-1.
         if [[ -n "$_out" ]]; then
-            printf '# mock Caddyfile (Phase 4a idempotency test)\n' > "$_out"
-            printf 'respond "__CADDYFILE_SHA__" 200\n' >> "$_out"
+            case "$_kind" in
+                caddy)
+                    printf '# mock Caddyfile (Phase 4b idempotency test)\n' > "$_out"
+                    printf 'respond "__CADDYFILE_SHA__" 200\n' >> "$_out"
+                    ;;
+                coturn)
+                    printf '# mock coturn.conf\nstatic-auth-secret=test-secret\n' > "$_out"
+                    ;;
+                xray)
+                    printf '{"log":{"loglevel":"warning"}}\n' > "$_out"
+                    ;;
+                *)
+                    printf '# mock render\n' > "$_out"
+                    ;;
+            esac
         fi
         return 0
     fi
     return 0
 }
 export -f opec
+
+# Phase 4b: stub firewall_apply so reconcile_firewall_surface works without ufw/firewalld.
+export FIREWALL_LIB="$REPO_ROOT/lib/install-firewall.sh"
+firewall_apply() { log "firewall_apply: stubbed (idempotency test)"; return 0; }
+export -f firewall_apply
 
 # Run reconcile_all twice
 MANIFEST_PATH="$TMPDIR_HERE/manifest.yaml"
