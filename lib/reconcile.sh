@@ -610,7 +610,9 @@ health_regressions() {
 # manifest_surfaces MANIFEST_PATH
 #
 # Reads manifest.yaml and emits one line per surface, tab-separated:
-#   id<TAB>kind<TAB>wired<TAB>template<TAB>out<TAB>renderer<TAB>restart_unit<TAB>sha_key<TAB>placeholder_completeness
+#   id<TAB>kind<TAB>wired<TAB>template<TAB>out<TAB>renderer<TAB>restart_unit<TAB>sha_key<TAB>placeholder_completeness<TAB>fail_soft<TAB>restart_signal<TAB>restart_unit_compose_service
+# Phase 4b: added fail_soft(10), restart_signal(11), restart_unit_compose_service(12).
+# field() moved outside loop (cosmetic fix — was redefined per-iteration; no runtime change).
 #
 # wired is "true" unless surface block contains "wired: false".
 # Uses python3 (de-facto dep, used 9x in channel-render-lib.sh); awk fallback.
@@ -619,7 +621,7 @@ health_regressions() {
 # ---------------------------------------------------------------------------
 
 # Base64-encoded python3 manifest parser.
-_MANIFEST_PARSER_B64="aW1wb3J0IHN5cywgcmUKbWFuaWZlc3RfcGF0aCA9IHN5cy5hcmd2WzFdCnRyeToKICAgIGNvbnRlbnQgPSBvcGVuKG1hbmlmZXN0X3BhdGgpLnJlYWQoKQpleGNlcHQgRXhjZXB0aW9uOgogICAgc3lzLmV4aXQoMCkKc3VyZmFjZXNfbWF0Y2ggPSByZS5zZWFyY2gocidec3VyZmFjZXM6XHMqXG4oLio/KSg/PV5cd3xcWiknLCBjb250ZW50LCByZS5NVUxUSUxJTkUgfCByZS5ET1RBTEwpCmlmIG5vdCBzdXJmYWNlc19tYXRjaDoKICAgIHN5cy5leGl0KDApCnN1cmZhY2VzX2Jsb2NrID0gc3VyZmFjZXNfbWF0Y2guZ3JvdXAoMSkKc3VyZmFjZV9lbnRyaWVzID0gcmUuc3BsaXQocidcbig/PSAgLSBpZDopJywgc3VyZmFjZXNfYmxvY2spCmZvciBlbnRyeSBpbiBzdXJmYWNlX2VudHJpZXM6CiAgICBlbnRyeSA9IGVudHJ5LnN0cmlwKCkKICAgIGlmIG5vdCBlbnRyeToKICAgICAgICBjb250aW51ZQogICAgaWRfbSA9IHJlLnNlYXJjaChyJ14tXHMraWQ6XHMqKFxTKyknLCBlbnRyeSwgcmUuTVVMVElMSU5FKQogICAgaWYgbm90IGlkX206CiAgICAgICAgY29udGludWUKICAgIHNpZCA9IGlkX20uZ3JvdXAoMSkuc3RyaXAoKQogICAgaWYgbm90IHNpZCBvciBzaWQgPT0gIi0iOgogICAgICAgIGNvbnRpbnVlCiAgICBkZWYgZmllbGQoa2V5LCBkZWZhdWx0PSItIik6CiAgICAgICAgbSA9IHJlLnNlYXJjaChyJ15ccysnICsgcmUuZXNjYXBlKGtleSkgKyByJzpccyooLispJCcsIGVudHJ5LCByZS5NVUxUSUxJTkUpCiAgICAgICAgaWYgbToKICAgICAgICAgICAgIyBTdHJpcCB0cmFpbGluZyBZQU1MIGlubGluZSBjb21tZW50ICgjIC4uLikgYW5kIHdoaXRlc3BhY2UKICAgICAgICAgICAgcmF3ID0gbS5ncm91cCgxKQogICAgICAgICAgICAjIFJlbW92ZSBpbmxpbmUgY29tbWVudDogc3BsaXQgb24gIiAjIiBidXQgbm90IGluc2lkZSBxdW90ZWQgc3RyaW5ncwogICAgICAgICAgICAjIFNpbXBsZSBoZXVyaXN0aWM6IHN0cmlwIGZyb20gZmlyc3QgIiAjIiB0aGF0IGFwcGVhcnMgYWZ0ZXIgYSBzcGFjZQogICAgICAgICAgICB2YWwgPSByZS5zdWIocidccysjLiokJywgJycsIHJhdykuc3RyaXAoKS5zdHJpcCgnIicpLnN0cmlwKCInIikKICAgICAgICAgICAgcmV0dXJuIHZhbCBpZiB2YWwgZWxzZSBkZWZhdWx0CiAgICAgICAgcmV0dXJuIGRlZmF1bHQKICAgIGtpbmQgICAgICAgICA9IGZpZWxkKCJraW5kIikKICAgIHdpcmVkX3JhdyAgICA9IGZpZWxkKCJ3aXJlZCIsICJ0cnVlIikKICAgIHdpcmVkICAgICAgICA9ICJmYWxzZSIgaWYgd2lyZWRfcmF3Lmxvd2VyKCkgPT0gImZhbHNlIiBlbHNlICJ0cnVlIgogICAgdG1wbCAgICAgICAgID0gZmllbGQoInRlbXBsYXRlIikKICAgIG91dCAgICAgICAgICA9IGZpZWxkKCJvdXQiKQogICAgcmVuZGVyZXIgICAgID0gZmllbGQoInJlbmRlcmVyIikKICAgIHJ1ICAgICAgICAgICA9IGZpZWxkKCJyZXN0YXJ0X3VuaXQiKQogICAgc2sgICAgICAgICAgID0gZmllbGQoInNoYV9rZXkiKQogICAgcGggICAgICAgICAgID0gZmllbGQoInBsYWNlaG9sZGVyX2NvbXBsZXRlbmVzcyIsICJmYWxzZSIpCiAgICBwcmludChmIntzaWR9XHR7a2luZH1cdHt3aXJlZH1cdHt0bXBsfVx0e291dH1cdHtyZW5kZXJlcn1cdHtydX1cdHtza31cdHtwaH0iKQo="
+_MANIFEST_PARSER_B64="aW1wb3J0IHN5cywgcmUKbWFuaWZlc3RfcGF0aCA9IHN5cy5hcmd2WzFdCnRyeToKICAgIGNvbnRlbnQgPSBvcGVuKG1hbmlmZXN0X3BhdGgpLnJlYWQoKQpleGNlcHQgRXhjZXB0aW9uOgogICAgc3lzLmV4aXQoMCkKc3VyZmFjZXNfbWF0Y2ggPSByZS5zZWFyY2gocidec3VyZmFjZXM6XHMqXG4oLio/KSg/PV5cd3xcWiknLCBjb250ZW50LCByZS5NVUxUSUxJTkUgfCByZS5ET1RBTEwpCmlmIG5vdCBzdXJmYWNlc19tYXRjaDoKICAgIHN5cy5leGl0KDApCnN1cmZhY2VzX2Jsb2NrID0gc3VyZmFjZXNfbWF0Y2guZ3JvdXAoMSkKc3VyZmFjZV9lbnRyaWVzID0gcmUuc3BsaXQocidcbig/PSAgLSBpZDopJywgc3VyZmFjZXNfYmxvY2spCgpkZWYgZmllbGQoZW50cnksIGtleSwgZGVmYXVsdD0iLSIpOgogICAgbSA9IHJlLnNlYXJjaChyJ15ccysnICsgcmUuZXNjYXBlKGtleSkgKyByJzpccyooLispJCcsIGVudHJ5LCByZS5NVUxUSUxJTkUpCiAgICBpZiBtOgogICAgICAgIHJhdyA9IG0uZ3JvdXAoMSkKICAgICAgICB2YWwgPSByZS5zdWIocidccysjLiokJywgJycsIHJhdykuc3RyaXAoKS5zdHJpcCgnIicpLnN0cmlwKCInIikKICAgICAgICByZXR1cm4gdmFsIGlmIHZhbCBlbHNlIGRlZmF1bHQKICAgIHJldHVybiBkZWZhdWx0Cgpmb3IgZW50cnkgaW4gc3VyZmFjZV9lbnRyaWVzOgogICAgZW50cnkgPSBlbnRyeS5zdHJpcCgpCiAgICBpZiBub3QgZW50cnk6CiAgICAgICAgY29udGludWUKICAgIGlkX20gPSByZS5zZWFyY2gocideLVxzK2lkOlxzKihcUyspJywgZW50cnksIHJlLk1VTFRJTElORSkKICAgIGlmIG5vdCBpZF9tOgogICAgICAgIGNvbnRpbnVlCiAgICBzaWQgPSBpZF9tLmdyb3VwKDEpLnN0cmlwKCkKICAgIGlmIG5vdCBzaWQgb3Igc2lkID09ICItIjoKICAgICAgICBjb250aW51ZQogICAga2luZCAgICAgICAgPSBmaWVsZChlbnRyeSwgImtpbmQiKQogICAgd2lyZWRfcmF3ICAgPSBmaWVsZChlbnRyeSwgIndpcmVkIiwgInRydWUiKQogICAgd2lyZWQgICAgICAgPSAiZmFsc2UiIGlmIHdpcmVkX3Jhdy5sb3dlcigpID09ICJmYWxzZSIgZWxzZSAidHJ1ZSIKICAgIHRtcGwgICAgICAgID0gZmllbGQoZW50cnksICJ0ZW1wbGF0ZSIpCiAgICBvdXQgICAgICAgICA9IGZpZWxkKGVudHJ5LCAib3V0IikKICAgIHJlbmRlcmVyICAgID0gZmllbGQoZW50cnksICJyZW5kZXJlciIpCiAgICBydSAgICAgICAgICA9IGZpZWxkKGVudHJ5LCAicmVzdGFydF91bml0IikKICAgIHNrICAgICAgICAgID0gZmllbGQoZW50cnksICJzaGFfa2V5IikKICAgIHBoICAgICAgICAgID0gZmllbGQoZW50cnksICJwbGFjZWhvbGRlcl9jb21wbGV0ZW5lc3MiLCAiZmFsc2UiKQogICAgZnMgICAgICAgICAgPSBmaWVsZChlbnRyeSwgImZhaWxfc29mdCIsICJmYWxzZSIpCiAgICByc2lnICAgICAgICA9IGZpZWxkKGVudHJ5LCAicmVzdGFydF9zaWduYWwiKQogICAgcnVjcyAgICAgICAgPSBmaWVsZChlbnRyeSwgInJlc3RhcnRfdW5pdF9jb21wb3NlX3NlcnZpY2UiKQogICAgcHJpbnQoZiJ7c2lkfVx0e2tpbmR9XHR7d2lyZWR9XHR7dG1wbH1cdHtvdXR9XHR7cmVuZGVyZXJ9XHR7cnV9XHR7c2t9XHR7cGh9XHR7ZnN9XHR7cnNpZ31cdHtydWNzfSIpCg=="
 
 manifest_surfaces() {
     local _manifest="$1"
@@ -720,7 +722,8 @@ reconcile_all() {
     local _surface_count=0 _wired_count=0 _skipped_count=0 _changed_count=0
 
     while IFS=$'\t' read -r _sid _kind _wired _template _out \
-                              _renderer _restart_unit _sha_key _ph_complete; do
+                              _renderer _restart_unit _sha_key _ph_complete \
+                              _fail_soft _restart_signal _restart_unit_compose_service; do
         [[ -z "$_sid" ]] && continue
         _surface_count=$((_surface_count + 1))
 
@@ -752,23 +755,103 @@ reconcile_all() {
                                 die "reconcile_all: Caddyfile.tpl not available (set REPO_DIR or REPO_RAW)"
                             fi
                         fi
-                        # Use _RECONCILE_CADDY_RELOAD flag for per-surface change tracking.
-                        # The old before/after _RECONCILE_RESTART_UNITS size delta was unsound:
-                        # dedup means a real change to a unit already in the list yields
-                        # zero delta — silently undercounting changes (impacts P4b multi-surface).
+                        # Per-surface change flag (CC1 fix: sound multi-surface tracking).
+                        # _RECONCILE_CADDY_RELOAD is a boolean flag set by reconcile_caddy_surface;
+                        # dedup does not interfere (unlike _RECONCILE_RESTART_UNITS list delta).
                         local _before_caddy_reload="${_RECONCILE_CADDY_RELOAD:-0}"
                         reconcile_caddy_surface "$RECONCILE_TMPDIR" "$_tpl_src"
                         if [[ "${_RECONCILE_CADDY_RELOAD:-0}" -ne "$_before_caddy_reload" ]]; then
                             _changed_count=$((_changed_count + 1))
                         fi
                         ;;
+                    coturn)
+                        # Phase 4b: coturn render_from_state.
+                        # Reload: SIGUSR2 → coturn reload_ssl_certs (no session drop).
+                        local _tpl_coturn="${RECONCILE_TMPDIR}/coturn.conf.tpl"
+                        if [[ ! -f "$_tpl_coturn" ]]; then
+                            local _repo_dir_c="${REPO_DIR:-}"
+                            local _repo_raw_c="${REPO_RAW:-}"
+                            if [[ -n "$_repo_dir_c" && -f "${_repo_dir_c}/coturn.conf.tpl" ]]; then
+                                cp "${_repo_dir_c}/coturn.conf.tpl" "$_tpl_coturn"
+                            elif [[ -n "$_repo_raw_c" ]]; then
+                                curl -fsSL --max-time 30 "${_repo_raw_c}/coturn.conf.tpl" \
+                                    -o "$_tpl_coturn" 2>/dev/null \
+                                    || die "reconcile_all: could not fetch coturn.conf.tpl from $_repo_raw_c"
+                            else
+                                die "reconcile_all: coturn.conf.tpl not available (set REPO_DIR or REPO_RAW)"
+                            fi
+                        fi
+                        local _before_coturn="${_RECONCILE_COTURN_CHANGED:-0}"
+                        reconcile_coturn_surface "${PREFIX_ETC:-/etc/oxpulse-partner-edge}" "$_tpl_coturn"
+                        if [[ "${_RECONCILE_COTURN_CHANGED:-0}" -ne "$_before_coturn" ]]; then
+                            _changed_count=$((_changed_count + 1))
+                        fi
+                        ;;
+                    xray_client)
+                        # Phase 4b: xray_client render_from_state — fail_soft (bypass channel).
+                        # Reload: force-recreate xray-client ONLY (peers untouched — PI2 invariant).
+                        local _tpl_xray="${RECONCILE_TMPDIR}/xray-client.json.tpl"
+                        local _tpl_xray_avail=1
+                        if [[ ! -f "$_tpl_xray" ]]; then
+                            local _repo_dir_x="${REPO_DIR:-}"
+                            local _repo_raw_x="${REPO_RAW:-}"
+                            if [[ -n "$_repo_dir_x" && -f "${_repo_dir_x}/xray-client.json.tpl" ]]; then
+                                cp "${_repo_dir_x}/xray-client.json.tpl" "$_tpl_xray"
+                            elif [[ -n "$_repo_raw_x" ]]; then
+                                curl -fsSL --max-time 30 "${_repo_raw_x}/xray-client.json.tpl" \
+                                    -o "$_tpl_xray" 2>/dev/null || {
+                                    warn "reconcile_all: could not fetch xray-client.json.tpl — skipping (fail_soft)"
+                                    _tpl_xray_avail=0
+                                }
+                            else
+                                warn "reconcile_all: xray-client.json.tpl not available (REPO_DIR/REPO_RAW unset) — skipping (fail_soft)"
+                                _tpl_xray_avail=0
+                            fi
+                        fi
+                        if [[ "$_tpl_xray_avail" -eq 1 ]]; then
+                            local _before_xray_client="${_RECONCILE_XRAY_CLIENT_CHANGED:-0}"
+                            reconcile_xray_client_surface "${PREFIX_ETC:-/etc/oxpulse-partner-edge}" "$_tpl_xray"
+                            if [[ "${_RECONCILE_XRAY_CLIENT_CHANGED:-0}" -ne "$_before_xray_client" ]]; then
+                                _changed_count=$((_changed_count + 1))
+                            fi
+                        fi
+                        ;;
                     *)
-                        warn "reconcile_all: surface '$_sid' render_from_state — no handler yet (Phase 4b)"
+                        warn "reconcile_all: surface '$_sid' render_from_state — no handler (skipping)"
                         ;;
                 esac
                 ;;
-            persist_rendered|sync_verified|network_apply)
-                warn "reconcile_all: surface '$_sid' kind=$_kind — not yet wired (Phase 4b)"
+            network_apply)
+                case "$_sid" in
+                    firewall)
+                        # Phase 4b: firewall network_apply — re-asserted every converge.
+                        # Canon §6: oxpulse-owned nft only — NEVER docker ip nat / firewalld.
+                        # Re-assert is idempotent; do NOT increment _changed_count for network_apply
+                        # (it is not a file-swap, it is a live state assertion).
+                        reconcile_firewall_surface
+                        ;;
+                    *)
+                        warn "reconcile_all: surface '$_sid' network_apply — no handler (skipping)"
+                        ;;
+                esac
+                ;;
+            sync_verified)
+                case "$_sid" in
+                    xray_env)
+                        # Phase 4b: xray_env sync_verified — provision if absent (closes #5).
+                        local _before_xray_env="${_RECONCILE_XRAY_ENV_CHANGED:-0}"
+                        reconcile_xray_env_surface "${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+                        if [[ "${_RECONCILE_XRAY_ENV_CHANGED:-0}" -ne "$_before_xray_env" ]]; then
+                            _changed_count=$((_changed_count + 1))
+                        fi
+                        ;;
+                    *)
+                        warn "reconcile_all: surface '$_sid' sync_verified — no handler (Phase 5+, skipping)"
+                        ;;
+                esac
+                ;;
+            persist_rendered)
+                warn "reconcile_all: surface '$_sid' persist_rendered — not yet wired (Phase 5+, skipping)"
                 ;;
             *)
                 warn "reconcile_all: surface '$_sid' unknown kind '$_kind' — skipping"
@@ -808,4 +891,410 @@ reconcile_all() {
         # Fail AFTER apply_restarts so other deferred restarts still fire first.
         die "reconcile_all: caddy reload double-failure (hot-reload and force-recreate both failed) — new Caddyfile NOT live; check caddy container logs"
     fi
+}
+# ---------------------------------------------------------------------------
+# Phase 4b — Surface handlers for coturn, xray_client, firewall, xray_env.
+#
+# Per-surface change flags (CC1 fix: sound multi-surface _changed_count).
+# Each surface sets its own flag on change; reconcile_all counts flags, not
+# _RECONCILE_RESTART_UNITS delta (which is unsound under dedup).
+# ---------------------------------------------------------------------------
+
+_RECONCILE_COTURN_CHANGED=0
+_RECONCILE_XRAY_CLIENT_CHANGED=0
+_RECONCILE_FIREWALL_APPLIED=0   # always re-asserted; not "changed" per se
+_RECONCILE_XRAY_ENV_CHANGED=0
+
+_reset_surface_flags() {
+    _RECONCILE_COTURN_CHANGED=0
+    _RECONCILE_XRAY_CLIENT_CHANGED=0
+    _RECONCILE_XRAY_ENV_CHANGED=0
+    # _RECONCILE_FIREWALL_APPLIED not reset: firewall runs every converge, value unused in count
+}
+
+# ---------------------------------------------------------------------------
+# _setup_coturn_render_env PREFIX_ETC
+#
+# Exports env vars required for `opec render coturn`:
+#   PARTNER_DOMAIN  — from caller (STATE_FILE; validated)
+#   TURNS_SUBDOMAIN — from caller (STATE_FILE; validated)
+#   TURN_SECRET     — from live docker-compose.yml TURN_SECRET env var
+#   PUBLIC_IP       — from STATE_FILE or live network probe
+#   PRIVATE_IP      — from STATE_FILE or ip addr heuristic
+#   EXTERNAL_IP_LINE— "PUBLIC_IP/PRIVATE_IP" behind NAT, else "PUBLIC_IP"
+#
+# Die on: PARTNER_DOMAIN/TURNS_SUBDOMAIN missing (non-derivable).
+# Die on: TURN_SECRET unresolvable (it's in compose only — required, not derivable).
+# Warn on: PUBLIC_IP unresolvable (non-fatal; coturn starts without it but NAT traversal breaks).
+# ---------------------------------------------------------------------------
+_setup_coturn_render_env() {
+    local _prefix_etc="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
+    local _compose="${COMPOSE_FILE:-${_prefix_etc}/docker-compose.yml}"
+
+    [[ -n "${PARTNER_DOMAIN:-}" ]]   || die "reconcile_coturn: PARTNER_DOMAIN missing — cannot render coturn.conf"
+    [[ -n "${TURNS_SUBDOMAIN:-}" ]]  || die "reconcile_coturn: TURNS_SUBDOMAIN missing — cannot render coturn.conf"
+
+    # TURN_SECRET: extract from live compose file (it lives there, not in STATE).
+    if [[ -z "${TURN_SECRET:-}" ]]; then
+        if [[ -r "$_compose" ]]; then
+            TURN_SECRET=$(grep -E '^\s*TURN_SECRET[=:]' "$_compose" 2>/dev/null \
+                | head -1 | sed 's/.*TURN_SECRET[=:]\s*//' | tr -d '"'"'"' ' | tr -d '[:space:]' || true)
+        fi
+    fi
+    # Also try docker inspect on the coturn container.
+    if [[ -z "${TURN_SECRET:-}" ]]; then
+        TURN_SECRET=$(${DOCKER_BIN:-docker} inspect oxpulse-partner-coturn \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+            | grep '^TURN_SECRET=' | cut -d= -f2 | head -1 || true)
+    fi
+    [[ -n "${TURN_SECRET:-}" ]] \
+        || die "reconcile_coturn: TURN_SECRET not found in compose or coturn container — cannot render coturn.conf safely"
+
+    # PUBLIC_IP: STATE_FILE → curl external probe.
+    if [[ -z "${PUBLIC_IP:-}" ]]; then
+        PUBLIC_IP=$(grep '^PUBLIC_IP=' "${STATE_FILE:-}" 2>/dev/null | cut -d= -f2 | head -1 || true)
+    fi
+    if [[ -z "${PUBLIC_IP:-}" ]]; then
+        PUBLIC_IP=$(curl -fsS --max-time 8 https://ifconfig.me 2>/dev/null \
+            || curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)
+    fi
+    if [[ -z "${PUBLIC_IP:-}" ]]; then
+        warn "reconcile_coturn: could not determine PUBLIC_IP — coturn.conf EXTERNAL_IP_LINE will be empty; TURN NAT traversal may fail"
+        PUBLIC_IP=""
+    fi
+
+    # PRIVATE_IP: STATE_FILE → ip addr heuristic.
+    if [[ -z "${PRIVATE_IP:-}" ]]; then
+        PRIVATE_IP=$(grep '^PRIVATE_IP=' "${STATE_FILE:-}" 2>/dev/null | cut -d= -f2 | head -1 || true)
+    fi
+    if [[ -z "${PRIVATE_IP:-}" ]]; then
+        PRIVATE_IP=$(ip addr show 2>/dev/null \
+            | grep 'inet ' | grep -v '127\.' | head -1 \
+            | awk '{print $2}' | cut -d/ -f1 || true)
+    fi
+
+    # EXTERNAL_IP_LINE: "public/private" if behind NAT (different IPs), else "public".
+    if [[ -n "${PUBLIC_IP:-}" && -n "${PRIVATE_IP:-}" && "$PUBLIC_IP" != "$PRIVATE_IP" ]]; then
+        EXTERNAL_IP_LINE="${PUBLIC_IP}/${PRIVATE_IP}"
+    else
+        EXTERNAL_IP_LINE="${PUBLIC_IP:-}"
+    fi
+
+    export PARTNER_DOMAIN TURNS_SUBDOMAIN TURN_SECRET PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE
+}
+
+# ---------------------------------------------------------------------------
+# reconcile_coturn_surface PREFIX_ETC [TPL_PATH]
+#
+# Phase 4b render_from_state handler for coturn.conf.
+#
+# Change-detection: sha256 of rendered candidate vs sha256 of installed file.
+# (No __COTURN_SHA__ self-reference like Caddyfile; plain file-vs-file compare.)
+#
+# On change:
+#   1. atomic_swap installed coturn.conf
+#   2. Send SIGUSR2 to the coturn container (reload_ssl_certs, no session drop).
+#      NEVER full-restart the container — that drops all TURN allocations.
+#
+# fail-closed: render failure or placeholder residue = die (coturn is NOT fail_soft).
+# ---------------------------------------------------------------------------
+reconcile_coturn_surface() {
+    local _prefix_etc="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
+    local _tpl_path="${2:-}"
+    local _out_path; _out_path=$(mktemp "${TMPDIR:-/tmp}/coturn.conf.XXXXXX")
+    local _installed_path="${_prefix_etc}/coturn.conf"
+
+    # Resolve template from REPO_DIR if not passed.
+    if [[ -z "$_tpl_path" ]]; then
+        if [[ -n "${REPO_DIR:-}" && -f "${REPO_DIR}/coturn.conf.tpl" ]]; then
+            _tpl_path="${REPO_DIR}/coturn.conf.tpl"
+        elif [[ -n "${RECONCILE_TMPDIR:-}" && -f "${RECONCILE_TMPDIR}/coturn.conf.tpl" ]]; then
+            _tpl_path="${RECONCILE_TMPDIR}/coturn.conf.tpl"
+        else
+            die "reconcile_coturn: coturn.conf.tpl not available (set REPO_DIR or pre-populate RECONCILE_TMPDIR)"
+        fi
+    fi
+
+    command -v opec >/dev/null 2>&1 \
+        || die "reconcile_coturn: opec not on PATH — required for coturn.conf render"
+
+    # Set up all placeholder env vars.
+    _setup_coturn_render_env "$_prefix_etc"
+
+    # Render via opec (single render authority — Decision 2).
+    opec render coturn --tpl "$_tpl_path" --out "$_out_path" \
+        || die "reconcile_coturn: opec render coturn failed — see error above"
+
+    # Runtime completeness guard (S1 — fail-closed before swap).
+    assert_no_unresolved_placeholders "$_out_path"
+
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        local _dry_sha
+        _dry_sha=$(sha256sum "$_out_path" | awk '{print $1}')
+        rm -f "$_out_path"
+        log "[dry-run] reconcile_coturn: would write coturn.conf (sha256=$_dry_sha) to $_installed_path"
+        return 0
+    fi
+
+    # Checksum-compare vs installed (idempotency: skip if unchanged).
+    local _rendered_sha _installed_sha=""
+    _rendered_sha=$(sha256sum "$_out_path" | awk '{print $1}')
+    if [[ -f "$_installed_path" ]]; then
+        _installed_sha=$(sha256sum "$_installed_path" | awk '{print $1}')
+    fi
+    if [[ "$_rendered_sha" == "$_installed_sha" ]]; then
+        rm -f "$_out_path"
+        log "reconcile_coturn: coturn.conf unchanged (sha256=$_rendered_sha) — no swap needed"
+        return 0
+    fi
+
+    # Atomic swap.
+    atomic_swap "$_installed_path" "$_out_path" 0644
+    log "reconcile_coturn: coturn.conf updated (sha256=$_rendered_sha)"
+
+    # Set per-surface change flag (CC1 fix: sound multi-surface _changed_count).
+    _RECONCILE_COTURN_CHANGED=1
+
+    # Signal SIGUSR2 to the coturn container — reload_ssl_certs, no session drop.
+    # Peer containers (SFU/caddy/xray/naive) are NOT touched.
+    local _docker="${DOCKER_BIN:-docker}"
+    local _compose_file="${COMPOSE_FILE:-${_prefix_etc}/docker-compose.yml}"
+    log "reconcile_coturn: sending SIGUSR2 to coturn container (reload_ssl_certs, no session drop)"
+    # Try docker kill first (direct signal to container).
+    if "$_docker" kill --signal SIGUSR2 oxpulse-partner-coturn 2>/dev/null; then
+        log "reconcile_coturn: SIGUSR2 delivered to oxpulse-partner-coturn"
+    elif "$_docker" compose -f "$_compose_file" kill --signal SIGUSR2 coturn 2>/dev/null; then
+        log "reconcile_coturn: SIGUSR2 delivered via compose kill"
+    else
+        warn "reconcile_coturn: could not send SIGUSR2 — coturn may not have reloaded certs (container down?)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# _setup_xray_client_render_env PREFIX_ETC
+#
+# Exports XRAY_XHTTP_* vars needed by `opec render xray`.
+# These live in node-config.json (channels[0].xray.xhttp), not in STATE.
+# Matches install.sh python3 blocks; defaults mirror channel-render-lib.sh.
+# ---------------------------------------------------------------------------
+_setup_xray_client_render_env() {
+    local _prefix_etc="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
+    local _node_cfg="${_prefix_etc}/node-config.json"
+
+    if [[ -r "$_node_cfg" ]] && command -v python3 >/dev/null 2>&1; then
+        local _py_tmp
+        _py_tmp=$(mktemp /tmp/xray_env_XXXXXX.py)
+        # shellcheck disable=SC2064
+        trap "rm -f '$_py_tmp'" RETURN
+        cat > "$_py_tmp" << 'PYEOF'
+import json, sys
+path = sys.argv[1]
+try:
+    d = json.load(open(path))
+    ch = d.get("channels", []) or [{}]
+    x = ch[0].get("xray", {}) if ch[0].get("protocol", "") == "vless-reality" else {}
+    xhttp = x.get("xhttp", {})
+    xmux  = xhttp.get("xmux") or x.get("xmux") or {}
+    print("XRAY_XHTTP_MODE="          + (xhttp.get("mode") or x.get("mode") or "stream-one"))
+    print("XRAY_XHTTP_PATH="          + (x.get("xhttp", {}).get("path") or "/xh"))
+    print("XRAY_XHTTP_XMUX_MAX_CONCURRENCY=" + str(xmux.get("maxConcurrency", 1)))
+    print("XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES=" + str(xmux.get("cMaxReuseTimes", 64)))
+    print("XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS=" + str(xmux.get("cMaxLifetimeMs", 15000)))
+    print("XRAY_XHTTP_X_PADDING_BYTES=" + str(x.get("xhttp", {}).get("extra", {}).get("xPaddingBytes") or "100-1000"))
+except Exception:
+    print("XRAY_XHTTP_MODE=stream-one")
+    print("XRAY_XHTTP_PATH=/xh")
+    print("XRAY_XHTTP_XMUX_MAX_CONCURRENCY=1")
+    print("XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES=64")
+    print("XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS=15000")
+    print("XRAY_XHTTP_X_PADDING_BYTES=100-1000")
+PYEOF
+        local _envout
+        _envout=$(python3 "$_py_tmp" "$_node_cfg" 2>/dev/null || true)
+        while IFS='=' read -r _k _v; do
+            [[ -z "${_k:-}" ]] && continue
+            export "${_k}=${_v}"
+        done <<< "$_envout"
+    else
+        # node-config absent or no python3 — use defaults (matches channel-render-lib.sh).
+        export XRAY_XHTTP_MODE="${XRAY_XHTTP_MODE:-stream-one}"
+        export XRAY_XHTTP_PATH="${XRAY_XHTTP_PATH:-/xh}"
+        export XRAY_XHTTP_XMUX_MAX_CONCURRENCY="${XRAY_XHTTP_XMUX_MAX_CONCURRENCY:-1}"
+        export XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES="${XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES:-64}"
+        export XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS="${XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS:-15000}"
+        export XRAY_XHTTP_X_PADDING_BYTES="${XRAY_XHTTP_X_PADDING_BYTES:-100-1000}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# reconcile_xray_client_surface PREFIX_ETC [TPL_PATH]
+#
+# Phase 4b render_from_state handler for xray-client.json.
+#
+# FAIL_SOFT: xray is a bypass channel — render failure = warn+continue, NOT die.
+# (This mirrors install.sh's render_channel_soft for xray.)
+#
+# On change:
+#   docker compose up -d --force-recreate xray-client
+#   (ONLY xray-client service; caddy/coturn/SFU/naive untouched — PI2 invariant.)
+#
+# Change-detection: sha256 rendered vs sha256 installed.
+# ---------------------------------------------------------------------------
+reconcile_xray_client_surface() {
+    local _prefix_etc="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
+    local _tpl_path="${2:-}"
+    local _out_path; _out_path=$(mktemp "${TMPDIR:-/tmp}/xray-client.json.XXXXXX")
+    local _installed_path="${_prefix_etc}/xray-client.json"
+
+    # Resolve template.
+    if [[ -z "$_tpl_path" ]]; then
+        if [[ -n "${REPO_DIR:-}" && -f "${REPO_DIR}/xray-client.json.tpl" ]]; then
+            _tpl_path="${REPO_DIR}/xray-client.json.tpl"
+        elif [[ -n "${RECONCILE_TMPDIR:-}" && -f "${RECONCILE_TMPDIR}/xray-client.json.tpl" ]]; then
+            _tpl_path="${RECONCILE_TMPDIR}/xray-client.json.tpl"
+        else
+            warn "reconcile_xray_client: xray-client.json.tpl not available (set REPO_DIR or pre-populate RECONCILE_TMPDIR) — skipping (fail_soft)"
+            return 0
+        fi
+    fi
+
+    if ! command -v opec >/dev/null 2>&1; then
+        warn "reconcile_xray_client: opec not on PATH — skipping xray-client.json render (fail_soft)"
+        return 0
+    fi
+
+    # Set up XRAY_XHTTP_* env vars from node-config.json.
+    _setup_xray_client_render_env "$_prefix_etc"
+
+    # Render — fail_soft: warn on failure, do NOT die.
+    if ! opec render xray --tpl "$_tpl_path" --out "$_out_path" 2>/dev/null; then
+        rm -f "$_out_path"
+        warn "reconcile_xray_client: opec render xray failed — skipping (fail_soft; xray is a bypass channel)"
+        return 0
+    fi
+
+    # Completeness guard — fail_soft: warn on residue, skip swap.
+    if grep -qE '\{\{[A-Z0-9_]+\}\}' "$_out_path" 2>/dev/null; then
+        local _leftover
+        _leftover=$(grep -oE '\{\{[A-Z0-9_]+\}\}' "$_out_path" | sort -u | tr '\n' ' ')
+        rm -f "$_out_path"
+        warn "reconcile_xray_client: unresolved placeholders (${_leftover}) — skipping (fail_soft)"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        local _dry_sha
+        _dry_sha=$(sha256sum "$_out_path" | awk '{print $1}')
+        rm -f "$_out_path"
+        log "[dry-run] reconcile_xray_client: would write xray-client.json (sha256=$_dry_sha) to $_installed_path"
+        return 0
+    fi
+
+    # Checksum-compare vs installed.
+    local _rendered_sha _installed_sha=""
+    _rendered_sha=$(sha256sum "$_out_path" | awk '{print $1}')
+    if [[ -f "$_installed_path" ]]; then
+        _installed_sha=$(sha256sum "$_installed_path" | awk '{print $1}')
+    fi
+    if [[ "$_rendered_sha" == "$_installed_sha" ]]; then
+        rm -f "$_out_path"
+        log "reconcile_xray_client: xray-client.json unchanged (sha256=$_rendered_sha) — no recreate needed"
+        return 0
+    fi
+
+    # Atomic swap.
+    atomic_swap "$_installed_path" "$_out_path" 0644
+    log "reconcile_xray_client: xray-client.json updated (sha256=$_rendered_sha)"
+
+    # Set per-surface change flag.
+    _RECONCILE_XRAY_CLIENT_CHANGED=1
+
+    # Recreate ONLY the xray-client compose service (PI2 invariant: no peer services).
+    local _docker="${DOCKER_BIN:-docker}"
+    local _compose_file="${COMPOSE_FILE:-${_prefix_etc}/docker-compose.yml}"
+    log "reconcile_xray_client: force-recreating xray-client service (peers untouched)"
+    if "$_docker" compose -f "$_compose_file" up -d --force-recreate xray-client 2>/dev/null; then
+        log "reconcile_xray_client: xray-client recreated (caddy/coturn/SFU/naive untouched)"
+    else
+        warn "reconcile_xray_client: xray-client recreate failed — check: $_docker compose -f $_compose_file logs xray-client"
+        # fail_soft: do not die even on recreate failure
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# reconcile_firewall_surface
+#
+# Phase 4b network_apply handler.
+# Re-asserts oxpulse-owned nft rules on EVERY converge (idempotent re-assert;
+# live re-assert is the authority — not checksum-based skip).
+#
+# Scope: ONLY oxpulse-owned nft table/chains + ufw/firewalld rules.
+# NEVER touches docker ip nat, firewalld zones docker manages, or iptables
+# chains owned by Docker. (Canon §6 invariant.)
+#
+# network_apply surfaces are re-asserted on every converge — their "changed"
+# count is not incremented because re-assert is the intended behavior, not a
+# deviation. Callers should not interpret firewall output as "changed" in the
+# idempotency sense.
+#
+# Requires: lib/install-firewall.sh sourced (provides firewall_apply).
+# ---------------------------------------------------------------------------
+reconcile_firewall_surface() {
+    local _fw_lib="${FIREWALL_LIB:-${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)}/install-firewall.sh}"
+
+    if [[ ! -f "$_fw_lib" ]]; then
+        die "reconcile_firewall: lib/install-firewall.sh not found at $_fw_lib — cannot apply firewall"
+    fi
+
+    # Source firewall lib if firewall_apply is not yet in scope.
+    if ! declare -f firewall_apply >/dev/null 2>&1; then
+        # shellcheck source=lib/install-firewall.sh
+        . "$_fw_lib"
+    fi
+
+    log "reconcile_firewall: re-asserting oxpulse-owned nft rules (idempotent, every converge)"
+    # firewall_apply: idempotent (ufw --force reset+rules or firewalld --permanent+reload).
+    # Returns 0 even when no supported tool found (warn+skip path in firewall_apply).
+    # Canon §6: only oxpulse-owned nft — NOT docker ip nat / firewalld zones docker owns.
+    firewall_apply || warn "reconcile_firewall: firewall_apply returned non-zero (non-fatal if unsupported tool)"
+    _RECONCILE_FIREWALL_APPLIED=1
+}
+
+# ---------------------------------------------------------------------------
+# reconcile_xray_env_surface PREFIX_ETC
+#
+# Phase 4b sync_verified handler for xray.env.
+# Closes failure class #5 (silent xray-update death — xray.env never provisioned).
+#
+# Contract:
+#   - If /etc/oxpulse-partner-edge/xray.env absent: create empty file (0644).
+#   - If already present: no-op (idempotent; operator or another path may have
+#     populated it — we never overwrite content).
+#   - Records change via _RECONCILE_XRAY_ENV_CHANGED.
+#
+# No-double-provision: upgrade.sh's inline `[[ ! -f xray.env ]]` touch-if-absent
+# is idempotent with this surface. Both paths converge: whichever fires first
+# creates the file; the other sees it present and skips. The manifest surface
+# IS the authority for ongoing converge runs; the upgrade.sh path remains for
+# backward compat during Phase 4b transition (Phase 6 will clean up).
+# ---------------------------------------------------------------------------
+reconcile_xray_env_surface() {
+    local _prefix_etc="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
+    local _xray_env_path="${_prefix_etc}/xray.env"
+
+    if [[ -f "$_xray_env_path" ]]; then
+        log "reconcile_xray_env: $_xray_env_path already present — no-op (idempotent)"
+        return 0
+    fi
+
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        log "[dry-run] reconcile_xray_env: would create empty $_xray_env_path (required by oxpulse-xray-update.service)"
+        return 0
+    fi
+
+    install -d -m 0755 "$_prefix_etc" 2>/dev/null || true
+    install -m 0644 /dev/null "$_xray_env_path" \
+        || { warn "reconcile_xray_env: could not create $_xray_env_path"; return 0; }
+    log "reconcile_xray_env: provisioned $_xray_env_path (empty; required by oxpulse-xray-update.service)"
+    _RECONCILE_XRAY_ENV_CHANGED=1
 }
