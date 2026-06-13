@@ -11,7 +11,7 @@ use std::io::Write;
 use std::{path::PathBuf, time::Duration};
 use tempfile::NamedTempFile;
 use tokio::{process::Command, time::sleep};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// All configuration for the agent loop, parsed from env at startup.
 pub struct AgentConfig {
@@ -22,6 +22,18 @@ pub struct AgentConfig {
     pub state_path: PathBuf,
     pub poll_interval: Duration,
     pub node_id: String,
+    /// Optional systemd unit to restart immediately after each successful kernel
+    /// apply, before saving state.  Used by split-routing to re-assert the live
+    /// AllowedIPs widening that awg syncconf just re-narrowed.
+    ///
+    /// Race-free guarantee: `restart_unit_after_apply` fires strictly AFTER
+    /// `apply_to_kernel()` (i.e. after `awg syncconf` returns), so the widen
+    /// always runs AFTER the re-narrow — not before.  A `.path` watcher on
+    /// awg0.conf would fire at the rename step (step 4), BEFORE syncconf (step 5),
+    /// and would therefore lose the race.  This hook is the correct solution.
+    ///
+    /// Set via `OXPULSE_RESTART_UNIT_AFTER_APPLY` env var.  Empty string → disabled.
+    pub restart_unit_after_apply: Option<String>,
 }
 
 pub struct AgentLoop {
@@ -43,6 +55,7 @@ impl AgentLoop {
             conf = ?self.cfg.awg_conf_path,
             poll_interval = ?self.cfg.poll_interval,
             node_id = %self.cfg.node_id,
+            restart_unit_after_apply = ?self.cfg.restart_unit_after_apply,
             "awg-params-agent starting"
         );
 
@@ -96,7 +109,20 @@ impl AgentLoop {
         // 5. Apply to running kernel via awg-quick strip | awg syncconf.
         self.apply_to_kernel().await.context("apply to kernel")?;
 
-        // 6. Update state file (only after successful kernel apply).
+        // 6. Re-assert split-routing (if configured) — strictly AFTER syncconf.
+        //
+        // awg syncconf re-narrows the hub peer's AllowedIPs back to /32 (the value
+        // in awg0.conf).  split-routing's live `awg set peer allowed-ips 0.0.0.0/0`
+        // must run AFTER syncconf to re-widen it.  This hook fires here — after
+        // apply_to_kernel() returned successfully — guaranteeing the correct order.
+        //
+        // Best-effort: a failure here is logged and does not fail the epoch update.
+        // split-routing is re-asserted by the daily refresh timer as belt-and-suspenders.
+        if let Some(unit) = should_restart(self.cfg.restart_unit_after_apply.as_deref(), true) {
+            self.restart_unit(unit).await;
+        }
+
+        // 7. Update state file (only after successful kernel apply).
         let new_state = AwgState {
             last_applied_epoch: response.epoch,
             applied_at: Utc::now(),
@@ -105,10 +131,52 @@ impl AgentLoop {
 
         info!(epoch = response.epoch, "epoch applied successfully");
 
-        // 7. Report to central (best-effort — failure does not affect the loop).
+        // 8. Report to central (best-effort — failure does not affect the loop).
         self.client.report_applied(response.epoch).await;
 
         Ok(())
+    }
+
+    /// Restart a systemd unit via `systemctl restart <unit>`.
+    /// Best-effort: logs warn on failure, never propagates the error.
+    /// Bounded by 90s timeout to match split-routing.service's TimeoutStartSec=90s —
+    /// the unit may legitimately take up to 90s to start (netlink socket setup);
+    /// timing out earlier would log a misleading warning while systemd continues
+    /// the unit lifecycle in the background.
+    ///
+    /// Note: this agent is a host binary
+    /// (/usr/local/bin/oxpulse-awg-params-agent), not a container.  Updates are
+    /// delivered by re-installing the release asset via install-awg-params-agent.sh,
+    /// not via upgrade.sh image pull.
+    async fn restart_unit(&self, unit: &str) {
+        use tokio::time::timeout;
+
+        info!(%unit, "restarting unit after kernel apply");
+
+        let unit = unit.to_owned();
+        let result = timeout(Duration::from_secs(90), async move {
+            Command::new("systemctl")
+                .arg("restart")
+                .arg(&unit)
+                .status()
+                .await
+        })
+        .await;
+
+        match result {
+            Ok(Ok(status)) if status.success() => {
+                info!("unit restart OK");
+            }
+            Ok(Ok(status)) => {
+                warn!(%status, "unit restart exited non-zero (split-routing may be stale until next refresh)");
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "unit restart spawn failed (split-routing may be stale until next refresh)");
+            }
+            Err(_) => {
+                warn!("unit restart timed out after 90s — unit may still be starting; systemd will continue the unit lifecycle");
+            }
+        }
     }
 
     /// Atomically overwrite `awg_conf_path` with `content`.
@@ -219,5 +287,63 @@ impl AgentLoop {
         timeout(Duration::from_secs(30), apply)
             .await
             .context("awg apply timed out after 30s")?
+    }
+}
+
+/// Decide whether to fire the post-apply unit restart hook.
+///
+/// Returns `Some(unit)` only when:
+///   - `unit` is `Some` (hook is configured), AND
+///   - `epoch_advanced` is true (an apply actually happened).
+///
+/// Returns `None` when the hook is disabled OR when no epoch advanced
+/// (no-change tick — the hook must not fire on idle polls).
+///
+/// This is a pure function so it can be unit-tested without shelling out.
+pub(crate) fn should_restart(unit: Option<&str>, epoch_advanced: bool) -> Option<&str> {
+    match (unit, epoch_advanced) {
+        (Some(u), true) => Some(u),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── should_restart decision logic ────────────────────────────────────────
+
+    #[test]
+    fn hook_fires_when_configured_and_epoch_advanced() {
+        assert_eq!(
+            should_restart(Some("oxpulse-partner-edge-split-routing.service"), true),
+            Some("oxpulse-partner-edge-split-routing.service"),
+        );
+    }
+
+    #[test]
+    fn hook_skipped_when_no_epoch_advanced() {
+        // No-change tick: epoch did not advance → hook must NOT fire.
+        assert_eq!(
+            should_restart(Some("oxpulse-partner-edge-split-routing.service"), false),
+            None,
+        );
+        // Regression: if this test passes when the epoch_advanced branch is removed,
+        // the test is vacuous.  Verified: removing `epoch_advanced` arm makes it return
+        // Some(u) unconditionally, causing this assertion to fail.
+    }
+
+    #[test]
+    fn hook_skipped_when_not_configured() {
+        // OXPULSE_RESTART_UNIT_AFTER_APPLY unset or empty → None.
+        assert_eq!(should_restart(None, true), None);
+        assert_eq!(should_restart(None, false), None);
+    }
+
+    #[test]
+    fn hook_skipped_when_unit_empty_string_represented_as_none() {
+        // Empty-string env var is converted to None in load_config (main.rs).
+        // Verify should_restart also returns None for None regardless of epoch.
+        assert_eq!(should_restart(None, true), None);
     }
 }

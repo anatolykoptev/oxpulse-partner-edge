@@ -85,6 +85,26 @@ setup() {
     | grep -q 'oxpulse-partner-edge-split-routing\.service'
 }
 
+# ── awg-params-agent post-apply hook wiring ─────────────────────────────────
+
+@test "upgrade.sh _HOST_SCRIPT_SYSTEMD_FILES contains oxpulse-awg-params-agent.service" {
+  # Agent unit must be synced so OXPULSE_RESTART_UNIT_AFTER_APPLY reaches existing boxes.
+  awk '/^_HOST_SCRIPT_SYSTEMD_FILES/,/^\)/' "$UPGRADE" \
+    | grep -q 'oxpulse-awg-params-agent\.service'
+}
+
+@test "upgrade.sh _HOST_SCRIPT_RESTART_UNITS contains oxpulse-awg-params-agent.service" {
+  # Agent must be restarted after unit sync to pick up the new env var.
+  awk '/^_HOST_SCRIPT_RESTART_UNITS/,/^\)/' "$UPGRADE" \
+    | grep -q 'oxpulse-awg-params-agent\.service'
+}
+
+@test "systemd/oxpulse-awg-params-agent.service sets OXPULSE_RESTART_UNIT_AFTER_APPLY" {
+  UNIT="$REPO_ROOT/systemd/oxpulse-awg-params-agent.service"
+  grep -q 'OXPULSE_RESTART_UNIT_AFTER_APPLY' "$UNIT"
+  grep -q 'oxpulse-partner-edge-split-routing\.service' "$UNIT"
+}
+
 # ── syntax guard ─────────────────────────────────────────────────────────────
 
 @test "upgrade.sh passes bash -n syntax check" {
