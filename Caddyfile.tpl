@@ -62,12 +62,11 @@
             tls
         }
     }
-    # Phase 1: structured JSON access logs to stdout.
-    # Docker JSON driver collects to journald. Fields including request.host,
-    # request.uri, resp_status, duration_ms, upstream_status,
-    # upstream_duration_ms, upstream_address are emitted automatically
-    # by caddy when format=json.
+    # Global log: emit Caddy internals (health checker, admin API) as JSON.
+    # HTTP access logs are configured per-site below so we can apply field
+    # filters there without touching the admin-api logger.
     log {
+        output stdout
         format json
         level INFO
     }
@@ -82,6 +81,7 @@
 (tunnel_upstream) {
     reverse_proxy {args[0]} {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
         lb_policy first
+        lb_retries 2
         lb_try_duration 5s
         lb_try_interval 250ms
         health_uri /api/health
@@ -104,6 +104,7 @@
 (tunnel_upstream_default) {
     reverse_proxy {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
         lb_policy first
+        lb_retries 2
         lb_try_duration 5s
         lb_try_interval 250ms
         health_uri /api/health
@@ -185,6 +186,92 @@
         # SPA fallback — everything else goes through the tunnel so backend can
         # inject partner branding into index.html before shipping to browser.
         import tunnel_upstream_default
+    }
+
+    # Structured JSON access log for user-facing tunnel traffic.
+    # Emits to stdout (collected by docker json-file driver → /var/lib/docker/containers/*-json.log).
+    # Sensitive fields deleted: Authorization header, Cookie header.
+    # Client IPs masked: /16 IPv4 + /32 IPv6 — anti-censorship edges on partner boxes in
+    # adversarial jurisdictions; raw visitor IPs must not persist on the box while still
+    # retaining geo-class forensics value.
+    # Query strings stripped from logged URIs: ?token=... and similar never persist on disk.
+    log {
+        output stdout
+        format filter {
+            wrap json
+            fields {
+                request>headers>Authorization delete
+                request>headers>Cookie delete
+                request>remote_ip ip_mask 16 32
+                request>client_ip ip_mask 16 32
+                request>uri regexp "^([^?]*)\\?.*$" "$1"
+            }
+        }
+        level INFO
+    }
+
+    # Gateway-error fallback page.
+    # Rendered entirely inline — no external assets, no redirects —
+    # because central is unreachable when this fires.
+    # Status code is preserved (502/503/504).
+    # Exponential backoff retry: 4s → 8s → 16s → 32s → cap 60s (sessionStorage counter).
+    # No meta-refresh — it cannot back off and would undercut the JS backoff.
+    # Same-origin retry only — do NOT redirect to api.oxpulse.chat (DPI risk).
+    handle_errors 502 503 504 {
+        header Content-Type "text/html; charset=utf-8"
+        respond `<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Соединение прервано / Connection interrupted</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;
+    background:#0f172a;color:#e2e8f0;display:flex;align-items:center;
+    justify-content:center;min-height:100vh;padding:1rem}
+  .card{background:#1e293b;border:1px solid #334155;border-radius:12px;
+    padding:2rem;max-width:420px;width:100%;text-align:center}
+  h1{font-size:1.25rem;font-weight:600;margin-bottom:.5rem;color:#f8fafc}
+  p{font-size:.9rem;color:#94a3b8;line-height:1.6;margin-bottom:1.25rem}
+  .code{font-size:.75rem;color:#64748b;margin-bottom:1.5rem}
+  button{background:#3b82f6;color:#fff;border:none;border-radius:8px;
+    padding:.6rem 1.5rem;font-size:.9rem;cursor:pointer;transition:background .2s}
+  button:hover{background:#2563eb}
+  #countdown{font-size:.8rem;color:#64748b;margin-bottom:1rem}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Соединение прервано</h1>
+  <p>Связь с сервером временно прервана.<br>
+     Страница повторит попытку автоматически.</p>
+  <p lang="en" style="font-size:.8rem;color:#64748b">Connection to the server was interrupted.
+     Retrying automatically.</p>
+  <div id="countdown"></div>
+  <div class="code">{err.status_code}</div>
+  <button onclick="sessionStorage.removeItem('_re');location.reload()">Повторить / Retry</button>
+</div>
+<script>
+  // Exponential backoff retry: 4s → 8s → 16s → 32s → cap 60s.
+  // Attempt counter persisted in sessionStorage so it survives the reload
+  // but resets when the tab is closed (no stale state across sessions).
+  var attempts = parseInt(sessionStorage.getItem('_re') || '0', 10);
+  var delays = [4, 8, 16, 32, 60];
+  var delay = delays[Math.min(attempts, delays.length - 1)];
+  sessionStorage.setItem('_re', attempts + 1);
+  var remaining = delay;
+  var cd = document.getElementById('countdown');
+  function tick() {
+    if (remaining <= 0) { location.reload(); return; }
+    cd.textContent = 'Повтор через ' + remaining + ' с / Retrying in ' + remaining + 's';
+    remaining--;
+    setTimeout(tick, 1000);
+  }
+  tick();
+</script>
+</body>
+</html>` {err.status_code}
     }
 }
 

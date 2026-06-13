@@ -644,6 +644,9 @@ _HOST_SCRIPT_RESTART_UNITS=(
 	# Split-routing (PR #280): restart timer + re-apply oneshot on script update.
 	oxpulse-partner-edge-ru-subnets-update.timer
 	oxpulse-partner-edge-split-routing.service
+	# awg-params-agent: restart after unit sync so the daemon picks up the new
+	# OXPULSE_RESTART_UNIT_AFTER_APPLY env var (post-apply split-routing hook).
+	oxpulse-awg-params-agent.service
 )
 
 # Systemd unit files synced by sync_host_scripts (Step 5).
@@ -666,6 +669,9 @@ _HOST_SCRIPT_SYSTEMD_FILES=(
 	oxpulse-partner-edge-split-routing.service
 	oxpulse-partner-edge-ru-subnets-update.service
 	oxpulse-partner-edge-ru-subnets-update.timer
+	# awg-params-agent service unit: must be synced so OXPULSE_RESTART_UNIT_AFTER_APPLY
+	# (post-apply split-routing hook) reaches existing boxes on upgrade.
+	oxpulse-awg-params-agent.service
 )
 
 # snapshot_host_scripts TAG — copy every managed sbin file + relevant systemd
