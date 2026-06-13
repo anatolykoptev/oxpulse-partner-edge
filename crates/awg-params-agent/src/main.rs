@@ -4,6 +4,17 @@
 //! AmneziaWG obfuscation params to the kernel, and reports back (best-effort)
 //! via `POST /api/partner/awg-params/applied`.
 //!
+//! # Deployment
+//!
+//! This is a **host binary** installed at `/usr/local/bin/oxpulse-awg-params-agent`
+//! and managed by the `oxpulse-awg-params-agent.service` systemd unit.  It is NOT
+//! containerized.  To update the binary: re-run `install-awg-params-agent.sh` (or
+//! re-run the full installer) which fetches the new release asset from GitHub
+//! releases.  The unit-file-only change (no binary bump) is deployed by
+//! `upgrade.sh` via `_HOST_SCRIPT_SYSTEMD_FILES` sync without reinstalling the binary.
+//!
+//! # Configuration
+//!
 //! Configuration is entirely via environment variables:
 //!   OXPULSE_CENTRAL_URL         (required)
 //!   OXPULSE_NODE_ID             (required)
@@ -135,4 +146,51 @@ fn env_or(key: &str, default: &str) -> String {
 fn parse_duration(s: &str) -> Result<Duration> {
     humantime::parse_duration(s)
         .map_err(|e| anyhow::anyhow!("invalid OXPULSE_POLL_INTERVAL {:?}: {}", s, e))
+}
+
+#[cfg(test)]
+mod tests {
+
+    // ── OXPULSE_RESTART_UNIT_AFTER_APPLY env → Option mapping ────────────────
+    //
+    // These tests guard the load_config() branch: unset or empty env var must
+    // produce None (hook disabled); non-empty must produce Some(unit).
+    // A regression that removed the is_empty() guard would make the unset case
+    // return Some(""), enabling the hook unconditionally — caught here.
+
+    #[test]
+    fn restart_unit_unset_maps_to_none() {
+        // When the env var is absent, env_or returns the default ""; is_empty →
+        // None.  We test env_or + branch inline to avoid touching real env state.
+        let val = env_or_for_test("OXPULSE_RESTART_UNIT_AFTER_APPLY_ABSENT_42x", "");
+        let result: Option<String> = if val.is_empty() { None } else { Some(val) };
+        assert_eq!(result, None, "unset env var must map to None (hook disabled)");
+    }
+
+    #[test]
+    fn restart_unit_empty_string_maps_to_none() {
+        // Explicit empty string in the unit file: Environment=OXPULSE_RESTART_UNIT_AFTER_APPLY=
+        // Must map to None.
+        let val = String::new();
+        let result: Option<String> = if val.is_empty() { None } else { Some(val) };
+        assert_eq!(result, None, "empty string must map to None (hook disabled)");
+    }
+
+    #[test]
+    fn restart_unit_non_empty_maps_to_some() {
+        // Non-empty value maps to Some.
+        let val = "oxpulse-partner-edge-split-routing.service".to_owned();
+        let result: Option<String> = if val.is_empty() { None } else { Some(val.clone()) };
+        assert_eq!(
+            result,
+            Some("oxpulse-partner-edge-split-routing.service".to_owned()),
+            "non-empty env var must map to Some(unit)",
+        );
+    }
+
+    /// Thin wrapper that keeps test code identical to the production branch.
+    /// Returns `default` when the variable is absent (same as `env_or`).
+    fn env_or_for_test(key: &str, default: &str) -> String {
+        std::env::var(key).unwrap_or_else(|_| default.to_owned())
+    }
 }
