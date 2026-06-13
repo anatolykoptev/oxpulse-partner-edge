@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib/reconcile.sh — Phase 1+2: convergent reconcile engine primitives.
+# lib/reconcile.sh — Phase 1+2+3: convergent reconcile engine primitives.
 #
 # Provides:
 #   atomic_swap INSTALLED_PATH CANDIDATE_PATH [MODE]
@@ -9,6 +9,8 @@
 #   migrate_state                                  # Phase 2 (ADR-002)
 #   mark_restart UNIT
 #   apply_restarts
+#   health_snapshot HEALTHCHECK_BIN SNAPSHOT_FILE  # Phase 3 (Decision 4)
+#   health_regressions BASELINE_FILE POST_FILE     # Phase 3 (Decision 4)
 #
 # Sourced by install.sh and upgrade.sh.  Not executable on its own.
 #
@@ -401,4 +403,120 @@ apply_restarts() {
         fi
     done
     _RECONCILE_RESTART_UNITS=""
+}
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Baseline-aware health gate (Decision 4).
+#
+# health_snapshot HEALTHCHECK_BIN SNAPSHOT_FILE
+#
+# Runs HEALTHCHECK_BIN with --snapshot and writes the output to SNAPSHOT_FILE.
+# Returns 0 on success, 1 if healthcheck bin is not executable or snapshot
+# fails to write.
+#
+# The snapshot format (defined by healthcheck.sh --snapshot):
+#   check_01_containers=GREEN
+#   check_02_api=RED
+#   ...
+# One line per check, deterministic identifier, no ANSI codes.
+# ---------------------------------------------------------------------------
+health_snapshot() {
+    local _hc_bin="$1"
+    local _snap_file="$2"
+
+    if [[ ! -x "$_hc_bin" ]]; then
+        warn "health_snapshot: healthcheck binary not executable: $_hc_bin"
+        return 1
+    fi
+
+    # Run --snapshot; always exits 0 per healthcheck.sh contract.
+    if ! "$_hc_bin" --snapshot > "$_snap_file" 2>/dev/null; then
+        warn "health_snapshot: healthcheck --snapshot exited non-zero (unexpected)"
+        return 1
+    fi
+
+    if [[ ! -s "$_snap_file" ]]; then
+        warn "health_snapshot: snapshot file is empty after run: $_snap_file"
+        return 1
+    fi
+
+    log "health_snapshot: captured $(wc -l < "$_snap_file") check(s) to $( basename "$_snap_file")"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# health_regressions BASELINE_FILE POST_FILE
+#
+# Compares two snapshot files and detects regressions: checks that were GREEN
+# in BASELINE_FILE and are RED in POST_FILE.
+#
+# Returns:
+#   0  — no regressions (gate passes; pre-existing reds are NOT counted)
+#   1  — at least one regression found (gate triggers rollback)
+#
+# Special cases:
+#   - BASELINE_FILE absent or empty: fresh-install path → return 0 (skip diff).
+#   - A check present in baseline but absent in post: treated as no-regression
+#     (check may have been removed; conservative — don't false-positive).
+#   - A check GREEN in baseline, RED in post: regression → return 1 + log names.
+#   - A check RED in baseline, RED in post: pre-existing drift → logged as DRIFT.
+#   - A check RED in baseline, GREEN in post: healed → no regression.
+# ---------------------------------------------------------------------------
+health_regressions() {
+    local _baseline="$1"
+    local _post="$2"
+
+    # Fresh install: no baseline → skip diff entirely.
+    if [[ ! -f "$_baseline" || ! -s "$_baseline" ]]; then
+        log "health_regressions: no baseline snapshot (fresh install) — skipping diff"
+        return 0
+    fi
+
+    local _regression_count=0
+    local _drift_count=0
+    local _healed_count=0
+
+    # For each check in baseline, look it up in post and classify.
+    while IFS='=' read -r _check_id _baseline_status || [[ -n "$_check_id" ]]; do
+        [[ -z "$_check_id" ]] && continue
+        # Skip malformed lines (must match name=GREEN or name=RED).
+        [[ "$_baseline_status" != "GREEN" && "$_baseline_status" != "RED" ]] && continue
+
+        # Look up same check in post snapshot.
+        _post_status=$(grep "^${_check_id}=" "$_post" 2>/dev/null \
+            | head -1 | cut -d= -f2 || true)
+
+        if [[ -z "$_post_status" ]]; then
+            # Check absent from post: conservative — treat as no-regression.
+            continue
+        fi
+
+        if [[ "$_baseline_status" == "GREEN" && "$_post_status" == "RED" ]]; then
+            log "health_regressions: REGRESSION — ${_check_id} was GREEN, now RED"
+            _regression_count=$((_regression_count + 1))
+        elif [[ "$_baseline_status" == "RED" && "$_post_status" == "RED" ]]; then
+            log "health_regressions: DRIFT (pre-existing) — ${_check_id} RED in both baseline and post"
+            _drift_count=$((_drift_count + 1))
+        elif [[ "$_baseline_status" == "RED" && "$_post_status" == "GREEN" ]]; then
+            log "health_regressions: HEALED — ${_check_id} was RED, now GREEN"
+            _healed_count=$((_healed_count + 1))
+        fi
+        # GREEN→GREEN: no action needed.
+    done < "$_baseline"
+
+    if [[ "$_regression_count" -gt 0 ]]; then
+        warn "health_regressions: ${_regression_count} regression(s) detected — rollback required"
+        [[ "$_drift_count" -gt 0 ]] && \
+            log "health_regressions: ${_drift_count} pre-existing red(s) (drift — not blocking)"
+        [[ "$_healed_count" -gt 0 ]] && \
+            log "health_regressions: ${_healed_count} healed check(s)"
+        return 1
+    fi
+
+    [[ "$_drift_count" -gt 0 ]] && \
+        warn "health_regressions: ${_drift_count} pre-existing red(s) (drift findings — not blocking upgrade)"
+    [[ "$_healed_count" -gt 0 ]] && \
+        log "health_regressions: ${_healed_count} healed check(s) — improvement"
+    log "health_regressions: no regressions detected"
+    return 0
 }
