@@ -1244,7 +1244,7 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	local _xray_env_path="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/xray.env"
 	if [[ ! -f "$_xray_env_path" ]]; then
 		install -d -m 0755 "${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
-		install -m 0600 /dev/null "$_xray_env_path"
+		install -m 0644 /dev/null "$_xray_env_path"
 		log "  host-script: provisioned xray.env at $_xray_env_path"
 		_any_changed=1
 	fi
@@ -1855,11 +1855,26 @@ if [[ "$MODE" == with_templates ]]; then
 			if curl -fsSL --max-time 30 "$REPO_RAW/Caddyfile.tpl" -o "$_caddyfile_tpl" 2>/dev/null; then
 				_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 				# Load same defaults as re_render_caddy: fallback to hardcoded fleet defaults.
-				local _defaults_conf="${PREFIX_SHARE:-/usr/local/share}/oxpulse-partner-edge/config/defaults.conf"
-				local _dr_awg="${AWG_MOTHERLY_IP:-10.9.0.2}"
-				local _dr_hy2h="${HY2_FALLBACK_HOST:-host.docker.internal}"
-				local _dr_hy2p="${HY2_FALLBACK_PORT:-18443}"
-				local _dr_naive="${NAIVE_SOCKS_PORT:-1080}"
+				_defaults_conf="${PREFIX_SHARE:-/usr/local/share}/oxpulse-partner-edge/config/defaults.conf"
+				_dr_awg="${AWG_MOTHERLY_IP:-10.9.0.2}"
+				_dr_hy2h="${HY2_FALLBACK_HOST:-host.docker.internal}"
+				_dr_hy2p="${HY2_FALLBACK_PORT:-18443}"
+				# NAIVE_SOCKS_PORT: check STATE_FILE first, then live docker inspect.
+				# Die with an actionable message if the template uses it and neither
+				# source is authoritative (naive container down + no persisted value).
+				_dr_naive="${NAIVE_SOCKS_PORT:-}"
+				[[ -z "$_dr_naive" ]] && _dr_naive=$(
+					grep '^NAIVE_SOCKS_PORT=' "${STATE_FILE:-}" 2>/dev/null | cut -d= -f2 || true)
+				[[ -z "$_dr_naive" ]] && _dr_naive=$(
+					${DOCKER_BIN:-docker} inspect oxpulse-partner-naive \
+						--format '{{range .Config.Env}}{{.}}\n{{end}}' 2>/dev/null \
+						| grep '^NAIVE_SOCKS_PORT=' | cut -d= -f2 || true)
+				if [[ -z "$_dr_naive" ]]; then
+					if grep -qF '{{NAIVE_SOCKS_PORT}}' "$_caddyfile_tpl" 2>/dev/null; then
+						die "NAIVE_SOCKS_PORT: not in STATE_FILE and naive container is down — cannot render Caddyfile safely. Bring up oxpulse-partner-naive or set NAIVE_SOCKS_PORT in the environment before re-running upgrade."
+					fi
+					_dr_naive="1080"
+				fi
 				if [[ -r "$_defaults_conf" ]]; then
 					_dr_awg=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' || echo '10.9.0.2')
 					_dr_hy2h=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' || echo 'host.docker.internal')

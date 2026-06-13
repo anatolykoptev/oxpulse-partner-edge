@@ -8,9 +8,17 @@
 # Pattern: clone of oxpulse-sfu-update.sh. Same alert/log/recovery shape so
 # operators read both the same way.
 #
+# Recreate strategy: docker compose up --force-recreate is used instead of a
+# hand-rolled `docker run` so the container is always created from the single
+# compose source of truth (network=edge, volume=xray-client.json, expose=3080).
+# A hand-rolled `docker run` can silently drift from docker-compose.yml.tpl
+# (wrong network, missing volume, etc.) and is non-idempotent; compose prevents
+# that class of bug.
+#
 # OVERRIDES (for nodes that run a differently-named xray container, e.g. piter):
 #   Create /etc/oxpulse-partner-edge/xray-update.env with:
-#     OXPULSE_XRAY_CONTAINER=xray-reality
+#     OXPULSE_XRAY_SERVICE=xray-client          # compose service name
+#     OXPULSE_XRAY_CONTAINER=xray-reality       # container name (for inspect)
 #     OXPULSE_XRAY_IMAGE=teddysun/xray:26.4.25
 #   The file is optional; bundle nodes don't need it (defaults are correct).
 set -euo pipefail
@@ -22,9 +30,11 @@ _XRAY_UPDATE_ENV="${XRAY_UPDATE_ENV_FILE:-/etc/oxpulse-partner-edge/xray-update.
 [ -f "$_XRAY_UPDATE_ENV" ] && source "$_XRAY_UPDATE_ENV"
 
 LOG="${LOG:-/var/log/oxpulse-xray-update.log}"
+# OXPULSE_XRAY_SERVICE is the compose service name; default matches docker-compose.yml.tpl.
+SERVICE="${OXPULSE_XRAY_SERVICE:-xray-client}"
 CONTAINER="${OXPULSE_XRAY_CONTAINER:-oxpulse-partner-xray}"
 IMAGE="${OXPULSE_XRAY_IMAGE:-ghcr.io/anatolykoptev/partner-edge-xray:stable}"
-ENV_FILE="${ENV_FILE:-/etc/oxpulse-partner-edge/xray.env}"
+COMPOSE_DIR="${OXPULSE_COMPOSE_DIR:-/etc/oxpulse-partner-edge}"
 source /etc/piter-monitor.env 2>/dev/null || true
 
 ts()    { date -Iseconds; }
@@ -58,23 +68,25 @@ if [ "$NEW_IMG" = "$RUNNING_IMG" ]; then
 fi
 
 OLD_VER=$(docker inspect "$CONTAINER" --format '{{index .Config.Labels "oxpulse.version"}}' 2>/dev/null || echo unknown)
-log "update detected; recreating $CONTAINER (current=$OLD_VER)"
+log "update detected; recreating $CONTAINER via compose (current=$OLD_VER)"
 
-# 4) Recreate. Keep flags in sync with how the container was originally created.
-[ -r "$ENV_FILE" ] || { log "FAIL missing $ENV_FILE"; alert "xray update FAILED: missing env file"; exit 1; }
+# 4) Recreate via docker compose so network/volume/expose always match
+# docker-compose.yml (single source of truth). This avoids drift that a
+# hand-rolled `docker run` can introduce (wrong network, missing volume, etc.).
+[ -f "$COMPOSE_DIR/docker-compose.yml" ] || {
+    log "FAIL missing $COMPOSE_DIR/docker-compose.yml"
+    alert "xray update FAILED: compose file not found"
+    exit 1
+}
 
-docker rm -f "$CONTAINER" >> "$LOG" 2>&1
-docker run -d --name "$CONTAINER" \
-    --restart unless-stopped \
-    --network host \
-    --env-file "$ENV_FILE" \
-    "$IMAGE" >> "$LOG" 2>&1
+( cd "$COMPOSE_DIR" && docker compose up -d --no-deps --force-recreate "$SERVICE" ) >> "$LOG" 2>&1
 
-# 5) Smoke: port 3080 must be listening within 12s.
+# 5) Smoke: container port 3080 must be reachable on the edge network within 12s.
+# xray-client uses `expose: 3080` (not host-network), so probe inside the container.
 ok=0
 for _i in 1 2 3 4 5 6; do
     sleep 2
-    if ss -ltn 2>/dev/null | grep -q ':3080 '; then
+    if docker exec "$CONTAINER" sh -c 'ss -ltn 2>/dev/null | grep -q ":3080 "' 2>/dev/null; then
         ok=1; break
     fi
 done
@@ -84,7 +96,7 @@ if [ $ok -eq 1 ]; then
     log "OK update: $OLD_VER → $NEW_VER"
     alert "xray updated: $OLD_VER → $NEW_VER"
 else
-    log "FAIL smoke (port 3080 not listening after 12s)"
+    log "FAIL smoke (port 3080 not reachable in container after 12s)"
     docker logs "$CONTAINER" --tail 30 >> "$LOG" 2>&1
     alert "xray update FAILED — investigate (smoke timeout)"
     exit 1

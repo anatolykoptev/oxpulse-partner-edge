@@ -1441,7 +1441,7 @@ fi
 if [[ $DRY_RUN -eq 0 ]]; then
 	install -d -m 0755 "$PREFIX_ETC"
 	if [[ ! -f "$PREFIX_ETC/xray.env" ]]; then
-		install -m 0600 /dev/null "$PREFIX_ETC/xray.env"
+		install -m 0644 /dev/null "$PREFIX_ETC/xray.env"
 		log "  provisioned $PREFIX_ETC/xray.env (empty — xray uses volume-mounted config)"
 	fi
 else

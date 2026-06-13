@@ -6,9 +6,13 @@ on:
       - 'install.sh'
       - 'upgrade.sh'
       - 'docker-compose.yml.tpl'
+      - 'Caddyfile.tpl'
+      - 'config/defaults.conf'
+      - 'scripts/oxpulse-xray-update.sh'
       - 'tests/test_install_die_on_empty_sfu_secret.sh'
       - 'tests/test_upgrade_die_on_empty_sfu_secret.sh'
       - 'tests/test_sfu_compose.sh'
+      - 'tests/test_upgrade_render_completeness.sh'
       - '.github/workflows/installer-tests.yml'
   push:
     branches: [main]
@@ -16,9 +20,13 @@ on:
       - 'install.sh'
       - 'upgrade.sh'
       - 'docker-compose.yml.tpl'
+      - 'Caddyfile.tpl'
+      - 'config/defaults.conf'
+      - 'scripts/oxpulse-xray-update.sh'
       - 'tests/test_install_die_on_empty_sfu_secret.sh'
       - 'tests/test_upgrade_die_on_empty_sfu_secret.sh'
       - 'tests/test_sfu_compose.sh'
+      - 'tests/test_upgrade_render_completeness.sh'
       - '.github/workflows/installer-tests.yml'
 
 jobs:
@@ -27,9 +35,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: shellcheck -S error install.sh
+        run: shellcheck -S error install.sh
+
+      - name: shellcheck -S error upgrade.sh
+        run: shellcheck -S error upgrade.sh
+
       - name: install.sh dies on empty signaling_sfu_secret
         run: bash tests/test_install_die_on_empty_sfu_secret.sh
+
       - name: upgrade.sh dies on empty signaling_sfu_secret
         run: bash tests/test_upgrade_die_on_empty_sfu_secret.sh
+
       - name: SFU compose template wiring (SFU_EDGE_ID regression)
         run: bash tests/test_sfu_compose.sh
+
+      - name: Caddy render completeness + with_templates conflict-check path
+        run: bash tests/test_upgrade_render_completeness.sh
