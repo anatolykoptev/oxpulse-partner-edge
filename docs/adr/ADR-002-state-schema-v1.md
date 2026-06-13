@@ -24,7 +24,7 @@ This forces reinstall on an otherwise-healthy box just because one metadata key 
 
 ### migrate_state() function
 
-`lib/reconcile.sh` provides `migrate_state()`. Called by upgrade.sh immediately after `. "$STATE_FILE"` (skipped on `--check` and `--dry-run` modes). Idempotent: a v1 state returns immediately.
+`lib/reconcile.sh` provides `migrate_state()`. Called by upgrade.sh immediately after `. "$STATE_FILE"` (skipped on `--check` and `--dry-run` modes). The future converge entrypoint (Phase 4) will also call it. Idempotent: a v1 state returns immediately.
 
 #### Migration rules
 
@@ -33,20 +33,14 @@ This forces reinstall on an otherwise-healthy box just because one metadata key 
 | `CADDYFILE_SHA` | sha256 of live `/etc/oxpulse-partner-edge/Caddyfile` | No — left absent; set on next reconcile |
 | `TURNS_SUBDOMAIN` | `turns_subdomain` field in node-config.json | No — left absent if not parseable |
 | `NAIVE_SOCKS_PORT` | docker inspect `oxpulse-partner-naive` (println fix); default 1080 | No — defaults to 1080 |
-| `BACKEND_API` | `backend_endpoint` from node-config.json (port suffix stripped) | **YES** — only if genuinely undeducible |
-| `OXPULSE_MIRROR_BASE` | Optional; not derived (absent on non-mirror installs is correct) | No |
+| `BACKEND_API` | Fleet constant `https://api.oxpulse.chat` (install.sh:58 default). NOT derived from node-config `backend_endpoint` (that is the scheme-less `host:port` TURN endpoint, e.g. `krolik.oxpulse.chat:5349`). | No — defaults to fleet constant |
+| `OXPULSE_MIRROR_BASE` | Optional; absent on non-mirror installs is correct. Not derived — left absent if missing from state. | No |
 
 #### One-actionable-die rule
 
-If a genuinely required key cannot be derived, `migrate_state()` emits **exactly one actionable line** naming the specific key and the manual fix:
+If a genuinely required key cannot be derived, `migrate_state()` emits **exactly one actionable line** naming the specific key and the manual fix. No "re-run install.sh" catch-all. One key. One fix. Operator can provide it and re-run upgrade.
 
-```
-migrate_state: BACKEND_API missing from /var/lib/oxpulse-partner-edge/install.env
-and cannot be derived from node-config.json.
-Provide it: echo 'BACKEND_API=https://api.oxpulse.chat' >> /var/lib/oxpulse-partner-edge/install.env
-```
-
-No "re-run install.sh" catch-all. One key. One fix. Operator can provide it and re-run upgrade.
+Note: `BACKEND_API` is handled by defaulting to the fleet constant `https://api.oxpulse.chat` rather than dying, since every production edge uses this value.
 
 ### Constraint: never derive secrets
 
@@ -69,7 +63,7 @@ These live in their own dedicated files, not in `install.env`, and `migrate_stat
 
 ### Negative / mitigations
 
-- The derive-from-live logic is conservative (won't guess a secret). Boxes missing BACKEND_API AND lacking node-config.json still require one manual key provision. This is intentional: better to fail with a precise actionable message than to silently derive a wrong value.
+- The derive-from-live logic is conservative (will not guess a secret). `BACKEND_API` is covered by the fleet-constant default; secrets and keys that cannot be safely defaulted still require one manual provision. This is intentional: better to fail with a precise actionable message than to silently derive a wrong value.
 - Boxes on a very new install that haven't converged yet will have SCHEMA_VERSION=1 from install.sh; the migration is a no-op. No double-write risk.
 
 ## Rollback
@@ -83,8 +77,8 @@ These live in their own dedicated files, not in `install.env`, and `migrate_stat
 
 | Vintage | Missing keys at install time | migrate_state result |
 |---------|-----------------------------|--------------------|
-| v0.12.50 (+ node-config.json) | BACKEND_API, NAIVE_SOCKS_PORT, CADDYFILE_SHA | Derives BACKEND_API from node-config; defaults NAIVE_SOCKS_PORT=1080; sets SCHEMA_VERSION=1 |
-| v0.12.50 (no node-config.json) | BACKEND_API (undeducible) | Die with one actionable line naming BACKEND_API |
+| v0.12.50 (+ node-config.json) | BACKEND_API, NAIVE_SOCKS_PORT, CADDYFILE_SHA | Defaults BACKEND_API to fleet constant https://api.oxpulse.chat; defaults NAIVE_SOCKS_PORT=1080; sets SCHEMA_VERSION=1 |
+| v0.12.50 (no node-config.json) | BACKEND_API (missing) | Defaults BACKEND_API to fleet constant https://api.oxpulse.chat; sets SCHEMA_VERSION=1 |
 | v0.12.63 | NAIVE_SOCKS_PORT, CADDYFILE_SHA | Defaults NAIVE_SOCKS_PORT=1080; sets SCHEMA_VERSION=1 |
 | v0.12.73 | CADDYFILE_SHA | Tries to hash live Caddyfile (if present); sets SCHEMA_VERSION=1 |
 | v0.12.78+ (Phase 1) | SCHEMA_VERSION | Sets SCHEMA_VERSION=1 (idempotent) |

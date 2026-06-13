@@ -8,9 +8,10 @@
 # Vintages tested:
 #   v0.12.50 (with node-config): PARTNER_ID + PARTNER_DOMAIN + NODE_ID + TUNNEL +
 #             IMAGE_VERSION + TURNS_SUBDOMAIN + INSTALLED_AT (no BACKEND_API);
-#             node-config.json present → BACKEND_API derives from backend_endpoint.
-#   v0.12.50 (no node-config): same state, no node-config → expect actionable die
-#             naming BACKEND_API.
+#             node-config.json present with scheme-less host:port backend_endpoint.
+#             BACKEND_API defaults to fleet constant https://api.oxpulse.chat.
+#   v0.12.50 (no node-config): same state, no node-config → BACKEND_API defaults
+#             to fleet constant https://api.oxpulse.chat (no longer dies).
 #   v0.12.63: + BACKEND_API  (still no NAIVE_SOCKS_PORT, no CADDYFILE_SHA,
 #             no SCHEMA_VERSION)
 #   v0.12.73: + NAIVE_SOCKS_PORT + CADDYFILE_SHA  (still no SCHEMA_VERSION —
@@ -158,6 +159,36 @@ check_migration() {
     else
         pass "$vintage: no 're-run install.sh' demanded"
     fi
+
+    # Test G: VALUE assertion — BACKEND_API must be the fleet constant.
+    # Falsification: old (wrong) code stripped port from node-config.backend_endpoint
+    # and wrote e.g. "krolik.oxpulse.chat" (scheme-less, wrong host).
+    # The correct value is always the fleet constant https://api.oxpulse.chat.
+    local post_ba
+    post_ba=$(grep '^BACKEND_API=' "$state_file" | cut -d= -f2 || true)
+    if [[ "$post_ba" == "https://api.oxpulse.chat" ]]; then
+        pass "$vintage: BACKEND_API=https://api.oxpulse.chat (fleet constant, not wrong node-config derive)"
+    else
+        fail "$vintage: BACKEND_API wrong — expected https://api.oxpulse.chat, got '${post_ba:-<empty>}'"
+    fi
+
+    # Test H: VALUE assertion — TURNS_SUBDOMAIN
+    local post_ts
+    post_ts=$(grep '^TURNS_SUBDOMAIN=' "$state_file" | cut -d= -f2 || true)
+    if [[ -n "$post_ts" ]]; then
+        pass "$vintage: TURNS_SUBDOMAIN='${post_ts}' (present)"
+    else
+        pass "$vintage: TURNS_SUBDOMAIN absent (acceptable — not derivable without node-config)"
+    fi
+
+    # Test I: VALUE assertion — NAIVE_SOCKS_PORT defaults to 1080 when docker unavailable
+    local post_nsp
+    post_nsp=$(grep '^NAIVE_SOCKS_PORT=' "$state_file" | cut -d= -f2 || true)
+    if [[ -n "$post_nsp" ]]; then
+        pass "$vintage: NAIVE_SOCKS_PORT='${post_nsp}' (present)"
+    else
+        fail "$vintage: NAIVE_SOCKS_PORT missing after migration"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -184,7 +215,7 @@ mkdir -p "$ETC_50"
 cat > "$ETC_50/node-config.json" << 'NCEOF'
 {
   "node_id": "partner-abc123-node",
-  "backend_endpoint": "https://api.oxpulse.chat:443",
+  "backend_endpoint": "krolik.oxpulse.chat:5349",
   "turn_secret": "secret-not-exposed",
   "turns_subdomain": "api-1a2b3c"
 }
@@ -202,10 +233,11 @@ EOF
 check_migration "v0.12.50+node-config" "$STATE_50a" "$ETC_50"
 
 # ---------------------------------------------------------------------------
-# Vintage 1b: v0.12.50 WITHOUT node-config.json — expect actionable die
+# Vintage 1b: v0.12.50 WITHOUT node-config.json
+# BACKEND_API was formerly expected to die(); now defaults to fleet constant.
 # ---------------------------------------------------------------------------
 echo ""
-echo "==> Vintage 1b: v0.12.50 WITHOUT node-config.json (BACKEND_API not derivable → die)"
+echo "==> Vintage 1b: v0.12.50 WITHOUT node-config.json (BACKEND_API defaults to fleet constant)"
 ETC_50b="$WORK/etc-v0.12.50-no-cfg"
 mkdir -p "$ETC_50b"
 STATE_50b="$WORK/state-v0.12.50-no-cfg.env"
@@ -218,18 +250,7 @@ IMAGE_VERSION=v0.12.50
 TURNS_SUBDOMAIN=api-nob
 INSTALLED_AT=2026-05-01T00:00:00Z
 EOF
-DIE_OUT=$(run_migrate "$STATE_50b" "$ETC_50b") || true
-# migrate_state must die with ONE actionable message naming BACKEND_API
-if echo "$DIE_OUT" | grep -qi "BACKEND_API"; then
-    pass "v0.12.50 no-node-config: die names BACKEND_API specifically"
-else
-    fail "v0.12.50 no-node-config: die message doesn't name BACKEND_API — $DIE_OUT"
-fi
-if echo "$DIE_OUT" | grep -q "MIGRATE_OK"; then
-    fail "v0.12.50 no-node-config: migrate_state should have died but returned OK"
-else
-    pass "v0.12.50 no-node-config: migrate_state correctly refused (no silent success)"
-fi
+check_migration "v0.12.50+no-node-config" "$STATE_50b" "$ETC_50b"
 
 # ---------------------------------------------------------------------------
 # Vintage 2: v0.12.63 — missing NAIVE_SOCKS_PORT, CADDYFILE_SHA

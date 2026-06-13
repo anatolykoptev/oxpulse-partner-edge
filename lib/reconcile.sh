@@ -228,24 +228,22 @@ reconcile_caddy_surface() {
 # ---------------------------------------------------------------------------
 # migrate_state — Phase 2 (ADR-002): forward-migrate STATE_FILE to schema v1.
 #
-# Called on every converge/upgrade BEFORE rendering surfaces.  Safe to call on
-# a v1 state (idempotent — SCHEMA_VERSION already set → returns immediately).
+# Called by upgrade.sh immediately after sourcing STATE_FILE.  The future
+# converge entrypoint (Phase 4) will also call it.  Safe to call on a v1 state
+# (idempotent — SCHEMA_VERSION already set → returns immediately).
 #
 # Migration contract (ADR-002):
 #   - SCHEMA_VERSION missing or < 1  → run this migration.
 #   - Write SCHEMA_VERSION=1 at end of STATE_FILE.
 #   - Derive missing NON-SECRET STRUCTURAL keys from the live system:
 #       CADDYFILE_SHA      → re-hash /etc/oxpulse-partner-edge/Caddyfile if present.
-#       OXPULSE_MIRROR_BASE → already optional; left absent if not derivable.
-#       TURNS_SUBDOMAIN    → already present in all post-Phase-6 states that could
-#                            reach upgrade; kept as-is if already set.
-#   - BACKEND_API: required, not derivable from live artefacts without a network
-#       round-trip (register token is single-use; node-config doesn't persist it
-#       in a form we can read without sourcing the compose secrets). On a real
-#       old-vintage edge, BACKEND_API was present from v0.12.53 onward (PR #219).
-#       For the narrow window of v0.12.50-v0.12.52 edges missing it: derive from
-#       the installed node-config.json (backend_endpoint field) if readable; else
-#       die with one actionable message.
+#       OXPULSE_MIRROR_BASE → optional; absent on non-mirror installs is correct.
+#                            Not derived here — left absent if missing.
+#       TURNS_SUBDOMAIN    → turns_subdomain field in node-config.json.
+#   - BACKEND_API: fleet constant = https://api.oxpulse.chat (install.sh:58).
+#       NOT derived from node-config backend_endpoint (that is the scheme-less
+#       host:port TURN/SFU endpoint, e.g. krolik.oxpulse.chat:5349 — completely
+#       different field).  If missing from state, default to the fleet constant.
 #   - NEVER derive or write secrets (reality.priv, awg-private.key, token,
 #     service_token_hash, signaling keys — those live in their own files).
 #
@@ -314,34 +312,24 @@ except Exception: pass
     fi
 
     # ------------------------------------------------------------------
-    # Phase 2c: BACKEND_API — required for upgrade.sh to function.
-    # Try to derive from node-config.json (backend_endpoint field).
-    # ------------------------------------------------------------------
+    # Phase 2c: BACKEND_API — fleet constant, NOT derived from node-config.
+    #
+    # IMPORTANT: node-config.json's backend_endpoint is the scheme-less
+    # host:port TURN/SFU endpoint (e.g. krolik.oxpulse.chat:5349 or
+    # api.oxpulse.chat:443).  It is NOT the registration API base URL.
+    # Stripping the port from that field produces a wrong, scheme-less
+    # value (e.g. "krolik.oxpulse.chat") — not a valid BACKEND_API.
+    #
+    # BACKEND_API is a fleet constant: every production edge uses
+    # https://api.oxpulse.chat (mirrors are handled via OXPULSE_MIRROR_BASE,
+    # not via a different BACKEND_API value).  Matches install.sh:58 default.
     if ! grep -q '^BACKEND_API=' "$_state_file" 2>/dev/null; then
-        local _node_cfg="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/node-config.json"
-        local _ba=""
-        if [[ -r "$_node_cfg" ]] && command -v python3 >/dev/null 2>&1; then
-            _ba=$(python3 -c "
-import json,sys
-try:
-    d=json.load(open('$_node_cfg'))
-    # backend_endpoint has port suffix (e.g. https://api.oxpulse.chat); strip it.
-    v=d.get('backend_endpoint','')
-    if v:
-        # Remove port: https://host:443 -> https://host
-        import re
-        v=re.sub(r':\d+$','',v)
-        print(v)
-except Exception: pass
-" 2>/dev/null || true)
-        fi
-        if [[ -n "$_ba" ]]; then
-            printf 'BACKEND_API=%s\n' "$_ba" >> "$_state_file"
-            log "migrate_state: derived BACKEND_API=$_ba from node-config.json"
-        else
-            die "migrate_state: BACKEND_API missing from $STATE_FILE and cannot be derived from node-config.json.
-Provide it: echo 'BACKEND_API=https://api.oxpulse.chat' >> $STATE_FILE"
-        fi
+        # Default to the install.sh:58 fleet constant.  Every production edge uses
+        # this value; mirrored installs use OXPULSE_MIRROR_BASE separately —
+        # BACKEND_API stays api.oxpulse.chat regardless.
+        local _ba="https://api.oxpulse.chat"
+        printf 'BACKEND_API=%s\n' "$_ba" >> "$_state_file"
+        log "migrate_state: BACKEND_API defaulted to fleet constant $_ba (not derived from node-config backend_endpoint)"
     fi
 
     # ------------------------------------------------------------------
