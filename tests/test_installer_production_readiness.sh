@@ -23,7 +23,7 @@ expected_containers=(
     "oxpulse-partner-coturn:coturn:required"
     "oxpulse-partner-sfu:sfu:required"
     "oxpulse-partner-xray:xray:required"
-    "oxpulse-partner-hy2:hysteria2:optional"
+    "oxpulse-partner-hysteria2:hysteria2:optional"
     "oxpulse-partner-naive:naive:optional"
 )
 for entry in "${expected_containers[@]}"; do
