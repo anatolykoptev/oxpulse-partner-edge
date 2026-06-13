@@ -1,16 +1,20 @@
 #!/bin/bash
-# lib/reconcile.sh — Phase 1+2+3: convergent reconcile engine primitives.
+# lib/reconcile.sh — Phases 1-4a: convergent reconcile engine.
 #
 # Provides:
 #   atomic_swap INSTALLED_PATH CANDIDATE_PATH [MODE]
 #   assert_no_unresolved_placeholders RENDERED_FILE
 #   _setup_caddy_render_env [TPL_FILE]
-#   reconcile_caddy_surface CANDIDATE_DIR
-#   migrate_state                                  # Phase 2 (ADR-002)
-#   mark_restart UNIT
-#   apply_restarts
-#   health_snapshot HEALTHCHECK_BIN SNAPSHOT_FILE  # Phase 3 (Decision 4)
-#   health_regressions BASELINE_FILE POST_FILE     # Phase 3 (Decision 4)
+#   reconcile_caddy_surface CANDIDATE_DIR           # Phase 1 (ADR-001)
+#   migrate_state                                   # Phase 2 (ADR-002)
+#   mark_restart UNIT                               # Phase 1 collector
+#   apply_restarts                                  # Phase 1 collector (wired P4a)
+#   health_snapshot HEALTHCHECK_BIN SNAPSHOT_FILE   # Phase 3 (Decision 4)
+#   health_regressions BASELINE_FILE POST_FILE      # Phase 3 (Decision 4)
+#   _MANIFEST_PARSER_B64 (constant)                 # Phase 4a (ADR-003)
+#   manifest_surfaces MANIFEST_PATH                 # Phase 4a manifest reader
+#   manifest_field SURFACE_RECORD FIELD_INDEX       # Phase 4a field accessor
+#   reconcile_all [MANIFEST_PATH]                   # Phase 4a engine entry point
 #
 # Sourced by install.sh and upgrade.sh.  Not executable on its own.
 #
@@ -519,4 +523,179 @@ health_regressions() {
         log "health_regressions: ${_healed_count} healed check(s) — improvement"
     log "health_regressions: no regressions detected"
     return 0
+}
+# ---------------------------------------------------------------------------
+# Phase 4a - Manifest reader.
+#
+# manifest_surfaces MANIFEST_PATH
+#
+# Reads manifest.yaml and emits one line per surface, tab-separated:
+#   id<TAB>kind<TAB>wired<TAB>template<TAB>out<TAB>renderer<TAB>restart_unit<TAB>sha_key<TAB>placeholder_completeness
+#
+# wired is "true" unless surface block contains "wired: false".
+# Uses python3 (de-facto dep, used 9x in channel-render-lib.sh); awk fallback.
+# The python code is stored as a base64 constant to avoid heredoc-in-sourced-
+# function issues (bash heredocs read stdin at call time in sourced files).
+# ---------------------------------------------------------------------------
+
+# Base64-encoded python3 manifest parser.
+_MANIFEST_PARSER_B64="aW1wb3J0IHN5cywgcmUKbWFuaWZlc3RfcGF0aCA9IHN5cy5hcmd2WzFdCnRyeToKICAgIGNvbnRlbnQgPSBvcGVuKG1hbmlmZXN0X3BhdGgpLnJlYWQoKQpleGNlcHQgRXhjZXB0aW9uOgogICAgc3lzLmV4aXQoMCkKc3VyZmFjZXNfbWF0Y2ggPSByZS5zZWFyY2gocidec3VyZmFjZXM6XHMqXG4oLio/KSg/PV5cd3xcWiknLCBjb250ZW50LCByZS5NVUxUSUxJTkUgfCByZS5ET1RBTEwpCmlmIG5vdCBzdXJmYWNlc19tYXRjaDoKICAgIHN5cy5leGl0KDApCnN1cmZhY2VzX2Jsb2NrID0gc3VyZmFjZXNfbWF0Y2guZ3JvdXAoMSkKc3VyZmFjZV9lbnRyaWVzID0gcmUuc3BsaXQocidcbig/PSAgLSBpZDopJywgc3VyZmFjZXNfYmxvY2spCmZvciBlbnRyeSBpbiBzdXJmYWNlX2VudHJpZXM6CiAgICBlbnRyeSA9IGVudHJ5LnN0cmlwKCkKICAgIGlmIG5vdCBlbnRyeToKICAgICAgICBjb250aW51ZQogICAgaWRfbSA9IHJlLnNlYXJjaChyJ14tXHMraWQ6XHMqKFxTKyknLCBlbnRyeSwgcmUuTVVMVElMSU5FKQogICAgaWYgbm90IGlkX206CiAgICAgICAgY29udGludWUKICAgIHNpZCA9IGlkX20uZ3JvdXAoMSkuc3RyaXAoKQogICAgaWYgbm90IHNpZCBvciBzaWQgPT0gIi0iOgogICAgICAgIGNvbnRpbnVlCiAgICBkZWYgZmllbGQoa2V5LCBkZWZhdWx0PSItIik6CiAgICAgICAgbSA9IHJlLnNlYXJjaChyJ15ccysnICsgcmUuZXNjYXBlKGtleSkgKyByJzpccyooLispJCcsIGVudHJ5LCByZS5NVUxUSUxJTkUpCiAgICAgICAgaWYgbToKICAgICAgICAgICAgIyBTdHJpcCB0cmFpbGluZyBZQU1MIGlubGluZSBjb21tZW50ICgjIC4uLikgYW5kIHdoaXRlc3BhY2UKICAgICAgICAgICAgcmF3ID0gbS5ncm91cCgxKQogICAgICAgICAgICAjIFJlbW92ZSBpbmxpbmUgY29tbWVudDogc3BsaXQgb24gIiAjIiBidXQgbm90IGluc2lkZSBxdW90ZWQgc3RyaW5ncwogICAgICAgICAgICAjIFNpbXBsZSBoZXVyaXN0aWM6IHN0cmlwIGZyb20gZmlyc3QgIiAjIiB0aGF0IGFwcGVhcnMgYWZ0ZXIgYSBzcGFjZQogICAgICAgICAgICB2YWwgPSByZS5zdWIocidccysjLiokJywgJycsIHJhdykuc3RyaXAoKS5zdHJpcCgnIicpLnN0cmlwKCInIikKICAgICAgICAgICAgcmV0dXJuIHZhbCBpZiB2YWwgZWxzZSBkZWZhdWx0CiAgICAgICAgcmV0dXJuIGRlZmF1bHQKICAgIGtpbmQgICAgICAgICA9IGZpZWxkKCJraW5kIikKICAgIHdpcmVkX3JhdyAgICA9IGZpZWxkKCJ3aXJlZCIsICJ0cnVlIikKICAgIHdpcmVkICAgICAgICA9ICJmYWxzZSIgaWYgd2lyZWRfcmF3Lmxvd2VyKCkgPT0gImZhbHNlIiBlbHNlICJ0cnVlIgogICAgdG1wbCAgICAgICAgID0gZmllbGQoInRlbXBsYXRlIikKICAgIG91dCAgICAgICAgICA9IGZpZWxkKCJvdXQiKQogICAgcmVuZGVyZXIgICAgID0gZmllbGQoInJlbmRlcmVyIikKICAgIHJ1ICAgICAgICAgICA9IGZpZWxkKCJyZXN0YXJ0X3VuaXQiKQogICAgc2sgICAgICAgICAgID0gZmllbGQoInNoYV9rZXkiKQogICAgcGggICAgICAgICAgID0gZmllbGQoInBsYWNlaG9sZGVyX2NvbXBsZXRlbmVzcyIsICJmYWxzZSIpCiAgICBwcmludChmIntzaWR9XHR7a2luZH1cdHt3aXJlZH1cdHt0bXBsfVx0e291dH1cdHtyZW5kZXJlcn1cdHtydX1cdHtza31cdHtwaH0iKQo="
+
+manifest_surfaces() {
+    local _manifest="$1"
+    if [[ ! -f "$_manifest" ]]; then
+        die "manifest_surfaces: manifest not found: $_manifest"
+    fi
+
+    if command -v python3 >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then
+        local _py_tmp
+        _py_tmp=$(mktemp /tmp/mfst_parse_XXXXXX.py)
+        # shellcheck disable=SC2064
+        trap "rm -f '$_py_tmp'" RETURN
+        printf '%s' "$_MANIFEST_PARSER_B64" | base64 -d > "$_py_tmp"
+        python3 "$_py_tmp" "$_manifest"
+    else
+        # Minimal awk fallback when python3 or base64 absent.
+        awk '
+        /^  - id:/ {
+            if (id != "") flush()
+            id=$NF; kind="-"; wired="true"; template="-"; out="-"
+            renderer="-"; restart_unit="-"; sha_key="-"; ph_complete="false"
+            next
+        }
+        id!="" && /^[a-z]/ && !/^surfaces/ { flush(); id="" }
+        id!="" && /^\s+kind:/         { kind=$NF }
+        id!="" && /^\s+wired:/        { if ($NF=="false") wired="false" }
+        id!="" && /^\s+template:/     { template=$NF }
+        id!="" && /^\s+out:/          { out=$NF }
+        id!="" && /^\s+restart_unit:/ { restart_unit=$NF }
+        id!="" && /^\s+sha_key:/      { sha_key=$NF }
+        id!="" && /^\s+placeholder_completeness:/ { ph_complete=$NF }
+        function flush() {
+            printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                id,kind,wired,template,out,renderer,restart_unit,sha_key,ph_complete
+        }
+        END { if (id!="") flush() }
+        ' "$_manifest"
+    fi
+}
+
+
+# ---------------------------------------------------------------------------
+# manifest_field SURFACE_RECORD FIELD_INDEX
+#
+# Extracts a tab-separated field from a manifest_surfaces record.
+# Indices (1-based):
+#   1=id  2=kind  3=wired  4=template  5=out  6=renderer
+#   7=restart_unit  8=sha_key  9=placeholder_completeness
+# ---------------------------------------------------------------------------
+manifest_field() {
+    local _record="$1"
+    local _idx="$2"
+    echo "$_record" | cut -f"$_idx"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 4a - reconcile_all [MANIFEST_PATH]
+#
+# Manifest-driven reconcile engine (ADR-003).
+#
+# Iterates declared surfaces in topological order.
+# Wired surfaces are reconciled; wired:false surfaces are logged and skipped.
+# After all surfaces: apply_restarts() fires (P1 dead-code fix - key P4a deliverable).
+#
+# P4a wired:  caddyfile (render_from_state).
+# P4b wires:  coturn, xray_client, compose, node_config, firewall,
+#             xray_env, host_scripts, systemd_units.
+#
+# Caller must source STATE_FILE and call migrate_state() before this.
+# RECONCILE_TMPDIR: scratch dir; auto-created if unset (cleaned on RETURN).
+# DRY_RUN=1: forwarded to reconcile_caddy_surface.
+# ---------------------------------------------------------------------------
+reconcile_all() {
+    local _manifest="${1:-}"
+    if [[ -z "$_manifest" ]]; then
+        local _script_dir
+        _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-}")/." || exit; cd ..; pwd)"
+        _manifest="${_script_dir}/manifest.yaml"
+    fi
+
+    if [[ ! -f "$_manifest" ]]; then
+        die "reconcile_all: manifest.yaml not found at $_manifest"
+    fi
+
+    log "reconcile_all: reading manifest $_manifest"
+
+    # Local scope: RECONCILE_TMPDIR is auto-managed per-call.
+    # Declaring local prevents the deleted-dir bug on repeated reconcile_all calls.
+    local RECONCILE_TMPDIR="${RECONCILE_TMPDIR:-}"
+    local _own_tmpdir=0
+    if [[ -z "$RECONCILE_TMPDIR" ]]; then
+        RECONCILE_TMPDIR=$(mktemp -d)
+        _own_tmpdir=1
+    fi
+    # shellcheck disable=SC2064
+    [[ "$_own_tmpdir" -eq 1 ]] && trap "rm -rf '${RECONCILE_TMPDIR}'" RETURN
+
+    local _surface_count=0 _wired_count=0 _skipped_count=0 _changed_count=0
+
+    while IFS=$'\t' read -r _sid _kind _wired _template _out \
+                              _renderer _restart_unit _sha_key _ph_complete; do
+        [[ -z "$_sid" ]] && continue
+        _surface_count=$((_surface_count + 1))
+
+        if [[ "$_wired" == "false" ]]; then
+            log "reconcile_all: surface '$_sid' (kind=$_kind) — declared, not yet wired (Phase 4b)"
+            _skipped_count=$((_skipped_count + 1))
+            continue
+        fi
+
+        _wired_count=$((_wired_count + 1))
+        log "reconcile_all: processing surface '$_sid' (kind=$_kind)"
+
+        case "$_kind" in
+            render_from_state)
+                case "$_sid" in
+                    caddyfile)
+                        local _tpl_src="${RECONCILE_TMPDIR}/Caddyfile.tpl"
+                        if [[ ! -f "$_tpl_src" ]]; then
+                            local _repo_dir="${REPO_DIR:-}"
+                            local _repo_raw="${REPO_RAW:-}"
+                            if [[ -n "$_repo_dir" && -f "${_repo_dir}/Caddyfile.tpl" ]]; then
+                                cp "${_repo_dir}/Caddyfile.tpl" "$_tpl_src"
+                            elif [[ -n "$_repo_raw" ]]; then
+                                curl -fsSL --max-time 30 \
+                                    "${_repo_raw}/Caddyfile.tpl" \
+                                    -o "$_tpl_src" 2>/dev/null \
+                                    || die "reconcile_all: could not fetch Caddyfile.tpl from $_repo_raw"
+                            else
+                                die "reconcile_all: Caddyfile.tpl not available (set REPO_DIR or REPO_RAW)"
+                            fi
+                        fi
+                        local _before_restarts="${_RECONCILE_RESTART_UNITS:-}"
+                        reconcile_caddy_surface "$RECONCILE_TMPDIR" "$_tpl_src"
+                        if [[ "${_RECONCILE_RESTART_UNITS:-}" != "$_before_restarts" ]]; then
+                            _changed_count=$((_changed_count + 1))
+                        fi
+                        ;;
+                    *)
+                        warn "reconcile_all: surface '$_sid' render_from_state — no handler yet (Phase 4b)"
+                        ;;
+                esac
+                ;;
+            persist_rendered|sync_verified|network_apply)
+                warn "reconcile_all: surface '$_sid' kind=$_kind — not yet wired (Phase 4b)"
+                ;;
+            *)
+                warn "reconcile_all: surface '$_sid' unknown kind '$_kind' — skipping"
+                ;;
+        esac
+    done < <(manifest_surfaces "$_manifest")
+
+    log "reconcile_all: ${_surface_count} declared, ${_wired_count} wired, ${_skipped_count} skipped (not-yet-wired), ${_changed_count} changed"
+
+    # KEY DELIVERABLE (Phase 4a): apply_restarts fires after the loop.
+    # In P1/P2/P3 mark_restart/apply_restarts were never called from upgrade.sh.
+    # P4a wires it: a changed Caddyfile triggers oxpulse-partner-edge.service restart.
+    apply_restarts
 }

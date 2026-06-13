@@ -2125,17 +2125,25 @@ if [[ "$MODE" == with_templates ]]; then
 
 	# Step 2+3: fetch + render templates. die()s on fetch failure — no state
 	# has been mutated yet (backups exist but originals are untouched).
-	# Phase 1 (reconcile): route Caddyfile through reconcile_caddy_surface (opec render caddy
-	# as single render authority). re_render_caddy remains defined below for backward compat
-	# (test_upgrade_render_completeness.sh tests it directly; Phase 6 deletes it).
-	_reconcile_tmpdir_wt=$(mktemp -d)
+	# Phase 4a (reconcile_all): manifest-driven engine replaces ad-hoc reconcile_caddy_surface
+	# call. P4a wires caddyfile only (behavior equivalent to P1); apply_restarts now fires
+	# after the loop (P1 dead-code fix). Caddyfile.tpl is fetched inside reconcile_all
+	# via REPO_RAW (already set). re_render_caddy remains for backward compat; Phase 6 deletes.
+	#
+	# Manifest location: manifest.yaml ships in the release bundle alongside upgrade.sh.
+	# upgrade.sh fetches it if not already present in RECONCILE_TMPDIR.
+	_manifest_path_wt=""
+	_manifest_tmpdir_wt=$(mktemp -d)
 	# shellcheck disable=SC2064
-	trap "rm -rf '$_reconcile_tmpdir_wt'" RETURN
-	log "fetching Caddyfile.tpl from $REPO_RAW (reconcile path)"
-	if ! curl -fsSL --max-time 30 "$REPO_RAW/Caddyfile.tpl" 			-o "$_reconcile_tmpdir_wt/Caddyfile.tpl" 2>/dev/null; then
-		die "could not fetch Caddyfile.tpl from $REPO_RAW — aborting (no changes applied)"
+	trap "rm -rf '$_manifest_tmpdir_wt'" RETURN
+	if ! curl -fsSL --max-time 30 "$REPO_RAW/manifest.yaml" \
+			-o "$_manifest_tmpdir_wt/manifest.yaml" 2>/dev/null; then
+		die "could not fetch manifest.yaml from $REPO_RAW — aborting (no changes applied)"
 	fi
-	reconcile_caddy_surface "$_reconcile_tmpdir_wt"
+	_manifest_path_wt="$_manifest_tmpdir_wt/manifest.yaml"
+	export RECONCILE_TMPDIR="$_manifest_tmpdir_wt"
+	reconcile_all "$_manifest_path_wt"
+	unset RECONCILE_TMPDIR
 	re_render_healthcheck
 
 	# Step 4: patch image tags in compose (same as plain image upgrade).
