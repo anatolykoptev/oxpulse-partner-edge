@@ -36,9 +36,14 @@ grep -q 'handle_errors 502 503 504' "$TPL" \
 # Block must contain {err.status_code} to pass through the 5xx status.
 grep -q '{err.status_code}' "$TPL" \
     || { echo "FAIL: {err.status_code} not found (status passthrough missing)"; exit 1; }
-# Must contain a self-retry mechanism (meta-refresh or setTimeout reload).
-grep -q 'meta http-equiv="refresh"' "$TPL" \
-    || { echo "FAIL: meta-refresh auto-retry not found in error page HTML"; exit 1; }
+# Must contain a self-retry mechanism (JS exponential backoff with sessionStorage).
+grep -q 'sessionStorage' "$TPL" \
+    || { echo "FAIL: sessionStorage-based exponential backoff not found in error page HTML"; exit 1; }
+# Must NOT contain a meta-refresh tag (removed in favour of JS backoff which can back off).
+if grep -q 'meta http-equiv="refresh"' "$TPL"; then
+    echo "FAIL: meta-refresh tag found — removed in favour of JS exponential backoff"
+    exit 1
+fi
 # Must NOT contain href/src/redirect to api.oxpulse.chat in rendered HTML
 # (DPI risk for RU users). Comments in the template are acceptable.
 if grep -v '^[[:space:]]*#' "$TPL" | grep -q 'href=.*api\.oxpulse\.chat\|src=.*api\.oxpulse\.chat\|redir.*api\.oxpulse\.chat'; then
@@ -96,6 +101,18 @@ PYEOF
     fi
     echo "OK: caddy validate reports 'Valid configuration'"
 fi
+
+echo "==> Test 5: ip_mask filters present in log block"
+grep -q 'request>remote_ip ip_mask' "$TPL" \
+    || { echo "FAIL: request>remote_ip ip_mask not found — client IPs are not masked"; exit 1; }
+grep -q 'request>client_ip ip_mask' "$TPL" \
+    || { echo "FAIL: request>client_ip ip_mask not found — client IPs are not masked"; exit 1; }
+echo "OK: ip_mask filters present for both remote_ip and client_ip"
+
+echo "==> Test 6: query-string strip filter present in log block"
+grep -q 'request>uri regexp' "$TPL" \
+    || { echo "FAIL: request>uri regexp filter not found — query strings are not stripped"; exit 1; }
+echo "OK: query-strip regexp filter present on request>uri"
 
 echo ""
 echo "PASS: all Caddyfile observability tests passed"

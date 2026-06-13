@@ -189,11 +189,12 @@
     }
 
     # Structured JSON access log for user-facing tunnel traffic.
-    # Emits to stdout (collected by docker json-file → journald).
+    # Emits to stdout (collected by docker json-file driver → /var/lib/docker/containers/*-json.log).
     # Sensitive fields deleted: Authorization header, Cookie header.
-    # URI is logged as-is (path only — query strings are not expected on
-    # the tunnel paths: /api/*, /ws/*, /events/*). If query params appear
-    # they must be scrubbed here before enabling query logging in prod.
+    # Client IPs masked: /16 IPv4 + /32 IPv6 — anti-censorship edges on partner boxes in
+    # adversarial jurisdictions; raw visitor IPs must not persist on the box while still
+    # retaining geo-class forensics value.
+    # Query strings stripped from logged URIs: ?token=... and similar never persist on disk.
     log {
         output stdout
         format filter {
@@ -201,6 +202,9 @@
             fields {
                 request>headers>Authorization delete
                 request>headers>Cookie delete
+                request>remote_ip ip_mask 16 32
+                request>client_ip ip_mask 16 32
+                request>uri regexp "^([^?]*)\\?.*$" "$1"
             }
         }
         level INFO
@@ -209,7 +213,9 @@
     # Gateway-error fallback page.
     # Rendered entirely inline — no external assets, no redirects —
     # because central is unreachable when this fires.
-    # Status code is preserved (502/503/504); meta-refresh retries after 4s.
+    # Status code is preserved (502/503/504).
+    # Exponential backoff retry: 4s → 8s → 16s → 32s → cap 60s (sessionStorage counter).
+    # No meta-refresh — it cannot back off and would undercut the JS backoff.
     # Same-origin retry only — do NOT redirect to api.oxpulse.chat (DPI risk).
     handle_errors 502 503 504 {
         header Content-Type "text/html; charset=utf-8"
@@ -218,7 +224,6 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="4">
 <title>Соединение прервано / Connection interrupted</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
@@ -233,23 +238,37 @@
   button{background:#3b82f6;color:#fff;border:none;border-radius:8px;
     padding:.6rem 1.5rem;font-size:.9rem;cursor:pointer;transition:background .2s}
   button:hover{background:#2563eb}
-  .dots{display:inline-block;animation:blink 1.4s infinite}
-  @keyframes blink{0%,80%,100%{opacity:0}40%{opacity:1}}
+  #countdown{font-size:.8rem;color:#64748b;margin-bottom:1rem}
 </style>
 </head>
 <body>
 <div class="card">
   <h1>Соединение прервано</h1>
   <p>Связь с сервером временно прервана.<br>
-     Страница обновится автоматически через несколько секунд<span class="dots">...</span></p>
+     Страница повторит попытку автоматически.</p>
   <p lang="en" style="font-size:.8rem;color:#64748b">Connection to the server was interrupted.
-     Retrying automatically<span class="dots">...</span></p>
+     Retrying automatically.</p>
+  <div id="countdown"></div>
   <div class="code">{err.status_code}</div>
-  <button onclick="location.reload()">Повторить / Retry</button>
+  <button onclick="sessionStorage.removeItem('_re');location.reload()">Повторить / Retry</button>
 </div>
 <script>
-  // Fallback: reload after 4s if meta-refresh is suppressed (some security contexts).
-  setTimeout(function(){location.reload()},4000);
+  // Exponential backoff retry: 4s → 8s → 16s → 32s → cap 60s.
+  // Attempt counter persisted in sessionStorage so it survives the reload
+  // but resets when the tab is closed (no stale state across sessions).
+  var attempts = parseInt(sessionStorage.getItem('_re') || '0', 10);
+  var delays = [4, 8, 16, 32, 60];
+  var delay = delays[Math.min(attempts, delays.length - 1)];
+  sessionStorage.setItem('_re', attempts + 1);
+  var remaining = delay;
+  var cd = document.getElementById('countdown');
+  function tick() {
+    if (remaining <= 0) { location.reload(); return; }
+    cd.textContent = 'Повтор через ' + remaining + ' с / Retrying in ' + remaining + 's';
+    remaining--;
+    setTimeout(tick, 1000);
+  }
+  tick();
 </script>
 </body>
 </html>` {err.status_code}
