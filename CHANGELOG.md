@@ -5,6 +5,17 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.76](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.75...v0.12.76) (2026-06-13)
+
+
+### Bug Fixes
+
+* **caddy:** access logs + handle_errors fallback page + lb_retries ([#307](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/307)) ([1db5949](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1db594992ce10063d0d6ba24e609ed4a6b24b385))
+* **healthcheck:** correct hy2 container name to oxpulse-partner-hysteria2 ([#310](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/310)) ([f485602](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/f48560210e613ba4430fa0a253c0d0489f53e9de))
+* **install:** hy2 ch3 profile activation — dedup append + drop --profile flag + persist .env ([#296](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/296)) ([20b5b86](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/20b5b861a1d0f94c29bf1c574651824c1bce4ef0))
+* **refresh:** re-assert split-routing AllowedIPs after AWG param sync ([#309](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/309)) ([bca2d94](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/bca2d949b7c487dd14db77fdc183f3b1c66c0eb1))
+* **upgrade:** render all 6 Caddyfile.tpl placeholders + provision xray.env ([#308](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/308)) ([64d76f9](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/64d76f903cd2590ef25c6f4c33ce4aaf18532509))
+
 ## [0.12.75](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.74...v0.12.75) (2026-06-11)
 
 
