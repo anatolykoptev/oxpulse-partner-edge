@@ -1,16 +1,22 @@
 #!/bin/bash
-# lib/reconcile.sh — Phase 1+2+3: convergent reconcile engine primitives.
+# lib/reconcile.sh — Phases 1-4a: convergent reconcile engine.
 #
 # Provides:
 #   atomic_swap INSTALLED_PATH CANDIDATE_PATH [MODE]
 #   assert_no_unresolved_placeholders RENDERED_FILE
 #   _setup_caddy_render_env [TPL_FILE]
-#   reconcile_caddy_surface CANDIDATE_DIR
-#   migrate_state                                  # Phase 2 (ADR-002)
-#   mark_restart UNIT
-#   apply_restarts
-#   health_snapshot HEALTHCHECK_BIN SNAPSHOT_FILE  # Phase 3 (Decision 4)
-#   health_regressions BASELINE_FILE POST_FILE     # Phase 3 (Decision 4)
+#   reconcile_caddy_surface CANDIDATE_DIR           # Phase 1 (ADR-001)
+#   migrate_state                                   # Phase 2 (ADR-002)
+#   mark_restart UNIT                               # Phase 1 collector
+#   apply_restarts                                  # Phase 1 collector (wired P4a)
+#   mark_caddy_reload                               # Phase 4a: targeted caddy reload flag
+#   apply_caddy_reloads                             # Phase 4a: hot-reload caddy (no peer down)
+#   health_snapshot HEALTHCHECK_BIN SNAPSHOT_FILE   # Phase 3 (Decision 4)
+#   health_regressions BASELINE_FILE POST_FILE      # Phase 3 (Decision 4)
+#   _MANIFEST_PARSER_B64 (constant)                 # Phase 4a (ADR-003)
+#   manifest_surfaces MANIFEST_PATH                 # Phase 4a manifest reader
+#   manifest_field SURFACE_RECORD FIELD_INDEX       # Phase 4a field accessor
+#   reconcile_all [MANIFEST_PATH]                   # Phase 4a engine entry point
 #
 # Sourced by install.sh and upgrade.sh.  Not executable on its own.
 #
@@ -148,10 +154,10 @@ _setup_caddy_render_env() {
 #   1. Set up ambient env (export all 6 placeholder vars).
 #   2. `opec render caddy --tpl Caddyfile.tpl --out candidate`.
 #   3. assert_no_unresolved_placeholders (fail-closed).
-#   4. Compute sha256 BEFORE __CADDYFILE_SHA__ substitution (matches install.sh).
-#   5. Substitute __CADDYFILE_SHA__ into rendered file.
-#   6. Checksum-compare against installed Caddyfile.
-#   7. If different: atomic_swap; update CADDYFILE_SHA in STATE_FILE; mark_restart.
+#   4. Compute sha256 BEFORE __CADDYFILE_SHA__ substitution (pre-sub hash).
+#   5. Compare pre-sub hash vs STATE CADDYFILE_SHA (last-installed pre-sub hash).
+#   6. If equal: no-op (S2 idempotency).
+#   7. If different: substitute sha into candidate, atomic_swap, update STATE, mark_caddy_reload.
 #
 # CANDIDATE_DIR is a writable scratch directory owned by the caller (tmpdir).
 # TPL_PATH is the local copy of Caddyfile.tpl (fetched by caller, or live repo).
@@ -187,11 +193,18 @@ reconcile_caddy_surface() {
     # Runtime completeness guard (S1 — fail-closed before swap).
     assert_no_unresolved_placeholders "$_out_path"
 
-    # Compute sha256 BEFORE __CADDYFILE_SHA__ substitution so the hash matches
-    # what install.sh records and what /canary/config-hash returns at runtime.
+    # Compute sha256 BEFORE __CADDYFILE_SHA__ substitution.
+    # This pre-substitution hash is what install.sh records in STATE (CADDYFILE_SHA)
+    # and what /canary/config-hash returns at runtime.
+    #
+    # Change-detection (BLOCKER-1 fix, ADR-003 sha_key):
+    #   Compare the NEW candidate's pre-sub hash against the LAST-INSTALLED pre-sub
+    #   hash stored in STATE_FILE key CADDYFILE_SHA.  Both sides are pre-substitution,
+    #   so a no-change render yields equal hashes: no swap, no reload (S2 idempotency).
+    #   The prior approach compared pre-sub vs post-sub-on-disk: always unequal when
+    #   __CADDYFILE_SHA__ is in the template, causing atomic_swap every run.
     local _rendered_sha
     _rendered_sha=$(sha256sum "$_out_path" | awk '{print $1}')
-    sed -i "s|__CADDYFILE_SHA__|${_rendered_sha}|g" "$_out_path"
 
     if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
         log "[dry-run] reconcile_caddy: would write Caddyfile (sha256=$_rendered_sha) to $_installed_path"
@@ -199,22 +212,29 @@ reconcile_caddy_surface() {
         return 0
     fi
 
-    # Checksum-compare vs installed (idempotency: skip if unchanged).
-    local _installed_sha=""
-    if [[ -f "$_installed_path" ]]; then
-        _installed_sha=$(sha256sum "$_installed_path" | awk '{print $1}')
+    # Read the STATE-recorded pre-sub hash of the last successful install.
+    local _state_sha=""
+    local _state_file="${STATE_FILE:-}"
+    if [[ -n "$_state_file" && -f "$_state_file" ]]; then
+        _state_sha=$(grep '^CADDYFILE_SHA=' "$_state_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
     fi
-    if [[ "$_rendered_sha" == "$_installed_sha" ]]; then
-        log "reconcile_caddy: Caddyfile unchanged (sha256=$_rendered_sha) — no swap needed"
+
+    # If hashes match — same template + same env vars — no-op (S2 idempotency).
+    if [[ -n "$_state_sha" && "$_rendered_sha" == "$_state_sha" ]]; then
+        log "reconcile_caddy: Caddyfile unchanged (sha256=$_rendered_sha matches STATE CADDYFILE_SHA) — no swap needed"
         return 0
     fi
+
+    # Hashes differ (or first install with no STATE sha): perform the update.
+    # Substitute the self-referential config-hash into the rendered file NOW
+    # (after change-detection so the substituted value does not affect comparison).
+    sed -i "s|__CADDYFILE_SHA__|${_rendered_sha}|g" "$_out_path"
 
     # Atomic swap (rename(2) on same filesystem — no partial-write window).
     atomic_swap "$_installed_path" "$_out_path" 0644
     log "reconcile_caddy: Caddyfile updated (sha256=$_rendered_sha)"
 
-    # Update CADDYFILE_SHA in STATE_FILE.
-    local _state_file="${STATE_FILE:-}"
+    # Persist the new pre-sub hash to STATE so the next run is idempotent.
     if [[ -n "$_state_file" && -f "$_state_file" ]]; then
         if grep -q '^CADDYFILE_SHA=' "$_state_file"; then
             sed -i "s|^CADDYFILE_SHA=.*|CADDYFILE_SHA=${_rendered_sha}|" "$_state_file"
@@ -223,8 +243,9 @@ reconcile_caddy_surface() {
         fi
     fi
 
-    # Collect restart for oxpulse-partner-edge.service (deduped, applied after all surfaces).
-    mark_restart "oxpulse-partner-edge.service"
+    # Collect caddy reload (targeted — does NOT restart peer containers).
+    # apply_caddy_reloads (called from reconcile_all) hot-reloads caddy in-place.
+    mark_caddy_reload
 }
 
 # ---------------------------------------------------------------------------
@@ -279,10 +300,24 @@ migrate_state() {
     if ! grep -q '^CADDYFILE_SHA=' "$_state_file" 2>/dev/null; then
         local _caddy_path="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/Caddyfile"
         if [[ -f "$_caddy_path" ]]; then
+            # Derive the PRE-substitution hash to match reconcile_caddy_surface's
+            # comparison basis. The live on-disk Caddyfile has __CADDYFILE_SHA__
+            # already substituted with the real hex SHA. reconcile hashes the rendered
+            # candidate BEFORE that substitution (pre-sub hash) and install.sh records
+            # that same pre-sub hash in STATE. If we hash the post-sub file directly,
+            # the recorded hash will never equal reconcile's pre-sub candidate hash —
+            # causing one spurious extra swap+reload on the first post-migration run.
+            #
+            # Reverse the substitution: replace any 64-char hex value inside
+            # respond "..." back to the __CADDYFILE_SHA__ placeholder, then hash.
+            # This produces the pre-sub hash that reconcile would compute for the same
+            # Caddyfile content, so the first --with-templates run after migration
+            # detects "unchanged" and produces zero swaps (Fix 2 invariant).
             local _live_sha
-            _live_sha=$(sha256sum "$_caddy_path" | awk '{print $1}')
+            _live_sha=$(sed 's/respond "[0-9a-f]\{64\}"/respond "__CADDYFILE_SHA__"/g' "$_caddy_path" \
+                | sha256sum | awk '{print $1}')
             printf 'CADDYFILE_SHA=%s\n' "$_live_sha" >> "$_state_file"
-            log "migrate_state: derived CADDYFILE_SHA=$_live_sha from live Caddyfile"
+            log "migrate_state: derived CADDYFILE_SHA=$_live_sha from live Caddyfile (pre-sub normalised)"
         else
             log "migrate_state: Caddyfile not found at $_caddy_path — CADDYFILE_SHA will be set after next reconcile"
         fi
@@ -368,15 +403,21 @@ except Exception: pass
 # ---------------------------------------------------------------------------
 # Dedup-restart collector.
 #
-# mark_restart UNIT  — record a unit for deferred restart.
+# mark_restart UNIT  — record a systemd unit for deferred restart.
 # apply_restarts     — restart all collected units (deduped), then clear.
 #
 # Units are accumulated in _RECONCILE_RESTART_UNITS (space-separated string).
 # apply_restarts runs `systemctl restart` per unique unit.  If not running as
-# root / no systemctl available, falls back to docker compose restart for the
-# compose service mapping.
+# root / no systemctl available, logs a warning (no-op in test environments).
+#
+# Caddy-specific reload (MAJOR-1 fix, targeted blast radius):
+#   mark_caddy_reload   — set deduped flag indicating caddy needs reloading.
+#   apply_caddy_reloads — hot-reload caddy via admin API (no peer containers down).
+#                          Falls back to force-recreate caddy only if hot-reload fails.
+#                          SFU/coturn/xray/naive are NEVER touched by a caddy change.
 # ---------------------------------------------------------------------------
 _RECONCILE_RESTART_UNITS=""
+_RECONCILE_CADDY_RELOAD=0
 
 mark_restart() {
     local _unit="$1"
@@ -403,6 +444,49 @@ apply_restarts() {
         fi
     done
     _RECONCILE_RESTART_UNITS=""
+}
+
+mark_caddy_reload() {
+    _RECONCILE_CADDY_RELOAD=1
+}
+
+# apply_caddy_reloads — hot-reload caddy via admin API; no peer containers down.
+#
+# Caddy's global block configures `admin localhost:2019`.  The reload command
+# sends the new config over the admin socket — zero connection drops to peers.
+# If the admin API is unavailable (e.g. caddy not running), falls back to
+# `docker compose up -d --force-recreate caddy` which recreates ONLY caddy.
+# Both paths leave SFU, coturn, xray, and naive containers untouched.
+apply_caddy_reloads() {
+    if [[ "${_RECONCILE_CADDY_RELOAD:-0}" -ne 1 ]]; then
+        return 0
+    fi
+    _RECONCILE_CADDY_RELOAD=0
+
+    local _compose_file="${COMPOSE_FILE:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}/docker-compose.yml}"
+    local _docker="${DOCKER_BIN:-docker}"
+
+    log "reconcile: caddy hot-reload via admin API (peers untouched)"
+    # -T: non-TTY exec (required in scripts; safe with admin API).
+    if "$_docker" compose -f "$_compose_file" exec -T caddy \
+            caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null; then
+        log "reconcile: caddy reload successful (SFU/coturn/xray/naive untouched)"
+        return 0
+    fi
+
+    warn "reconcile: caddy admin reload failed — falling back to force-recreate caddy only"
+    # Recreate ONLY caddy. `--force-recreate caddy` with an explicit service name
+    # does not recreate sibling services in the compose project.
+    if "$_docker" compose -f "$_compose_file" up -d --force-recreate caddy 2>/dev/null; then
+        log "reconcile: caddy container recreated (peers untouched)"
+        return 0
+    fi
+
+    warn "reconcile: caddy force-recreate also failed — check: $_docker compose -f $_compose_file logs caddy"
+    # Both reload paths failed: the new Caddyfile is NOT live.
+    # Return non-zero so reconcile_all (and callers like upgrade.sh) see a hard error
+    # rather than a silent rc=0 while caddy continues serving the stale config.
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -519,4 +603,209 @@ health_regressions() {
         log "health_regressions: ${_healed_count} healed check(s) — improvement"
     log "health_regressions: no regressions detected"
     return 0
+}
+# ---------------------------------------------------------------------------
+# Phase 4a - Manifest reader.
+#
+# manifest_surfaces MANIFEST_PATH
+#
+# Reads manifest.yaml and emits one line per surface, tab-separated:
+#   id<TAB>kind<TAB>wired<TAB>template<TAB>out<TAB>renderer<TAB>restart_unit<TAB>sha_key<TAB>placeholder_completeness
+#
+# wired is "true" unless surface block contains "wired: false".
+# Uses python3 (de-facto dep, used 9x in channel-render-lib.sh); awk fallback.
+# The python code is stored as a base64 constant to avoid heredoc-in-sourced-
+# function issues (bash heredocs read stdin at call time in sourced files).
+# ---------------------------------------------------------------------------
+
+# Base64-encoded python3 manifest parser.
+_MANIFEST_PARSER_B64="aW1wb3J0IHN5cywgcmUKbWFuaWZlc3RfcGF0aCA9IHN5cy5hcmd2WzFdCnRyeToKICAgIGNvbnRlbnQgPSBvcGVuKG1hbmlmZXN0X3BhdGgpLnJlYWQoKQpleGNlcHQgRXhjZXB0aW9uOgogICAgc3lzLmV4aXQoMCkKc3VyZmFjZXNfbWF0Y2ggPSByZS5zZWFyY2gocidec3VyZmFjZXM6XHMqXG4oLio/KSg/PV5cd3xcWiknLCBjb250ZW50LCByZS5NVUxUSUxJTkUgfCByZS5ET1RBTEwpCmlmIG5vdCBzdXJmYWNlc19tYXRjaDoKICAgIHN5cy5leGl0KDApCnN1cmZhY2VzX2Jsb2NrID0gc3VyZmFjZXNfbWF0Y2guZ3JvdXAoMSkKc3VyZmFjZV9lbnRyaWVzID0gcmUuc3BsaXQocidcbig/PSAgLSBpZDopJywgc3VyZmFjZXNfYmxvY2spCmZvciBlbnRyeSBpbiBzdXJmYWNlX2VudHJpZXM6CiAgICBlbnRyeSA9IGVudHJ5LnN0cmlwKCkKICAgIGlmIG5vdCBlbnRyeToKICAgICAgICBjb250aW51ZQogICAgaWRfbSA9IHJlLnNlYXJjaChyJ14tXHMraWQ6XHMqKFxTKyknLCBlbnRyeSwgcmUuTVVMVElMSU5FKQogICAgaWYgbm90IGlkX206CiAgICAgICAgY29udGludWUKICAgIHNpZCA9IGlkX20uZ3JvdXAoMSkuc3RyaXAoKQogICAgaWYgbm90IHNpZCBvciBzaWQgPT0gIi0iOgogICAgICAgIGNvbnRpbnVlCiAgICBkZWYgZmllbGQoa2V5LCBkZWZhdWx0PSItIik6CiAgICAgICAgbSA9IHJlLnNlYXJjaChyJ15ccysnICsgcmUuZXNjYXBlKGtleSkgKyByJzpccyooLispJCcsIGVudHJ5LCByZS5NVUxUSUxJTkUpCiAgICAgICAgaWYgbToKICAgICAgICAgICAgIyBTdHJpcCB0cmFpbGluZyBZQU1MIGlubGluZSBjb21tZW50ICgjIC4uLikgYW5kIHdoaXRlc3BhY2UKICAgICAgICAgICAgcmF3ID0gbS5ncm91cCgxKQogICAgICAgICAgICAjIFJlbW92ZSBpbmxpbmUgY29tbWVudDogc3BsaXQgb24gIiAjIiBidXQgbm90IGluc2lkZSBxdW90ZWQgc3RyaW5ncwogICAgICAgICAgICAjIFNpbXBsZSBoZXVyaXN0aWM6IHN0cmlwIGZyb20gZmlyc3QgIiAjIiB0aGF0IGFwcGVhcnMgYWZ0ZXIgYSBzcGFjZQogICAgICAgICAgICB2YWwgPSByZS5zdWIocidccysjLiokJywgJycsIHJhdykuc3RyaXAoKS5zdHJpcCgnIicpLnN0cmlwKCInIikKICAgICAgICAgICAgcmV0dXJuIHZhbCBpZiB2YWwgZWxzZSBkZWZhdWx0CiAgICAgICAgcmV0dXJuIGRlZmF1bHQKICAgIGtpbmQgICAgICAgICA9IGZpZWxkKCJraW5kIikKICAgIHdpcmVkX3JhdyAgICA9IGZpZWxkKCJ3aXJlZCIsICJ0cnVlIikKICAgIHdpcmVkICAgICAgICA9ICJmYWxzZSIgaWYgd2lyZWRfcmF3Lmxvd2VyKCkgPT0gImZhbHNlIiBlbHNlICJ0cnVlIgogICAgdG1wbCAgICAgICAgID0gZmllbGQoInRlbXBsYXRlIikKICAgIG91dCAgICAgICAgICA9IGZpZWxkKCJvdXQiKQogICAgcmVuZGVyZXIgICAgID0gZmllbGQoInJlbmRlcmVyIikKICAgIHJ1ICAgICAgICAgICA9IGZpZWxkKCJyZXN0YXJ0X3VuaXQiKQogICAgc2sgICAgICAgICAgID0gZmllbGQoInNoYV9rZXkiKQogICAgcGggICAgICAgICAgID0gZmllbGQoInBsYWNlaG9sZGVyX2NvbXBsZXRlbmVzcyIsICJmYWxzZSIpCiAgICBwcmludChmIntzaWR9XHR7a2luZH1cdHt3aXJlZH1cdHt0bXBsfVx0e291dH1cdHtyZW5kZXJlcn1cdHtydX1cdHtza31cdHtwaH0iKQo="
+
+manifest_surfaces() {
+    local _manifest="$1"
+    if [[ ! -f "$_manifest" ]]; then
+        die "manifest_surfaces: manifest not found: $_manifest"
+    fi
+
+    if command -v python3 >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then
+        local _py_tmp
+        _py_tmp=$(mktemp /tmp/mfst_parse_XXXXXX.py)
+        # shellcheck disable=SC2064
+        trap "rm -f '$_py_tmp'" RETURN
+        printf '%s' "$_MANIFEST_PARSER_B64" | base64 -d > "$_py_tmp"
+        python3 "$_py_tmp" "$_manifest"
+    else
+        # Minimal awk fallback when python3 or base64 absent.
+        awk '
+        /^  - id:/ {
+            if (id != "") flush()
+            id=$NF; kind="-"; wired="true"; template="-"; out="-"
+            renderer="-"; restart_unit="-"; sha_key="-"; ph_complete="false"
+            next
+        }
+        id!="" && /^[a-z]/ && !/^surfaces/ { flush(); id="" }
+        id!="" && /^\s+kind:/         { kind=$NF }
+        id!="" && /^\s+wired:/        { if ($NF=="false") wired="false" }
+        id!="" && /^\s+template:/     { template=$NF }
+        id!="" && /^\s+out:/          { out=$NF }
+        id!="" && /^\s+restart_unit:/ { restart_unit=$NF }
+        id!="" && /^\s+sha_key:/      { sha_key=$NF }
+        id!="" && /^\s+placeholder_completeness:/ { ph_complete=$NF }
+        function flush() {
+            printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                id,kind,wired,template,out,renderer,restart_unit,sha_key,ph_complete
+        }
+        END { if (id!="") flush() }
+        ' "$_manifest"
+    fi
+}
+
+
+# ---------------------------------------------------------------------------
+# manifest_field SURFACE_RECORD FIELD_INDEX
+#
+# Extracts a tab-separated field from a manifest_surfaces record.
+# Indices (1-based):
+#   1=id  2=kind  3=wired  4=template  5=out  6=renderer
+#   7=restart_unit  8=sha_key  9=placeholder_completeness
+# ---------------------------------------------------------------------------
+manifest_field() {
+    local _record="$1"
+    local _idx="$2"
+    echo "$_record" | cut -f"$_idx"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 4a - reconcile_all [MANIFEST_PATH]
+#
+# Manifest-driven reconcile engine (ADR-003).
+#
+# Iterates declared surfaces in topological order.
+# Wired surfaces are reconciled; wired:false surfaces are logged and skipped.
+# After all surfaces: apply_restarts() fires (P1 dead-code fix - key P4a deliverable).
+#
+# P4a wired:  caddyfile (render_from_state).
+# P4b wires:  coturn, xray_client, compose, node_config, firewall,
+#             xray_env, host_scripts, systemd_units.
+#
+# Caller must source STATE_FILE and call migrate_state() before this.
+# RECONCILE_TMPDIR: scratch dir; auto-created if unset (cleaned on RETURN).
+# DRY_RUN=1: forwarded to reconcile_caddy_surface.
+# ---------------------------------------------------------------------------
+reconcile_all() {
+    local _manifest="${1:-}"
+    if [[ -z "$_manifest" ]]; then
+        local _script_dir
+        _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-}")/." || exit; cd ..; pwd)"
+        _manifest="${_script_dir}/manifest.yaml"
+    fi
+
+    if [[ ! -f "$_manifest" ]]; then
+        die "reconcile_all: manifest.yaml not found at $_manifest"
+    fi
+
+    log "reconcile_all: reading manifest $_manifest"
+
+    # Local scope: RECONCILE_TMPDIR is auto-managed per-call.
+    # Declaring local prevents the deleted-dir bug on repeated reconcile_all calls.
+    local RECONCILE_TMPDIR="${RECONCILE_TMPDIR:-}"
+    local _own_tmpdir=0
+    if [[ -z "$RECONCILE_TMPDIR" ]]; then
+        RECONCILE_TMPDIR=$(mktemp -d)
+        _own_tmpdir=1
+    fi
+    # shellcheck disable=SC2064
+    [[ "$_own_tmpdir" -eq 1 ]] && trap "rm -rf '${RECONCILE_TMPDIR}'" RETURN
+
+    local _surface_count=0 _wired_count=0 _skipped_count=0 _changed_count=0
+
+    while IFS=$'\t' read -r _sid _kind _wired _template _out \
+                              _renderer _restart_unit _sha_key _ph_complete; do
+        [[ -z "$_sid" ]] && continue
+        _surface_count=$((_surface_count + 1))
+
+        if [[ "$_wired" == "false" ]]; then
+            log "reconcile_all: surface '$_sid' (kind=$_kind) — declared, not yet wired (Phase 4b)"
+            _skipped_count=$((_skipped_count + 1))
+            continue
+        fi
+
+        _wired_count=$((_wired_count + 1))
+        log "reconcile_all: processing surface '$_sid' (kind=$_kind)"
+
+        case "$_kind" in
+            render_from_state)
+                case "$_sid" in
+                    caddyfile)
+                        local _tpl_src="${RECONCILE_TMPDIR}/Caddyfile.tpl"
+                        if [[ ! -f "$_tpl_src" ]]; then
+                            local _repo_dir="${REPO_DIR:-}"
+                            local _repo_raw="${REPO_RAW:-}"
+                            if [[ -n "$_repo_dir" && -f "${_repo_dir}/Caddyfile.tpl" ]]; then
+                                cp "${_repo_dir}/Caddyfile.tpl" "$_tpl_src"
+                            elif [[ -n "$_repo_raw" ]]; then
+                                curl -fsSL --max-time 30 \
+                                    "${_repo_raw}/Caddyfile.tpl" \
+                                    -o "$_tpl_src" 2>/dev/null \
+                                    || die "reconcile_all: could not fetch Caddyfile.tpl from $_repo_raw"
+                            else
+                                die "reconcile_all: Caddyfile.tpl not available (set REPO_DIR or REPO_RAW)"
+                            fi
+                        fi
+                        # Use _RECONCILE_CADDY_RELOAD flag for per-surface change tracking.
+                        # The old before/after _RECONCILE_RESTART_UNITS size delta was unsound:
+                        # dedup means a real change to a unit already in the list yields
+                        # zero delta — silently undercounting changes (impacts P4b multi-surface).
+                        local _before_caddy_reload="${_RECONCILE_CADDY_RELOAD:-0}"
+                        reconcile_caddy_surface "$RECONCILE_TMPDIR" "$_tpl_src"
+                        if [[ "${_RECONCILE_CADDY_RELOAD:-0}" -ne "$_before_caddy_reload" ]]; then
+                            _changed_count=$((_changed_count + 1))
+                        fi
+                        ;;
+                    *)
+                        warn "reconcile_all: surface '$_sid' render_from_state — no handler yet (Phase 4b)"
+                        ;;
+                esac
+                ;;
+            persist_rendered|sync_verified|network_apply)
+                warn "reconcile_all: surface '$_sid' kind=$_kind — not yet wired (Phase 4b)"
+                ;;
+            *)
+                warn "reconcile_all: surface '$_sid' unknown kind '$_kind' — skipping"
+                ;;
+        esac
+    done < <(manifest_surfaces "$_manifest")
+
+    # Fail-closed guard (LIKELY fix): a present manifest that yields zero surfaces
+    # means the parser failed silently (malformed YAML, missing surfaces: block,
+    # or parser exception). Silently skipping all surfaces would leave caddy
+    # unmanaged on every run — a stealth misconfiguration. Die loudly instead.
+    # (Absent manifest already die()s above; this covers present-but-unparseable.)
+    if [[ "$_surface_count" -eq 0 ]]; then
+        die "reconcile_all: manifest parsed zero surfaces from $_manifest — malformed manifest or parser failure; refusing to proceed (caddy would be silently unmanaged)"
+    fi
+
+    # Phase 4a invariant: caddyfile surface must be wired. If _surface_count>0 but
+    # _wired_count==0 every surface is unwired, which means the caddyfile entry is
+    # missing or explicitly wired:false — a configuration error.
+    if [[ "$_wired_count" -eq 0 ]]; then
+        die "reconcile_all: manifest has $_surface_count surface(s) but none are wired — expected caddyfile (wired:true); refusing to proceed"
+    fi
+
+    log "reconcile_all: ${_surface_count} declared, ${_wired_count} wired, ${_skipped_count} skipped (not-yet-wired), ${_changed_count} changed"
+
+    # KEY DELIVERABLE (Phase 4a): apply_caddy_reloads + apply_restarts fire after the loop.
+    # Caddy changes use targeted hot-reload (no peer containers down).
+    # Other unit restarts (Phase 4b surfaces) use apply_restarts.
+    #
+    # Fix 1 (engine reliability): apply_caddy_reloads returns non-zero on double-failure
+    # (both hot-reload and force-recreate paths failed). Capture rc and propagate so the
+    # caller sees a hard error, not a silent success with stale caddy config live.
+    local _caddy_reload_rc=0
+    apply_caddy_reloads || _caddy_reload_rc=$?
+    apply_restarts
+    if [[ "$_caddy_reload_rc" -ne 0 ]]; then
+        # Fail AFTER apply_restarts so other deferred restarts still fire first.
+        die "reconcile_all: caddy reload double-failure (hot-reload and force-recreate both failed) — new Caddyfile NOT live; check caddy container logs"
+    fi
 }
