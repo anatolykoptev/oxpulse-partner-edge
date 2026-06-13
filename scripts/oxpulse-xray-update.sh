@@ -9,7 +9,9 @@
 # operators read both the same way.
 #
 # Recreate strategy: docker compose up --force-recreate is used instead of a
-# hand-rolled `docker run` so the container is always created from the single
+# hand-rolled `docker run`.  The argument to --force-recreate is the SERVICE
+# name (OXPULSE_XRAY_SERVICE), not the container name — compose resolves the
+# container from the service definition and always recreates from the single
 # compose source of truth (network=edge, volume=xray-client.json, expose=3080).
 # A hand-rolled `docker run` can silently drift from docker-compose.yml.tpl
 # (wrong network, missing volume, etc.) and is non-idempotent; compose prevents
@@ -86,7 +88,7 @@ log "update detected; recreating $CONTAINER via compose (current=$OLD_VER)"
 ok=0
 for _i in 1 2 3 4 5 6; do
     sleep 2
-    if docker exec "$CONTAINER" sh -c 'ss -ltn 2>/dev/null | grep -q ":3080 "' 2>/dev/null; then
+    if docker exec "$CONTAINER" sh -c 'ss -ltn 2>/dev/null | grep -q ":3080"' 2>/dev/null; then
         ok=1; break
     fi
 done

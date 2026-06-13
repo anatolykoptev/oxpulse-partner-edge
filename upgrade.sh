@@ -361,6 +361,41 @@ if [[ "$MODE" == templates ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# _resolve_naive_socks_port TPL_FILE — shared helper used by re_render_caddy
+# AND the with_templates dry-run block so both paths resolve NAIVE_SOCKS_PORT
+# identically.  Resolution order:
+#   1. NAIVE_SOCKS_PORT env var (already set by caller)
+#   2. STATE_FILE / install.env persisted value
+#   3. Live docker inspect on oxpulse-partner-naive
+#   4. die — if {{NAIVE_SOCKS_PORT}} is present in TPL_FILE (arg $1) and
+#             no authoritative source is available.  NEVER silently defaults
+#             to 1080 when the template uses the placeholder; that would bake
+#             a wrong upstream into the live Caddyfile without warning.
+#
+# Prints the resolved port on stdout.  Exits non-zero (via die) on failure.
+# ---------------------------------------------------------------------------
+_resolve_naive_socks_port() {
+	local _tpl_file="${1:-}"
+	local _port="${NAIVE_SOCKS_PORT:-}"
+	# Tier 2: STATE_FILE
+	[[ -z "$_port" ]] && _port=$(
+		grep '^NAIVE_SOCKS_PORT=' "${STATE_FILE:-}" 2>/dev/null | cut -d= -f2 || true)
+	# Tier 3: live docker inspect
+	[[ -z "$_port" ]] && _port=$(
+		${DOCKER_BIN:-docker} inspect oxpulse-partner-naive \
+			--format '{{range .Config.Env}}{{.}}\n{{end}}' 2>/dev/null \
+			| grep '^NAIVE_SOCKS_PORT=' | cut -d= -f2 || true)
+	# Tier 4: die if template uses the placeholder and nothing resolved
+	if [[ -z "$_port" ]]; then
+		if [[ -n "$_tpl_file" ]] && grep -qF '{{NAIVE_SOCKS_PORT}}' "$_tpl_file" 2>/dev/null; then
+			die "NAIVE_SOCKS_PORT: not in STATE_FILE and naive container is down — cannot render Caddyfile safely. Bring up oxpulse-partner-naive or set NAIVE_SOCKS_PORT in the environment before re-running."
+		fi
+		_port="1080"
+	fi
+	printf '%s' "$_port"
+}
+
+# ---------------------------------------------------------------------------
 # re_render_caddy — fetch Caddyfile.tpl, render with install.env values,
 # compute and embed the sha256 (__CADDYFILE_SHA__ logic matching install.sh),
 # update CADDYFILE_SHA in install.env.
@@ -424,15 +459,10 @@ re_render_caddy() {
 	_awg_motherly_ip="${_awg_motherly_ip:-10.9.0.2}"
 	_hy2_fallback_host="${_hy2_fallback_host:-host.docker.internal}"
 	_hy2_fallback_port="${_hy2_fallback_port:-18443}"
-	# NAIVE_SOCKS_PORT: read from live naive container env or default to 1080.
-	if [[ -z "$_naive_socks_port" ]]; then
-		_naive_socks_port=$(
-			${DOCKER_BIN:-docker} inspect oxpulse-partner-naive \
-				--format '{{range .Config.Env}}{{.}}\n{{end}}' 2>/dev/null \
-				| grep '^NAIVE_SOCKS_PORT=' | cut -d= -f2 || true
-		)
-		_naive_socks_port="${_naive_socks_port:-1080}"
-	fi
+	# NAIVE_SOCKS_PORT: use shared resolver (env → STATE_FILE → docker inspect → die).
+	# The resolver dies if {{NAIVE_SOCKS_PORT}} is in the template and unresolvable,
+	# matching the dry-run path — no silent 1080 fallback on a down naive container.
+	_naive_socks_port=$(_resolve_naive_socks_port "$out_tpl")
 
 	# Render ALL placeholders present in Caddyfile.tpl.
 	sed \
@@ -1859,22 +1889,8 @@ if [[ "$MODE" == with_templates ]]; then
 				_dr_awg="${AWG_MOTHERLY_IP:-10.9.0.2}"
 				_dr_hy2h="${HY2_FALLBACK_HOST:-host.docker.internal}"
 				_dr_hy2p="${HY2_FALLBACK_PORT:-18443}"
-				# NAIVE_SOCKS_PORT: check STATE_FILE first, then live docker inspect.
-				# Die with an actionable message if the template uses it and neither
-				# source is authoritative (naive container down + no persisted value).
-				_dr_naive="${NAIVE_SOCKS_PORT:-}"
-				[[ -z "$_dr_naive" ]] && _dr_naive=$(
-					grep '^NAIVE_SOCKS_PORT=' "${STATE_FILE:-}" 2>/dev/null | cut -d= -f2 || true)
-				[[ -z "$_dr_naive" ]] && _dr_naive=$(
-					${DOCKER_BIN:-docker} inspect oxpulse-partner-naive \
-						--format '{{range .Config.Env}}{{.}}\n{{end}}' 2>/dev/null \
-						| grep '^NAIVE_SOCKS_PORT=' | cut -d= -f2 || true)
-				if [[ -z "$_dr_naive" ]]; then
-					if grep -qF '{{NAIVE_SOCKS_PORT}}' "$_caddyfile_tpl" 2>/dev/null; then
-						die "NAIVE_SOCKS_PORT: not in STATE_FILE and naive container is down — cannot render Caddyfile safely. Bring up oxpulse-partner-naive or set NAIVE_SOCKS_PORT in the environment before re-running upgrade."
-					fi
-					_dr_naive="1080"
-				fi
+				# NAIVE_SOCKS_PORT: use shared resolver — identical to re_render_caddy.
+				_dr_naive=$(_resolve_naive_socks_port "$_caddyfile_tpl")
 				if [[ -r "$_defaults_conf" ]]; then
 					_dr_awg=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' || echo '10.9.0.2')
 					_dr_hy2h=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' || echo 'host.docker.internal')

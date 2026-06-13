@@ -1494,6 +1494,10 @@ EOF
 	if [[ -n "${OXPULSE_MIRROR_BASE:-}" ]]; then
 		printf 'OXPULSE_MIRROR_BASE=%s\n' "${OXPULSE_MIRROR_BASE}" >> "$PREFIX_LIB/install.env"
 	fi
+	# Persist NAIVE_SOCKS_PORT so upgrade.sh _resolve_naive_socks_port can read it
+	# from STATE_FILE when the naive container is down during an upgrade.
+	# Value is authoritative at install time (env > node-config > default 1080).
+	printf 'NAIVE_SOCKS_PORT=%s\n' "${NAIVE_SOCKS_PORT:-1080}" >> "$PREFIX_LIB/install.env"
 	chmod 0600 "$PREFIX_LIB/install.env"
 	# Phase 1: record sha256 of rendered Caddyfile for drift detection.
 	# healthcheck.sh check 15 compares this against /canary/config-hash.

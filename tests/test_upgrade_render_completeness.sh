@@ -76,6 +76,7 @@ PARTNER_DOMAIN=test.example.com
 TURNS_SUBDOMAIN=turns
 IMAGE_VERSION=latest
 CADDYFILE_SHA=old
+NAIVE_SOCKS_PORT=1080
 ENVEOF
 chmod 0600 "$T_LIB/install.env"
 
@@ -102,7 +103,7 @@ RENDER_OUT=$(
         DOCKER_BIN="true"   # stub — naive container not running
         DRY_RUN=0
 
-        eval "$(awk "/^re_render_caddy\(\)/,/^\}$/" "'"$UPGRADE"'")"
+        eval "$(awk "/^_resolve_naive_socks_port\(\)/,/^\}$/" "'"$UPGRADE"'"; awk "/^re_render_caddy\(\)/,/^\}$/" "'"$UPGRADE"'")"
         re_render_caddy
     ' 2>&1
 ) || RENDER_RC=$?
@@ -166,7 +167,7 @@ GUARD_OUT=$(
         DOCKER_BIN="true"
         DRY_RUN=0
 
-        eval "$(awk "/^re_render_caddy\(\)/,/^\}$/" "'"$UPGRADE"'")"
+        eval "$(awk "/^_resolve_naive_socks_port\(\)/,/^\}$/" "'"$UPGRADE"'"; awk "/^re_render_caddy\(\)/,/^\}$/" "'"$UPGRADE"'")"
         # Override the curl inside re_render_caddy to copy the local file.
         # We do this by shimming curl in the env.
         curl() {
@@ -240,7 +241,7 @@ t6_cleanup() {
     kill "$T6_HTTP_PID" 2>/dev/null || true
     rm -rf "$T6_TMPDIR"
 }
-trap t6_cleanup EXIT
+trap 'cleanup; t6_cleanup' EXIT
 sleep 1
 curl -fsSL --max-time 5 "http://127.0.0.1:$T6_PORT/Caddyfile.tpl" >/dev/null \
     || { fail "local http server (T6) not ready"; t6_cleanup; }
@@ -396,6 +397,71 @@ else
 fi
 
 t6_cleanup
+
+# ---- Test 7: re_render_caddy dies symmetrically when {{NAIVE_SOCKS_PORT}} in tpl and unresolvable ----
+echo "==> Test 7: re_render_caddy dies if NAIVE_SOCKS_PORT unresolvable (symmetric with dry-run)"
+
+T7_TMPDIR=$(mktemp -d)
+T7_ETC="$T7_TMPDIR/etc"
+T7_LIB="$T7_TMPDIR/lib"
+T7_SHARE="$T7_TMPDIR/share/oxpulse-partner-edge/config"
+mkdir -p "$T7_ETC" "$T7_LIB" "$T7_SHARE"
+
+# Compose with caddy service so re_render_caddy doesn't skip.
+cat > "$T7_ETC/docker-compose.yml" << 'COMPOSE7'
+services:
+  caddy:
+    image: ghcr.io/anatolykoptev/partner-edge-caddy:latest
+  oxpulse-sfu:
+    environment:
+      SIGNALING_SFU_SECRET: "test-secret"
+COMPOSE7
+
+# install.env WITHOUT NAIVE_SOCKS_PORT — simulates naive-down edge, no persisted value.
+cat > "$T7_LIB/install.env" << 'ENV7'
+PARTNER_DOMAIN=t7.example.com
+TURNS_SUBDOMAIN=turns
+IMAGE_VERSION=latest
+CADDYFILE_SHA=old
+ENV7
+chmod 0600 "$T7_LIB/install.env"
+
+cp "$REPO_ROOT/config/defaults.conf" "$T7_SHARE/defaults.conf" 2>/dev/null || \
+    printf ': "${OXPULSE_AWG_MOTHERLY_IP:=10.9.0.2}"\n' > "$T7_SHARE/defaults.conf"
+
+T7_RC=0
+T7_OUT=$(
+    bash -c '
+        set -euo pipefail
+        log()  { printf "==> %s\n" "$*" >&2; }
+        warn() { printf "!! %s\n" "$*" >&2; }
+        die()  { printf "ERR %s\n" "$*" >&2; exit 1; }
+
+        PREFIX_ETC="'"$T7_ETC"'"
+        PREFIX_LIB="'"$T7_LIB"'"
+        PREFIX_SHARE="'"$T7_TMPDIR/share"'"
+        STATE_FILE="'"$T7_LIB/install.env"'"
+        COMPOSE_FILE="'"$T7_ETC/docker-compose.yml"'"
+        REPO_RAW="http://127.0.0.1:'"$SERVE_PORT"'"
+        PARTNER_DOMAIN="t7.example.com"
+        TURNS_SUBDOMAIN="turns"
+        DOCKER_BIN="true"   # stub — naive container down (true always exits 0 but no output)
+        DRY_RUN=0
+        # NAIVE_SOCKS_PORT not set — no env, no STATE_FILE entry, docker inspect stub returns empty
+
+        eval "$(awk "/^_resolve_naive_socks_port\(\)/,/^\}$/" "'"$UPGRADE"'")"
+        eval "$(awk "/^re_render_caddy\(\)/,/^\}$/" "'"$UPGRADE"'")"
+        re_render_caddy
+    ' 2>&1
+) || T7_RC=$?
+
+if [[ $T7_RC -ne 0 ]] && echo "$T7_OUT" | grep -qi "NAIVE_SOCKS_PORT"; then
+    pass "re_render_caddy dies with actionable message when NAIVE_SOCKS_PORT unresolvable"
+else
+    fail "re_render_caddy did NOT die (rc=$T7_RC) — silent 1080 fallback or wrong error (output: $T7_OUT)"
+fi
+
+rm -rf "$T7_TMPDIR"
 
 # ---- Summary ----
 echo ""
