@@ -34,6 +34,13 @@ services:
       # Provisioned by install.sh; refreshed monthly by geoip-refresh.timer.
       # Read-only — Caddy only needs to read the file.
       - /var/lib/geoip:/var/lib/geoip:ro
+      # Phase 3: operator override slot — conf.d/*.caddy
+      # Caddyfile imports /etc/oxpulse-partner-edge/conf.d/*.caddy at the end.
+      # Without this mount the import path does not exist inside the container
+      # and the override slot is a silent no-op. install.sh creates conf.d/
+      # with a README.txt before docker compose up, so the bind-mount source
+      # always exists on the host for fresh installs.
+      - ./conf.d:/etc/oxpulse-partner-edge/conf.d:ro
     depends_on:
       xray-client:
         condition: service_started

@@ -69,7 +69,6 @@ jobs:
         #   test_e2e_a_prime.sh         — live provisioned VM e2e
         #   test_bake.sh                — references deploy/partner-edge/ path (pre-reorganization)
         #   test_cert_watch_units.sh    — needs deployed systemd units
-        #   test_compose_volumes.sh     — references deploy/partner-edge/ path
         #   test_coturn_config.sh       — references deploy/partner-edge/ path
         #   test_cover_page.sh          — needs live Caddy image + cover.html
         #   test_headers.sh             — requires positional <domain> argument
@@ -88,7 +87,7 @@ jobs:
           set +e
           PASS=0; FAIL=0
           SKIP_LIST="test_caddy_image.sh test_e2e_a_prime.sh \
-            test_bake.sh test_cert_watch_units.sh test_compose_volumes.sh \
+            test_bake.sh test_cert_watch_units.sh \
             test_coturn_config.sh test_cover_page.sh test_headers.sh \
             test_healthcheck_turns443.sh test_hydrate.sh test_install_deps.sh \
             test_install_ships_cover.sh test_install_wires_cert_watch.sh \
