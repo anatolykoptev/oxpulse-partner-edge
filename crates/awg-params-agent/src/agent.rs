@@ -11,7 +11,7 @@ use std::io::Write;
 use std::{path::PathBuf, time::Duration};
 use tempfile::NamedTempFile;
 use tokio::{process::Command, time::sleep};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// All configuration for the agent loop, parsed from env at startup.
 pub struct AgentConfig {
@@ -22,6 +22,18 @@ pub struct AgentConfig {
     pub state_path: PathBuf,
     pub poll_interval: Duration,
     pub node_id: String,
+    /// Optional systemd unit to restart immediately after each successful kernel
+    /// apply, before saving state.  Used by split-routing to re-assert the live
+    /// AllowedIPs widening that awg syncconf just re-narrowed.
+    ///
+    /// Race-free guarantee: `restart_unit_after_apply` fires strictly AFTER
+    /// `apply_to_kernel()` (i.e. after `awg syncconf` returns), so the widen
+    /// always runs AFTER the re-narrow — not before.  A `.path` watcher on
+    /// awg0.conf would fire at the rename step (step 4), BEFORE syncconf (step 5),
+    /// and would therefore lose the race.  This hook is the correct solution.
+    ///
+    /// Set via `OXPULSE_RESTART_UNIT_AFTER_APPLY` env var.  Empty string → disabled.
+    pub restart_unit_after_apply: Option<String>,
 }
 
 pub struct AgentLoop {
@@ -43,6 +55,7 @@ impl AgentLoop {
             conf = ?self.cfg.awg_conf_path,
             poll_interval = ?self.cfg.poll_interval,
             node_id = %self.cfg.node_id,
+            restart_unit_after_apply = ?self.cfg.restart_unit_after_apply,
             "awg-params-agent starting"
         );
 
@@ -96,7 +109,20 @@ impl AgentLoop {
         // 5. Apply to running kernel via awg-quick strip | awg syncconf.
         self.apply_to_kernel().await.context("apply to kernel")?;
 
-        // 6. Update state file (only after successful kernel apply).
+        // 6. Re-assert split-routing (if configured) — strictly AFTER syncconf.
+        //
+        // awg syncconf re-narrows the hub peer's AllowedIPs back to /32 (the value
+        // in awg0.conf).  split-routing's live `awg set peer allowed-ips 0.0.0.0/0`
+        // must run AFTER syncconf to re-widen it.  This hook fires here — after
+        // apply_to_kernel() returned successfully — guaranteeing the correct order.
+        //
+        // Best-effort: a failure here is logged and does not fail the epoch update.
+        // split-routing is re-asserted by the daily refresh timer as belt-and-suspenders.
+        if let Some(ref unit) = self.cfg.restart_unit_after_apply {
+            self.restart_unit(unit).await;
+        }
+
+        // 7. Update state file (only after successful kernel apply).
         let new_state = AwgState {
             last_applied_epoch: response.epoch,
             applied_at: Utc::now(),
@@ -105,10 +131,45 @@ impl AgentLoop {
 
         info!(epoch = response.epoch, "epoch applied successfully");
 
-        // 7. Report to central (best-effort — failure does not affect the loop).
+        // 8. Report to central (best-effort — failure does not affect the loop).
         self.client.report_applied(response.epoch).await;
 
         Ok(())
+    }
+
+    /// Restart a systemd unit via `systemctl restart <unit>`.
+    /// Best-effort: logs warn on failure, never propagates the error.
+    /// Bounded by 60s timeout to avoid blocking the agent loop on a wedged
+    /// netlink socket (same risk as split-routing.service ExecStart).
+    async fn restart_unit(&self, unit: &str) {
+        use tokio::time::timeout;
+
+        info!(%unit, "restarting unit after kernel apply");
+
+        let unit = unit.to_owned();
+        let result = timeout(Duration::from_secs(60), async move {
+            Command::new("systemctl")
+                .arg("restart")
+                .arg(&unit)
+                .status()
+                .await
+        })
+        .await;
+
+        match result {
+            Ok(Ok(status)) if status.success() => {
+                info!("unit restart OK");
+            }
+            Ok(Ok(status)) => {
+                warn!(%status, "unit restart exited non-zero (split-routing may be stale until next refresh)");
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "unit restart spawn failed (split-routing may be stale until next refresh)");
+            }
+            Err(_) => {
+                warn!("unit restart timed out after 60s (split-routing may be stale until next refresh)");
+            }
+        }
     }
 
     /// Atomically overwrite `awg_conf_path` with `content`.

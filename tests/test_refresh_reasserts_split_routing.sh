@@ -31,13 +31,17 @@ grep -q "oxpulse-partner-edge-split-routing.service" "$SCRIPT" \
     || fail "test2: split-routing re-assert not found in $SCRIPT"
 pass "test2: split-routing re-assert block present in source"
 
-grep -q "systemctl restart" "$SCRIPT" \
-    || fail "test2b: 'systemctl restart' for split-routing not found in $SCRIPT"
-pass "test2b: systemctl restart call present"
+grep -q "timeout 60 systemctl restart" "$SCRIPT" \
+    || fail "test2b: 'timeout 60 systemctl restart' not found in $SCRIPT (nit fix: must be guarded)"
+pass "test2b: timeout 60 systemctl restart present"
 
-grep -q "re-asserting split-routing" "$SCRIPT" \
-    || fail "test2c: re-assert log message not found in $SCRIPT"
-pass "test2c: re-assert log message present"
+grep -q "belt-and-suspenders" "$SCRIPT" \
+    || fail "test2c: 'belt-and-suspenders' comment not found in $SCRIPT (updated comment required)"
+pass "test2c: belt-and-suspenders comment present"
+
+grep -q "PRIMARY fix" "$SCRIPT" \
+    || fail "test2d: 'PRIMARY fix' comment not found in $SCRIPT (must document the epoch-driven hook)"
+pass "test2d: PRIMARY fix comment present"
 
 # ── Test 3: re-assert block is after the rotation section ────────────────────
 ROTATION_END_LINE=$(grep -n 'log "OK rotation applied' "$SCRIPT" | tail -1 | cut -d: -f1)
@@ -88,10 +92,17 @@ systemctl() {
 }
 export -f systemctl
 
+# Stub timeout so the harness doesn't need the real binary.
+timeout() {
+    shift  # drop the numeric arg
+    "$@"   # run the rest (systemctl restart ...)
+}
+export -f timeout
+
 _sr_svc="oxpulse-partner-edge-split-routing.service"
 if systemctl list-unit-files "$_sr_svc" --no-legend 2>/dev/null | grep -q "$_sr_svc"; then
-    log "re-asserting split-routing after AWG param sync"
-    if systemctl restart "$_sr_svc" 2>>"$LOG_FILE"; then
+    log "re-asserting split-routing (daily belt-and-suspenders)"
+    if timeout 60 systemctl restart "$_sr_svc" 2>>"$LOG_FILE"; then
         log "split-routing re-assert OK"
     else
         log "WARN split-routing re-assert failed (non-fatal) — check: systemctl status $_sr_svc"
@@ -143,10 +154,14 @@ systemctl() {
 }
 export -f systemctl
 
+# Stub timeout
+timeout() { shift; "$@"; }
+export -f timeout
+
 _sr_svc="oxpulse-partner-edge-split-routing.service"
 if systemctl list-unit-files "$_sr_svc" --no-legend 2>/dev/null | grep -q "$_sr_svc"; then
-    log "re-asserting split-routing after AWG param sync"
-    if systemctl restart "$_sr_svc" 2>>"$LOG_FILE"; then
+    log "re-asserting split-routing (daily belt-and-suspenders)"
+    if timeout 60 systemctl restart "$_sr_svc" 2>>"$LOG_FILE"; then
         log "split-routing re-assert OK"
     else
         log "WARN split-routing re-assert failed (non-fatal)"
@@ -167,6 +182,22 @@ COMBINED5=$(cat "$T/stdout5.txt" "$LOG5" 2>/dev/null || true)
 printf '%s' "$COMBINED5" | grep -q "skipping re-assert" \
     || fail "test5: expected 'skipping re-assert' in output; got: $COMBINED5"
 pass "test5: behavioral — unit absent → skip logged, no restart attempted"
+
+# ── Test 6: structural — service unit sets OXPULSE_RESTART_UNIT_AFTER_APPLY ──────
+UNIT_FILE="$REPO_ROOT/systemd/oxpulse-awg-params-agent.service"
+[[ -f "$UNIT_FILE" ]] \
+    || fail "test6: awg-params-agent unit file not found at $UNIT_FILE"
+
+grep -q "OXPULSE_RESTART_UNIT_AFTER_APPLY" "$UNIT_FILE" \
+    || fail "test6: OXPULSE_RESTART_UNIT_AFTER_APPLY not in $UNIT_FILE"
+grep -q "oxpulse-partner-edge-split-routing.service" "$UNIT_FILE" \
+    || fail "test6: split-routing unit name not in $UNIT_FILE OXPULSE_RESTART_UNIT_AFTER_APPLY value"
+pass "test6: awg-params-agent service unit wires OXPULSE_RESTART_UNIT_AFTER_APPLY"
+
+# Syntax check on the unit file (bash -n won't work but check it's non-empty and has [Unit])
+grep -q "\[Unit\]" "$UNIT_FILE" \
+    || fail "test6: unit file missing [Unit] section"
+pass "test6: unit file structure OK"
 
 echo ""
 echo "All tests passed."

@@ -12,6 +12,9 @@
 //!   OXPULSE_AWG_IFACE           (default awg0)
 //!   OXPULSE_STATE_PATH          (default /var/lib/oxpulse-partner-edge/awg-params-state.json)
 //!   OXPULSE_POLL_INTERVAL       (default 30s, humantime format: "30s", "1m")
+//!   OXPULSE_RESTART_UNIT_AFTER_APPLY  (optional; systemd unit restarted after each
+//!                                      successful kernel apply — used by split-routing
+//!                                      to re-assert AllowedIPs widening after syncconf)
 
 mod agent;
 mod client;
@@ -84,6 +87,18 @@ fn load_config() -> Result<AgentConfig> {
 
     let poll_interval = parse_duration(&env_or("OXPULSE_POLL_INTERVAL", "30s"))?;
 
+    // Optional post-apply hook: restart this systemd unit after each successful
+    // kernel apply.  Empty string → disabled.  Used by split-routing to re-assert
+    // AllowedIPs widening strictly after awg syncconf re-narrowed it.
+    let restart_unit_after_apply = {
+        let val = env_or("OXPULSE_RESTART_UNIT_AFTER_APPLY", "");
+        if val.is_empty() {
+            None
+        } else {
+            Some(val)
+        }
+    };
+
     info!(
         central_url = %central_url,
         node_id = %node_id,
@@ -92,6 +107,7 @@ fn load_config() -> Result<AgentConfig> {
         awg_iface = %awg_iface,
         state_path = ?state_path,
         poll_interval = ?poll_interval,
+        restart_unit_after_apply = ?restart_unit_after_apply,
         "config loaded"
     );
 
@@ -103,6 +119,7 @@ fn load_config() -> Result<AgentConfig> {
         state_path,
         poll_interval,
         node_id,
+        restart_unit_after_apply,
     })
 }
 

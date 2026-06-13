@@ -104,3 +104,18 @@ setup() {
 @test "release.yml gh release upload includes oxpulse-partner-edge-ru-subnets-update.timer" {
   awk '/gh release upload/,/--clobber/' "$RELEASE_YML" | grep -q 'oxpulse-partner-edge-ru-subnets-update\.timer'
 }
+
+# ── awg-params-agent service unit (post-apply hook wiring) ───────────────────
+
+@test "release.yml stages systemd/oxpulse-awg-params-agent.service via cp" {
+  grep -q 'cp systemd/oxpulse-awg-params-agent\.service' "$RELEASE_YML"
+}
+
+@test "release.yml sha256sum block covers oxpulse-awg-params-agent.service" {
+  # Must be in the sha256sum input list so its integrity is pinned to the release.
+  awk '/sha256sum/,/>.*SHA256SUMS/' "$RELEASE_YML" | grep -q 'oxpulse-awg-params-agent\.service'
+}
+
+@test "release.yml gh release upload includes oxpulse-awg-params-agent.service" {
+  awk '/gh release upload/,/--clobber/' "$RELEASE_YML" | grep -q 'oxpulse-awg-params-agent\.service'
+}

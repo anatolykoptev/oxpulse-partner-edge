@@ -397,16 +397,26 @@ fi
 echo "$NEW_VERSION" > "$VERSION_FILE"
 log "OK rotation applied: pub=${NEW_PUB:0:16}... version=$NEW_VERSION"
 
-# Re-assert split-routing after AWG param sync.
-# The awg-params-agent may reset the hub peer's AllowedIPs from 0.0.0.0/0
-# back to /32 when applying a new epoch. refresh.service runs daily and
-# coincides with param-agent syncs, so we re-assert as the final step.
+# Belt-and-suspenders re-assert of split-routing.
+# PRIMARY fix (durable, event-driven): awg-params-agent post-apply hook via
+# OXPULSE_RESTART_UNIT_AFTER_APPLY fires immediately after every awg syncconf,
+# regardless of time of day.  The daily refresh timer is NOT the primary trigger.
+# This block is kept as a cheap safety net: upgrade lag (agent running before
+# the env var was wired), or any future scenario where the primary hook is not
+# configured.
+#
+# Timing note: epoch changes fire at any hour (operator key rotations), NOT on
+# the daily refresh cadence.  The daily restart here closes a window of UP TO
+# 24h when the agent hook is absent; it is not a substitute for the hook.
+#
 # Idempotent: split-routing script is safe to call multiple times.
 # Skip gracefully on nodes where split-routing is not installed.
+# timeout 60: split-routing is Type=oneshot with live awg/ip ops; cap the wait
+# so a wedged netlink socket cannot block the daily refresh indefinitely.
 _sr_svc="oxpulse-partner-edge-split-routing.service"
 if systemctl list-unit-files "$_sr_svc" --no-legend 2>/dev/null | grep -q "$_sr_svc"; then
-    log "re-asserting split-routing after AWG param sync"
-    if systemctl restart "$_sr_svc" 2>>"$LOG_FILE"; then
+    log "re-asserting split-routing (daily belt-and-suspenders)"
+    if timeout 60 systemctl restart "$_sr_svc" 2>>"$LOG_FILE"; then
         log "split-routing re-assert OK"
     else
         log "WARN split-routing re-assert failed (non-fatal) — check: systemctl status $_sr_svc"
