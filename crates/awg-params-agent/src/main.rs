@@ -164,7 +164,10 @@ mod tests {
         // None.  We test env_or + branch inline to avoid touching real env state.
         let val = env_or_for_test("OXPULSE_RESTART_UNIT_AFTER_APPLY_ABSENT_42x", "");
         let result: Option<String> = if val.is_empty() { None } else { Some(val) };
-        assert_eq!(result, None, "unset env var must map to None (hook disabled)");
+        assert_eq!(
+            result, None,
+            "unset env var must map to None (hook disabled)"
+        );
     }
 
     #[test]
@@ -173,14 +176,21 @@ mod tests {
         // Must map to None.
         let val = String::new();
         let result: Option<String> = if val.is_empty() { None } else { Some(val) };
-        assert_eq!(result, None, "empty string must map to None (hook disabled)");
+        assert_eq!(
+            result, None,
+            "empty string must map to None (hook disabled)"
+        );
     }
 
     #[test]
     fn restart_unit_non_empty_maps_to_some() {
         // Non-empty value maps to Some.
         let val = "oxpulse-partner-edge-split-routing.service".to_owned();
-        let result: Option<String> = if val.is_empty() { None } else { Some(val.clone()) };
+        let result: Option<String> = if val.is_empty() {
+            None
+        } else {
+            Some(val.clone())
+        };
         assert_eq!(
             result,
             Some("oxpulse-partner-edge-split-routing.service".to_owned()),
