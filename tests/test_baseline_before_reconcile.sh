@@ -31,9 +31,16 @@ pass "B0: upgrade.sh present"
 # the next top-level ";;".  We grep for line numbers to check ordering.
 # Strategy: find line numbers of key calls within the with_templates block.
 
-# Find the with_templates mode block start
-_wt_start=$(grep -n 'with_templates\b' "$UPGRADE" | grep -v '#' | head -1 | cut -d: -f1)
-[[ -n "$_wt_start" ]] || { fail "B0a: with_templates block not found in upgrade.sh"; exit 1; }
+# Find the with_templates MODE execution block — NOT the arg-parse case line.
+# The arg-parse line (--with-templates) MODE=with_templates ;; appears ~line 268 and
+# causes _sync_line to match the sync_host_scripts FUNCTION DEFINITION (~line 1127)
+# rather than the CALL SITE (~line 2148). Anchor to the runtime block instead:
+#   if [[ "$MODE" == with_templates ]]; then
+# This guarantees that awk searches from the execution section, so sync_host_scripts,
+# health_snapshot, and reconcile_all line numbers all refer to actual call sites.
+_wt_pat='if [[ "$MODE" == with_templates ]]'
+_wt_start=$(grep -Fn "$_wt_pat" "$UPGRADE" | grep -v '#' | head -1 | cut -d: -f1)
+[[ -n "$_wt_start" ]] || { fail "B0a: with_templates execution block not found in upgrade.sh"; exit 1; }
 
 # Find line numbers of key calls (searching from the wt block start)
 _sync_line=$(awk "NR>$_wt_start && /sync_host_scripts/ && !/^[[:space:]]*#/ {print NR; exit}" "$UPGRADE")

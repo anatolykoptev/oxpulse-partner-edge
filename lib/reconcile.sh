@@ -300,10 +300,24 @@ migrate_state() {
     if ! grep -q '^CADDYFILE_SHA=' "$_state_file" 2>/dev/null; then
         local _caddy_path="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/Caddyfile"
         if [[ -f "$_caddy_path" ]]; then
+            # Derive the PRE-substitution hash to match reconcile_caddy_surface's
+            # comparison basis. The live on-disk Caddyfile has __CADDYFILE_SHA__
+            # already substituted with the real hex SHA. reconcile hashes the rendered
+            # candidate BEFORE that substitution (pre-sub hash) and install.sh records
+            # that same pre-sub hash in STATE. If we hash the post-sub file directly,
+            # the recorded hash will never equal reconcile's pre-sub candidate hash —
+            # causing one spurious extra swap+reload on the first post-migration run.
+            #
+            # Reverse the substitution: replace any 64-char hex value inside
+            # respond "..." back to the __CADDYFILE_SHA__ placeholder, then hash.
+            # This produces the pre-sub hash that reconcile would compute for the same
+            # Caddyfile content, so the first --with-templates run after migration
+            # detects "unchanged" and produces zero swaps (Fix 2 invariant).
             local _live_sha
-            _live_sha=$(sha256sum "$_caddy_path" | awk '{print $1}')
+            _live_sha=$(sed 's/respond "[0-9a-f]\{64\}"/respond "__CADDYFILE_SHA__"/g' "$_caddy_path" \
+                | sha256sum | awk '{print $1}')
             printf 'CADDYFILE_SHA=%s\n' "$_live_sha" >> "$_state_file"
-            log "migrate_state: derived CADDYFILE_SHA=$_live_sha from live Caddyfile"
+            log "migrate_state: derived CADDYFILE_SHA=$_live_sha from live Caddyfile (pre-sub normalised)"
         else
             log "migrate_state: Caddyfile not found at $_caddy_path — CADDYFILE_SHA will be set after next reconcile"
         fi
@@ -469,6 +483,10 @@ apply_caddy_reloads() {
     fi
 
     warn "reconcile: caddy force-recreate also failed — check: $_docker compose -f $_compose_file logs caddy"
+    # Both reload paths failed: the new Caddyfile is NOT live.
+    # Return non-zero so reconcile_all (and callers like upgrade.sh) see a hard error
+    # rather than a silent rc=0 while caddy continues serving the stale config.
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -779,6 +797,15 @@ reconcile_all() {
     # KEY DELIVERABLE (Phase 4a): apply_caddy_reloads + apply_restarts fire after the loop.
     # Caddy changes use targeted hot-reload (no peer containers down).
     # Other unit restarts (Phase 4b surfaces) use apply_restarts.
-    apply_caddy_reloads
+    #
+    # Fix 1 (engine reliability): apply_caddy_reloads returns non-zero on double-failure
+    # (both hot-reload and force-recreate paths failed). Capture rc and propagate so the
+    # caller sees a hard error, not a silent success with stale caddy config live.
+    local _caddy_reload_rc=0
+    apply_caddy_reloads || _caddy_reload_rc=$?
     apply_restarts
+    if [[ "$_caddy_reload_rc" -ne 0 ]]; then
+        # Fail AFTER apply_restarts so other deferred restarts still fire first.
+        die "reconcile_all: caddy reload double-failure (hot-reload and force-recreate both failed) — new Caddyfile NOT live; check caddy container logs"
+    fi
 }

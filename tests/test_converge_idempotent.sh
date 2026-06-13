@@ -156,6 +156,16 @@ atomic_swap() {
     log "atomic_swap: would swap $1 <- $2 (count=$_ATOMIC_SWAP_COUNT)"
 }
 
+# Override apply_caddy_reloads: idempotency test measures atomic_swap counts,
+# not reload behavior (reload tested by test_caddy_reload_fail_loud.sh).
+# Without this stub, DOCKER_BIN="false" causes both reload paths to fail and
+# reconcile_all die()s (Fix 1 behavior), collapsing the run1/run2 comparison.
+apply_caddy_reloads() {
+    log "apply_caddy_reloads: stubbed (idempotency test — reload behavior tested separately)"
+    _RECONCILE_CADDY_RELOAD=0
+    return 0
+}
+
 # Override opec: produce a file matching the installed SHA so run 1 is idempotent.
 # Handles: render caddy --tpl TPL --out OUT, and render caddy --help (capability probe).
 opec() {
