@@ -9,10 +9,39 @@
 	"logging": {
 		"logs": {
 			"default": {
+				"writer": {
+					"output": "stdout"
+				},
 				"encoder": {
 					"format": "json"
 				},
-				"level": "INFO"
+				"level": "INFO",
+				"exclude": [
+					"http.log.access.log0"
+				]
+			},
+			"log0": {
+				"writer": {
+					"output": "stdout"
+				},
+				"encoder": {
+					"fields": {
+						"request\u003eheaders\u003eAuthorization": {
+							"filter": "delete"
+						},
+						"request\u003eheaders\u003eCookie": {
+							"filter": "delete"
+						}
+					},
+					"format": "filter",
+					"wrap": {
+						"format": "json"
+					}
+				},
+				"level": "INFO",
+				"include": [
+					"http.log.access.log0"
+				]
 			}
 		}
 	},
@@ -165,7 +194,7 @@
 											]
 										},
 										{
-											"group": "group9",
+											"group": "group10",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -194,7 +223,7 @@
 											]
 										},
 										{
-											"group": "group9",
+											"group": "group10",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -223,7 +252,7 @@
 											]
 										},
 										{
-											"group": "group9",
+											"group": "group10",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -286,6 +315,7 @@
 																		}
 																	},
 																	"load_balancing": {
+																		"retries": 2,
 																		"selection_policy": {
 																			"policy": "first"
 																		},
@@ -352,6 +382,7 @@
 																		}
 																	},
 																	"load_balancing": {
+																		"retries": 2,
 																		"selection_policy": {
 																			"policy": "first"
 																		},
@@ -418,6 +449,7 @@
 																		}
 																	},
 																	"load_balancing": {
+																		"retries": 2,
 																		"selection_policy": {
 																			"policy": "first"
 																		},
@@ -484,6 +516,7 @@
 																		}
 																	},
 																	"load_balancing": {
+																		"retries": 2,
 																		"selection_policy": {
 																			"policy": "first"
 																		},
@@ -517,6 +550,71 @@
 							"terminal": true
 						}
 					],
+					"errors": {
+						"routes": [
+							{
+								"match": [
+									{
+										"host": [
+											"test.example"
+										]
+									}
+								],
+								"handle": [
+									{
+										"handler": "subroute",
+										"routes": [
+											{
+												"handle": [
+													{
+														"handler": "subroute",
+														"routes": [
+															{
+																"handle": [
+																	{
+																		"handler": "headers",
+																		"response": {
+																			"set": {
+																				"Content-Type": [
+																					"text/html; charset=utf-8"
+																				]
+																			}
+																		}
+																	},
+																	{
+																		"body": "\u003c!doctype html\u003e\n\u003chtml lang=\"ru\"\u003e\n\u003chead\u003e\n\u003cmeta charset=\"utf-8\"\u003e\n\u003cmeta name=\"viewport\" content=\"width=device-width,initial-scale=1\"\u003e\n\u003cmeta http-equiv=\"refresh\" content=\"4\"\u003e\n\u003ctitle\u003eСоединение прервано / Connection interrupted\u003c/title\u003e\n\u003cstyle\u003e\n  *{box-sizing:border-box;margin:0;padding:0}\n  body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;\n    background:#0f172a;color:#e2e8f0;display:flex;align-items:center;\n    justify-content:center;min-height:100vh;padding:1rem}\n  .card{background:#1e293b;border:1px solid #334155;border-radius:12px;\n    padding:2rem;max-width:420px;width:100%;text-align:center}\n  h1{font-size:1.25rem;font-weight:600;margin-bottom:.5rem;color:#f8fafc}\n  p{font-size:.9rem;color:#94a3b8;line-height:1.6;margin-bottom:1.25rem}\n  .code{font-size:.75rem;color:#64748b;margin-bottom:1.5rem}\n  button{background:#3b82f6;color:#fff;border:none;border-radius:8px;\n    padding:.6rem 1.5rem;font-size:.9rem;cursor:pointer;transition:background .2s}\n  button:hover{background:#2563eb}\n  .dots{display:inline-block;animation:blink 1.4s infinite}\n  @keyframes blink{0%,80%,100%{opacity:0}40%{opacity:1}}\n\u003c/style\u003e\n\u003c/head\u003e\n\u003cbody\u003e\n\u003cdiv class=\"card\"\u003e\n  \u003ch1\u003eСоединение прервано\u003c/h1\u003e\n  \u003cp\u003eСвязь с сервером временно прервана.\u003cbr\u003e\n     Страница обновится автоматически через несколько секунд\u003cspan class=\"dots\"\u003e...\u003c/span\u003e\u003c/p\u003e\n  \u003cp lang=\"en\" style=\"font-size:.8rem;color:#64748b\"\u003eConnection to the server was interrupted.\n     Retrying automatically\u003cspan class=\"dots\"\u003e...\u003c/span\u003e\u003c/p\u003e\n  \u003cdiv class=\"code\"\u003e{http.error.status_code}\u003c/div\u003e\n  \u003cbutton onclick=\"location.reload()\"\u003eПовторить / Retry\u003c/button\u003e\n\u003c/div\u003e\n\u003cscript\u003e\n  // Fallback: reload after 4s if meta-refresh is suppressed (some security contexts).\n  setTimeout(function(){location.reload()},4000);\n\u003c/script\u003e\n\u003c/body\u003e\n\u003c/html\u003e",
+																		"handler": "static_response",
+																		"status_code": "{http.error.status_code}"
+																	}
+																]
+															}
+														]
+													}
+												],
+												"match": [
+													{
+														"expression": "{http.error.status_code} in [502, 503, 504]"
+													}
+												]
+											}
+										]
+									}
+								],
+								"terminal": true
+							}
+						]
+					},
+					"logs": {
+						"logger_names": {
+							"test.example": [
+								"log0"
+							]
+						},
+						"skip_hosts": [
+							"api-abc.test.example.test.example",
+							"www.test.example"
+						]
+					},
 					"protocols": [
 						"h1",
 						"h2"
@@ -647,7 +745,7 @@
 									"handler": "subroute",
 									"routes": [
 										{
-											"group": "group12",
+											"group": "group13",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -673,7 +771,7 @@
 											]
 										},
 										{
-											"group": "group12",
+											"group": "group13",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -699,7 +797,7 @@
 											]
 										},
 										{
-											"group": "group12",
+											"group": "group13",
 											"handle": [
 												{
 													"handler": "subroute",
@@ -733,13 +831,13 @@
 											]
 										},
 										{
-											"group": "group12",
+											"group": "group13",
 											"handle": [
 												{
 													"handler": "subroute",
 													"routes": [
 														{
-															"group": "group3",
+															"group": "group4",
 															"handle": [
 																{
 																	"handler": "rewrite",
