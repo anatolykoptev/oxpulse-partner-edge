@@ -438,8 +438,8 @@ re_render_caddy() {
 
 	# Resolve Caddyfile tunnel-upstream vars not persisted in install.env.
 	# AWG_MOTHERLY_IP / HY2_FALLBACK_HOST / HY2_FALLBACK_PORT come from
-	# defaults.conf (fleet-wide). NAIVE_SOCKS_PORT is derived from the live
-	# naive container or defaults to 1080 (install.sh default).
+	# defaults.conf (fleet-wide). NAIVE_SOCKS_PORT resolves via _resolve_naive_socks_port
+	# (env → STATE_FILE/install.env → live naive container → die if templated & unresolvable).
 	local _defaults_conf="${PREFIX_SHARE:-/usr/local/share}/oxpulse-partner-edge/config/defaults.conf"
 	local _awg_motherly_ip="${AWG_MOTHERLY_IP:-}"
 	local _hy2_fallback_host="${HY2_FALLBACK_HOST:-}"
