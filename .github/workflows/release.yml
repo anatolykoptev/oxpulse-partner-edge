@@ -468,6 +468,9 @@ jobs:
           cp systemd/oxpulse-partner-edge-split-routing.service oxpulse-partner-edge-split-routing.service
           cp systemd/oxpulse-partner-edge-ru-subnets-update.service oxpulse-partner-edge-ru-subnets-update.service
           cp systemd/oxpulse-partner-edge-ru-subnets-update.timer    oxpulse-partner-edge-ru-subnets-update.timer
+          # awg-params-agent unit: must be released so upgrade.sh can sync it
+          # with OXPULSE_RESTART_UNIT_AFTER_APPLY to existing boxes.
+          cp systemd/oxpulse-awg-params-agent.service                oxpulse-awg-params-agent.service
           cp lib/install-split-routing.sh                            install-split-routing.sh
           # Bug 8 fix: ship defaults.conf so install-systemd.sh can fetch it
           # from REPO_RAW on fresh installs (tier-4 fallback path).
@@ -543,6 +546,7 @@ jobs:
             oxpulse-partner-edge-split-routing.service \
             oxpulse-partner-edge-ru-subnets-update.service \
             oxpulse-partner-edge-ru-subnets-update.timer \
+            oxpulse-awg-params-agent.service \
             oxpulse-partner-edge-enable-hy2 \
             partner-cli-amd64 \
             partner-cli-arm64 \
@@ -607,6 +611,7 @@ jobs:
             opec-arm64 \
             oxpulse-awg-params-agent-amd64 \
             oxpulse-awg-params-agent-arm64 \
+            oxpulse-awg-params-agent.service \
             install-awg-params-agent.sh \
             oxpulse-partner-edge-split-routing.sh \
             oxpulse-partner-edge-split-disable.sh \
