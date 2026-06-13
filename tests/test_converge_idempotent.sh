@@ -64,20 +64,31 @@ else
     fail "I5: apply_restarts() NOT called inside reconcile_all() — it is dead code"
 fi
 
-# I6: Functional idempotency — reconcile_all run2 must produce zero atomic_swap calls.
+# I6: Functional idempotency with __CADDYFILE_SHA__ placeholder.
+# The mock renderer emits 'respond "__CADDYFILE_SHA__" 200' (mirrors Caddyfile.tpl:361)
+# so the substitution path is exercised and the broken pre-sub-vs-post-sub comparison
+# (BLOCKER-1) would have caused run-2 to also swap (false-GREEN without this placeholder).
+# Asserts: run-1 swaps (STATE sha=abc123 != rendered pre-sub hash), run-2 is NO-OP.
+# Falsification: reverting BLOCKER-1 fix makes run-2 produce 1 swap => FAIL.
 # We use a subshell with mocked primitives.
 _tmpdir=$(mktemp -d)
 # shellcheck disable=SC2064
 trap "rm -rf '${_tmpdir}'" EXIT
 
-# Create a mock "installed" Caddyfile that matches what the mock renderer produces
-# so run 1 is already idempotent too (sandbox has no real state).
+# Create a mock "installed" Caddyfile (content doesn't matter for STATE-based compare).
+# The STATE CADDYFILE_SHA='abc123' will NOT match the real pre-sub hash of the mock
+# render output, so run-1 will detect a change and swap. After run-1, STATE is updated
+# to the actual pre-sub hash. Run-2 renders the same content => same hash => no swap.
+# The mock renderer emits respond \"__CADDYFILE_SHA__\" 200 to exercise the substitution path.
 _etc_dir="$_tmpdir/etc/oxpulse-partner-edge"
 mkdir -p "$_etc_dir"
-# Write a deterministic "installed" Caddyfile
-echo "# mock Caddyfile v1 sha=abc123" > "$_etc_dir/Caddyfile"
+# Write an initial installed Caddyfile (placeholder value; will be replaced on run-1).
+echo "# initial installed Caddyfile" > "$_etc_dir/Caddyfile"
 
-# Write a minimal state file
+# Write a minimal state file.
+# CADDYFILE_SHA=abc123 is a sentinel that deliberately does NOT match the pre-sub hash
+# of the mock render output, ensuring run-1 triggers a change (and exercises the swap +
+# STATE-update path). After run-1 updates STATE, run-2 must be a no-op.
 _state_file="$_tmpdir/install.env"
 cat > "$_state_file" << 'STATE'
 PARTNER_DOMAIN=test.example.com
@@ -157,8 +168,15 @@ opec() {
             [[ "$_out_next" -eq 1 ]] && _out="$i" && _out_next=0
             [[ "$i" == "--out" ]] && _out_next=1
         done
-        # Produce content that sha256-matches what's installed (abc123 sentinel).
-        [[ -n "$_out" ]] && echo "# mock Caddyfile v1 sha=abc123" > "$_out" || true
+        # Produce deterministic content with the self-referential __CADDYFILE_SHA__
+        # placeholder (mirrors Caddyfile.tpl:361 'respond \"__CADDYFILE_SHA__\" 200').
+        # This exercises the substitution path so the pre-sub hash comparison is tested.
+        # BLOCKER-2 fix: WITHOUT this placeholder, pre-sub == post-sub and the broken
+        # comparison was accidentally stable, masking BLOCKER-1.
+        if [[ -n "$_out" ]]; then
+            printf '# mock Caddyfile (Phase 4a idempotency test)\n' > "$_out"
+            printf 'respond "__CADDYFILE_SHA__" 200\n' >> "$_out"
+        fi
         return 0
     fi
     return 0
@@ -191,11 +209,16 @@ if echo "$_idem_out" | grep -q "RUN1_FAILED"; then
 elif echo "$_idem_out" | grep -q "RUN2_FAILED"; then
     fail "I6: reconcile_all run2 failed (non-idempotent crash)"
 elif echo "$_idem_out" | grep -q "DONE"; then
+    _run1_swaps=$(echo "$_idem_out" | grep "^RUN1_SWAPS=" | cut -d= -f2)
     _run2_swaps=$(echo "$_idem_out" | grep "^RUN2_SWAPS=" | cut -d= -f2)
-    if [[ "${_run2_swaps:-1}" -eq 0 ]]; then
-        pass "I6: reconcile_all run2 produces zero atomic_swap calls (idempotent)"
+    # Run-1 must detect a change (STATE sha=abc123 != rendered pre-sub sha).
+    if [[ "${_run1_swaps:-0}" -eq 0 ]]; then
+        fail "I6: reconcile_all run1 produced zero swaps — expected 1 (STATE sha mismatch should trigger change)"
+    # Run-2 must be a no-op (STATE sha now matches rendered pre-sub sha).
+    elif [[ "${_run2_swaps:-1}" -eq 0 ]]; then
+        pass "I6: reconcile_all run2 produces zero atomic_swap calls (idempotent with __CADDYFILE_SHA__ placeholder exercised)"
     else
-        fail "I6: reconcile_all run2 had $_run2_swaps swap(s) — NOT idempotent"
+        fail "I6: reconcile_all run2 had $_run2_swaps swap(s) — NOT idempotent (BLOCKER-1 not fixed?)"
     fi
 else
     fail "I6: reconcile_all did not complete (function not implemented or crashed)"

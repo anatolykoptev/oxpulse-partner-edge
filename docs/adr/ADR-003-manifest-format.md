@@ -44,7 +44,7 @@ state_schema:
 
 | Kind | Required fields | Semantics |
 |------|----------------|-----------|
-| `render_from_state` | `template`, `out`, `renderer`, `placeholder_completeness`, `restart_unit` | Render from template × STATE; checksum-compare; atomic-swap if changed; restart `restart_unit` |
+| `render_from_state` | `template`, `out`, `renderer`, `placeholder_completeness`, `restart_unit`, `sha_key` | Render from template × STATE; compare pre-sub hash vs STATE `sha_key`; atomic-swap if changed; reload/restart surface-appropriate action |
 | `persist_rendered` | `out`, `secret_surface: true` | Artifact carries secrets. Never re-render from template. Patch image tags only. |
 | `sync_verified` | `out`, `checksum_source` | Fetch for `release_tag`; SHA256SUMS-verify; atomic-swap if changed. |
 | `network_apply` | `applier`, `scope` | Idempotent network state. Re-asserted every converge. Live re-assert is authority. |
@@ -59,8 +59,16 @@ be declared in Phase 4a while adopting surfaces one-by-one in Phase 4b.
 ### `sha_key`
 
 Optional field on `render_from_state` surfaces. Names the STATE_FILE key that tracks the
-rendered checksum (e.g. `CADDYFILE_SHA`). Used for drift detection and canary
-config-hash comparison.
+**pre-substitution** sha256 of the last successfully installed render (e.g. `CADDYFILE_SHA`).
+
+The reconcile engine uses this key for **change-detection**: the new render's pre-sub hash
+is compared against `STATE[sha_key]`. Equal hashes mean no change — no atomic_swap, no
+reload. Unequal (or absent) triggers the update, then writes the new pre-sub hash back to
+`STATE[sha_key]`. This makes idempotency exact: a no-change converge run produces zero
+writes regardless of whether the template has a self-referential placeholder (e.g.
+`respond "__CADDYFILE_SHA__" 200` in Caddyfile.tpl).
+
+The hash is also exposed at runtime via `/canary/config-hash` for drift detection.
 
 ---
 
@@ -95,7 +103,11 @@ mechanism) or the secret must be derived from a separate secret store.
 - Single declaration: adding a surface requires one manifest entry; the engine handles it.
 - Structural impossibility of undeclared writes (test_manifest_coverage enforces).
 - Idempotency by construction: `reconcile_all` twice produces zero changes (S2).
-- `apply_restarts` fires exactly once after the loop; deduplication built-in.
+- `apply_caddy_reloads` fires once after the loop; hot-reloads caddy via the admin API
+  without touching peer containers (SFU/coturn/xray/naive). Falls back to
+  `docker compose up -d --force-recreate caddy` if the admin API is unavailable.
+- `apply_restarts` fires once after the loop for systemd-unit restarts (Phase 4b surfaces).
+  Deduplication built-in.
 
 **Negative:**
 - `manifest_version` is ONE_WAY: any incompatible format change requires a migration.

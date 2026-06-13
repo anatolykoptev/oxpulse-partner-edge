@@ -1,11 +1,12 @@
 #!/bin/bash
-# tests/test_apply_restarts_wired.sh — Phase 4a: apply_restarts fires on caddyfile change.
+# tests/test_apply_restarts_wired.sh — Phase 4a: caddy reload fires on caddyfile change.
 #
 # Asserts:
-#   AR1: apply_restarts is CALLED after reconcile_all when caddyfile changes.
-#   AR2: apply_restarts does NOT fire when caddyfile is unchanged (checksum match).
-#   AR3: mark_restart is called with oxpulse-partner-edge.service on caddyfile change.
-#   AR4: dedup: calling mark_restart twice with same unit results in one restart.
+#   AR1: apply_caddy_reloads is CALLED (targeted) after reconcile_all when caddyfile changes.
+#   AR2: no caddy reload when caddyfile is UNCHANGED (STATE sha matches rendered sha).
+#   AR3: mark_caddy_reload sets _RECONCILE_CADDY_RELOAD; peers NOT in restart list.
+#   AR3a: oxpulse-partner-edge.service NOT added to restart units (no full-stack down).
+#   AR4: dedup: mark_restart called 3x with same unit produces 1 distinct restart.
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -49,7 +50,10 @@ STATE
     echo "$_etc"
 }
 
-# AR1 + AR3: caddyfile changed → apply_restarts fires with oxpulse-partner-edge.service.
+# AR1: caddyfile changed → apply_caddy_reloads fires (mark_caddy_reload was called).
+# AR3: mark_caddy_reload sets _RECONCILE_CADDY_RELOAD=1 on caddyfile change.
+# Both assert targeted caddy reload (not a full systemd restart of the stack).
+# STATE sha=oldsha will not match the new render hash, triggering the change path.
 # Run directly in subshell (no sub-script file) to avoid heredoc-in-file nesting.
 _ar1_result=$(
     set +e
@@ -64,7 +68,8 @@ _ar1_result=$(
             [[ "${3:-}" == "--help" ]] && return 0
             local _out="" _nxt=0
             for _i in "$@"; do [[ "$_nxt" -eq 1 ]] && _out="$_i" && _nxt=0; [[ "$_i" == "--out" ]] && _nxt=1; done
-            [[ -n "$_out" ]] && printf '# NEW Caddyfile sha=newsha\n' > "$_out"
+            # Content whose sha256 differs from STATE CADDYFILE_SHA=oldsha → triggers change
+            [[ -n "$_out" ]] && printf '# NEW Caddyfile (different from STATE sha=oldsha)\nrespond "__CADDYFILE_SHA__" 200\n' > "$_out"
         fi
         return 0
     }
@@ -81,12 +86,19 @@ _ar1_result=$(
     # shellcheck disable=SC1090
     . "$LIB"
 
-    _ar1_fired=0
-    _ar1_units=""
+    # Override apply_caddy_reloads to capture invocation without docker exec.
+    _ar1_caddy_reload_fired=0
+    apply_caddy_reloads() {
+        if [[ "${_RECONCILE_CADDY_RELOAD:-0}" -eq 1 ]]; then
+            echo "CADDY_RELOAD:FIRED"
+            _ar1_caddy_reload_fired=1
+        else
+            echo "CADDY_RELOAD:EMPTY"
+        fi
+        _RECONCILE_CADDY_RELOAD=0
+    }
     apply_restarts() {
-        _ar1_units="${_RECONCILE_RESTART_UNITS:-}"
-        [[ -n "$_ar1_units" ]] && _ar1_fired=1
-        echo "FIRED:${_RECONCILE_RESTART_UNITS:-EMPTY}"
+        echo "RESTART:${_RECONCILE_RESTART_UNITS:-EMPTY}"
         _RECONCILE_RESTART_UNITS=""
     }
 
@@ -94,39 +106,52 @@ _ar1_result=$(
     echo "DONE"
 )
 
-if echo "$_ar1_result" | grep -q "^FIRED:oxpulse"; then
-    _units=$(echo "$_ar1_result" | grep "^FIRED:" | head -1 | cut -d: -f2-)
-    pass "AR1: apply_restarts fired after caddyfile change"
-    if echo "$_units" | grep -q "oxpulse-partner-edge.service"; then
-        pass "AR3: oxpulse-partner-edge.service in restart list"
+if echo "$_ar1_result" | grep -q "CADDY_RELOAD:FIRED"; then
+    pass "AR1: apply_caddy_reloads fired after caddyfile change (targeted reload, not full restart)"
+    # AR3: verify _RECONCILE_CADDY_RELOAD was set (mark_caddy_reload was called)
+    # Inferred: CADDY_RELOAD:FIRED means _RECONCILE_CADDY_RELOAD=1 was detected in apply_caddy_reloads
+    pass "AR3: mark_caddy_reload set _RECONCILE_CADDY_RELOAD=1 on caddyfile change (peers untouched)"
+    # Also verify oxpulse-partner-edge.service was NOT in _RECONCILE_RESTART_UNITS
+    # (full-stack restart must NOT happen for a caddy-only change)
+    if echo "$_ar1_result" | grep -q "RESTART:EMPTY"; then
+        pass "AR3a: oxpulse-partner-edge.service NOT in restart list (caddy change = hot-reload only)"
     else
-        fail "AR3: oxpulse-partner-edge.service not in restart list (got: $_units)"
+        _restart_units=$(echo "$_ar1_result" | grep "^RESTART:" | head -1 | cut -d: -f2-)
+        fail "AR3a: full systemd restart triggered for caddy-only change (units: $_restart_units) — blast radius too wide"
     fi
-elif echo "$_ar1_result" | grep -q "^FIRED:EMPTY"; then
-    fail "AR1: apply_restarts fired with empty units (mark_restart not called)"
-    fail "AR3: oxpulse-partner-edge.service not marked for restart"
+elif echo "$_ar1_result" | grep -q "CADDY_RELOAD:EMPTY"; then
+    fail "AR1: apply_caddy_reloads fired but _RECONCILE_CADDY_RELOAD was 0 (mark_caddy_reload not called)"
+    fail "AR3: mark_caddy_reload not called on caddyfile change"
 else
-    fail "AR1: apply_restarts not called (dead code)"
-    fail "AR3: cannot verify mark_restart"
+    fail "AR1: apply_caddy_reloads not called (dead code)"
+    fail "AR3: cannot verify mark_caddy_reload"
     echo "AR1 output: $_ar1_result" >&2
 fi
 
-# AR2: caddyfile UNCHANGED → apply_restarts fires with empty units (no restart).
+# AR2: caddyfile UNCHANGED → no caddy reload and no restart.
+# We set STATE CADDYFILE_SHA to the sha256 of the rendered content so the
+# STATE-based change-detection determines no change.
+# Compute the pre-sub sha of the mock render output upfront.
+_ar2_stable_content='# STABLE Caddyfile (no __CADDYFILE_SHA__ placeholder)'
+_ar2_stable_sha=$(printf '%s\n' "$_ar2_stable_content" | sha256sum | awk '{print $1}')
+
 _ar2_result=$(
     set +e
     log()  { echo "[L] $*" >&2; }
     warn() { echo "[W] $*" >&2; }
     die()  { echo "[D] $*" >&2; exit 1; }
 
-    _etc=$(_setup_sandbox ar2 "# STABLE Caddyfile sha=stable" 2>/dev/null)
+    _etc=$(_setup_sandbox ar2 "# STABLE Caddyfile" 2>/dev/null)
+    # Override STATE sha to match the pre-sub hash of what opec will render.
+    sed -i "s|^CADDYFILE_SHA=.*|CADDYFILE_SHA=${_ar2_stable_sha}|" "$_tmpdir/ar2/install.env"
 
     opec() {
         if [[ "${1:-}" == "render" && "${2:-}" == "caddy" ]]; then
             [[ "${3:-}" == "--help" ]] && return 0
             local _out="" _nxt=0
             for _i in "$@"; do [[ "$_nxt" -eq 1 ]] && _out="$_i" && _nxt=0; [[ "$_i" == "--out" ]] && _nxt=1; done
-            # Produce SAME content as installed
-            [[ -n "$_out" ]] && printf '# STABLE Caddyfile sha=stable\n' > "$_out"
+            # Produce the same stable content; its sha256 == STATE CADDYFILE_SHA → no change
+            [[ -n "$_out" ]] && printf '%s\n' "# STABLE Caddyfile (no __CADDYFILE_SHA__ placeholder)" > "$_out"
         fi
         return 0
     }
@@ -143,8 +168,12 @@ _ar2_result=$(
     # shellcheck disable=SC1090
     . "$LIB"
 
+    apply_caddy_reloads() {
+        echo "CADDY_RELOAD:${_RECONCILE_CADDY_RELOAD:-0}"
+        _RECONCILE_CADDY_RELOAD=0
+    }
     apply_restarts() {
-        echo "FIRED:${_RECONCILE_RESTART_UNITS:-EMPTY}"
+        echo "RESTART:${_RECONCILE_RESTART_UNITS:-EMPTY}"
         _RECONCILE_RESTART_UNITS=""
     }
 
@@ -152,13 +181,12 @@ _ar2_result=$(
     echo "DONE"
 )
 
-if echo "$_ar2_result" | grep -q "^FIRED:EMPTY"; then
-    pass "AR2: apply_restarts fired with empty units (no restart when unchanged)"
-elif echo "$_ar2_result" | grep -q "^FIRED:"; then
-    _u=$(echo "$_ar2_result" | grep "^FIRED:" | head -1 | cut -d: -f2-)
-    fail "AR2: restart fired when caddyfile was unchanged (units: $_u)"
+if echo "$_ar2_result" | grep -q "CADDY_RELOAD:0"; then
+    pass "AR2: no caddy reload when caddyfile unchanged (STATE sha matches rendered sha)"
+elif echo "$_ar2_result" | grep -q "CADDY_RELOAD:1"; then
+    fail "AR2: caddy reload triggered on unchanged caddyfile (STATE sha compare broken)"
 else
-    fail "AR2: apply_restarts not called"
+    fail "AR2: apply_caddy_reloads not called"
     echo "AR2 output: $_ar2_result" >&2
 fi
 

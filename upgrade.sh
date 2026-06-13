@@ -2123,15 +2123,8 @@ if [[ "$MODE" == with_templates ]]; then
 	}
 	_probe_opec_for_upgrade
 
-	# Step 2+3: fetch + render templates. die()s on fetch failure — no state
-	# has been mutated yet (backups exist but originals are untouched).
-	# Phase 4a (reconcile_all): manifest-driven engine replaces ad-hoc reconcile_caddy_surface
-	# call. P4a wires caddyfile only (behavior equivalent to P1); apply_restarts now fires
-	# after the loop (P1 dead-code fix). Caddyfile.tpl is fetched inside reconcile_all
-	# via REPO_RAW (already set). re_render_caddy remains for backward compat; Phase 6 deletes.
-	#
-	# Manifest location: manifest.yaml ships in the release bundle alongside upgrade.sh.
-	# upgrade.sh fetches it if not already present in RECONCILE_TMPDIR.
+	# Step 2: fetch manifest + templates. die()s on fetch failure — no state has been
+	# mutated yet (backups exist but originals are untouched). Manifest drives reconcile_all.
 	_manifest_path_wt=""
 	_manifest_tmpdir_wt=$(mktemp -d)
 	# shellcheck disable=SC2064
@@ -2141,37 +2134,46 @@ if [[ "$MODE" == with_templates ]]; then
 		die "could not fetch manifest.yaml from $REPO_RAW — aborting (no changes applied)"
 	fi
 	_manifest_path_wt="$_manifest_tmpdir_wt/manifest.yaml"
-	export RECONCILE_TMPDIR="$_manifest_tmpdir_wt"
-	reconcile_all "$_manifest_path_wt"
-	unset RECONCILE_TMPDIR
-	re_render_healthcheck
 
-	# Step 4: patch image tags in compose (same as plain image upgrade).
+	# Step 3: patch image tags in compose (same as plain image upgrade).
 	sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
 		"$COMPOSE_FILE"
 	sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 
-	# Step 5: sync host-scripts for the release tag (health-report, sbin libs, units).
+	# Step 4: sync host-scripts for the release tag (health-report, sbin libs, units).
+	# Must run BEFORE the baseline snapshot so the newly-installed healthcheck.sh
+	# (with --snapshot support) is used. sync_host_scripts does NOT recreate containers,
+	# so the baseline still reflects the pre-change container/service state.
 	log "syncing host-scripts to $RELEASE_TAG (image tag=$TARGET)"
 	sync_host_scripts "$RELEASE_TAG"
 
-	# Phase 3 (Decision 4): capture baseline health snapshot AFTER host-script sync so the
-	# newly-installed healthcheck.sh (with --snapshot support) is used, not the pre-Phase-3
-	# script that returns an error on unknown --snapshot arg.  sync_host_scripts installs
-	# host scripts and systemd units only — it does NOT recreate containers — so the
-	# baseline still reflects the pre-change container/service state (mirrors plain path).
-	# Skip on fresh install (HEALTHCHECK absent) — health_regressions skips diff when
-	# baseline file is absent, so the gate behaves as first-run (no rollback on new reds).
+	# Step 5: capture baseline health snapshot BEFORE reconcile_all (MAJOR-2 fix).
+	# Correct order: sync_host_scripts → baseline → reconcile_all → pull/recreate → post.
+	# Prior order had baseline AFTER reconcile_all: a caddy-reload-induced breakage was
+	# recorded INTO the baseline, so health_regressions saw no delta and skipped rollback.
+	# Skip on fresh install (HEALTHCHECK absent); health_regressions skips diff when
+	# baseline file is absent (first-run path: no rollback on new reds).
 	_wt_baseline_snap=$(mktemp)
 	if [[ -x "$HEALTHCHECK" ]]; then
-		log "capturing pre-change health baseline (--with-templates, post host-script sync)"
+		log "capturing pre-change health baseline (--with-templates, post host-script sync, pre-reconcile)"
 		health_snapshot "$HEALTHCHECK" "$_wt_baseline_snap" || true
 	else
 		log "healthcheck binary absent — skipping pre-change baseline (first install?)"
 		rm -f "$_wt_baseline_snap"; _wt_baseline_snap=""
 	fi
 
-	# Step 6: pull new images (with per-service digest capture for zero-downtime recreate).
+	# Step 6: reconcile all surfaces (Phase 4a engine).
+	# Phase 4a wires caddyfile only; apply_caddy_reloads fires a targeted caddy hot-reload
+	# (no peer containers down). Caddyfile.tpl is fetched inside reconcile_all via REPO_RAW.
+	# re_render_caddy remains for backward compat; Phase 6 deletes.
+	export RECONCILE_TMPDIR="$_manifest_tmpdir_wt"
+	reconcile_all "$_manifest_path_wt"
+	unset RECONCILE_TMPDIR
+	re_render_healthcheck
+
+	# Step 7 (formerly Step 6): pull new images.
+
+	# Step 8: pull new images (with per-service digest capture for zero-downtime recreate).
 	ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
 	declare -A _wt_before_digests
 	capture_running_digests _wt_before_digests
