@@ -30,6 +30,36 @@ sleep 1
 curl -fsSL --max-time 5 "http://127.0.0.1:$SERVE_PORT/Caddyfile.tpl" >/dev/null \
     || { echo "FAIL: local HTTP server not serving Caddyfile.tpl"; exit 1; }
 
+# ---- opec availability (Check-1 render tests are skipped when opec absent) ----
+# Canonical locate logic mirrors tests/test_caddyfile_golden.sh.
+OPEC_OK=0
+if [[ -n "${OPEC_BIN:-}" ]]; then
+    _opec_candidate="$OPEC_BIN"
+elif command -v opec >/dev/null 2>&1; then
+    _opec_candidate=opec
+else
+    _cargo_target=$(
+        cd "$REPO_ROOT" && git rev-parse --git-common-dir 2>/dev/null \
+        | xargs dirname 2>/dev/null || true)
+    _opec_candidate=""
+    for _d in \
+        /mnt/cargo/oxpulse-partner-edge-shared-*/release/opec \
+        "$_cargo_target/target/release/opec" \
+        "$(pwd)/target/release/opec"; do
+        for _f in $_d; do
+            if [[ -x "$_f" ]]; then _opec_candidate="$_f"; break 2; fi
+        done
+    done
+fi
+if [[ -n "${_opec_candidate:-}" ]] && "$_opec_candidate" --version >/dev/null 2>&1; then
+    OPEC_OK=1
+    # If opec was found via cargo fallback (not already on PATH), inject its directory
+    # into PATH so upgrade.sh's own `command -v opec` also finds it.
+    if ! command -v opec >/dev/null 2>&1; then
+        export PATH="${_opec_candidate%/opec}:$PATH"
+    fi
+fi
+
 # ---- shared sandbox factory ----
 make_sandbox() {
     local id="$1"
@@ -130,6 +160,12 @@ run_dry() {
 }
 
 # ============================================================
+# Tests 1+2 require opec for the Check-1 Caddyfile render path.
+# Skip gracefully on CI runners that don't have opec available.
+# ============================================================
+if [[ "$OPEC_OK" == 1 ]]; then
+
+# ============================================================
 # Test 1: Check 1 — Caddyfile validation failure → CATASTROPHIC
 # ============================================================
 echo "==> Test 1: Check 1 CATASTROPHIC — Caddyfile fails caddy validate"
@@ -182,6 +218,10 @@ echo "$output" | grep -q "CATASTROPHIC" \
 echo "$output" | grep -qi "INFO\|not running\|skipped" \
     || { echo "FAIL: Test 2 — absent container should produce INFO in report"; echo "$output"; exit 1; }
 echo "OK: Test 2 — absent caddy container treated as INFO"
+
+else
+    echo "SKIP: Test 1+2 (Check 1 render) — opec not available; set OPEC_BIN=/path/to/opec to run"
+fi  # OPEC_OK
 
 # ============================================================
 # Test 3: Check 2 — compose structural drift → WARNING

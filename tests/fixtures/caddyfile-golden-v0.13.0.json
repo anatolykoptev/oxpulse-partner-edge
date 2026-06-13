@@ -348,7 +348,7 @@
 																			"dial": "host.docker.internal:18443"
 																		},
 																		{
-																			"dial": "127.0.0.1:{{NAIVE_SOCKS_PORT}}"
+																			"dial": "127.0.0.1:1080"
 																		}
 																	]
 																}
@@ -415,7 +415,7 @@
 																			"dial": "host.docker.internal:18443"
 																		},
 																		{
-																			"dial": "127.0.0.1:{{NAIVE_SOCKS_PORT}}"
+																			"dial": "127.0.0.1:1080"
 																		}
 																	]
 																}
@@ -482,7 +482,7 @@
 																			"dial": "host.docker.internal:18443"
 																		},
 																		{
-																			"dial": "127.0.0.1:{{NAIVE_SOCKS_PORT}}"
+																			"dial": "127.0.0.1:1080"
 																		}
 																	]
 																}
@@ -549,7 +549,7 @@
 																			"dial": "host.docker.internal:18443"
 																		},
 																		{
-																			"dial": "127.0.0.1:{{NAIVE_SOCKS_PORT}}"
+																			"dial": "127.0.0.1:1080"
 																		}
 																	]
 																}
@@ -768,7 +768,7 @@
 														{
 															"handle": [
 																{
-																	"body": "__CADDYFILE_SHA__",
+																	"body": "6cfcba248a101a0fb3a0b7f3e199bad03b854252384edc314e93655d01b67ac6",
 																	"handler": "static_response",
 																	"status_code": 200
 																}
