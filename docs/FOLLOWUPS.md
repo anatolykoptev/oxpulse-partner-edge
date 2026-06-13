@@ -147,3 +147,71 @@ without re-running the audit.
 **Files:** new `tests/load/sfu-room-ramp.ts` (or similar), `docs/HOSTING_REQUIREMENTS.md` update.
 
 **Discovered:** 2026-05-22 README refresh -- current RAM recommendation is industry-extrapolated, not measured.
+
+
+---
+
+### Q. SEC-CR-302 — P3b peer-probe DNS-rebinding TOCTOU (MEDIUM, BLOCKING before default-ON)
+
+> **SEC-CR-306 (hex/NAT64 IPv4-mapped IPv6 SSRF bypass) — CLOSED in PR #306.**
+> A sibling residual: the v6 classifier matched the textual SHAPE of an embedded
+> v4 (a dotted `.*.*.*.*` tail), so hex-compressed / uppercase / IPv4-compat /
+> NAT64 forms (`::ffff:7f00:1`, `::FFFF:7F00:1`, `::7f00:1`, `64:ff9b::7f00:1`)
+> slipped past and connected to the internal embedded v4. Fixed by classifying
+> the 16-byte VALUE (`inet_pton` normalization → mapped/NAT64/compat-prefix
+> detection → embedded-v4 reclassified via the v4 path; fail-closed on
+> unparseable/ambiguous). See `_ipv6_embedded_v4` + `_ip_is_internal`, regression
+> rows in `tests/test_cross_probe_loop.sh` (test9). **SEC-CR-302 below is now the
+> ONLY remaining BLOCKING-before-default-ON SSRF residual.**
+
+**Where:** `oxpulse-channels-health-report.sh` — `_host_is_internal` (SSRF dial-time recheck) → `_probe_peer_coturn` (the `turnutils_uclient -S … <turns_host>` dial).
+
+**Symptom:** the SSRF recheck resolves `turns_host` and rejects any host that
+resolves to an internal address. `turnutils_uclient` then RE-RESOLVES the same
+hostname when it dials. A DNS-rebinding attacker who controls the authoritative
+DNS for a roster host can answer the recheck's query with a PUBLIC A record and
+the dial's query with an INTERNAL one (TTL 0). The recheck passes; the dial
+hits an internal target. Classic resolve-then-use TOCTOU.
+
+**Why it matters:** the peer-probe dials a TURNS:443 relay from inside the
+own-coturn container, which has outbound network. A rebinding host could steer
+the TLS Allocate at an internal service (SSRF). Today the blast radius is
+small: the peer roster is **server-curated** (P2 `register.rs` lists only vetted
+partner edges with a `CROSS_PROBE_TOKEN_SECRET`), so an attacker must first
+compromise the central's roster curation to inject a rebinding host. The loop is
+also not yet default-ON across the fleet. But once it is, this residual must be
+closed first.
+
+**Why it is NOT fixed in this PR:** the clean fix is to dial the
+already-vetted IP while keeping the TLS SNI = original hostname (so caddy-l4's
+:443 SNI-mux still routes to the peer's coturn). `turnutils_uclient` CANNOT do
+this: its only target is the positional `<TURN-Server-IP-address>`, which it
+ALSO uses as the SNI (Debian coturn manpage; coturn#1333 — hostname positional
+→ SNI). There is no connect-to-IP-with-SNI-override flag:
+- `-X` = "IPv4 relay address explicitly requested" — a TURN-protocol option for
+  the RELAY address, not the connect target.
+- `-L` = local bind source IP, not the destination.
+- `-E` = CA file for cert verification, not SNI.
+Passing the resolved IP positionally would make the SNI an IP literal →
+caddy-l4 has no matching SNI route/cert → the probe fails on EVERY healthy
+peer (a false-negative storm). We do NOT hack turnutils to force it.
+
+**Next step (one of):**
+
+1. Add an `nsswitch`/resolver pin so the recheck and the dial share ONE
+   resolution: resolve once in `_host_is_internal`, write the `host → vetted IP`
+   pair into a process-local hosts override (e.g. a `--add-host`-style entry for
+   the `docker exec`, or a coturn-container `/etc/hosts` line scoped to the
+   probe), so `turnutils_uclient`'s re-resolution returns the SAME vetted IP
+   while SNI stays the hostname. Verify caddy-l4 still routes (SNI unchanged).
+2. OR switch the dial to a TURNS client that accepts connect-IP + SNI-override
+   separately (custom `turnutils`-equivalent, or a small Rust/Go TLS+TURN probe
+   in `crates/`), removing the turnutils SNI=target coupling entirely.
+3. OR gate the loop default-ON behind a stricter roster-source attestation so the
+   server-curation trust assumption is explicit and auditable.
+
+**Files:** `oxpulse-channels-health-report.sh` (`_host_is_internal` +
+`_probe_peer_coturn`), `tests/test_cross_probe_loop.sh` (add a rebinding-pin
+assertion), the chosen probe binary if option 2.
+
+**Discovered:** PR #306 review (SEC-CR-302), 2026-06-12.
