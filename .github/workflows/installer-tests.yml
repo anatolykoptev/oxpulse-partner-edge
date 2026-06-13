@@ -17,6 +17,10 @@ on:
       - 'tests/test_render_completeness.sh'
       - 'tests/test_state_migration_matrix.sh'
       - 'tests/test_health_gate_baseline.sh'
+      - 'tests/test_manifest_coverage.sh'
+      - 'tests/test_converge_idempotent.sh'
+      - 'tests/test_apply_restarts_wired.sh'
+      - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
   push:
@@ -36,6 +40,10 @@ on:
       - 'tests/test_render_completeness.sh'
       - 'tests/test_state_migration_matrix.sh'
       - 'tests/test_health_gate_baseline.sh'
+      - 'tests/test_manifest_coverage.sh'
+      - 'tests/test_converge_idempotent.sh'
+      - 'tests/test_apply_restarts_wired.sh'
+      - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
 
@@ -77,3 +85,12 @@ jobs:
 
       - name: Baseline-aware health gate — regression diff (Phase 3, Decision 4)
         run: bash tests/test_health_gate_baseline.sh
+
+      - name: Manifest coverage — all surfaces declared + caddyfile wired (Phase 4a)
+        run: bash tests/test_manifest_coverage.sh
+
+      - name: reconcile_all idempotency — run2 produces zero swaps (Phase 4a, S2)
+        run: bash tests/test_converge_idempotent.sh
+
+      - name: apply_restarts wired inside reconcile_all — dead-code fix verified (Phase 4a)
+        run: bash tests/test_apply_restarts_wired.sh
