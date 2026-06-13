@@ -71,6 +71,10 @@ HEALTHCHECK="${OXPULSE_HEALTHCHECK:-/usr/local/sbin/oxpulse-partner-edge-healthc
 # do not match the SHA256SUMS released for that tag (main is always ahead of any tag).
 # Tests and operator overrides can still use OXPULSE_REPO_RAW to point at a fixture.
 OXPULSE_UPGRADE_TAG="${OXPULSE_UPGRADE_TAG:-@RELEASE_TAG@}"
+# Phase 3 (Decision 4) — baseline-aware health gate.
+# Default: 0 = use regression-based gate (no rollback on pre-existing reds).
+# Set to 1 to restore the legacy "all-green-required" gate for diagnosis.
+OXPULSE_ABSOLUTE_HEALTH_GATE="${OXPULSE_ABSOLUTE_HEALTH_GATE:-0}"
 # Initialize OXPULSE_MIRROR_BASE to empty string so the strip at line 92 and
 # the -n checks below are safe under set -u on edges with no mirror configured
 # (e.g. zvonilka GitHub-direct edges where install.env lacks OXPULSE_MIRROR_BASE).
@@ -939,6 +943,22 @@ recreate_changed_services() {
 
 # settle_healthcheck_with_retry — poll healthcheck after container recreation.
 #
+# Phase 3 (Decision 4): baseline-aware gate.
+#   - If OXPULSE_ABSOLUTE_HEALTH_GATE=0 (default): gate passes when no
+#     REGRESSION is detected (GREEN in baseline → RED in post).  Pre-existing
+#     reds (RED in both baseline and post) are reported as drift but do NOT
+#     block the upgrade.  This fixes the cheburator loop where permanent reds
+#     on check 12 (SFU /metrics mesh-IP false-negative) and checks 13/14
+#     (xray canary tunnel/upstream degraded) caused every --with-templates
+#     upgrade to auto-rollback even when the change was correct.
+#   - If OXPULSE_ABSOLUTE_HEALTH_GATE=1: fall back to the old "all green
+#     required" behavior (REVERSIBLE — set for diagnosis or on bare installs
+#     where no baseline is available).
+#
+# The baseline-aware path auto-detects whether the installed healthcheck.sh
+# supports --snapshot (emits name=GREEN|RED lines).  If not (legacy binary or
+# test stub), falls back to the absolute --local gate transparently.
+#
 # Background: xray Reality tunnel establishment on first connection takes up to
 # 8s (uTLS cipher randomisation per connection, measured on rvpn during the
 # v0.12.20 upgrade incident 2026-05-09).  A single `sleep 10` leaves only a 2s
@@ -956,28 +976,149 @@ recreate_changed_services() {
 #                                        worst-case (8s) plus a 6s margin for a
 #                                        loaded edge — safe for production.
 #
-# Returns 0 as soon as healthcheck passes; non-zero if ALL attempts exhausted.
+# Args:
+#   $1  label (default: "post-upgrade")
+#   $2  baseline_snapshot_file (optional; used for regression gate)
+#
+# Returns 0 when gate passes; non-zero if rollback required.
+#
+# Self-contained: snapshot/regression helpers inlined so F4 awk extraction works.
 settle_healthcheck_with_retry() {
-	local label="${1:-post-upgrade}"  # context for log messages
+	local label="${1:-post-upgrade}"            # context for log messages
+	local _baseline_snap="${2:-}"               # Phase 3: pre-change snapshot file
 	local budget="${OXPULSE_UPGRADE_HEALTH_TIMEOUT:-30}"
 	local interval=3
 	local max_attempts=$(( (budget + interval - 1) / interval ))  # ceil(budget/interval)
 
-	local attempt=1
-	while [[ "$attempt" -le "$max_attempts" ]]; do
-		log "healthcheck attempt $attempt/$max_attempts (${label})…"
-		if "$HEALTHCHECK" --local; then
-			log "healthcheck passed on attempt $attempt/$max_attempts (${label})"
-			return 0
+	# ---------------------------------------------------------------------------
+	# _settle_hc_snapshot BINARY OUTFILE — inline snapshot helper.
+	# Runs BINARY --snapshot; returns 0 if output contains >=1 name=GREEN|RED line.
+	# Returns 1 if binary is not executable, exits non-zero, or produces no valid
+	# snapshot lines (= legacy binary that does not support --snapshot).
+	# ---------------------------------------------------------------------------
+	_settle_hc_snapshot() {
+		local _bin="$1" _out="$2"
+		[[ -x "$_bin" ]] || return 1
+		"$_bin" --snapshot > "$_out" 2>/dev/null || return 1
+		grep -qE '^[A-Za-z0-9_]+=GREEN$|^[A-Za-z0-9_]+=RED$' "$_out" 2>/dev/null || return 1
+		return 0
+	}
+
+	# ---------------------------------------------------------------------------
+	# _settle_hc_regressions BASELINE_FILE POST_FILE — inline regression diff.
+	# Returns 0 if no GREEN→RED transitions; 1 if any regression found.
+	# Returns 0 if baseline is absent (fresh install — skip diff).
+	# ---------------------------------------------------------------------------
+	_settle_hc_regressions() {
+		local _bl="$1" _po="$2"
+		[[ -f "$_bl" && -s "$_bl" ]] || { log "settle_healthcheck: no baseline — skipping regression diff"; return 0; }
+		local _reg=0 _drift=0 _healed=0 _id _bst _pst
+		while IFS='=' read -r _id _bst || [[ -n "$_id" ]]; do
+			[[ -z "$_id" ]] && continue
+			[[ "$_bst" != "GREEN" && "$_bst" != "RED" ]] && continue
+			_pst=$(grep "^${_id}=" "$_po" 2>/dev/null | head -1 | cut -d= -f2 || true)
+			[[ -z "$_pst" ]] && continue
+			if [[ "$_bst" == "GREEN" && "$_pst" == "RED" ]]; then
+				log "settle_healthcheck: REGRESSION — ${_id} GREEN→RED"
+				_reg=$(( _reg + 1 ))
+			elif [[ "$_bst" == "RED" && "$_pst" == "RED" ]]; then
+				log "settle_healthcheck: DRIFT (pre-existing) — ${_id} red in both"
+				_drift=$(( _drift + 1 ))
+			elif [[ "$_bst" == "RED" && "$_pst" == "GREEN" ]]; then
+				log "settle_healthcheck: HEALED — ${_id} RED→GREEN"
+				_healed=$(( _healed + 1 ))
+			fi
+		done < "$_bl"
+		if [[ "$_reg" -gt 0 ]]; then
+			warn "settle_healthcheck: ${_reg} regression(s) — rollback"
+			[[ "$_drift" -gt 0 ]] && log "settle_healthcheck: ${_drift} pre-existing red(s) (drift, not blocking)"
+			return 1
 		fi
-		if [[ "$attempt" -lt "$max_attempts" ]]; then
+		[[ "$_drift"  -gt 0 ]] && warn "settle_healthcheck: ${_drift} pre-existing red(s) (drift findings — not blocking)"
+		[[ "$_healed" -gt 0 ]] && log "settle_healthcheck: ${_healed} healed check(s)"
+		log "settle_healthcheck: no regressions"
+		return 0
+	}
+
+	# Absolute gate mode (legacy / escape hatch).
+	if [[ "${OXPULSE_ABSOLUTE_HEALTH_GATE:-0}" == "1" ]]; then
+		log "settle_healthcheck: using absolute gate (OXPULSE_ABSOLUTE_HEALTH_GATE=1)"
+		local _attempt=1
+		while [[ "$_attempt" -le "$max_attempts" ]]; do
+			log "healthcheck attempt $_attempt/$max_attempts (${label})…"
+			if "$HEALTHCHECK" --local; then
+				log "healthcheck passed on attempt $_attempt/$max_attempts (${label})"
+				return 0
+			fi
+			if [[ "$_attempt" -lt "$max_attempts" ]]; then
+				log "healthcheck not yet passing — retrying in ${interval}s"
+				sleep "$interval"
+			fi
+			_attempt=$(( _attempt + 1 ))
+		done
+		warn "healthcheck still failing after $max_attempts attempt(s) (budget=${budget}s) — ${label}"
+		return 1
+	fi
+
+	# Phase 3 baseline-aware gate (default).
+	# Detect --snapshot support: probe with a temp file BEFORE the retry loop.
+	# This probe does NOT count toward the retry budget.
+	local _probe_tmp
+	_probe_tmp=$(mktemp)
+	local _snap_supported=0
+	_settle_hc_snapshot "$HEALTHCHECK" "$_probe_tmp" && _snap_supported=1
+	rm -f "$_probe_tmp"
+
+	if [[ "$_snap_supported" -eq 0 ]]; then
+		# Legacy binary (no --snapshot support): fall back to absolute --local gate.
+		log "settle_healthcheck: healthcheck lacks --snapshot support — using --local gate (${label})"
+		local _attempt=1
+		while [[ "$_attempt" -le "$max_attempts" ]]; do
+			log "healthcheck attempt $_attempt/$max_attempts (${label})…"
+			if "$HEALTHCHECK" --local; then
+				log "healthcheck passed on attempt $_attempt/$max_attempts (${label})"
+				return 0
+			fi
+			if [[ "$_attempt" -lt "$max_attempts" ]]; then
+				log "healthcheck not yet passing — retrying in ${interval}s"
+				sleep "$interval"
+			fi
+			_attempt=$(( _attempt + 1 ))
+		done
+		warn "healthcheck still failing after $max_attempts attempt(s) (budget=${budget}s) — ${label}"
+		return 1
+	fi
+
+	# --snapshot supported: poll until stable post snapshot captured, then diff.
+	local _post_snap
+	_post_snap=$(mktemp)
+	# shellcheck disable=SC2064
+	trap "rm -f '$_post_snap'" RETURN
+
+	local _attempt=1
+	local _stable=0
+	while [[ "$_attempt" -le "$max_attempts" ]]; do
+		log "healthcheck attempt $_attempt/$max_attempts (${label})…"
+		if _settle_hc_snapshot "$HEALTHCHECK" "$_post_snap"; then
+			_stable=1
+			break
+		fi
+		if [[ "$_attempt" -lt "$max_attempts" ]]; then
 			log "healthcheck not yet passing — retrying in ${interval}s"
 			sleep "$interval"
 		fi
-		attempt=$(( attempt + 1 ))
+		_attempt=$(( _attempt + 1 ))
 	done
-	warn "healthcheck still failing after $max_attempts attempt(s) (budget=${budget}s) — ${label}"
-	return 1
+
+	if [[ "$_stable" -eq 0 ]]; then
+		warn "settle_healthcheck: snapshot failed after $max_attempts attempt(s) (${label})"
+		return 1
+	fi
+
+	log "settle_healthcheck: post snapshot captured on attempt $_attempt/$max_attempts (${label})"
+
+	# Diff baseline vs post; rollback on regression.
+	_settle_hc_regressions "${_baseline_snap}" "$_post_snap"
 }
 
 # sync_host_scripts TAG — download, verify, and install host-scripts for TAG.
@@ -1943,6 +2084,12 @@ if [[ "$MODE" == with_templates ]]; then
 		exit "$_conflict_exit"
 	fi
 
+	# Phase 3 (Decision 4): baseline captured AFTER sync_host_scripts (Step 5) so the
+	# new --snapshot-capable healthcheck.sh is in place before the snapshot is taken.
+	# Declared here (empty) so Step 1–5 rollback paths can reference ${_wt_baseline_snap:-}
+	# without an unbound-variable error under set -u.
+	_wt_baseline_snap=""
+
 	# Step 1: backup current state before any mutation (images + templates + host-scripts).
 	[[ -f "$PREFIX_ETC/Caddyfile" ]]  && cp -a "$PREFIX_ETC/Caddyfile" "$PREV_CADDYFILE"
 	[[ -f "$HEALTHCHECK" ]]           && cp -a "$HEALTHCHECK" "$PREV_HEALTHCHECK"
@@ -2000,6 +2147,22 @@ if [[ "$MODE" == with_templates ]]; then
 	log "syncing host-scripts to $RELEASE_TAG (image tag=$TARGET)"
 	sync_host_scripts "$RELEASE_TAG"
 
+	# Phase 3 (Decision 4): capture baseline health snapshot AFTER host-script sync so the
+	# newly-installed healthcheck.sh (with --snapshot support) is used, not the pre-Phase-3
+	# script that returns an error on unknown --snapshot arg.  sync_host_scripts installs
+	# host scripts and systemd units only — it does NOT recreate containers — so the
+	# baseline still reflects the pre-change container/service state (mirrors plain path).
+	# Skip on fresh install (HEALTHCHECK absent) — health_regressions skips diff when
+	# baseline file is absent, so the gate behaves as first-run (no rollback on new reds).
+	_wt_baseline_snap=$(mktemp)
+	if [[ -x "$HEALTHCHECK" ]]; then
+		log "capturing pre-change health baseline (--with-templates, post host-script sync)"
+		health_snapshot "$HEALTHCHECK" "$_wt_baseline_snap" || true
+	else
+		log "healthcheck binary absent — skipping pre-change baseline (first install?)"
+		rm -f "$_wt_baseline_snap"; _wt_baseline_snap=""
+	fi
+
 	# Step 6: pull new images (with per-service digest capture for zero-downtime recreate).
 	ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
 	declare -A _wt_before_digests
@@ -2030,9 +2193,11 @@ if [[ "$MODE" == with_templates ]]; then
 		die "--with-templates upgrade rolled back due to compose up failure"
 	fi
 
-	# Step 8: verify with retry (same settle_healthcheck_with_retry as plain path).
-	if ! settle_healthcheck_with_retry "with-templates-upgrade"; then
-		warn "healthcheck red after --with-templates upgrade — rolling back"
+	# Step 8: verify with retry — Phase 3 baseline-aware gate.
+	# Pass baseline snapshot so gate diffs pre-change vs post-change.
+	if ! settle_healthcheck_with_retry "with-templates-upgrade" "${_wt_baseline_snap:-}"; then
+		warn "healthcheck regression after --with-templates upgrade — rolling back"
+		rm -f "${_wt_baseline_snap:-}"
 		do_rollback_templates
 		restore_host_scripts
 		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull) || true
@@ -2040,8 +2205,9 @@ if [[ "$MODE" == with_templates ]]; then
 		if ! "$HEALTHCHECK" --local; then
 			die "--with-templates rolled back but healthcheck still failing — manual recovery required"
 		fi
-		die "--with-templates upgrade rolled back due to post-upgrade healthcheck failure"
+		die "--with-templates upgrade rolled back due to post-upgrade healthcheck regression"
 	fi
+	rm -f "${_wt_baseline_snap:-}"
 
 	log "--with-templates upgrade to $TARGET complete"
 	re_render_xray
@@ -2114,6 +2280,17 @@ sync_host_scripts "$RELEASE_TAG"
 # Refresh ghcr auth from stored token (no-op if file absent).
 ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
 
+# Phase 3 (Decision 4): capture baseline health snapshot BEFORE pull.
+# Must happen before image pull to capture the pre-change state.
+_baseline_snapshot=$(mktemp)
+if [[ -x "$HEALTHCHECK" ]]; then
+	log "capturing pre-change health baseline (plain-upgrade)"
+	health_snapshot "$HEALTHCHECK" "$_baseline_snapshot" || true
+else
+	log "healthcheck binary absent — skipping pre-change baseline"
+	rm -f "$_baseline_snapshot"; _baseline_snapshot=""
+fi
+
 # Capture per-service image digests BEFORE pull so we can skip recreating
 # services whose image did not actually change (e.g. no-op version bump where
 # the sfu image is byte-for-byte identical across tags).
@@ -2164,15 +2341,18 @@ fi
 # worst-case xray Reality establishment time (~8s on rvpn v0.12.20 incident),
 # with added margin for a loaded edge.  A single sleep 10 was replaced because
 # the 2s slack was insufficient on loaded edges (see function definition comment).
-if ! settle_healthcheck_with_retry "plain-upgrade"; then
-	warn "healthcheck red after upgrade — rolling back"
+# Phase 3: pass baseline snapshot for regression-aware gate.
+if ! settle_healthcheck_with_retry "plain-upgrade" "${_baseline_snapshot:-}"; then
+	warn "healthcheck regression after upgrade — rolling back"
+	rm -f "${_baseline_snapshot:-}"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
 	restore_host_scripts
 	(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull)
 	(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate) || true
-	die "upgrade rolled back due to post-upgrade healthcheck failure"
+	die "upgrade rolled back due to post-upgrade healthcheck regression"
 fi
+rm -f "${_baseline_snapshot:-}"
 
 log "upgraded to $TARGET successfully"
 

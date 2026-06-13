@@ -16,6 +16,8 @@ on:
       - 'tests/test_upgrade_render_completeness.sh'
       - 'tests/test_render_completeness.sh'
       - 'tests/test_state_migration_matrix.sh'
+      - 'tests/test_health_gate_baseline.sh'
+      - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
   push:
     branches: [main]
@@ -33,6 +35,8 @@ on:
       - 'tests/test_upgrade_render_completeness.sh'
       - 'tests/test_render_completeness.sh'
       - 'tests/test_state_migration_matrix.sh'
+      - 'tests/test_health_gate_baseline.sh'
+      - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
 
 jobs:
@@ -70,3 +74,6 @@ jobs:
 
       - name: State schema v1 migration matrix (Phase 2, ADR-002)
         run: bash tests/test_state_migration_matrix.sh
+
+      - name: Baseline-aware health gate — regression diff (Phase 3, Decision 4)
+        run: bash tests/test_health_gate_baseline.sh
