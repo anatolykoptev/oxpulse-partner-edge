@@ -8,9 +8,16 @@ Wants=network-online.target
 Type=simple
 ExecStart=/usr/local/bin/oxpulse-awg-params-agent
 EnvironmentFile=/etc/oxpulse-partner-edge/awg-params-agent.env
+# Re-assert split-routing AllowedIPs widening after every epoch apply.
+# awg syncconf re-narrows the hub peer AllowedIPs to /32 (the value in awg0.conf);
+# this hook fires strictly AFTER syncconf returns, guaranteeing the widen runs after
+# the re-narrow.  Race-free: a .path watcher would fire at the conf rename (step 4),
+# before syncconf (step 5), and would lose the race.  Empty string disables the hook.
+Environment=OXPULSE_RESTART_UNIT_AFTER_APPLY=oxpulse-partner-edge-split-routing.service
 Restart=on-failure
 RestartSec=10s
-# Root is required for `awg syncconf` (netlink socket for amneziawg-go).
+# Root is required for `awg syncconf` (netlink socket for amneziawg-go)
+# and for `systemctl restart` of split-routing (system unit, not user unit).
 User=root
 
 [Install]
