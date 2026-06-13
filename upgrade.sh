@@ -196,6 +196,13 @@ _source_lib "ghcr-auth-lib.sh" \
     "${PREFIX_SBIN:-/usr/local/sbin}/ghcr-auth-lib.sh" \
     "$REPO_RAW/ghcr-auth-lib.sh"
 
+# Source reconcile engine primitives (Phase 1 — caddyfile surface).
+# shellcheck source=lib/reconcile.sh
+_source_lib "reconcile.sh" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/reconcile.sh" \
+    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/reconcile.sh" \
+    "$REPO_RAW/lib/reconcile.sh"
+
 [[ $EUID -eq 0 || "${OXPULSE_SKIP_ROOT_CHECK:-0}" == "1" ]] || die "must run as root"
 [[ -r "$COMPOSE_FILE" ]] || die "no installed bundle at $COMPOSE_FILE"
 [[ -r "$STATE_FILE" ]]   || die "missing $STATE_FILE — reinstall instead of upgrade"
@@ -1881,37 +1888,25 @@ if [[ "$MODE" == with_templates ]]; then
 		_proposed_compose="$_conflict_tmpdir/docker-compose.yml.tpl"
 		curl -fsSL --max-time 30 "$REPO_RAW/docker-compose.yml.tpl" -o "$_proposed_compose" 2>/dev/null || true
 
-		# Render Caddyfile directly for Check 1 and Check 6 (re-implementing the
-		# render inline so we get the actual file path, not just a log message).
+		# Render Caddyfile directly for Check 1 and Check 6 via reconcile_caddy_surface
+		# (opec render caddy — single render authority, Phase 1). DRY_RUN=1 so the surface
+		# function writes rendered output but does NOT atomic_swap to the installed path.
 		_rendered_caddy="$_conflict_tmpdir/Caddyfile"
 		_proposed_sha="unknown"
 		if grep -qE '^\s+caddy:' "$COMPOSE_FILE" 2>/dev/null && \
 		   [[ -n "${PARTNER_DOMAIN:-}" ]] && [[ -n "${TURNS_SUBDOMAIN:-}" ]]; then
 			_caddyfile_tpl="$_conflict_tmpdir/Caddyfile.tpl"
-			if curl -fsSL --max-time 30 "$REPO_RAW/Caddyfile.tpl" -o "$_caddyfile_tpl" 2>/dev/null; then
-				_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
-				# Load same defaults as re_render_caddy: fallback to hardcoded fleet defaults.
-				_defaults_conf="${PREFIX_SHARE:-/usr/local/share}/oxpulse-partner-edge/config/defaults.conf"
-				_dr_awg="${AWG_MOTHERLY_IP:-10.9.0.2}"
-				_dr_hy2h="${HY2_FALLBACK_HOST:-host.docker.internal}"
-				_dr_hy2p="${HY2_FALLBACK_PORT:-18443}"
-				# NAIVE_SOCKS_PORT: use shared resolver — identical to re_render_caddy.
-				_dr_naive=$(_resolve_naive_socks_port "$_caddyfile_tpl")
-				if [[ -r "$_defaults_conf" ]]; then
-					_dr_awg=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' _ "$_defaults_conf" || echo '10.9.0.2')
-					_dr_hy2h=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' _ "$_defaults_conf" || echo 'host.docker.internal')
-					_dr_hy2p=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_PORT:-18443}"' _ "$_defaults_conf" || echo '18443')
+			if curl -fsSL --max-time 30 "$REPO_RAW/Caddyfile.tpl" 					-o "$_caddyfile_tpl" 2>/dev/null; then
+				# Set up env for opec (same resolution as reconcile_caddy_surface).
+				_setup_caddy_render_env "$_caddyfile_tpl"
+				command -v opec >/dev/null 2>&1 && \
+					opec render caddy --tpl "$_caddyfile_tpl" --out "$_rendered_caddy" 2>/dev/null || {
+						warn "[dry-run] opec not available or render failed — Caddyfile conflict check skipped"
+					}
+				if [[ -f "$_rendered_caddy" ]]; then
+					_proposed_sha=$(sha256sum "$_rendered_caddy" | awk '{print $1}')
+					sed -i "s|__CADDYFILE_SHA__|${_proposed_sha}|g" "$_rendered_caddy"
 				fi
-				sed \
-					-e "s|{{PARTNER_DOMAIN}}|$(_esc "$PARTNER_DOMAIN")|g" \
-					-e "s|{{TURNS_SUBDOMAIN}}|$(_esc "$TURNS_SUBDOMAIN")|g" \
-					-e "s|{{AWG_MOTHERLY_IP}}|$(_esc "$_dr_awg")|g" \
-					-e "s|{{HY2_FALLBACK_HOST}}|$(_esc "$_dr_hy2h")|g" \
-					-e "s|{{HY2_FALLBACK_PORT}}|$(_esc "$_dr_hy2p")|g" \
-					-e "s|{{NAIVE_SOCKS_PORT}}|$(_esc "$_dr_naive")|g" \
-					"$_caddyfile_tpl" > "$_rendered_caddy"
-				_proposed_sha=$(sha256sum "$_rendered_caddy" | awk '{print $1}')
-				sed -i "s|__CADDYFILE_SHA__|${_proposed_sha}|g" "$_rendered_caddy"
 			fi
 		fi
 
@@ -1936,7 +1931,17 @@ if [[ "$MODE" == with_templates ]]; then
 
 	# Step 2+3: fetch + render templates. die()s on fetch failure — no state
 	# has been mutated yet (backups exist but originals are untouched).
-	re_render_caddy
+	# Phase 1 (reconcile): route Caddyfile through reconcile_caddy_surface (opec render caddy
+	# as single render authority). re_render_caddy remains defined below for backward compat
+	# (test_upgrade_render_completeness.sh tests it directly; Phase 6 deletes it).
+	_reconcile_tmpdir_wt=$(mktemp -d)
+	# shellcheck disable=SC2064
+	trap "rm -rf '$_reconcile_tmpdir_wt'" RETURN
+	log "fetching Caddyfile.tpl from $REPO_RAW (reconcile path)"
+	if ! curl -fsSL --max-time 30 "$REPO_RAW/Caddyfile.tpl" 			-o "$_reconcile_tmpdir_wt/Caddyfile.tpl" 2>/dev/null; then
+		die "could not fetch Caddyfile.tpl from $REPO_RAW — aborting (no changes applied)"
+	fi
+	reconcile_caddy_surface "$_reconcile_tmpdir_wt"
 	re_render_healthcheck
 
 	# Step 4: patch image tags in compose (same as plain image upgrade).
