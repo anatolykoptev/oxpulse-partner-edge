@@ -396,3 +396,21 @@ fi
 # Persist new version
 echo "$NEW_VERSION" > "$VERSION_FILE"
 log "OK rotation applied: pub=${NEW_PUB:0:16}... version=$NEW_VERSION"
+
+# Re-assert split-routing after AWG param sync.
+# The awg-params-agent may reset the hub peer's AllowedIPs from 0.0.0.0/0
+# back to /32 when applying a new epoch. refresh.service runs daily and
+# coincides with param-agent syncs, so we re-assert as the final step.
+# Idempotent: split-routing script is safe to call multiple times.
+# Skip gracefully on nodes where split-routing is not installed.
+_sr_svc="oxpulse-partner-edge-split-routing.service"
+if systemctl list-unit-files "$_sr_svc" --no-legend 2>/dev/null | grep -q "$_sr_svc"; then
+    log "re-asserting split-routing after AWG param sync"
+    if systemctl restart "$_sr_svc" 2>>"$LOG_FILE"; then
+        log "split-routing re-assert OK"
+    else
+        log "WARN split-routing re-assert failed (non-fatal) — check: systemctl status $_sr_svc"
+    fi
+else
+    log "split-routing: $_sr_svc not installed — skipping re-assert"
+fi
