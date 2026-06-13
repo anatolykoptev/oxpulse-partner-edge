@@ -53,6 +53,7 @@ IMAGE_VERSION=latest
 TURNS_SUBDOMAIN=turns
 INSTALLED_AT=2026-01-01T00:00:00Z
 CADDYFILE_SHA=oldhashvalue
+NAIVE_SOCKS_PORT=1080
 ENVEOF
 chmod 0600 "$T_LIB/install.env"
 
@@ -96,6 +97,7 @@ RENDER_SHA=$(
 
         # Extract and run re_render_caddy from upgrade.sh.
         # We eval the function definition only.
+        eval "$(awk "/^_resolve_naive_socks_port\(\)/,/^\}$/" "'"$UPGRADE"'")"
         eval "$(awk "/^re_render_caddy\(\)/,/^\}$/" "'"$UPGRADE"'")"
         re_render_caddy
         grep "^CADDYFILE_SHA=" "'"$T_LIB"'/install.env" | cut -d= -f2
@@ -134,6 +136,10 @@ bash -c '
     sed \
         -e "s|{{PARTNER_DOMAIN}}|test.example.com|g" \
         -e "s|{{TURNS_SUBDOMAIN}}|turns|g" \
+        -e "s|{{AWG_MOTHERLY_IP}}|10.9.0.2|g" \
+        -e "s|{{HY2_FALLBACK_HOST}}|host.docker.internal|g" \
+        -e "s|{{HY2_FALLBACK_PORT}}|18443|g" \
+        -e "s|{{NAIVE_SOCKS_PORT}}|1080|g" \
     > "'"$CADDY_NOSUB"'"
 '
 EXPECTED_SHA=$(sha256sum "$CADDY_NOSUB" | awk '{print $1}')
@@ -165,6 +171,7 @@ bash -c '
     TURNS_SUBDOMAIN="turns"
     DRY_RUN=0
 
+    eval "$(awk "/^_resolve_naive_socks_port\(\)/,/^\}$/" "'"$UPGRADE"'")"
     eval "$(awk "/^re_render_caddy\(\)/,/^\}$/" "'"$UPGRADE"'")"
     re_render_caddy
 ' 2>/tmp/render-idem.log || { echo "FAIL: second re_render_caddy failed"; cat /tmp/render-idem.log >&2; exit 1; }
@@ -243,6 +250,7 @@ SKIP_OUT=$(bash -c '
     TURNS_SUBDOMAIN="turns"
     DRY_RUN=0
 
+    eval "$(awk "/^_resolve_naive_socks_port\(\)/,/^\}$/" "'"$UPGRADE"'")"
     eval "$(awk "/^re_render_caddy\(\)/,/^\}$/" "'"$UPGRADE"'")"
     re_render_caddy
 ' 2>&1 || true)
