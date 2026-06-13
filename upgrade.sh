@@ -248,7 +248,6 @@ check_signaling_sfu_secret
 # shellcheck disable=SC1090
 . "$STATE_FILE"
 CURRENT="${IMAGE_VERSION:-unknown}"
-
 MODE=apply
 TARGET=""
 DRY_RUN=0
@@ -283,6 +282,20 @@ done
 if [[ -n "$GHCR_TOKEN_ARG" ]]; then
 	ghcr_configure_token "$GHCR_TOKEN_ARG" || die "failed to save/login with supplied --ghcr-token (see warning above)"
 	unset GHCR_TOKEN_ARG  # don't keep secret in env longer than necessary
+fi
+
+# Phase 2 (ADR-002): forward-migrate STATE_FILE to schema v1 before any surface
+# renders or preflight checks run. migrate_state() is idempotent on v1 states.
+# This replaces the scattered "re-run install.sh" die()s: the migration derives
+# missing non-secret structural keys (CADDYFILE_SHA, BACKEND_API, TURNS_SUBDOMAIN,
+# NAIVE_SOCKS_PORT) from the live system where unambiguous; fails with one
+# actionable die naming the single key it cannot derive.
+# Skip on --check and DRY_RUN modes: read-only paths must not mutate state.
+if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
+	migrate_state
+	# Re-source state so the current shell sees any keys that were just written.
+	# shellcheck disable=SC1090
+	. "$STATE_FILE"
 fi
 
 V01_TO_V02=0
@@ -387,10 +400,14 @@ _resolve_naive_socks_port() {
 	# Tier 2: STATE_FILE
 	[[ -z "$_port" ]] && _port=$(
 		grep '^NAIVE_SOCKS_PORT=' "${STATE_FILE:-}" 2>/dev/null | cut -d= -f2 || true)
-	# Tier 3: live docker inspect
+	# Tier 3: live docker inspect.
+	# Use {{println .}} (Go's println emits a real newline per element) so that
+	# grep '^NAIVE_SOCKS_PORT=' matches even when NAIVE is not the first env var.
+	# The old '{{.}}\n' form emits a LITERAL backslash-n, joining all vars onto
+	# one physical line — grep only matched when NAIVE happened to be first.
 	[[ -z "$_port" ]] && _port=$(
 		${DOCKER_BIN:-docker} inspect oxpulse-partner-naive \
-			--format '{{range .Config.Env}}{{.}}\n{{end}}' 2>/dev/null \
+			--format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
 			| grep '^NAIVE_SOCKS_PORT=' | cut -d= -f2 || true)
 	# Tier 4: die if template uses the placeholder and nothing resolved
 	if [[ -z "$_port" ]]; then
@@ -1359,8 +1376,12 @@ maybe_v01_to_v02_preflight() {
 
 	log "detected v0.1.x → v0.2.x migration — running DNS preflight"
 
-	[[ -n "${TURNS_SUBDOMAIN:-}" ]] || die "TURNS_SUBDOMAIN missing from $STATE_FILE — state file is from a pre-Phase-6 build, re-run install.sh to populate it"
-	[[ -n "${PARTNER_DOMAIN:-}"  ]] || die "PARTNER_DOMAIN missing from $STATE_FILE — state file is from a pre-Phase-6 build, re-run install.sh to populate it"
+	# Phase 2 (ADR-002): migrate_state() already ran above and derived any missing
+	# structural keys from the live system.  If TURNS_SUBDOMAIN or PARTNER_DOMAIN
+	# are still absent after migration, the state is genuinely unrecoverable without
+	# operator input — fail with a precise message (no "re-run install.sh" catch-all).
+	[[ -n "${TURNS_SUBDOMAIN:-}" ]] || die "TURNS_SUBDOMAIN missing from $STATE_FILE — migrate_state could not derive it. Provide it: echo 'TURNS_SUBDOMAIN=api-<hex>' >> $STATE_FILE"
+	[[ -n "${PARTNER_DOMAIN:-}"  ]] || die "PARTNER_DOMAIN missing from $STATE_FILE — migrate_state could not derive it. Provide it: echo 'PARTNER_DOMAIN=<your-domain>' >> $STATE_FILE"
 
 	PUBLIC_IP=$(curl -fsS --max-time 5 https://ifconfig.me 2>/dev/null || curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
 	[[ -n "$PUBLIC_IP" ]] || die "could not determine public IP (both ifconfig.me and api.ipify.org failed)"
@@ -1928,6 +1949,32 @@ if [[ "$MODE" == with_templates ]]; then
 	cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
 	cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
 	snapshot_host_scripts "$CURRENT"
+
+	# Phase 2 (Task 6): opec-presence + caddy-render-capable probe BEFORE reconcile.
+	# Unlike install.sh (which always runs _ensure_opec_binary at startup), upgrade.sh
+	# had no probe — a box with missing/stale opec would die mid-reconcile with a
+	# cryptic error from reconcile_caddy_surface.  Probe here with a clear message.
+	_probe_opec_for_upgrade() {
+		# Check opec present and understands `render caddy`.
+		if ! command -v opec >/dev/null 2>&1; then
+			# Try to fetch via sync_host_scripts if RELEASE_TAG is available.
+			if [[ -n "${RELEASE_TAG:-}" ]]; then
+				log "opec not found — attempting to fetch via sync_host_scripts $RELEASE_TAG"
+				sync_host_scripts "$RELEASE_TAG" || true
+			fi
+			# Re-check after potential install.
+			command -v opec >/dev/null 2>&1 || \
+				die "opec not on PATH — required for --with-templates Caddyfile render. Re-run install.sh or install opec manually: see https://github.com/anatolykoptev/oxpulse-partner-edge/releases"
+		fi
+		# Capability probe: opec must support `render caddy` (added in Phase 1).
+		if ! opec render caddy --help >/dev/null 2>&1; then
+			log "opec does not support 'render caddy' — attempting to update via sync_host_scripts"
+			[[ -n "${RELEASE_TAG:-}" ]] && sync_host_scripts "$RELEASE_TAG" || true
+			opec render caddy --help >/dev/null 2>&1 || \
+				die "opec binary is too old (missing 'render caddy' subcommand). Update opec: re-run install.sh or copy opec-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') from the release bundle."
+		fi
+	}
+	_probe_opec_for_upgrade
 
 	# Step 2+3: fetch + render templates. die()s on fetch failure — no state
 	# has been mutated yet (backups exist but originals are untouched).

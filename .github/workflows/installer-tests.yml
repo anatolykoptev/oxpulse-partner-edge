@@ -15,6 +15,7 @@ on:
       - 'tests/test_sfu_compose.sh'
       - 'tests/test_upgrade_render_completeness.sh'
       - 'tests/test_render_completeness.sh'
+      - 'tests/test_state_migration_matrix.sh'
       - '.github/workflows/installer-tests.yml'
   push:
     branches: [main]
@@ -31,6 +32,7 @@ on:
       - 'tests/test_sfu_compose.sh'
       - 'tests/test_upgrade_render_completeness.sh'
       - 'tests/test_render_completeness.sh'
+      - 'tests/test_state_migration_matrix.sh'
       - '.github/workflows/installer-tests.yml'
 
 jobs:
@@ -65,3 +67,6 @@ jobs:
 
       - name: Caddyfile.tpl placeholder coverage + reconcile lib primitives (Phase 1, S1)
         run: bash tests/test_render_completeness.sh
+
+      - name: State schema v1 migration matrix (Phase 2, ADR-002)
+        run: bash tests/test_state_migration_matrix.sh

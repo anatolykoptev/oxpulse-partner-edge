@@ -1,11 +1,12 @@
 #!/bin/bash
-# lib/reconcile.sh — Phase 1: convergent reconcile engine primitives (caddyfile surface).
+# lib/reconcile.sh — Phase 1+2: convergent reconcile engine primitives.
 #
 # Provides:
 #   atomic_swap INSTALLED_PATH CANDIDATE_PATH [MODE]
 #   assert_no_unresolved_placeholders RENDERED_FILE
 #   _setup_caddy_render_env [TPL_FILE]
 #   reconcile_caddy_surface CANDIDATE_DIR
+#   migrate_state                                  # Phase 2 (ADR-002)
 #   mark_restart UNIT
 #   apply_restarts
 #
@@ -21,7 +22,7 @@
 # NAIVE_SOCKS_PORT resolution (_setup_caddy_render_env):
 #   1. NAIVE_SOCKS_PORT env var already set
 #   2. STATE_FILE / install.env persisted value
-#   3. Live docker inspect on oxpulse-partner-naive
+#   3. Live docker inspect on oxpulse-partner-naive (uses {{println .}} for real newlines)
 #   4. die — if {{NAIVE_SOCKS_PORT}} is present in TPL_FILE and unresolvable.
 #      NEVER silently defaults to 1080 when the template uses the placeholder.
 
@@ -115,9 +116,13 @@ _setup_caddy_render_env() {
             | cut -d= -f2 || true)
     fi
     if [[ -z "${NAIVE_SOCKS_PORT:-}" ]]; then
-        # Tier 3: live docker inspect
+        # Tier 3: live docker inspect.
+        # Use {{println .}} (Go's println emits a real newline per element) rather
+        # than the broken '{{.}}\n' form which emits a LITERAL backslash-n, joining
+        # all env vars onto one physical line — grep '^NAIVE_SOCKS_PORT=' only
+        # matches when NAIVE is the very first var (tier-3 silently dead otherwise).
         NAIVE_SOCKS_PORT=$(${DOCKER_BIN:-docker} inspect oxpulse-partner-naive \
-            --format '{{range .Config.Env}}{{.}}\n{{end}}' 2>/dev/null \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
             | grep '^NAIVE_SOCKS_PORT=' | cut -d= -f2 || true)
     fi
     # Tier 4: die if template uses the placeholder and nothing resolved.
@@ -218,6 +223,144 @@ reconcile_caddy_surface() {
 
     # Collect restart for oxpulse-partner-edge.service (deduped, applied after all surfaces).
     mark_restart "oxpulse-partner-edge.service"
+}
+
+# ---------------------------------------------------------------------------
+# migrate_state — Phase 2 (ADR-002): forward-migrate STATE_FILE to schema v1.
+#
+# Called by upgrade.sh immediately after sourcing STATE_FILE.  The future
+# converge entrypoint (Phase 4) will also call it.  Safe to call on a v1 state
+# (idempotent — SCHEMA_VERSION already set → returns immediately).
+#
+# Migration contract (ADR-002):
+#   - SCHEMA_VERSION missing or < 1  → run this migration.
+#   - Write SCHEMA_VERSION=1 at end of STATE_FILE.
+#   - Derive missing NON-SECRET STRUCTURAL keys from the live system:
+#       CADDYFILE_SHA      → re-hash /etc/oxpulse-partner-edge/Caddyfile if present.
+#       OXPULSE_MIRROR_BASE → optional; absent on non-mirror installs is correct.
+#                            Not derived here — left absent if missing.
+#       TURNS_SUBDOMAIN    → turns_subdomain field in node-config.json.
+#   - BACKEND_API: fleet constant = https://api.oxpulse.chat (install.sh:58).
+#       NOT derived from node-config backend_endpoint (that is the scheme-less
+#       host:port TURN/SFU endpoint, e.g. krolik.oxpulse.chat:5349 — completely
+#       different field).  If missing from state, default to the fleet constant.
+#   - NEVER derive or write secrets (reality.priv, awg-private.key, token,
+#     service_token_hash, signaling keys — those live in their own files).
+#
+# Reads:  STATE_FILE (global, set by caller before sourcing this lib).
+# Writes: STATE_FILE (appends/updates only — never truncates).
+# ---------------------------------------------------------------------------
+migrate_state() {
+    local _state_file="${STATE_FILE:-}"
+    if [[ -z "$_state_file" || ! -f "$_state_file" ]]; then
+        # No state file at all — caller (upgrade.sh) already guards this.
+        return 0
+    fi
+
+    # Read current schema version (absent = 0 = legacy).
+    local _current_version
+    _current_version=$(grep '^SCHEMA_VERSION=' "$_state_file" 2>/dev/null \
+        | cut -d= -f2 | tr -d '[:space:]' || true)
+    _current_version="${_current_version:-0}"
+
+    # Already at v1 — idempotent return.
+    if [[ "$_current_version" == "1" ]]; then
+        return 0
+    fi
+
+    log "migrate_state: STATE_FILE at schema v${_current_version} — migrating to v1"
+
+    # ------------------------------------------------------------------
+    # Phase 2a: derive CADDYFILE_SHA from live Caddyfile if missing.
+    # The sha is non-secret structural metadata (visible via /canary/config-hash).
+    # ------------------------------------------------------------------
+    if ! grep -q '^CADDYFILE_SHA=' "$_state_file" 2>/dev/null; then
+        local _caddy_path="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/Caddyfile"
+        if [[ -f "$_caddy_path" ]]; then
+            local _live_sha
+            _live_sha=$(sha256sum "$_caddy_path" | awk '{print $1}')
+            printf 'CADDYFILE_SHA=%s\n' "$_live_sha" >> "$_state_file"
+            log "migrate_state: derived CADDYFILE_SHA=$_live_sha from live Caddyfile"
+        else
+            log "migrate_state: Caddyfile not found at $_caddy_path — CADDYFILE_SHA will be set after next reconcile"
+        fi
+    fi
+
+    # ------------------------------------------------------------------
+    # Phase 2b: derive TURNS_SUBDOMAIN from node-config.json if missing.
+    # turns_subdomain is non-secret (public DNS label).
+    # ------------------------------------------------------------------
+    if ! grep -q '^TURNS_SUBDOMAIN=' "$_state_file" 2>/dev/null; then
+        local _node_cfg="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/node-config.json"
+        local _ts=""
+        if [[ -r "$_node_cfg" ]] && command -v python3 >/dev/null 2>&1; then
+            _ts=$(python3 -c "
+import json,sys
+try:
+    d=json.load(open('$_node_cfg'))
+    v=d.get('turns_subdomain','')
+    if v: print(v)
+except Exception: pass
+" 2>/dev/null || true)
+        fi
+        if [[ -n "$_ts" ]]; then
+            printf 'TURNS_SUBDOMAIN=%s\n' "$_ts" >> "$_state_file"
+            log "migrate_state: derived TURNS_SUBDOMAIN=$_ts from node-config.json"
+        else
+            log "migrate_state: TURNS_SUBDOMAIN not derivable from node-config.json — will be set on next install"
+        fi
+    fi
+
+    # ------------------------------------------------------------------
+    # Phase 2c: BACKEND_API — fleet constant, NOT derived from node-config.
+    #
+    # IMPORTANT: node-config.json's backend_endpoint is the scheme-less
+    # host:port TURN/SFU endpoint (e.g. krolik.oxpulse.chat:5349 or
+    # api.oxpulse.chat:443).  It is NOT the registration API base URL.
+    # Stripping the port from that field produces a wrong, scheme-less
+    # value (e.g. "krolik.oxpulse.chat") — not a valid BACKEND_API.
+    #
+    # BACKEND_API is a fleet constant: every production edge uses
+    # https://api.oxpulse.chat (mirrors are handled via OXPULSE_MIRROR_BASE,
+    # not via a different BACKEND_API value).  Matches install.sh:58 default.
+    if ! grep -q '^BACKEND_API=' "$_state_file" 2>/dev/null; then
+        # Default to the install.sh:58 fleet constant.  Every production edge uses
+        # this value; mirrored installs use OXPULSE_MIRROR_BASE separately —
+        # BACKEND_API stays api.oxpulse.chat regardless.
+        local _ba="https://api.oxpulse.chat"
+        printf 'BACKEND_API=%s\n' "$_ba" >> "$_state_file"
+        log "migrate_state: BACKEND_API defaulted to fleet constant $_ba (not derived from node-config backend_endpoint)"
+    fi
+
+    # ------------------------------------------------------------------
+    # Phase 2d: NAIVE_SOCKS_PORT — optional but expected on full installs.
+    # Derive from live docker inspect (using the println fix) if missing.
+    # ------------------------------------------------------------------
+    if ! grep -q '^NAIVE_SOCKS_PORT=' "$_state_file" 2>/dev/null; then
+        local _nsp=""
+        _nsp=$(${DOCKER_BIN:-docker} inspect oxpulse-partner-naive \
+            --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+            | grep '^NAIVE_SOCKS_PORT=' | cut -d= -f2 || true)
+        if [[ -n "$_nsp" ]]; then
+            printf 'NAIVE_SOCKS_PORT=%s\n' "$_nsp" >> "$_state_file"
+            log "migrate_state: derived NAIVE_SOCKS_PORT=$_nsp from live naive container"
+        else
+            # Default 1080 is safe: matches naive's built-in default.
+            printf 'NAIVE_SOCKS_PORT=1080\n' >> "$_state_file"
+            log "migrate_state: NAIVE_SOCKS_PORT defaulted to 1080 (naive container not running)"
+        fi
+    fi
+
+    # ------------------------------------------------------------------
+    # Write SCHEMA_VERSION=1 — must be last so partial-write is detectable.
+    # Update in-place if somehow already present (idempotency guard); else append.
+    # ------------------------------------------------------------------
+    if grep -q '^SCHEMA_VERSION=' "$_state_file" 2>/dev/null; then
+        sed -i "s|^SCHEMA_VERSION=.*|SCHEMA_VERSION=1|" "$_state_file"
+    else
+        printf 'SCHEMA_VERSION=1\n' >> "$_state_file"
+    fi
+    log "migrate_state: STATE_FILE migrated to SCHEMA_VERSION=1"
 }
 
 # ---------------------------------------------------------------------------
