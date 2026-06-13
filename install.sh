@@ -1566,6 +1566,8 @@ EOF
 	# healthcheck.sh check 15 compares this against /canary/config-hash.
 	_caddy_sha="$_rendered_sha"  # reuse hash computed before substitution (drift-safe)
 	printf 'CADDYFILE_SHA=%s\n' "$_caddy_sha" >> "$PREFIX_LIB/install.env"
+	# Phase 2 (ADR-002): schema version — forward-only; old readers ignore it.
+	printf 'SCHEMA_VERSION=1\n' >> "$PREFIX_LIB/install.env"
 fi
 
 # ---------- Step 6: start ----------
