@@ -943,6 +943,64 @@ Or: re-run install.sh with OXPULSE_SERVICE_TOKEN=<raw> in the env
 			log "  service token reused from existing $SVC_TOKEN_FILE"
 		fi
 	fi
+	# ── cross-probe mesh persist (P3b producer) ───────────────────────────────
+	# The central (P3a) may return a server-curated peer_roster[] of public peer
+	# TURNS:443 endpoints + a scoped cross_probe_token (xprb_). Both OPTIONAL — a
+	# pre-P3a central omits them and the edge never runs the peer-probe loop
+	# (fail-closed; oxpulse-channels-health-report.sh skips on empty roster / no
+	# token). Roster is public (0644); the token is a bearer credential (0600,
+	# COALESCE-preserve like the service token so a re-register that omits it does
+	# not wipe a working credential).
+	#
+	# peer_roster is a JSON array → json_get_raw (json_get only handles scalars).
+	# json_get_raw echoes "null" when absent; normalise to "[]".
+	PEER_ROSTER=$(json_get_raw peer_roster "$tmp_cfg")
+	[[ "$PEER_ROSTER" == "null" || -z "$PEER_ROSTER" ]] && PEER_ROSTER="[]"
+	PEER_ROSTER_FILE="$PREFIX_LIB/peer-roster.json"
+	install -d -m 0755 "$PREFIX_LIB"
+	_roster_tmp=$(mktemp "$PEER_ROSTER_FILE.XXXXXX")
+	printf '%s\n' "$PEER_ROSTER" > "$_roster_tmp"
+	chmod 0644 "$_roster_tmp"
+	mv -f "$_roster_tmp" "$PEER_ROSTER_FILE"
+	unset _roster_tmp
+	_roster_count=$(printf '%s' "$PEER_ROSTER" | jq 'length' 2>/dev/null || echo 0)
+	log "  peer roster persisted → $PEER_ROSTER_FILE ($_roster_count peer(s))"
+
+	# PRESERVE-ON-ABSENT INVARIANT (mirrors hydrate.sh's cross-probe write site):
+	# the central (P2 register.rs) mints cross_probe_token on EVERY register POST
+	# WHEN peer_roster is non-empty AND CROSS_PROBE_TOKEN_SECRET is set — it is
+	# NOT fresh-provision-only. When the central has no secret, or a register
+	# transiently returns an empty roster, the field is OMITTED (graceful-degrade,
+	# not revocation). So we COALESCE-PRESERVE on both branches: a present token
+	# is written only if we don't already hold one (don't clobber a possibly newer
+	# operator-rotated value); an omitted token leaves any existing file intact.
+	# Revocation is server-side: a rotated CROSS_PROBE_TOKEN_SECRET invalidates the
+	# old token → the prober-report POST 4xx's and the edge stops trusting it. We
+	# never rely on rm for revocation.
+	CROSS_PROBE_TOKEN=$(json_get cross_probe_token "$tmp_cfg")
+	XPRB_TOKEN_FILE="$PREFIX_ETC/cross-probe-token"
+	if [[ -n "$CROSS_PROBE_TOKEN" ]]; then
+		if [[ ! -e "$XPRB_TOKEN_FILE" ]]; then
+			_xprb_tmp=$(mktemp "$XPRB_TOKEN_FILE.XXXXXX")
+			printf '%s' "$CROSS_PROBE_TOKEN" > "$_xprb_tmp"
+			chmod 0600 "$_xprb_tmp"
+			mv -f "$_xprb_tmp" "$XPRB_TOKEN_FILE"
+			unset _xprb_tmp
+			log "  cross-probe token persisted → $XPRB_TOKEN_FILE (raw value redacted)"
+		else
+			# A token already exists; the central re-mints on every register, but
+			# we keep the on-disk one (an operator may have rotated it locally and
+			# the server's re-mint of the SAME value is a no-op). COALESCE-preserve.
+			log "  cross-probe token returned by server; preserved existing $XPRB_TOKEN_FILE"
+		fi
+	else
+		# Token OMITTED (central has no CROSS_PROBE_TOKEN_SECRET, or a transient
+		# empty roster). Preserve any existing token — a transient must not wipe a
+		# working credential. The loop uses the existing token if present, else
+		# stays disabled (fail-closed; empty roster also disables it).
+		log "  no cross-probe token in response — preserved existing token if present, else peer-probe loop stays disabled"
+	fi
+	unset PEER_ROSTER CROSS_PROBE_TOKEN
 fi
 [[ -z "$REALITY_SHORT_ID" ]]   && die "reality_short_id missing from config"
 [[ -z "$REALITY_SERVER_NAME" ]] && REALITY_SERVER_NAME="www.samsung.com"
