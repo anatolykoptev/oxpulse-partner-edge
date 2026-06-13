@@ -319,6 +319,8 @@ _install_lib_source install-awg-params-agent.sh
 _install_lib_source install-firewall.sh
 # shellcheck source=lib/install-split-routing.sh
 _install_lib_source install-split-routing.sh
+# shellcheck source=lib/reconcile.sh
+_install_lib_source reconcile.sh
 
 preflight_run
 
@@ -1112,7 +1114,10 @@ render_with_opec() {
 # avoid duplicate definitions — channel-render-lib.sh is the single source of truth.
 render_with_opec compose "$stage/compose.tpl" "$compose_out"
 render_with_opec caddy   "$stage/caddy.tpl"   "$caddy_out"
-# Phase 1: compute sha256 of rendered Caddyfile and substitute __CADDYFILE_SHA__
+# Phase 1 (reconcile): completeness guard — fail-closed if any {{X}} survived render.
+# Uses assert_no_unresolved_placeholders from lib/reconcile.sh.
+assert_no_unresolved_placeholders "$caddy_out"
+# Compute sha256 of rendered Caddyfile and substitute __CADDYFILE_SHA__
 # placeholder so /canary/config-hash returns the actual hash at runtime.
 _rendered_sha=$(sha256sum "$caddy_out" | awk '{print $1}')
 sed -i "s|__CADDYFILE_SHA__|${_rendered_sha}|g" "$caddy_out"

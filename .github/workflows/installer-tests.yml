@@ -9,10 +9,12 @@ on:
       - 'Caddyfile.tpl'
       - 'config/defaults.conf'
       - 'scripts/oxpulse-xray-update.sh'
+      - 'lib/reconcile.sh'
       - 'tests/test_install_die_on_empty_sfu_secret.sh'
       - 'tests/test_upgrade_die_on_empty_sfu_secret.sh'
       - 'tests/test_sfu_compose.sh'
       - 'tests/test_upgrade_render_completeness.sh'
+      - 'tests/test_render_completeness.sh'
       - '.github/workflows/installer-tests.yml'
   push:
     branches: [main]
@@ -23,10 +25,12 @@ on:
       - 'Caddyfile.tpl'
       - 'config/defaults.conf'
       - 'scripts/oxpulse-xray-update.sh'
+      - 'lib/reconcile.sh'
       - 'tests/test_install_die_on_empty_sfu_secret.sh'
       - 'tests/test_upgrade_die_on_empty_sfu_secret.sh'
       - 'tests/test_sfu_compose.sh'
       - 'tests/test_upgrade_render_completeness.sh'
+      - 'tests/test_render_completeness.sh'
       - '.github/workflows/installer-tests.yml'
 
 jobs:
@@ -58,3 +62,6 @@ jobs:
 
       - name: Caddy render completeness + with_templates conflict-check path
         run: bash tests/test_upgrade_render_completeness.sh
+
+      - name: Caddyfile.tpl placeholder coverage + reconcile lib primitives (Phase 1, S1)
+        run: bash tests/test_render_completeness.sh
