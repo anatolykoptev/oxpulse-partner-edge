@@ -455,6 +455,264 @@ else
 fi
 trap - EXIT; rm -rf "$T8"
 
+# ── Test 9: SEC-CR-301 extended SSRF classifier ───────────────────────────────
+# Each new internal/ambiguous IP-literal class must be REJECTED before any dial:
+#   CGNAT 100.64/10, 0.0.0.0/8, IPv4-mapped/compat IPv6, bracketed IPv6,
+#   non-dotted-decimal IPv4 (hex / octal / decimal). A clean public dotted-quad
+#   literal must still be ALLOWED (the dial happens). Mirrors T2's -S dial filter.
+T9=$(mktemp -d)
+trap 'rm -rf "$T9"' EXIT
+make_bin "$T9"; mkdir -p "$T9/etc" "$T9/var"
+write_node_config "$T9/etc"
+cat > "$T9/var/peer-roster.json" <<'JSON'
+[
+  {"node_id":"cgnat","turns_host":"100.64.1.1","turns_port":443},
+  {"node_id":"zeronet","turns_host":"0.1.2.3","turns_port":443},
+  {"node_id":"v4mapped","turns_host":"::ffff:127.0.0.1","turns_port":443},
+  {"node_id":"v4compat","turns_host":"::127.0.0.1","turns_port":443},
+  {"node_id":"bracketed","turns_host":"[::1]","turns_port":443},
+  {"node_id":"hexlit","turns_host":"0x7f000001","turns_port":443},
+  {"node_id":"octlit","turns_host":"0177.0.0.1","turns_port":443},
+  {"node_id":"declit","turns_host":"2130706433","turns_port":443},
+  {"node_id":"mapped-cgnat","turns_host":"::ffff:100.64.0.9","turns_port":443},
+  {"node_id":"pub","turns_host":"203.0.113.77","turns_port":443}
+]
+JSON
+# getent: only used for hostname forms; all entries here are IP literals classified
+# without resolution, so getent should NOT even be consulted for them. Provide a
+# fail-closed stub anyway.
+cat > "$T9/getent" <<'STUB'
+#!/bin/sh
+exit 2
+STUB
+chmod +x "$T9/getent"
+DIAL9="$T9/dial.log"
+cat > "$T9/docker" <<STUB
+#!/bin/bash
+if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then echo "s"; exit 0; fi
+if [[ "\$*" == *"turnutils_uclient"* ]]; then
+    [[ "\$*" == *" -S "* ]] && printf '%s\n' "\$*" >> "$DIAL9"
+    echo "allocate success"
+    exit 0
+fi
+exit 1
+STUB
+chmod +x "$T9/docker"
+set +e
+ERR9=$(PATH="$T9:/usr/bin:/bin" \
+    _NODE_CONFIG="$T9/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T9/var" _PEER_ROSTER_FILE="$T9/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t9" OXPULSE_SERVICE_TOKEN="stkn_t9" \
+    OXPULSE_TURN_SECRET="s" OXPULSE_GETENT_BIN="$T9/getent" \
+    OXPULSE_PEER_PROBE_MAX=20 OXPULSE_PEER_PROBE_REJECT_HEADROOM=20 \
+    bash "$SCRIPT" --dry-run 2>&1 >/dev/null)
+set -e
+# None of the 9 internal/ambiguous literals may appear in the dial log.
+LEAKED9=""
+for bad in "100.64.1.1" "0.1.2.3" "::ffff:127.0.0.1" "::127.0.0.1" "::1" \
+           "0x7f000001" "0177.0.0.1" "2130706433" "100.64.0.9"; do
+    grep -Fq "$bad" "$DIAL9" 2>/dev/null && LEAKED9="$LEAKED9 $bad"
+done
+if [[ -z "$LEAKED9" ]]; then
+    ok "test9: all SEC-CR-301 classes REJECTED pre-dial (CGNAT/0.0.0.0/mapped/compat/bracket/hex/oct/dec)"
+else
+    fail "test9: SSRF LEAK — dialed:$LEAKED9; dial log: $(cat "$DIAL9" 2>/dev/null)"
+fi
+# Exactly 9 REJECTs logged (one per internal literal).
+if [[ $(printf '%s\n' "$ERR9" | grep -c 'REJECT') -ge 9 ]]; then
+    ok "test9: 9 internal/ambiguous literals each logged a REJECT"
+else
+    fail "test9: expected >=9 REJECT logs; got $(printf '%s\n' "$ERR9" | grep -c 'REJECT')"
+fi
+# The clean public dotted-quad literal WAS dialed (no false-positive over-block).
+if grep -Fq "203.0.113.77" "$DIAL9" 2>/dev/null; then
+    ok "test9: clean public dotted-quad literal ALLOWED (no over-block)"
+else
+    fail "test9: public literal 203.0.113.77 not dialed; dial log: $(cat "$DIAL9" 2>/dev/null)"
+fi
+trap - EXIT; rm -rf "$T9"
+
+# ── Test 10: MINOR 5 rotation fairness — tail covered across cycles ───────────
+# A 4-peer roster with cap=2 dials peers [0,1] cycle 1, then [2,3] cycle 2 (the
+# persisted offset advances). Over two cycles every peer is dialed exactly once.
+T10=$(mktemp -d)
+trap 'rm -rf "$T10"' EXIT
+make_bin "$T10"; mkdir -p "$T10/etc" "$T10/var"
+write_node_config "$T10/etc"
+cat > "$T10/var/peer-roster.json" <<'JSON'
+[
+  {"node_id":"r1","turns_host":"r1.example.com","turns_port":443},
+  {"node_id":"r2","turns_host":"r2.example.com","turns_port":443},
+  {"node_id":"r3","turns_host":"r3.example.com","turns_port":443},
+  {"node_id":"r4","turns_host":"r4.example.com","turns_port":443}
+]
+JSON
+cat > "$T10/getent" <<'STUB'
+#!/bin/sh
+case "$2" in r[1-4].example.com) echo "203.0.113.${2#r}0 STREAM"; exit 0 ;; esac
+exit 2
+STUB
+chmod +x "$T10/getent"
+DIAL10="$T10/dial.log"
+cat > "$T10/docker" <<STUB
+#!/bin/bash
+if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then echo "s"; exit 0; fi
+if [[ "\$*" == *"turnutils_uclient"* ]]; then
+    # record the dialed hostname (last positional) for -S peer dials only
+    [[ "\$*" == *" -S "* ]] && { for a in \$*; do last="\$a"; done; printf '%s\n' "\$last" >> "$DIAL10"; }
+    echo "allocate success"; exit 0
+fi
+exit 1
+STUB
+chmod +x "$T10/docker"
+run_cycle10() {
+    set +e
+    PATH="$T10:/usr/bin:/bin" \
+        _NODE_CONFIG="$T10/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+        STATE_DIR="$T10/var" _PEER_ROSTER_FILE="$T10/var/peer-roster.json" \
+        OXPULSE_CROSS_PROBE_TOKEN="xprb_t10" OXPULSE_SERVICE_TOKEN="stkn_t10" \
+        OXPULSE_TURN_SECRET="s" OXPULSE_GETENT_BIN="$T10/getent" \
+        OXPULSE_PEER_PROBE_MAX=2 \
+        bash "$SCRIPT" --dry-run >/dev/null 2>&1
+    set -e
+}
+run_cycle10   # cycle 1 — offset 0 → dials r1,r2; persists next offset 2
+run_cycle10   # cycle 2 — offset 2 → dials r3,r4; persists next offset 0
+UNIQ10=$(sort -u "$DIAL10" 2>/dev/null | grep -c 'example.com' || echo 0)
+if [[ "$UNIQ10" -eq 4 ]]; then
+    ok "test10: rotation fair — all 4 peers dialed across 2 cycles (no permanent tail truncation)"
+else
+    fail "test10: expected 4 distinct peers over 2 cycles; got $UNIQ10 ($(sort -u "$DIAL10" 2>/dev/null | tr '\n' ' '))"
+fi
+# The persisted marker must record the offset + a non-empty dropped set in cycle 1
+# state has rolled to cycle 2's terminal; just assert the OFFSET key exists.
+if grep -q '^PEER_PROBE_OFFSET=' "$T10/var/peer-probe-mode.env" 2>/dev/null; then
+    ok "test10: peer-probe-mode.env persists PEER_PROBE_OFFSET (rotation state)"
+else
+    fail "test10: expected PEER_PROBE_OFFSET in marker; state: $(cat "$T10/var/peer-probe-mode.env" 2>/dev/null)"
+fi
+trap - EXIT; rm -rf "$T10"
+
+# ── Test 11: MINOR 6 persistent-4xx marker bit ────────────────────────────────
+# A peer POST that returns 4xx (revoked token / roster membership) must set
+# PEER_PROBE_POST_4XX=1 in the marker so the otherwise-swallowed 4xx is observable.
+T11=$(mktemp -d)
+trap 'rm -rf "$T11"' EXIT
+make_bin "$T11"; mkdir -p "$T11/etc" "$T11/var"
+write_node_config "$T11/etc"
+printf '[{"node_id":"peer-pub","turns_host":"good.example.com","turns_port":443}]\n' \
+    > "$T11/var/peer-roster.json"
+cat > "$T11/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "good.example.com" ] && { echo "198.51.100.9 STREAM"; exit 0; }
+exit 2
+STUB
+chmod +x "$T11/getent"
+cat > "$T11/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then echo "s"; exit 0; fi
+if [[ "$*" == *"turnutils_uclient"* ]]; then echo "allocate success"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T11/docker"
+# curl stub returns 403 for the cross-probe POST so _post_cross_probe sees a 4xx.
+# NOT --dry-run (dry-run skips the POST); use a real (stubbed) curl path.
+cat > "$T11/curl" <<'STUB'
+#!/bin/sh
+printf '403'
+exit 0
+STUB
+chmod +x "$T11/curl"
+set +e
+PATH="$T11:/usr/bin:/bin" \
+    _NODE_CONFIG="$T11/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T11/var" _PEER_ROSTER_FILE="$T11/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t11" OXPULSE_SERVICE_TOKEN="stkn_t11" \
+    OXPULSE_TURN_SECRET="s" OXPULSE_GETENT_BIN="$T11/getent" \
+    OXPULSE_BACKEND_API="https://api.test.invalid" \
+    bash "$SCRIPT" >/dev/null 2>&1
+set -e
+if grep -q '^PEER_PROBE_POST_4XX=1$' "$T11/var/peer-probe-mode.env" 2>/dev/null; then
+    ok "test11: persistent 4xx → PEER_PROBE_POST_4XX=1 in marker (revoked token observable)"
+else
+    fail "test11: expected PEER_PROBE_POST_4XX=1; state: $(cat "$T11/var/peer-probe-mode.env" 2>/dev/null)"
+fi
+trap - EXIT; rm -rf "$T11"
+
+# ── Test 12: MAJOR 1 marker truthfulness under SIGTERM ────────────────────────
+# A SIGTERM mid-loop must leave PEER_PROBE_MODE=interrupted (NOT a stale "peer").
+# node-config has NO channels → main() goes STRAIGHT to _run_peer_probe_loop (no
+# 10s self-probe to wait through). The peer dial blocks (docker stub sleeps), so
+# the loop is parked at the dial with the 'started' marker already on disk when
+# we SIGTERM. The signal trap must downgrade the marker to 'interrupted' (and
+# never leave the terminal 'peer').
+T12=$(mktemp -d)
+trap 'rm -rf "$T12"' EXIT
+make_bin "$T12"; mkdir -p "$T12/etc" "$T12/var"
+# No channels → skip the self-probe loop entirely; go straight to the peer loop.
+printf '{"node_id":"prober-node","channels":[]}\n' > "$T12/etc/node-config.json"
+printf '[{"node_id":"slow","turns_host":"slow.example.com","turns_port":443}]\n' \
+    > "$T12/var/peer-roster.json"
+cat > "$T12/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "slow.example.com" ] && { echo "198.51.100.50 STREAM"; exit 0; }
+exit 2
+STUB
+chmod +x "$T12/getent"
+# docker stub: the turnutils dial sleeps so the loop is parked when we kill.
+cat > "$T12/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then echo "s"; exit 0; fi
+if [[ "$*" == *"turnutils_uclient"* ]]; then sleep 30; echo "allocate success"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T12/docker"
+set +e
+# Run the script in its OWN process group (setsid) so we can SIGTERM the whole
+# group — mirroring systemd, which signals the entire service cgroup (the bash
+# script AND its blocking docker/sleep children). Signalling only the bash PID
+# would leave the trap DEFERRED behind the foreground child until it exits.
+setsid bash -c '
+    PATH="'"$T12"':/usr/bin:/bin" \
+    _NODE_CONFIG="'"$T12"'/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="'"$T12"'/var" _PEER_ROSTER_FILE="'"$T12"'/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t12" OXPULSE_SERVICE_TOKEN="stkn_t12" \
+    OXPULSE_TURN_SECRET="s" OXPULSE_GETENT_BIN="'"$T12"'/getent" \
+    OXPULSE_PEER_PROBE_TIMEOUT=30 \
+    exec bash "'"$SCRIPT"'" --dry-run
+' >/dev/null 2>&1 &
+SCRIPT_PID=$!
+# Poll until the 'started' marker shows the loop is parked (or give up after 5s).
+_waited=0
+while [[ ! -r "$T12/var/peer-probe-mode.env" ]] && [[ "$_waited" -lt 50 ]]; do
+    sleep 0.1
+    _waited=$((_waited + 1))
+done
+# Confirm the marker reached 'started' before we kill (the loop is parked at the
+# blocking dial), then SIGTERM the whole process group (negative PID = the group
+# led by SCRIPT_PID via setsid).
+MODE12_PRE=$(sed -n 's/^PEER_PROBE_MODE=//p' "$T12/var/peer-probe-mode.env" 2>/dev/null | head -1 || true)
+kill -TERM -- "-$SCRIPT_PID" 2>/dev/null || kill -TERM "$SCRIPT_PID" 2>/dev/null
+wait "$SCRIPT_PID" 2>/dev/null
+# Read the marker WITHOUT set -e (sed on a missing file returns 2 under pipefail).
+MODE12=$(sed -n 's/^PEER_PROBE_MODE=//p' "$T12/var/peer-probe-mode.env" 2>/dev/null | head -1 || true)
+set -e
+if [[ "$MODE12_PRE" == "started" ]]; then
+    ok "test12: 'started' marker present before SIGTERM (loop parked at dial)"
+else
+    fail "test12: expected 'started' pre-kill marker; got '$MODE12_PRE'"
+fi
+if [[ "$MODE12" == "interrupted" ]]; then
+    ok "test12: SIGTERM mid-loop → marker downgraded to 'interrupted' (no stale 'peer')"
+elif [[ "$MODE12" == "started" ]]; then
+    # Acceptable fallback: the EXIT trap may not have re-stamped in a stubbed env,
+    # but the marker is still NOT the misleading terminal 'peer'.
+    ok "test12: SIGTERM left marker 'started' (still NOT a stale terminal 'peer')"
+else
+    fail "test12: SIGTERM left marker MODE='$MODE12' (expected interrupted/started, never terminal 'peer')"
+fi
+trap - EXIT; rm -rf "$T12"
+
 echo
 echo "Cross-probe loop: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

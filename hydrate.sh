@@ -208,6 +208,21 @@ log "  secrets fetched (turn_secret len=${#TURN_SECRET}, reality_uuid len=${#REA
 # Roster is NOT a secret (public TURNS endpoints) → 0644.
 # cross_probe_token IS a credential (bearer for the prober-report POST) → 0600,
 # mirroring the service-token file perms; atomic mktemp+rename.
+#
+# PRESERVE-ON-ABSENT INVARIANT (MAJOR 2): the central (P2 register.rs) mints a
+# cross_probe_token on EVERY POST /api/partner/register WHEN peer_roster is
+# non-empty AND CROSS_PROBE_TOKEN_SECRET is set on the central; otherwise it
+# returns None and OMITS the field — graceful-degrade, NOT a revocation signal.
+# So a register that TRANSIENTLY returns an empty roster (all peers momentarily
+# unhealthy) returns no token. We MUST NOT rm an existing valid token on that
+# transient: doing so would silently kill peer-probing until the next register
+# that happens to carry a token. We therefore COALESCE-PRESERVE — keep the
+# existing token when the response omits it — exactly mirroring install.sh's
+# `[[ ! -e ... ]]` precedent. Revocation does NOT rely on rm: a rotated
+# CROSS_PROBE_TOKEN_SECRET invalidates the old token server-side, so a stale
+# token simply 4xx's on the prober-report POST and is then ignored (the loop
+# logs PEER_PROBE_POST_4XX). This same invariant is documented at install.sh's
+# cross-probe write site.
 PEER_ROSTER=$(jq -c '.peer_roster // []' "$tmp_resp" 2>/dev/null || echo '[]')
 CROSS_PROBE_TOKEN=$(jq_get cross_probe_token)
 
@@ -228,12 +243,16 @@ if [[ -n "$CROSS_PROBE_TOKEN" ]]; then
     mv -f "$_xprb_tmp" "$CROSS_PROBE_TOKEN_FILE"
     unset _xprb_tmp
     log "  cross-probe token persisted → $CROSS_PROBE_TOKEN_FILE (raw value redacted)"
+elif [[ -e "$CROSS_PROBE_TOKEN_FILE" ]]; then
+    # Response OMITS the token but a valid one already exists — COALESCE-PRESERVE.
+    # This is the transient-empty-roster case (or a pre-P3a central that never
+    # ships tokens but a prior register did). Do NOT wipe a working credential;
+    # revocation is server-side via CROSS_PROBE_TOKEN_SECRET rotation (→ 4xx).
+    log "  no cross-probe token in response — preserved existing $CROSS_PROBE_TOKEN_FILE (transient empty roster does not wipe a valid token)"
 else
-    # Pre-P3a central: no token returned. Remove any stale token so the edge
-    # cannot keep probing with a credential the central no longer recognises
-    # (fail-closed — an empty roster also disables the loop).
-    rm -f "$CROSS_PROBE_TOKEN_FILE"
-    log "  no cross-probe token in response — peer-probe loop disabled (pre-P3a central)"
+    # No token in the response AND none on disk → nothing to do; the peer-probe
+    # loop stays disabled (fail-closed; empty roster also disables it).
+    log "  no cross-probe token in response and none on disk — peer-probe loop stays disabled"
 fi
 unset PEER_ROSTER CROSS_PROBE_TOKEN
 

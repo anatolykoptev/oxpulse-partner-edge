@@ -964,6 +964,17 @@ Or: re-run install.sh with OXPULSE_SERVICE_TOKEN=<raw> in the env
 	_roster_count=$(printf '%s' "$PEER_ROSTER" | jq 'length' 2>/dev/null || echo 0)
 	log "  peer roster persisted → $PEER_ROSTER_FILE ($_roster_count peer(s))"
 
+	# PRESERVE-ON-ABSENT INVARIANT (mirrors hydrate.sh's cross-probe write site):
+	# the central (P2 register.rs) mints cross_probe_token on EVERY register POST
+	# WHEN peer_roster is non-empty AND CROSS_PROBE_TOKEN_SECRET is set — it is
+	# NOT fresh-provision-only. When the central has no secret, or a register
+	# transiently returns an empty roster, the field is OMITTED (graceful-degrade,
+	# not revocation). So we COALESCE-PRESERVE on both branches: a present token
+	# is written only if we don't already hold one (don't clobber a possibly newer
+	# operator-rotated value); an omitted token leaves any existing file intact.
+	# Revocation is server-side: a rotated CROSS_PROBE_TOKEN_SECRET invalidates the
+	# old token → the prober-report POST 4xx's and the edge stops trusting it. We
+	# never rely on rm for revocation.
 	CROSS_PROBE_TOKEN=$(json_get cross_probe_token "$tmp_cfg")
 	XPRB_TOKEN_FILE="$PREFIX_ETC/cross-probe-token"
 	if [[ -n "$CROSS_PROBE_TOKEN" ]]; then
@@ -975,12 +986,17 @@ Or: re-run install.sh with OXPULSE_SERVICE_TOKEN=<raw> in the env
 			unset _xprb_tmp
 			log "  cross-probe token persisted → $XPRB_TOKEN_FILE (raw value redacted)"
 		else
-			# Operator may have a current token; server only returns it on fresh
-			# provision. Don't clobber.
+			# A token already exists; the central re-mints on every register, but
+			# we keep the on-disk one (an operator may have rotated it locally and
+			# the server's re-mint of the SAME value is a no-op). COALESCE-preserve.
 			log "  cross-probe token returned by server; preserved existing $XPRB_TOKEN_FILE"
 		fi
 	else
-		log "  no cross-probe token in response — peer-probe loop uses existing token if present, else stays disabled"
+		# Token OMITTED (central has no CROSS_PROBE_TOKEN_SECRET, or a transient
+		# empty roster). Preserve any existing token — a transient must not wipe a
+		# working credential. The loop uses the existing token if present, else
+		# stays disabled (fail-closed; empty roster also disables it).
+		log "  no cross-probe token in response — preserved existing token if present, else peer-probe loop stays disabled"
 	fi
 	unset PEER_ROSTER CROSS_PROBE_TOKEN
 fi
