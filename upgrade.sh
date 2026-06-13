@@ -248,21 +248,6 @@ check_signaling_sfu_secret
 # shellcheck disable=SC1090
 . "$STATE_FILE"
 CURRENT="${IMAGE_VERSION:-unknown}"
-
-# Phase 2 (ADR-002): forward-migrate STATE_FILE to schema v1 before any surface
-# renders or preflight checks run. migrate_state() is idempotent on v1 states.
-# This replaces the scattered "re-run install.sh" die()s: the migration derives
-# missing non-secret structural keys (CADDYFILE_SHA, BACKEND_API, TURNS_SUBDOMAIN,
-# NAIVE_SOCKS_PORT) from the live system where unambiguous; fails with one
-# actionable die naming the single key it cannot derive.
-# Skip on --check and DRY_RUN modes: read-only paths must not mutate state.
-if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
-	migrate_state
-	# Re-source state so the current shell sees any keys that were just written.
-	# shellcheck disable=SC1090
-	. "$STATE_FILE"
-fi
-
 MODE=apply
 TARGET=""
 DRY_RUN=0
@@ -297,6 +282,20 @@ done
 if [[ -n "$GHCR_TOKEN_ARG" ]]; then
 	ghcr_configure_token "$GHCR_TOKEN_ARG" || die "failed to save/login with supplied --ghcr-token (see warning above)"
 	unset GHCR_TOKEN_ARG  # don't keep secret in env longer than necessary
+fi
+
+# Phase 2 (ADR-002): forward-migrate STATE_FILE to schema v1 before any surface
+# renders or preflight checks run. migrate_state() is idempotent on v1 states.
+# This replaces the scattered "re-run install.sh" die()s: the migration derives
+# missing non-secret structural keys (CADDYFILE_SHA, BACKEND_API, TURNS_SUBDOMAIN,
+# NAIVE_SOCKS_PORT) from the live system where unambiguous; fails with one
+# actionable die naming the single key it cannot derive.
+# Skip on --check and DRY_RUN modes: read-only paths must not mutate state.
+if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
+	migrate_state
+	# Re-source state so the current shell sees any keys that were just written.
+	# shellcheck disable=SC1090
+	. "$STATE_FILE"
 fi
 
 V01_TO_V02=0
