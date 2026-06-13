@@ -39,11 +39,13 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
 
-      - name: shellcheck -S error install.sh
-        run: shellcheck -S error install.sh
-
-      - name: shellcheck -S error upgrade.sh
-        run: shellcheck -S error upgrade.sh
+      - name: shellcheck -x -S warning *.sh (matches release gate)
+        run: |
+          shopt -s nullglob
+          for f in *.sh; do
+            echo ">> $f"
+            shellcheck -x -S warning "$f"
+          done
 
       - name: install.sh dies on empty signaling_sfu_secret
         run: bash tests/test_install_die_on_empty_sfu_secret.sh

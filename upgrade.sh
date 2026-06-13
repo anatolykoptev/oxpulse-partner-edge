@@ -448,9 +448,9 @@ re_render_caddy() {
 	if [[ -r "$_defaults_conf" ]]; then
 		# shellcheck source=/dev/null
 		local _awg_d _hy2h_d _hy2p_d
-		_awg_d=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' || echo '10.9.0.2')
-		_hy2h_d=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' || echo 'host.docker.internal')
-		_hy2p_d=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_PORT:-18443}"' || echo '18443')
+		_awg_d=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' _ "$_defaults_conf" || echo '10.9.0.2')
+		_hy2h_d=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' _ "$_defaults_conf" || echo 'host.docker.internal')
+		_hy2p_d=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_PORT:-18443}"' _ "$_defaults_conf" || echo '18443')
 		[[ -z "$_awg_motherly_ip"   ]] && _awg_motherly_ip="$_awg_d"
 		[[ -z "$_hy2_fallback_host" ]] && _hy2_fallback_host="$_hy2h_d"
 		[[ -z "$_hy2_fallback_port" ]] && _hy2_fallback_port="$_hy2p_d"
@@ -1898,9 +1898,9 @@ if [[ "$MODE" == with_templates ]]; then
 				# NAIVE_SOCKS_PORT: use shared resolver — identical to re_render_caddy.
 				_dr_naive=$(_resolve_naive_socks_port "$_caddyfile_tpl")
 				if [[ -r "$_defaults_conf" ]]; then
-					_dr_awg=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' || echo '10.9.0.2')
-					_dr_hy2h=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' || echo 'host.docker.internal')
-					_dr_hy2p=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_PORT:-18443}"' || echo '18443')
+					_dr_awg=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' _ "$_defaults_conf" || echo '10.9.0.2')
+					_dr_hy2h=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' _ "$_defaults_conf" || echo 'host.docker.internal')
+					_dr_hy2p=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_PORT:-18443}"' _ "$_defaults_conf" || echo '18443')
 				fi
 				sed \
 					-e "s|{{PARTNER_DOMAIN}}|$(_esc "$PARTNER_DOMAIN")|g" \
