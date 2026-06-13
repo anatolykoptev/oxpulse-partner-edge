@@ -475,7 +475,14 @@ cat > "$T9/var/peer-roster.json" <<'JSON'
   {"node_id":"octlit","turns_host":"0177.0.0.1","turns_port":443},
   {"node_id":"declit","turns_host":"2130706433","turns_port":443},
   {"node_id":"mapped-cgnat","turns_host":"::ffff:100.64.0.9","turns_port":443},
-  {"node_id":"pub","turns_host":"203.0.113.77","turns_port":443}
+  {"node_id":"mapped-hex","turns_host":"::ffff:7f00:1","turns_port":443},
+  {"node_id":"mapped-hex-upper","turns_host":"::FFFF:7F00:1","turns_port":443},
+  {"node_id":"compat-hex","turns_host":"::7f00:1","turns_port":443},
+  {"node_id":"nat64-hex","turns_host":"64:ff9b::7f00:1","turns_port":443},
+  {"node_id":"nat64-dotted","turns_host":"64:ff9b::127.0.0.1","turns_port":443},
+  {"node_id":"pub","turns_host":"203.0.113.77","turns_port":443},
+  {"node_id":"pub-mapped","turns_host":"::ffff:8.8.8.8","turns_port":443},
+  {"node_id":"pub-v6","turns_host":"2606:4700:4700::1111","turns_port":443}
 ]
 JSON
 # getent: only used for hostname forms; all entries here are IP literals classified
@@ -507,28 +514,51 @@ ERR9=$(PATH="$T9:/usr/bin:/bin" \
     OXPULSE_PEER_PROBE_MAX=20 OXPULSE_PEER_PROBE_REJECT_HEADROOM=20 \
     bash "$SCRIPT" --dry-run 2>&1 >/dev/null)
 set -e
-# None of the 9 internal/ambiguous literals may appear in the dial log.
+# None of the 14 internal/ambiguous literals may appear in the dial log. The
+# SEC-CR-306 family — hex-compressed / uppercase / IPv4-compat / NAT64 v4-mapped
+# IPv6 (::ffff:7f00:1, ::FFFF:7F00:1, ::7f00:1, 64:ff9b::7f00:1, 64:ff9b::…) —
+# bypassed the OLD string-shape classifier (it only matched a dotted ".*.*.*.*"
+# tail) and connected to the embedded internal v4. They MUST now reject pre-dial.
 LEAKED9=""
-for bad in "100.64.1.1" "0.1.2.3" "::ffff:127.0.0.1" "::127.0.0.1" "::1" \
-           "0x7f000001" "0177.0.0.1" "2130706433" "100.64.0.9"; do
+# NOTE: each token must be a substring UNIQUE to an internal roster host — do not
+# add a token (e.g. bare "::1") that is also a substring of a PUBLIC dial target
+# ("2606:4700:4700::1111" contains "::1"), or the -Fq match false-positives. We
+# grep the bracketed loopback "[::1]" / its roster host instead where needed.
+for bad in "100.64.1.1" "0.1.2.3" "::ffff:127.0.0.1" "::127.0.0.1" \
+           "0x7f000001" "0177.0.0.1" "2130706433" "100.64.0.9" \
+           "::ffff:7f00:1" "::FFFF:7F00:1" "::7f00:1" \
+           "64:ff9b::7f00:1" "64:ff9b::127.0.0.1"; do
     grep -Fq "$bad" "$DIAL9" 2>/dev/null && LEAKED9="$LEAKED9 $bad"
 done
 if [[ -z "$LEAKED9" ]]; then
-    ok "test9: all SEC-CR-301 classes REJECTED pre-dial (CGNAT/0.0.0.0/mapped/compat/bracket/hex/oct/dec)"
+    ok "test9: all SEC-CR-301/306 classes REJECTED pre-dial (CGNAT/0.0.0.0/mapped/compat/bracket/hex/oct/dec/NAT64)"
 else
     fail "test9: SSRF LEAK — dialed:$LEAKED9; dial log: $(cat "$DIAL9" 2>/dev/null)"
 fi
-# Exactly 9 REJECTs logged (one per internal literal).
-if [[ $(printf '%s\n' "$ERR9" | grep -c 'REJECT') -ge 9 ]]; then
-    ok "test9: 9 internal/ambiguous literals each logged a REJECT"
+# At least 14 REJECTs logged (one per internal literal in the roster).
+if [[ $(printf '%s\n' "$ERR9" | grep -c 'REJECT') -ge 14 ]]; then
+    ok "test9: 14 internal/ambiguous literals each logged a REJECT (incl. hex/NAT64 SEC-CR-306)"
 else
-    fail "test9: expected >=9 REJECT logs; got $(printf '%s\n' "$ERR9" | grep -c 'REJECT')"
+    fail "test9: expected >=14 REJECT logs; got $(printf '%s\n' "$ERR9" | grep -c 'REJECT')"
 fi
 # The clean public dotted-quad literal WAS dialed (no false-positive over-block).
 if grep -Fq "203.0.113.77" "$DIAL9" 2>/dev/null; then
     ok "test9: clean public dotted-quad literal ALLOWED (no over-block)"
 else
     fail "test9: public literal 203.0.113.77 not dialed; dial log: $(cat "$DIAL9" 2>/dev/null)"
+fi
+# A public IPv4-MAPPED v6 (::ffff:8.8.8.8) and a real public v6 MUST still be
+# allowed — the byte-level guard rejects only EMBEDDED-INTERNAL v4 and internal
+# v6, never a public mapped/native address (regression-guard against over-block).
+if grep -Fq "::ffff:8.8.8.8" "$DIAL9" 2>/dev/null; then
+    ok "test9: public IPv4-mapped v6 (::ffff:8.8.8.8) ALLOWED (no over-block)"
+else
+    fail "test9: public mapped ::ffff:8.8.8.8 not dialed; dial log: $(cat "$DIAL9" 2>/dev/null)"
+fi
+if grep -Fq "2606:4700:4700::1111" "$DIAL9" 2>/dev/null; then
+    ok "test9: public native v6 (2606:4700:4700::1111) ALLOWED (no over-block)"
+else
+    fail "test9: public v6 2606:4700:4700::1111 not dialed; dial log: $(cat "$DIAL9" 2>/dev/null)"
 fi
 trap - EXIT; rm -rf "$T9"
 
@@ -703,13 +733,12 @@ else
     fail "test12: expected 'started' pre-kill marker; got '$MODE12_PRE'"
 fi
 if [[ "$MODE12" == "interrupted" ]]; then
+    # The SIGTERM trap MUST fire and downgrade the marker. The env reliably
+    # produces 'interrupted'; we require it EXACTLY (no 'started' fallback) so a
+    # future regression where the trap stops firing is caught, not masked.
     ok "test12: SIGTERM mid-loop → marker downgraded to 'interrupted' (no stale 'peer')"
-elif [[ "$MODE12" == "started" ]]; then
-    # Acceptable fallback: the EXIT trap may not have re-stamped in a stubbed env,
-    # but the marker is still NOT the misleading terminal 'peer'.
-    ok "test12: SIGTERM left marker 'started' (still NOT a stale terminal 'peer')"
 else
-    fail "test12: SIGTERM left marker MODE='$MODE12' (expected interrupted/started, never terminal 'peer')"
+    fail "test12: SIGTERM left marker MODE='$MODE12' (expected 'interrupted' — trap must fire)"
 fi
 trap - EXIT; rm -rf "$T12"
 

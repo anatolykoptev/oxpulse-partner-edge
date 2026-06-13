@@ -9,11 +9,14 @@ Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 # TimeoutStartSec=90 (raised from 45) — the P3b peer-probe loop is serial and
-# each peer costs worst-case getent 3s + TLS-Allocate probe 8s + POST 8s = 19s;
-# with the default cap of 2 peers that is 38s, plus a ~10s pre-loop TURN-secret
-# read = 48s peer-side, on top of the per-channel self-probe loop + upstream
-# transition check. 90s contains the whole oneshot with headroom (48s ≪ 90s).
-# The old 45s counted only the probe timeout and ignored the serial getent+POST,
-# so a full cycle could overrun and systemd SIGTERM'd the oneshot mid-loop. If an
-# operator raises OXPULSE_PEER_PROBE_MAX, raise this too: 19s×cap + 10s ≤ this.
+# each DIALLED peer costs worst-case getent 3s + TLS-Allocate probe 8s + POST 8s
+# = 19s; with the default cap of 2 peers that is 19×2 = 38s. The loop ALSO scans
+# up to reject-headroom extra slots (getent-only, 3s each) before the cap is met,
+# = 3×2 = 6s, plus a ~10s pre-loop TURN-secret read = 38 + 6 + 10 = 54s peer-side
+# (matches the authoritative budget block in oxpulse-channels-health-report.sh),
+# on top of the per-channel self-probe loop + upstream transition check. 90s
+# contains the whole oneshot with headroom (54s ≪ 90s). The old 45s counted only
+# the probe timeout and ignored the serial getent+POST, so a full cycle could
+# overrun and systemd SIGTERM'd the oneshot mid-loop. If an operator raises
+# OXPULSE_PEER_PROBE_MAX, raise this too: 19s×cap + 3s×reject_headroom + 10s ≤ this.
 TimeoutStartSec=90

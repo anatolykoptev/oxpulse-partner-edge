@@ -153,6 +153,17 @@ without re-running the audit.
 
 ### Q. SEC-CR-302 — P3b peer-probe DNS-rebinding TOCTOU (MEDIUM, BLOCKING before default-ON)
 
+> **SEC-CR-306 (hex/NAT64 IPv4-mapped IPv6 SSRF bypass) — CLOSED in PR #306.**
+> A sibling residual: the v6 classifier matched the textual SHAPE of an embedded
+> v4 (a dotted `.*.*.*.*` tail), so hex-compressed / uppercase / IPv4-compat /
+> NAT64 forms (`::ffff:7f00:1`, `::FFFF:7F00:1`, `::7f00:1`, `64:ff9b::7f00:1`)
+> slipped past and connected to the internal embedded v4. Fixed by classifying
+> the 16-byte VALUE (`inet_pton` normalization → mapped/NAT64/compat-prefix
+> detection → embedded-v4 reclassified via the v4 path; fail-closed on
+> unparseable/ambiguous). See `_ipv6_embedded_v4` + `_ip_is_internal`, regression
+> rows in `tests/test_cross_probe_loop.sh` (test9). **SEC-CR-302 below is now the
+> ONLY remaining BLOCKING-before-default-ON SSRF residual.**
+
 **Where:** `oxpulse-channels-health-report.sh` — `_host_is_internal` (SSRF dial-time recheck) → `_probe_peer_coturn` (the `turnutils_uclient -S … <turns_host>` dial).
 
 **Symptom:** the SSRF recheck resolves `turns_host` and rejects any host that

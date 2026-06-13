@@ -525,6 +525,44 @@ _peer_roster_file() {
     printf '%s' "${_PEER_ROSTER_FILE:-$state_dir/peer-roster.json}"
 }
 
+# ---------- byte-level embedded-v4 extractor (closes SEC-CR-306) ----------
+# An IPv6 literal can embed a v4 address in THREE families, each in ANY textual
+# encoding (dotted, hex-compressed, uppercase):
+#   * IPv4-mapped     ::ffff:a.b.c.d  /  ::ffff:0:0/96   (bytes[0:12]=…0000ffff)
+#   * NAT64 well-known 64:ff9b::a.b.c.d /  64:ff9b::/96   (bytes[0:12]=0064ff9b…0)
+#   * IPv4-compatible ::a.b.c.d / ::<hex> (deprecated)    (bytes[0:12]=all-zero)
+# The PRIOR classifier matched the textual SHAPE (a dotted ".*.*.*.*" tail), so
+# hex-compressed forms (::ffff:7f00:1, ::FFFF:7F00:1, ::7f00:1, 64:ff9b::7f00:1)
+# slipped past the guard — getaddrinfo/turnutils later re-expand them to the
+# internal v4 and connect. SEC-CR-306. We now classify by the 16-byte VALUE, not
+# the string: normalize with python3 socket.inet_pton(AF_INET6,…) → if the upper
+# 12 bytes match a known v4-bearing prefix, the lower 4 bytes ARE the embedded
+# v4. Override the interpreter with OXPULSE_PY_BIN for tests.
+#
+# stdout: the embedded dotted-quad (when the literal embeds a v4).
+# exit 0  → embeds a v4 (caller reclassifies the printed v4 via the v4 path)
+# exit 1  → a pure IPv6 literal with NO embedded v4 (caller uses v6 range arms)
+# exit 2  → not a parseable v6 literal / ambiguous (caller FAILS CLOSED = reject)
+_ipv6_embedded_v4() {
+    local py_bin="${OXPULSE_PY_BIN:-python3}"
+    L="$1" "$py_bin" -c '
+import socket, os, sys
+lit = os.environ.get("L", "")
+try:
+    b = socket.inet_pton(socket.AF_INET6, lit)
+except OSError:
+    sys.exit(2)
+prefix, v4 = b[:12], b[12:16]
+MAPPED = bytes(10) + b"\xff\xff"          # ::ffff:0:0/96
+NAT64  = b"\x00\x64\xff\x9b" + bytes(8)   # 64:ff9b::/96
+ZERO   = bytes(12)                        # ::/96 (compat, ::, ::1)
+if prefix in (MAPPED, NAT64, ZERO):
+    sys.stdout.write(socket.inet_ntop(socket.AF_INET, v4))
+    sys.exit(0)
+sys.exit(1)
+' 2>/dev/null
+}
+
 # ---------- SSRF dial-time recheck (closes P2-SEC-CR-001) ----------
 # Returns 0 (TRUE — internal, REJECT) when the host is, or resolves to, a
 # loopback / RFC-1918 / link-local / ULA / ::1 address. Returns 1 (public, OK).
@@ -543,17 +581,35 @@ _ip_is_internal() {
     # Strip a [..] bracket wrapper (URL-form IPv6 literal: "[::1]") before
     # matching — SEC-CR-301 (brackets must not let ::1 slip past the case arms).
     ip="${ip#[}"; ip="${ip%]}"
-    # IPv4-compatible IPv6 ("::a.b.c.d", deprecated) and IPv4-mapped ("::ffff:a.b.c.d")
-    # both embed a v4 tail. Recurse on the trailing dotted-quad so the v4 ranges
-    # below apply (SEC-CR-301). Match a generic ::[..:]a.b.c.d, not only the
-    # internal-prefixed forms the old code enumerated.
-    case "$ip" in
-        ::[Ff][Ff][Ff][Ff]:*.*.*.* | ::*.*.*.*)
-            _ip_is_internal "${ip##*:}" && return 0
-            # The embedded v4 was public; the wrapper itself is not internal.
-            return 1
-            ;;
-    esac
+    # IPv4-mapped / NAT64 / IPv4-compatible IPv6 ALL embed a v4 — in ANY encoding
+    # (dotted, hex-compressed, uppercase). Classify by the 16-byte value, not the
+    # textual shape (SEC-CR-306: the old dotted-".*.*.*.*" match let hex through).
+    # Only run the byte-level extractor on literals that contain a colon (cheap
+    # gate — a bare v4 literal has no ':' and needs no normalization).
+    if [[ "$ip" == *:* ]]; then
+        local _embedded_v4 _embed_rc
+        _embedded_v4=$(_ipv6_embedded_v4 "$ip"); _embed_rc=$?
+        case "$_embed_rc" in
+            0)
+                # Embeds a v4 → classify the embedded v4 via the v4 path. An
+                # internal embedded v4 (loopback/RFC-1918/CGNAT/0.0.0.0/…) rejects;
+                # a public one (e.g. ::ffff:8.8.8.8) falls through to public.
+                _ip_is_internal "$_embedded_v4" && return 0
+                return 1
+                ;;
+            1)
+                # Pure IPv6, no embedded v4 → fall through to the v6 range arms
+                # (::1 / fe80::/10 / fc00::/7) below.
+                : ;;
+            *)
+                # rc=2 (unparseable / ambiguous v6 literal) OR any other code
+                # (python3 unavailable / errored, e.g. 127) → FAIL CLOSED (treat as
+                # internal, reject). We never dial a literal we cannot prove is a
+                # public pure-v6 address.
+                return 0
+                ;;
+        esac
+    fi
     case "$ip" in
         # IPv4 loopback 127.0.0.0/8
         127.*) return 0 ;;
@@ -1068,6 +1124,12 @@ _run_peer_probe_loop() {
     if [[ "$scanned" -lt "$n" ]]; then
         for (( j=scanned; j<n; j++ )); do
             d=$(printf '%s' "$roster" | jq -r --argjson i "$(( (start + j) % n ))" '.[$i].node_id // empty')
+            # NIT: this value goes UNQUOTED into a KEY=VALUE marker line
+            # (PEER_PROBE_DROPPED) consumed by external parsers. Sanitize each
+            # node_id to [A-Za-z0-9._-] (drop newlines/'='/commas/etc.) so a
+            # malformed roster entry cannot break the marker line. node_ids are
+            # curated today; this is defence-in-depth.
+            d=$(printf '%s' "$d" | tr -cd 'A-Za-z0-9._-')
             [[ -n "$d" ]] && dropped="${dropped:+$dropped,}$d"
         done
         [[ -n "$dropped" ]] && \
