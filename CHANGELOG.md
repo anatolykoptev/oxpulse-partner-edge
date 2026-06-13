@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.77](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.76...v0.12.77) (2026-06-13)
+
+
+### Bug Fixes
+
+* quote defaults.conf path in upgrade.sh bash -c (SC2027) + align PR shellcheck gate to release ([#312](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/312)) ([508fe0c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/508fe0c65d0dd4982fab58375071c2f598eaa20c))
+
 ## [0.12.76](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.75...v0.12.76) (2026-06-13)
 
 
