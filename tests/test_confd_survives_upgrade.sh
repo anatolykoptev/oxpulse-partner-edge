@@ -57,6 +57,7 @@ IMAGE_VERSION=latest
 TURNS_SUBDOMAIN=turns
 INSTALLED_AT=2026-01-01T00:00:00Z
 CADDYFILE_SHA=oldhash
+NAIVE_SOCKS_PORT=1080
 ENVEOF
 chmod 0600 "$T_LIB/install.env"
 
@@ -76,6 +77,7 @@ bash -c '
     TURNS_SUBDOMAIN="turns"
     DRY_RUN=0
 
+    eval "$(awk "/^_resolve_naive_socks_port\(\)/,/^\}$/" "'"$UPGRADE"'")"
     eval "$(awk "/^re_render_caddy\(\)/,/^\}$/" "'"$UPGRADE"'")"
     re_render_caddy
 ' 2>/tmp/confd-upgrade-test.log || { echo "FAIL: re_render_caddy returned non-zero"; cat /tmp/confd-upgrade-test.log >&2; exit 1; }
