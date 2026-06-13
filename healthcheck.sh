@@ -215,8 +215,8 @@ fi
 # In Phase 1.7 partial rollout, edges without hy2 provisioned are awg-only.
 # Container absent = info (not fail). Container present but unhealthy = warn.
 echo -n "  16. hy2 container healthy:                        "
-_hy2_health=$(docker inspect -f '{{.State.Health.Status}}' oxpulse-partner-hy2 2>/dev/null || true)
-_hy2_running=$(docker ps --filter name=oxpulse-partner-hy2 --format '{{.Names}}' 2>/dev/null | grep -c oxpulse-partner-hy2 || true)
+_hy2_health=$(docker inspect -f '{{.State.Health.Status}}' oxpulse-partner-hysteria2 2>/dev/null || true)
+_hy2_running=$(docker ps --filter name=oxpulse-partner-hysteria2 --format '{{.Names}}' 2>/dev/null | grep -c oxpulse-partner-hysteria2 || true)
 if [[ "$_hy2_health" == "healthy" ]]; then
 	echo -e "\033[32mOK\033[0m"
 elif [[ "$_hy2_running" -gt 0 ]]; then
