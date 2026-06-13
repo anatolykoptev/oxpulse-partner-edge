@@ -401,12 +401,56 @@ re_render_caddy() {
 	# Escape sed replacement metacharacters (same helper as channel-render-lib.sh).
 	_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 
-	# Render placeholders. Only PARTNER_DOMAIN and TURNS_SUBDOMAIN are in
-	# Caddyfile.tpl — confirmed by grep of the template.
+	# Resolve Caddyfile tunnel-upstream vars not persisted in install.env.
+	# AWG_MOTHERLY_IP / HY2_FALLBACK_HOST / HY2_FALLBACK_PORT come from
+	# defaults.conf (fleet-wide). NAIVE_SOCKS_PORT is derived from the live
+	# naive container or defaults to 1080 (install.sh default).
+	local _defaults_conf="${PREFIX_SHARE:-/usr/local/share}/oxpulse-partner-edge/config/defaults.conf"
+	local _awg_motherly_ip="${AWG_MOTHERLY_IP:-}"
+	local _hy2_fallback_host="${HY2_FALLBACK_HOST:-}"
+	local _hy2_fallback_port="${HY2_FALLBACK_PORT:-}"
+	local _naive_socks_port="${NAIVE_SOCKS_PORT:-}"
+	if [[ -r "$_defaults_conf" ]]; then
+		# shellcheck source=/dev/null
+		local _awg_d _hy2h_d _hy2p_d
+		_awg_d=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' || echo '10.9.0.2')
+		_hy2h_d=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' || echo 'host.docker.internal')
+		_hy2p_d=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_PORT:-18443}"' || echo '18443')
+		[[ -z "$_awg_motherly_ip"   ]] && _awg_motherly_ip="$_awg_d"
+		[[ -z "$_hy2_fallback_host" ]] && _hy2_fallback_host="$_hy2h_d"
+		[[ -z "$_hy2_fallback_port" ]] && _hy2_fallback_port="$_hy2p_d"
+	fi
+	# Hardcoded fallbacks match install.sh compile-time defaults.
+	_awg_motherly_ip="${_awg_motherly_ip:-10.9.0.2}"
+	_hy2_fallback_host="${_hy2_fallback_host:-host.docker.internal}"
+	_hy2_fallback_port="${_hy2_fallback_port:-18443}"
+	# NAIVE_SOCKS_PORT: read from live naive container env or default to 1080.
+	if [[ -z "$_naive_socks_port" ]]; then
+		_naive_socks_port=$(
+			${DOCKER_BIN:-docker} inspect oxpulse-partner-naive \
+				--format '{{range .Config.Env}}{{.}}\n{{end}}' 2>/dev/null \
+				| grep '^NAIVE_SOCKS_PORT=' | cut -d= -f2 || true
+		)
+		_naive_socks_port="${_naive_socks_port:-1080}"
+	fi
+
+	# Render ALL placeholders present in Caddyfile.tpl.
 	sed \
 		-e "s|{{PARTNER_DOMAIN}}|$(_esc "$PARTNER_DOMAIN")|g" \
 		-e "s|{{TURNS_SUBDOMAIN}}|$(_esc "$TURNS_SUBDOMAIN")|g" \
+		-e "s|{{AWG_MOTHERLY_IP}}|$(_esc "$_awg_motherly_ip")|g" \
+		-e "s|{{HY2_FALLBACK_HOST}}|$(_esc "$_hy2_fallback_host")|g" \
+		-e "s|{{HY2_FALLBACK_PORT}}|$(_esc "$_hy2_fallback_port")|g" \
+		-e "s|{{NAIVE_SOCKS_PORT}}|$(_esc "$_naive_socks_port")|g" \
 		"$out_tpl" > "$out_caddy"
+
+	# Render-completeness guard: abort before deploy if any placeholder survived.
+	# Catches future Caddyfile.tpl additions not yet wired in re_render_caddy.
+	local _leftover
+	_leftover=$(grep -oE '\{\{[A-Z0-9_]+\}\}' "$out_caddy" 2>/dev/null | sort -u || true)
+	if [[ -n "$_leftover" ]]; then
+		die "Caddyfile render incomplete — unsubstituted placeholders:\n$(printf '%s\n' "$_leftover" | sed 's/^/  /')\nAdd the missing variable to re_render_caddy() or re-run install.sh."
+	fi
 
 	# Phase 1: compute sha256 of the rendered file BEFORE substituting
 	# __CADDYFILE_SHA__ — this matches install.sh exactly so that
@@ -1193,6 +1237,19 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	fi
 
 	# ------------------------------------------------------------------
+	# Step 6.5: provision xray.env — required by oxpulse-xray-update.sh.
+	# The watchtower script hard-fails without this file (line 64).
+	# Idempotent: touch only if absent so operator env overrides are preserved.
+	# ------------------------------------------------------------------
+	local _xray_env_path="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/xray.env"
+	if [[ ! -f "$_xray_env_path" ]]; then
+		install -d -m 0755 "${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+		install -m 0600 /dev/null "$_xray_env_path"
+		log "  host-script: provisioned xray.env at $_xray_env_path"
+		_any_changed=1
+	fi
+
+	# ------------------------------------------------------------------
 	# Step 7: daemon-reload + targeted restart of affected timers only.
 	# Coturn/sfu/xray images are the image path's concern — never touched here.
 	# ------------------------------------------------------------------
@@ -1601,7 +1658,7 @@ _conflict_check_6() {
 	[[ -f "$rendered_caddy" ]] || { CHECK_STATUS[6]="INFO"; CHECK_DETAIL[6]="  Rendered Caddyfile not available — skipped."; return; }
 
 	local placeholders
-	placeholders=$(grep -oE '\{\{[A-Z_]+\}\}|__[A-Z_]+__' "$rendered_caddy" 2>/dev/null | sort -u || true)
+	placeholders=$(grep -oE '\{\{[A-Z0-9_]+\}\}|__[A-Z0-9_]+__' "$rendered_caddy" 2>/dev/null | sort -u || true)
 	if [[ -n "$placeholders" ]]; then
 		CHECK_STATUS[6]="WARNING"
 		local items
@@ -1797,9 +1854,24 @@ if [[ "$MODE" == with_templates ]]; then
 			_caddyfile_tpl="$_conflict_tmpdir/Caddyfile.tpl"
 			if curl -fsSL --max-time 30 "$REPO_RAW/Caddyfile.tpl" -o "$_caddyfile_tpl" 2>/dev/null; then
 				_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+				# Load same defaults as re_render_caddy: fallback to hardcoded fleet defaults.
+				local _defaults_conf="${PREFIX_SHARE:-/usr/local/share}/oxpulse-partner-edge/config/defaults.conf"
+				local _dr_awg="${AWG_MOTHERLY_IP:-10.9.0.2}"
+				local _dr_hy2h="${HY2_FALLBACK_HOST:-host.docker.internal}"
+				local _dr_hy2p="${HY2_FALLBACK_PORT:-18443}"
+				local _dr_naive="${NAIVE_SOCKS_PORT:-1080}"
+				if [[ -r "$_defaults_conf" ]]; then
+					_dr_awg=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' || echo '10.9.0.2')
+					_dr_hy2h=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' || echo 'host.docker.internal')
+					_dr_hy2p=$(bash -c '. "'"'"$_defaults_conf"'"'" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_PORT:-18443}"' || echo '18443')
+				fi
 				sed \
 					-e "s|{{PARTNER_DOMAIN}}|$(_esc "$PARTNER_DOMAIN")|g" \
 					-e "s|{{TURNS_SUBDOMAIN}}|$(_esc "$TURNS_SUBDOMAIN")|g" \
+					-e "s|{{AWG_MOTHERLY_IP}}|$(_esc "$_dr_awg")|g" \
+					-e "s|{{HY2_FALLBACK_HOST}}|$(_esc "$_dr_hy2h")|g" \
+					-e "s|{{HY2_FALLBACK_PORT}}|$(_esc "$_dr_hy2p")|g" \
+					-e "s|{{NAIVE_SOCKS_PORT}}|$(_esc "$_dr_naive")|g" \
 					"$_caddyfile_tpl" > "$_rendered_caddy"
 				_proposed_sha=$(sha256sum "$_rendered_caddy" | awk '{print $1}')
 				sed -i "s|__CADDYFILE_SHA__|${_proposed_sha}|g" "$_rendered_caddy"

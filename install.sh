@@ -1433,6 +1433,21 @@ else
 	warn "  [dry-run] would create $PREFIX_ETC/conf.d/ override slot"
 fi
 
+# Provision xray.env — required by oxpulse-xray-update.sh watchtower (line 64).
+# The xray container uses a volume-mounted JSON config, not env vars, so this
+# file is intentionally empty. Without it the weekly xray update timer hard-fails
+# on every edge with: "FAIL missing /etc/oxpulse-partner-edge/xray.env".
+# Idempotent: touch only if absent so operators can add custom env overrides.
+if [[ $DRY_RUN -eq 0 ]]; then
+	install -d -m 0755 "$PREFIX_ETC"
+	if [[ ! -f "$PREFIX_ETC/xray.env" ]]; then
+		install -m 0600 /dev/null "$PREFIX_ETC/xray.env"
+		log "  provisioned $PREFIX_ETC/xray.env (empty — xray uses volume-mounted config)"
+	fi
+else
+	warn "  [dry-run] would provision $PREFIX_ETC/xray.env if absent"
+fi
+
 # ---------- Step 5b: provision DB-IP mmdb (M2b.2) ----------
 # Downloads dbip-country-lite-{YYYY-MM}.mmdb.gz from db-ip.com (CC-BY 4.0,
 # no API key required). Caddy's maxmind_geolocation handler reads this file
