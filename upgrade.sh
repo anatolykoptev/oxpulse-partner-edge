@@ -2084,19 +2084,11 @@ if [[ "$MODE" == with_templates ]]; then
 		exit "$_conflict_exit"
 	fi
 
-	# Phase 3 (Decision 4): capture baseline health snapshot BEFORE any mutation.
-	# Skip on fresh install (HEALTHCHECK absent) — health_regressions skips diff
-	# when no baseline file exists, so the gate behaves as first-run.
-	_wt_baseline_snap=$(mktemp)
-	# shellcheck disable=SC2064
-	trap "rm -f '$_wt_baseline_snap'" RETURN
-	if [[ -x "$HEALTHCHECK" ]]; then
-		log "capturing pre-change health baseline (--with-templates)"
-		health_snapshot "$HEALTHCHECK" "$_wt_baseline_snap" || true
-	else
-		log "healthcheck binary absent — skipping pre-change baseline (first install?)"
-		rm -f "$_wt_baseline_snap"; _wt_baseline_snap=""
-	fi
+	# Phase 3 (Decision 4): baseline captured AFTER sync_host_scripts (Step 5) so the
+	# new --snapshot-capable healthcheck.sh is in place before the snapshot is taken.
+	# Declared here (empty) so Step 1–5 rollback paths can reference ${_wt_baseline_snap:-}
+	# without an unbound-variable error under set -u.
+	_wt_baseline_snap=""
 
 	# Step 1: backup current state before any mutation (images + templates + host-scripts).
 	[[ -f "$PREFIX_ETC/Caddyfile" ]]  && cp -a "$PREFIX_ETC/Caddyfile" "$PREV_CADDYFILE"
@@ -2155,6 +2147,22 @@ if [[ "$MODE" == with_templates ]]; then
 	log "syncing host-scripts to $RELEASE_TAG (image tag=$TARGET)"
 	sync_host_scripts "$RELEASE_TAG"
 
+	# Phase 3 (Decision 4): capture baseline health snapshot AFTER host-script sync so the
+	# newly-installed healthcheck.sh (with --snapshot support) is used, not the pre-Phase-3
+	# script that returns an error on unknown --snapshot arg.  sync_host_scripts installs
+	# host scripts and systemd units only — it does NOT recreate containers — so the
+	# baseline still reflects the pre-change container/service state (mirrors plain path).
+	# Skip on fresh install (HEALTHCHECK absent) — health_regressions skips diff when
+	# baseline file is absent, so the gate behaves as first-run (no rollback on new reds).
+	_wt_baseline_snap=$(mktemp)
+	if [[ -x "$HEALTHCHECK" ]]; then
+		log "capturing pre-change health baseline (--with-templates, post host-script sync)"
+		health_snapshot "$HEALTHCHECK" "$_wt_baseline_snap" || true
+	else
+		log "healthcheck binary absent — skipping pre-change baseline (first install?)"
+		rm -f "$_wt_baseline_snap"; _wt_baseline_snap=""
+	fi
+
 	# Step 6: pull new images (with per-service digest capture for zero-downtime recreate).
 	ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
 	declare -A _wt_before_digests
@@ -2189,6 +2197,7 @@ if [[ "$MODE" == with_templates ]]; then
 	# Pass baseline snapshot so gate diffs pre-change vs post-change.
 	if ! settle_healthcheck_with_retry "with-templates-upgrade" "${_wt_baseline_snap:-}"; then
 		warn "healthcheck regression after --with-templates upgrade — rolling back"
+		rm -f "${_wt_baseline_snap:-}"
 		do_rollback_templates
 		restore_host_scripts
 		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull) || true
@@ -2198,6 +2207,7 @@ if [[ "$MODE" == with_templates ]]; then
 		fi
 		die "--with-templates upgrade rolled back due to post-upgrade healthcheck regression"
 	fi
+	rm -f "${_wt_baseline_snap:-}"
 
 	log "--with-templates upgrade to $TARGET complete"
 	re_render_xray
@@ -2334,6 +2344,7 @@ fi
 # Phase 3: pass baseline snapshot for regression-aware gate.
 if ! settle_healthcheck_with_retry "plain-upgrade" "${_baseline_snapshot:-}"; then
 	warn "healthcheck regression after upgrade — rolling back"
+	rm -f "${_baseline_snapshot:-}"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
 	restore_host_scripts
@@ -2341,6 +2352,7 @@ if ! settle_healthcheck_with_retry "plain-upgrade" "${_baseline_snapshot:-}"; th
 	(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate) || true
 	die "upgrade rolled back due to post-upgrade healthcheck regression"
 fi
+rm -f "${_baseline_snapshot:-}"
 
 log "upgraded to $TARGET successfully"
 
