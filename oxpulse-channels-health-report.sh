@@ -859,15 +859,74 @@ _probe_peer_coturn() {
     fi
 }
 
+# ---------- probe one peer's STUN/UDP port (coturn-udp leg) ----------
+# Args: stun_host stun_port
+# Echoes "<handshake_ok>\t<rtt_ms>"  (handshake_ok = true|false).
+#
+# Uses a plain STUN Binding request (turnutils_stunclient, no HMAC/auth needed)
+# to verify UDP reachability of the peer's coturn on port 3478.  This is a
+# connectivity probe, NOT an allocation probe — no TURN credentials are required
+# and no allocation is created.  The signal is "UDP path to the peer's coturn
+# ingress is open from THIS edge's vantage", which is exactly what the central
+# needs for a second distinct prober on the coturn-udp transport.
+#
+# Target set: SAME roster as the TLS leg (_run_peer_probe_loop provides the
+# SSRF-vetted turns_host — no new target source, P2-SEC-CR-001 unchanged).
+#
+# RU-edge note: a RU edge probing peers over UDP can only be advisory — it
+# cannot unilaterally withdraw a peer (central requires ≥2 distinct probers).
+# Worst-case a compromised RU edge reports false negatives; the quorum still
+# needs krolik + at least one other clean edge to agree.  This is the same
+# §P4-SEC-CR-301 self-declared-geo caveat already accepted for the TLS leg;
+# the UDP leg does NOT widen it.
+#
+# SSRF note: the SSRF recheck (_host_is_internal) runs ONCE per peer in
+# _run_peer_probe_loop BEFORE any dial; this function is called AFTER that
+# guard.  Re-running the guard here would add a redundant 3s getent wait with
+# no security benefit — the UDP dial uses the same already-vetted host.
+_probe_peer_udp_stun() {
+    local stun_host="$1"
+    local stun_port="$2"
+    local t0 t1 exit_code rtt_ms stun_out
+
+    t0="${EPOCHREALTIME}"
+    # OXPULSE_PEER_UDP_STUN_TIMEOUT default 5s (vs 8s for TLS Allocate) — the
+    # UDP Binding round-trip is a single packet exchange; 5s is ample even
+    # under transient loss.  This keeps the per-peer budget increase to 13s
+    # (5s probe + 8s POST) on top of the existing TLS leg, giving a worst-case
+    # per-peer total of 32s (was 19s) and a full cycle cap=2 worst case of:
+    #   32×2 + 3×2 + 10 = 80s ≤ TimeoutStartSec=90.
+    stun_out=$(timeout "${OXPULSE_PEER_UDP_STUN_TIMEOUT:-5}" \
+        docker exec oxpulse-partner-coturn \
+        turnutils_stunclient "$stun_host" -p "$stun_port" \
+        2>&1)
+    exit_code=$?
+    t1="${EPOCHREALTIME}"
+    rtt_ms=$(_elapsed_ms "$t0" "$t1")
+
+    if [[ "$exit_code" -eq 0 ]]; then
+        printf 'true\t%d' "$rtt_ms"
+    else
+        warn "peer-probe udp: $stun_host:$stun_port STUN failed (exit=$exit_code): $(printf '%s' "$stun_out" | tail -n2 | tr '\n' ' ')"
+        printf 'false\t%d' "$rtt_ms"
+    fi
+}
+
 # ---------- POST a prober-attributed cross-probe report ----------
 # Mirrors _post_channel but uses the cross_probe_token (xprb_) bearer and the
 # CrossProbeReportRequest body. ALL untrusted values (target node_id / host) go
 # through jq --arg / --argjson — never shell-interpolated into the request.
+#
+# Args: target_node_id handshake_ok rtt_ms token [channel_name]
+#   channel_name defaults to "coturn" (TLS leg); pass "coturn-udp" for the UDP leg.
+#   The same token, prober_node_id, and POST endpoint are used for both legs —
+#   no new auth path is introduced.
 _post_cross_probe() {
     local target_node_id="$1"
     local handshake_ok="$2"     # "true" | "false" (JSON bool)
     local rtt_ms="$3"
     local token="$4"
+    local channel_name="${5:-coturn}"   # "coturn" | "coturn-udp"
 
     local probed_at
     probed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -876,10 +935,11 @@ _post_cross_probe() {
     body=$(jq -nc \
         --arg prober "$NODE_ID" \
         --arg target "$target_node_id" \
+        --arg ch "$channel_name" \
         --argjson ok "$handshake_ok" \
         --argjson rtt "$rtt_ms" \
         --arg ts "$probed_at" \
-        '{prober_node_id:$prober, target_node_id:$target, channel_name:"coturn", handshake_ok:$ok, rtt_ms:$rtt, probe_mode:"peer", probed_at:$ts}')
+        '{prober_node_id:$prober, target_node_id:$target, channel_name:$ch, handshake_ok:$ok, rtt_ms:$rtt, probe_mode:"peer", probed_at:$ts}')
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
         printf '%s\n' "$body"
@@ -981,11 +1041,13 @@ _run_peer_probe_loop() {
 
     # ── BUDGET (MAJOR 1) ──────────────────────────────────────────────────────
     # The loop is SERIAL per peer; each peer costs, worst case:
-    #     getent SSRF recheck   timeout 3s   (OXPULSE_GETENT_TIMEOUT, _host_is_internal)
-    #   + TLS Allocate probe     timeout 8s   (OXPULSE_PEER_PROBE_TIMEOUT, _probe_peer_coturn)
-    #   + cross-probe POST      curl 8s       (OXPULSE_PEER_PROBE_POST_TIMEOUT, _post_cross_probe)
+    #     getent SSRF recheck      timeout 3s   (OXPULSE_GETENT_TIMEOUT, _host_is_internal)
+    #   + TLS Allocate probe        timeout 8s   (OXPULSE_PEER_PROBE_TIMEOUT, _probe_peer_coturn)
+    #   + coturn cross-probe POST  curl 8s       (OXPULSE_PEER_PROBE_POST_TIMEOUT, _post_cross_probe)
+    #   + UDP STUN probe            timeout 5s   (OXPULSE_PEER_UDP_STUN_TIMEOUT, _probe_peer_udp_stun)
+    #   + coturn-udp cross-probe POST curl 8s    (OXPULSE_PEER_PROBE_POST_TIMEOUT, _post_cross_probe)
     #   ────────────────────────────────────
-    #     worst_per_peer       = 19s
+    #     worst_per_peer           = 32s
     #
     # Plus a one-time pre-loop reserve before the first peer:
     #     TURN-secret read     timeout 10s   (docker exec sed, above)
@@ -1010,15 +1072,13 @@ _run_peer_probe_loop() {
     #   ≤  TimeoutStartSec
     #
     # With cap = 2, scan_cap = 4:
-    #     19×2 + 3×2 + 10 = 38 + 6 + 10 = 54s.
-    # The systemd unit sets TimeoutStartSec=90 (raised from 45) so the WHOLE
-    # oneshot — self-channel loop + secret read + this peer pass + upstream-
-    # transition check — fits with real headroom (54s peer-side ≪ 90s). The old
-    # 45s budget counted ONLY the probe timeout and ignored the serial getent +
-    # POST, so a full cycle could overrun and systemd SIGTERM'd it mid-loop.
-    # Default cap dropped 3→2 to keep the arithmetic provable even at every
-    # timeout ceiling. Operators on a large mesh raise OXPULSE_PEER_PROBE_MAX
-    # knowingly AND must raise TimeoutStartSec to match the invariant above.
+    #     32×2 + 3×2 + 10 = 64 + 6 + 10 = 80s.
+    # The systemd unit sets TimeoutStartSec=90 so the WHOLE oneshot — self-channel
+    # loop + secret read + this peer pass + upstream-transition check — still fits
+    # with 10s headroom (80s ≪ 90s). The UDP leg adds 13s/peer (5s STUN + 8s POST)
+    # on top of the prior 19s; overall cap=2 worst case moved 54s → 80s.
+    # Operators on a large mesh raise OXPULSE_PEER_PROBE_MAX knowingly AND must
+    # raise TimeoutStartSec to match: worst_per_peer(32) × cap + 3×cap + 10 ≤ TSSec.
     local cap="${OXPULSE_PEER_PROBE_MAX:-2}"
     local scan_cap=$(( cap + ${OXPULSE_PEER_PROBE_REJECT_HEADROOM:-$cap} ))
 
@@ -1063,7 +1123,7 @@ _run_peer_probe_loop() {
     local probed=0 ok_count=0 rejected=0 post_4xx=0
     local scanned=0   # roster slots WALKED this cycle (dial or reject) — drives
                       # rotation + the scan bound. `probed` (dials only) gates cap.
-    local i idx node_id turns_host turns_port handshake_ok rtt result
+    local i idx node_id turns_host turns_port udp_port handshake_ok rtt result
     # Walk the roster starting at `start`, wrapping once. Stop when we have either
     # dialled `cap` peers OR scanned `scan_cap` slots (the reject bound) OR
     # exhausted the roster. Rejects advance `scanned` (bounding getent cost) but
@@ -1078,13 +1138,21 @@ _run_peer_probe_loop() {
         if ! [[ "$turns_port" =~ ^[0-9]+$ ]]; then
             turns_port=443
         fi
+        # udp_port: optional roster field for the STUN/UDP port. Falls back to
+        # OXPULSE_COTURN_STUN_PORT (operator override, default 3478). Must be a
+        # clean integer; any other value falls back to the default silently.
+        udp_port=$(printf '%s' "$roster" | jq -r --argjson i "$idx" '.[$i].udp_port // empty')
+        if ! [[ "$udp_port" =~ ^[0-9]+$ ]]; then
+            udp_port="${OXPULSE_COTURN_STUN_PORT:-3478}"
+        fi
         if [[ -z "$node_id" || -z "$turns_host" ]]; then
             warn "peer-probe: roster entry $idx missing node_id/turns_host — skipping"
             scanned=$((scanned + 1))
             continue
         fi
 
-        # SSRF dial-time recheck — REJECT before any dial.
+        # SSRF dial-time recheck — REJECT before any dial (both TLS and UDP legs
+        # target the same turns_host; a single recheck covers both).
         if _host_is_internal "$turns_host"; then
             warn "peer-probe: REJECT $node_id ($turns_host) — resolves internal/unresolvable (SSRF guard)"
             rejected=$((rejected + 1))
@@ -1093,6 +1161,7 @@ _run_peer_probe_loop() {
             continue
         fi
 
+        # ── TLS leg (coturn) ────────────────────────────────────────────────────
         result=$(_probe_peer_coturn "$turns_host" "$turns_port" "$turn_secret")
         handshake_ok="${result%%$'\t'*}"
         rtt="${result##*$'\t'}"
@@ -1104,7 +1173,18 @@ _run_peer_probe_loop() {
         # ONLY on a 4xx (revoked token / roster-membership) — distinct from the
         # 5xx/000 transient path which returns 0. Without this the `|| true`
         # swallows the 4xx and a revoked token loops forever invisibly.
-        if ! _post_cross_probe "$node_id" "$handshake_ok" "$rtt" "$token"; then
+        if ! _post_cross_probe "$node_id" "$handshake_ok" "$rtt" "$token" "coturn"; then
+            post_4xx=1
+        fi
+
+        # ── UDP leg (coturn-udp) ─────────────────────────────────────────────────
+        # Probe the peer's STUN/UDP port (3478 by default) via a plain STUN Binding
+        # request. The SSRF guard above already vetted turns_host; no second getent
+        # needed. The same xprb_ token and POST endpoint are used — no new auth path.
+        result=$(_probe_peer_udp_stun "$turns_host" "$udp_port")
+        handshake_ok="${result%%$'\t'*}"
+        rtt="${result##*$'\t'}"
+        if ! _post_cross_probe "$node_id" "$handshake_ok" "$rtt" "$token" "coturn-udp"; then
             post_4xx=1
         fi
 
