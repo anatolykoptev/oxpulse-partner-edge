@@ -151,7 +151,7 @@ without re-running the audit.
 
 ---
 
-### Q. SEC-CR-302 — P3b peer-probe DNS-rebinding TOCTOU (MEDIUM, FIXED in #323)
+### Q. SEC-CR-302 — P3b peer-probe DNS-rebinding TOCTOU (MEDIUM, FIXED in #324)
 
 > **SEC-CR-306 (hex/NAT64 IPv4-mapped IPv6 SSRF bypass) — CLOSED in PR #306.**
 > A sibling residual: the v6 classifier matched the textual SHAPE of an embedded
@@ -222,7 +222,7 @@ instead of `turnutils_uclient`. openssl accepts `-connect <vetted-IP>:<port>
 (turnutils could not split connect-target from SNI — that was the original
 blocker).
 
-**FIXED (PR #323, 2026-06-16):** `_host_is_internal` now ECHOES the first vetted
+**FIXED (PR #324, 2026-06-16):** `_host_is_internal` now ECHOES the first vetted
 public IP on its allow path; the peer loop captures it and PINS both legs' dial
 to that IP — `openssl -connect <vetted-IP> -servername <host> -verify_hostname
 <host>` (TLS) and `turnutils_stunclient <vetted-IP>` (UDP). Neither tool

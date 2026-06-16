@@ -707,9 +707,14 @@ _host_is_internal() {
             return 0   # ANY internal address → reject the whole host
         fi
     done <<< "$resolved"
-    # SEC-CR-322-02: echo the FIRST vetted IP so the caller can PIN the dial to it
+    # SEC-CR-322-02: echo the first vetted IP so the caller can PIN the dial to it
     # (-connect <ip> -servername <host>) — neither openssl nor turnutils then
     # re-resolves the hostname, closing the resolve-then-dial DNS-rebind TOCTOU.
+    # "first" = lexically-smallest (the list is `sort -u`'d above); for a single-
+    # homed edge (the norm) it is the only address. A multi-homed peer whose
+    # lexically-first public IP is unreachable would be pinned to it — acceptable:
+    # the central needs ≥2 distinct probers to withdraw, so one prober's pin choice
+    # cannot unilaterally evict, and ALL its addresses were already vetted public.
     printf '%s' "$first_ip"
     return 1   # all resolved addresses public → allow
 }
@@ -1017,10 +1022,16 @@ _read_peer_probe_offset() {
 
 # ---------- peer-probe loop (P3b) ----------
 # Reads roster + token; skips cleanly (debug-log) if either is empty/absent.
-# For each peer (capped at OXPULSE_PEER_PROBE_MAX): SSRF dial-recheck → mint →
-# TLS Allocate → POST. Bounded for the TimeoutStartSec=90 budget (see the BUDGET
-# block below for the arithmetic). Rotates the probed slice per cycle (MINOR 5)
-# and writes a SIGTERM-safe marker (MAJOR 1).
+# For each peer (capped at OXPULSE_PEER_PROBE_MAX): SSRF dial-recheck → pin →
+# TLS handshake + UDP STUN → POST. Bounded for the TimeoutStartSec=90 budget (see
+# the BUDGET block below). Rotates the probed slice per cycle (MINOR 5) and writes
+# a SIGTERM-safe marker (MAJOR 1).
+#
+# ⚠️  MUST be called as `_run_peer_probe_loop || true` under `set -e` — like
+# probe_ch4. The SSRF recheck `vetted_ip=$(_host_is_internal …)` returns 1 on the
+# ALLOW path (every healthy public peer), so a BARE call would trip errexit on the
+# first healthy peer and abort the loop, silently masked as success. Both current
+# call sites (the timer entrypoint + the dry-run path) already shield with `|| true`.
 _run_peer_probe_loop() {
     local token roster_file roster
     token=$(_read_cross_probe_token 2>/dev/null || true)
@@ -1146,6 +1157,7 @@ _run_peer_probe_loop() {
     local scanned=0   # roster slots WALKED this cycle (dial or reject) — drives
                       # rotation + the scan bound. `probed` (dials only) gates cap.
     local i idx node_id turns_host turns_port udp_port handshake_ok rtt result
+    local vetted_ip _peer_is_internal
     # Walk the roster starting at `start`, wrapping once. Stop when we have either
     # dialled `cap` peers OR scanned `scan_cap` slots (the reject bound) OR
     # exhausted the roster. Rejects advance `scanned` (bounding getent cost) but
