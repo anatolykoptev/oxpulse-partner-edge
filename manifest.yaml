@@ -1,0 +1,129 @@
+# manifest.yaml — declares every managed surface for oxpulse-partner-edge.
+#
+# Reconciled by lib/reconcile.sh (reconcile_all).
+# Surfaces NOT listed here are UNMANAGED and never touched:
+#   conf.d/         — operator override slot (canon conf-d.md)
+#   ru-subnets.txt  — data feed, own lifecycle (ru-subnets-update timer)
+#   reality.priv / awg-private.key / token — secrets, generate-once
+#
+# manifest_version bumps ONLY on FORMAT change (ONE_WAY freeze — ADR-003).
+# release_tag is substituted by release.yml (@RELEASE_TAG@ → real tag at release time).
+#
+# Surface kinds:
+#   render_from_state — engine renders artifact from (template × STATE), checksum-compares,
+#                       atomic-swaps, restarts restart_unit only if changed.
+#                       NO secrets in STATE => safe to re-render every converge.
+#   persist_rendered  — artifact carries secrets that live ONLY in the rendered file
+#                       (compose, node-config). Engine does NOT re-render from template.
+#                       Patches in-place (image tags only); treats on-disk file as authority.
+#   sync_verified     — host script / unit / lib / data: fetch for release_tag,
+#                       SHA256SUMS-verify, idempotent checksum-skip, atomic-swap.
+#   network_apply     — idempotent network state (firewall nft, sysctl, ip rules).
+#                       Re-asserted every converge; live re-assert is the authority.
+#
+# wired: false — surface is DECLARED (so test_manifest_coverage guards it) but NOT yet
+#               reconciled by the engine. Wiring happens in Phase 4b.
+#               The reconcile_all loop skips these surfaces (logs "declared, not yet wired").
+
+manifest_version: 1
+release_tag: "@RELEASE_TAG@"
+
+surfaces:
+  # --- render_from_state surfaces (Phase 4a: caddyfile WIRED; others Phase 4b) ---
+
+  - id: caddyfile
+    kind: render_from_state
+    template: Caddyfile.tpl
+    out: /etc/oxpulse-partner-edge/Caddyfile
+    renderer: "opec render caddy"       # single render authority (Decision 2, ADR-001)
+    validate: "opec render caddy --check"
+    placeholder_completeness: true      # CI + runtime: every {{X}} must resolve (S1)
+    restart_unit: oxpulse-partner-edge.service  # reload only if checksum changed
+    sha_key: CADDYFILE_SHA              # tracked in STATE for drift/canary
+    # wired: (absent = wired in P4a)
+
+  - id: coturn
+    kind: render_from_state
+    template: coturn.conf.tpl
+    out: /etc/oxpulse-partner-edge/coturn.conf
+    renderer: "opec render coturn"
+    placeholder_completeness: true
+    restart_signal: "SIGUSR2"           # coturn reload_ssl_certs, no session drop
+    restart_unit: oxpulse-partner-cert-watch.service
+    wired: false                        # Phase 4b
+
+  - id: xray_client
+    kind: render_from_state
+    template: xray-client.json.tpl
+    out: /etc/oxpulse-partner-edge/xray-client.json
+    renderer: "opec render xray"
+    placeholder_completeness: true
+    fail_soft: true                     # bypass channel — render failure != install death
+    restart_unit_compose_service: xray-client
+    wired: false                        # Phase 4b
+
+  # --- persist_rendered surfaces (secrets present — never re-render from template) ---
+
+  - id: compose
+    kind: persist_rendered
+    out: /etc/oxpulse-partner-edge/docker-compose.yml
+    patch_only: ["image_tags"]          # sed image:TAG; everything else is authority
+    secret_surface: true
+    wired: false                        # Phase 4b
+
+  - id: node_config
+    kind: persist_rendered
+    out: /etc/oxpulse-partner-edge/node-config.json
+    secret_surface: true
+    refresh_from: "/api/partner/keys"   # reality rotation merge (refresh.sh duty)
+    wired: false                        # Phase 4b
+
+  # --- network_apply surfaces ---
+
+  - id: firewall
+    kind: network_apply
+    applier: "firewall_apply"           # lib/install-firewall.sh — runs on every converge
+    scope: "oxpulse-owned nft only"     # canon §6: never docker ip nat / firewalld
+    wired: false                        # Phase 4b
+
+  # --- sync_verified surfaces ---
+
+  - id: xray_env
+    kind: sync_verified
+    out: /etc/oxpulse-partner-edge/xray.env
+    required_by_unit: oxpulse-xray-update.service
+    wired: false                        # Phase 4b (closes #5 root cause when wired)
+
+  - id: host_scripts
+    kind: sync_verified
+    checksum_source: SHA256SUMS
+    wired: false                        # Phase 4b
+
+  - id: systemd_units
+    kind: sync_verified
+    checksum_source: SHA256SUMS
+    on_failure_alert: "oxpulse-alert@%n.service"
+    wired: false                        # Phase 4b
+
+unmanaged:
+  # Documented EXCLUSIONS — never read or written by the reconcile engine.
+  - path: /etc/oxpulse-partner-edge/conf.d/
+    reason: "operator override slot (conf-d.md canon §6)"
+  - path: /etc/oxpulse-partner-edge/ru-subnets.txt
+    reason: "data feed, own lifecycle (ru-subnets-update timer)"
+  - files: [reality.priv, awg-private.key, token]
+    reason: "secrets, generate-once; never re-rendered from template"
+
+state_schema:
+  version: 1          # ADR-002 freeze; migrate_state() forward-only
+  required_keys:
+    - PARTNER_ID
+    - PARTNER_DOMAIN
+    - NODE_ID
+    - BACKEND_API
+    - IMAGE_VERSION
+    - TURNS_SUBDOMAIN
+    - SCHEMA_VERSION
+  derivable_keys:
+    - CADDYFILE_SHA           # re-hash live Caddyfile on migrate
+    - OXPULSE_MIRROR_BASE     # optional; absent on non-mirror installs
