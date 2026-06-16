@@ -742,6 +742,87 @@ else
 fi
 trap - EXIT; rm -rf "$T12"
 
+# ── Test 13: UDP STUN leg — coturn-udp row emitted alongside coturn row ───────
+# Verifies that _probe_peer_udp_stun runs per probe cycle and _post_cross_probe
+# is called with channel_name="coturn-udp" in addition to "coturn" (TLS leg).
+# A real roster peer with a public host → both channel rows must appear in the
+# dry-run output.  This test fails if the UDP leg is removed (revert guard).
+T13=$(mktemp -d)
+trap 'rm -rf "$T13"' EXIT
+make_bin "$T13"; mkdir -p "$T13/etc" "$T13/var"
+write_node_config "$T13/etc"
+printf '[{"node_id":"peer-dual","turns_host":"api-dual.example.com","turns_port":443}]\n' \
+    > "$T13/var/peer-roster.json"
+
+# getent stub: public address.
+cat > "$T13/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "api-dual.example.com" ] && { echo "203.0.113.20 STREAM api-dual.example.com"; exit 0; }
+exit 2
+STUB
+chmod +x "$T13/getent"
+
+# docker stub: handles both turnutils_uclient (TLS Allocate, -S flag) and
+# turnutils_stunclient (UDP STUN).  Both succeed so handshake_ok=true on both.
+cat > "$T13/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then echo "t13-secret"; exit 0; fi
+if [[ "$*" == *"turnutils_uclient"* ]]; then echo "allocate success: relay address 203.0.113.20:49152"; exit 0; fi
+if [[ "$*" == *"turnutils_stunclient"* ]]; then echo "STUN response received"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T13/docker"
+
+set +e
+OUT13=$(PATH="$T13:/usr/bin:/bin" \
+    _NODE_CONFIG="$T13/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T13/var" _PEER_ROSTER_FILE="$T13/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t13" OXPULSE_SERVICE_TOKEN="stkn_t13" \
+    OXPULSE_TURN_SECRET="t13-secret" OXPULSE_GETENT_BIN="$T13/getent" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+# Both the TLS leg (coturn) and the UDP leg (coturn-udp) must be present.
+TLS_ROW13=$(printf '%s\n' "$OUT13" | jq -c 'select(.channel_name=="coturn" and .probe_mode=="peer")' 2>/dev/null | head -1)
+UDP_ROW13=$(printf '%s\n' "$OUT13" | jq -c 'select(.channel_name=="coturn-udp" and .probe_mode=="peer")' 2>/dev/null | head -1)
+
+if [[ -n "$TLS_ROW13" ]]; then
+    ok "test13: coturn (TLS) row present"
+else
+    fail "test13: coturn TLS row missing; output: $OUT13"
+fi
+
+if [[ -n "$UDP_ROW13" ]]; then
+    ok "test13: coturn-udp (UDP STUN) row present"
+else
+    fail "test13: coturn-udp UDP row missing — UDP leg not emitting; output: $OUT13"
+fi
+
+# Both rows must carry the same prober_node_id and target_node_id.
+if printf '%s' "$UDP_ROW13" | jq -e '
+        .prober_node_id=="prober-node"
+        and .target_node_id=="peer-dual"
+        and .probe_mode=="peer"
+        and (.handshake_ok==true)
+        and (.rtt_ms|type=="number")
+    ' >/dev/null 2>&1; then
+    ok "test13: coturn-udp row schema valid (prober/target/mode/ok/rtt)"
+else
+    fail "test13: coturn-udp row schema mismatch: $UDP_ROW13"
+fi
+
+# The UDP leg uses the same xprb_ token bearer path — verify no new auth field
+# was introduced (both rows must be structurally identical except channel_name).
+TLS_KEYS13=$(printf '%s' "$TLS_ROW13" | jq -c '[keys[]]|sort' 2>/dev/null)
+UDP_KEYS13=$(printf '%s' "$UDP_ROW13" | jq -c '[keys[]]|sort' 2>/dev/null)
+if [[ "$TLS_KEYS13" == "$UDP_KEYS13" ]]; then
+    ok "test13: TLS and UDP rows have identical JSON key sets (no new auth fields)"
+else
+    fail "test13: key-set divergence TLS=$TLS_KEYS13 UDP=$UDP_KEYS13"
+fi
+
+trap - EXIT; rm -rf "$T13"
+
 echo
 echo "Cross-probe loop: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
