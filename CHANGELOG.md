@@ -5,6 +5,23 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.78](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.77...v0.12.78) (2026-06-16)
+
+
+### Features
+
+* **probe:** edge cross-probe loop — probe roster peers' TURNS:443 + prober-attributed report (P3b mesh producer) ([#306](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/306)) ([19aec4f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/19aec4fe374a00f8d41fe89828fb789d52e09406))
+* **probe:** P3b UDP STUN leg — coturn-udp peer-row for second vantage ([#321](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/321)) ([012c66f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/012c66f93e6edfb7f0580503fa592d37ea2fe4f8))
+* **reconcile:** baseline-aware health gate — rollback on regression not pre-existing red (Phase 3) ([#318](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/318)) ([092322e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/092322e1fedfb6b7d64fc92f3e68e8d3ceb8c01d))
+* **reconcile:** manifest-driven engine + apply_restarts wiring + caddy surface (Phase 4a, ADR-003) ([#319](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/319)) ([d13075d](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d13075de0c107659c21a1d7fbfed166763f889b7))
+* **reconcile:** Phase 1 — lib/reconcile.sh + caddyfile via opec render authority (ADR-001) ([#316](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/316)) ([27f7584](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/27f7584a3e544f82a90f6e4c7a77fe5efd842453))
+* **reconcile:** state schema v1 + migrate_state + tier-3 NAIVE fix + opec probe (Phase 2, ADR-002) ([#317](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/317)) ([aa995c2](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/aa995c2c8ef37ca66bc68bfa94332bc4d32d882d))
+
+
+### Bug Fixes
+
+* **caddy:** mount conf.d into caddy container so the override slot actually loads ([#314](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/314)) ([6f15fc4](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/6f15fc4fac3805c6a85cdc60f2613e7494711d22))
+
 ## [0.12.77](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.76...v0.12.77) (2026-06-13)
 
 
