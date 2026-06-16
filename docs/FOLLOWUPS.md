@@ -215,3 +215,21 @@ peer (a false-negative storm). We do NOT hack turnutils to force it.
 assertion), the chosen probe binary if option 2.
 
 **Discovered:** PR #306 review (SEC-CR-302), 2026-06-12.
+
+**UPDATE (PR #322, 2026-06-16):** the TLS leg now dials with `openssl s_client`
+instead of `turnutils_uclient`. openssl accepts `-connect <vetted-IP>:<port>
+-servername <hostname>` SEPARATELY, so **option 2 is now a one-line change**
+(turnutils could not split connect-target from SNI — that was the original
+blocker). Thread the IP `_host_is_internal` already resolved into `-connect`
+(keep `-servername "$turns_host"`). Residual UNCHANGED meanwhile (dial still
+re-resolves the hostname). Still BLOCKING before default-ON fleetwide.
+
+### R. SEC-CR-322-01 — coturn-tls probe must SAN-check (HIGH, FIXED in #322)
+
+`openssl s_client -verify_return_error` chain-verifies but does NOT match the
+cert SAN/hostname; krolik's rustls always SAN-checks
+(`probe_tls_allocate_fails_on_sni_mismatch`). Without a SAN check a valid-chain /
+wrong-SAN cert (catch-all vhost, cert swap) reads UP at the edge but DOWN at
+krolik → the two coturn-tls probers disagree. **Fixed:** added `-verify_hostname
+"$turns_host"`; `test15` asserts the flag is present (real wrong-SAN→exit1 is
+openssl's, validated on ruoxp). **Discovered:** PR #322 crypto review, 2026-06-16.
