@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.79](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.78...v0.12.79) (2026-06-16)
+
+
+### Bug Fixes
+
+* **probe:** coturn-tls leg uses openssl s_client (turnutils can't drive caddy-l4 SNI-mux) ([#322](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/322)) ([c97608e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c97608e906d0dacfd027e36c82d51b6825903785))
+* **probe:** pin cross-probe dial to the SSRF-vetted IP (SEC-CR-322-02 / SEC-CR-302) ([#324](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/324)) ([c3fa13e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c3fa13e3d36386e7ccda71622a6af4a116b0b76d))
+
 ## [0.12.78](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.77...v0.12.78) (2026-06-16)
 
 
