@@ -151,7 +151,7 @@ without re-running the audit.
 
 ---
 
-### Q. SEC-CR-302 — P3b peer-probe DNS-rebinding TOCTOU (MEDIUM, BLOCKING before default-ON)
+### Q. SEC-CR-302 — P3b peer-probe DNS-rebinding TOCTOU (MEDIUM, FIXED in #323)
 
 > **SEC-CR-306 (hex/NAT64 IPv4-mapped IPv6 SSRF bypass) — CLOSED in PR #306.**
 > A sibling residual: the v6 classifier matched the textual SHAPE of an embedded
@@ -218,11 +218,20 @@ assertion), the chosen probe binary if option 2.
 
 **UPDATE (PR #322, 2026-06-16):** the TLS leg now dials with `openssl s_client`
 instead of `turnutils_uclient`. openssl accepts `-connect <vetted-IP>:<port>
--servername <hostname>` SEPARATELY, so **option 2 is now a one-line change**
+-servername <hostname>` SEPARATELY, so **option 2 became a small change**
 (turnutils could not split connect-target from SNI — that was the original
-blocker). Thread the IP `_host_is_internal` already resolved into `-connect`
-(keep `-servername "$turns_host"`). Residual UNCHANGED meanwhile (dial still
-re-resolves the hostname). Still BLOCKING before default-ON fleetwide.
+blocker).
+
+**FIXED (PR #323, 2026-06-16):** `_host_is_internal` now ECHOES the first vetted
+public IP on its allow path; the peer loop captures it and PINS both legs' dial
+to that IP — `openssl -connect <vetted-IP> -servername <host> -verify_hostname
+<host>` (TLS) and `turnutils_stunclient <vetted-IP>` (UDP). Neither tool
+re-resolves the hostname, so the resolve-then-dial window is closed. caddy-l4
+still routes by SNI and the cert SAN is still checked against the hostname
+(empirically verified on ruoxp: connect-IP + SNI + verify_hostname → exit 0;
+connect-IP without SNI → exit 1). `tests/test_cross_probe_loop.sh` test16 asserts
+the pin (-connect = vetted IP, -servername/-verify_hostname = hostname, hostname
+never in -connect). **No longer blocking — the loop may go default-ON fleetwide.**
 
 ### R. SEC-CR-322-01 — coturn-tls probe must SAN-check (HIGH, FIXED in #322)
 

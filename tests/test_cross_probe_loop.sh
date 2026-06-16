@@ -148,15 +148,15 @@ STUB
 chmod +x "$T2/getent"
 
 DIAL_LOG="$T2/dial.log"
-# Record coturn-tls peer-probe dials: the TLS leg now runs `openssl s_client
-# -connect <host>:<port>` on the host, so the openssl stub logs the dialed host.
-# The SSRF guard (_host_is_internal) runs once per peer BEFORE either leg dials,
-# so logging the TLS leg suffices to prove no internal host was reached.
+# Record coturn-tls peer-probe dials: the TLS leg runs `openssl s_client
+# -connect <vetted-ip> -servername <host>`, so the openssl stub logs the FULL
+# argv (post SEC-CR-322-02 the -connect target is the vetted IP, the host is in
+# -servername). The SSRF guard (_host_is_internal) runs once per peer BEFORE
+# either leg dials, so an internal host appears in NEITHER -connect nor
+# -servername (rejected pre-dial) while the public host's hostname is present.
 cat > "$T2/openssl" <<STUB
 #!/bin/bash
-prev=""; host=""
-for a in "\$@"; do [ "\$prev" = "-connect" ] && host="\${a%%:*}"; prev="\$a"; done
-[ -n "\$host" ] && printf '%s\n' "\$host" >> "$DIAL_LOG"
+printf '%s\n' "\$*" >> "$DIAL_LOG"
 exit 0
 STUB
 chmod +x "$T2/openssl"
@@ -956,6 +956,65 @@ else
 fi
 
 trap - EXIT; rm -rf "$T15"
+
+# ── Test 16: SEC-CR-322-02 — dial is PINNED to the vetted IP (no re-resolve) ───
+# _host_is_internal resolves+vets the host ONCE and echoes the IP; both legs must
+# dial THAT IP, not the hostname (which openssl/turnutils would re-resolve,
+# reopening the DNS-rebind TOCTOU). Assert -connect targets the vetted IP while
+# SNI + SAN-check keep the hostname (caddy-l4 routing + cert verification intact).
+T16=$(mktemp -d)
+trap 'rm -rf "$T16"' EXIT
+make_bin "$T16"; mkdir -p "$T16/etc" "$T16/var"
+write_node_config "$T16/etc"
+printf '[{"node_id":"peer-pin","turns_host":"api-pin.example.com","turns_port":443}]\n' \
+    > "$T16/var/peer-roster.json"
+cat > "$T16/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "api-pin.example.com" ] && { echo "198.51.100.77 STREAM api-pin.example.com"; exit 0; }
+exit 2
+STUB
+chmod +x "$T16/getent"
+ARGV16="$T16/openssl-argv.log"
+cat > "$T16/openssl" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$ARGV16"
+exit 0
+STUB
+chmod +x "$T16/openssl"
+cat > "$T16/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then echo "t16-secret"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T16/docker"
+
+set +e
+PATH="$T16:/usr/bin:/bin" \
+    _NODE_CONFIG="$T16/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T16/var" _PEER_ROSTER_FILE="$T16/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t16" OXPULSE_SERVICE_TOKEN="stkn_t16" \
+    OXPULSE_TURN_SECRET="t16-secret" OXPULSE_GETENT_BIN="$T16/getent" \
+    bash "$SCRIPT" --dry-run >/dev/null 2>&1
+set -e
+
+if grep -q -- '-connect 198.51.100.77:443' "$ARGV16" 2>/dev/null; then
+    ok "test16: TLS dial PINNED to vetted IP (-connect 198.51.100.77, SEC-CR-322-02)"
+else
+    fail "test16: -connect did not target the vetted IP; argv: $(cat "$ARGV16" 2>/dev/null)"
+fi
+if grep -q -- '-servername api-pin.example.com' "$ARGV16" 2>/dev/null \
+   && grep -q -- '-verify_hostname api-pin.example.com' "$ARGV16" 2>/dev/null; then
+    ok "test16: SNI + SAN-check still use the hostname (caddy-l4 route + cert intact)"
+else
+    fail "test16: hostname missing from -servername/-verify_hostname; argv: $(cat "$ARGV16" 2>/dev/null)"
+fi
+if grep -q -- '-connect api-pin.example.com' "$ARGV16" 2>/dev/null; then
+    fail "test16: -connect used the hostname (openssl would re-resolve — TOCTOU open)"
+else
+    ok "test16: -connect never uses the hostname (no re-resolution path)"
+fi
+
+trap - EXIT; rm -rf "$T16"
 
 echo
 echo "Cross-probe loop: PASS=$PASS FAIL=$FAIL"
