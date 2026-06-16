@@ -770,10 +770,14 @@ _write_peer_probe_state() {
 #
 #   -connect/-servername  caddy-l4 SNI-muxes :443 by SNI → routes to the peer's
 #       coturn. openssl sends SNI = the -servername hostname.
-#   -verify_return_error  fail (non-zero exit) on cert-chain verification error,
-#       trusting the host system CA store. This MIRRORS krolik's
-#       probe_tls_allocate (rustls + webpki-roots, never
-#       danger_accept_invalid_certs) so the two probers agree on coturn-tls.
+#   -verify_hostname <host>  check the cert SAN matches the hostname (rustls always
+#       SAN-checks; -verify_return_error ALONE does chain-but-not-hostname, so
+#       without this a valid-chain / wrong-SAN cert would pass here yet fail at
+#       krolik → the two probers disagree, SEC-CR-322-01).
+#   -verify_return_error  hard-fail (non-zero exit) on any verification error,
+#       trusting the host system CA store. Together with -verify_hostname this
+#       MIRRORS krolik's probe_tls_allocate (rustls + webpki-roots: chain AND SAN,
+#       never danger_accept_invalid_certs) so the two probers agree on coturn-tls.
 #   -brief </dev/null  one handshake, no interactive stdin, concise output.
 #
 # WHY NOT turnutils_uclient -S (the original #306 leg): coturn 4.6.3
@@ -825,15 +829,24 @@ _probe_peer_coturn() {
     [[ "$turns_host" == *:* ]] && connect_target="[$turns_host]"
 
     t0="${EPOCHREALTIME}"
-    # TLS handshake + public-CA cert verification against the peer's caddy-l4 :443
-    # with SNI = hostname (caddy-l4 SNI-muxes :443 → routes to the peer's coturn).
-    # This MIRRORS krolik's probe_tls_allocate TLS layer (webpki-roots, never
-    # danger_accept_invalid_certs) so the two probers agree on the coturn-tls
-    # transport. Probe timeout default 8s — see _run_peer_probe_loop BUDGET block.
+    # TLS handshake + public-CA chain verification + hostname/SAN match against the
+    # peer's caddy-l4 :443 with SNI = hostname (caddy-l4 SNI-muxes :443 → routes to
+    # the peer's coturn). This MIRRORS krolik's probe_tls_allocate TLS layer
+    # (rustls + webpki-roots: chain AND SAN, never danger_accept_invalid_certs) so
+    # the two probers make the SAME trust decision on coturn-tls:
+    #   -verify_return_error  hard-fail (non-zero exit) on any verification error
+    #   -verify_hostname      check the cert SAN matches the hostname — WITHOUT this
+    #     openssl chain-verifies but accepts a valid-chain / wrong-SAN cert (exit 0)
+    #     while rustls rejects it (SEC-CR-322-01); the two probers would then
+    #     DISAGREE on a misrouted/catch-all cert. With it, both fail-closed.
+    # Probe timeout default 8s — see _run_peer_probe_loop BUDGET block.
+    # NOTE: capture is command-substitution + `$?` — do NOT pipe openssl through
+    # tail/grep, or `$?` becomes the pipe-tail's status and every failure reads UP.
     ossl_out=$(timeout "${OXPULSE_PEER_PROBE_TIMEOUT:-8}" \
         "$ossl_bin" s_client \
             -connect "${connect_target}:${turns_port}" \
             -servername "$turns_host" \
+            -verify_hostname "$turns_host" \
             -verify_return_error -brief </dev/null 2>&1)
     exit_code=$?
     t1="${EPOCHREALTIME}"
@@ -1034,7 +1047,7 @@ _run_peer_probe_loop() {
     # ── BUDGET (MAJOR 1) ──────────────────────────────────────────────────────
     # The loop is SERIAL per peer; each peer costs, worst case:
     #     getent SSRF recheck      timeout 3s   (OXPULSE_GETENT_TIMEOUT, _host_is_internal)
-    #   + TLS Allocate probe        timeout 8s   (OXPULSE_PEER_PROBE_TIMEOUT, _probe_peer_coturn)
+    #   + TLS handshake probe       timeout 8s   (OXPULSE_PEER_PROBE_TIMEOUT, _probe_peer_coturn)
     #   + coturn cross-probe POST  curl 8s       (OXPULSE_PEER_PROBE_POST_TIMEOUT, _post_cross_probe)
     #   + UDP STUN probe            timeout 5s   (OXPULSE_PEER_UDP_STUN_TIMEOUT, _probe_peer_udp_stun)
     #   + coturn-udp cross-probe POST curl 8s    (OXPULSE_PEER_PROBE_POST_TIMEOUT, _post_cross_probe)

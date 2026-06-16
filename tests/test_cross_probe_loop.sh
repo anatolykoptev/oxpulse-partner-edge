@@ -309,7 +309,10 @@ else
 fi
 trap - EXIT; rm -rf "$T5"
 
-# ── Test 6: secret-not-on-argv during a peer probe (SEC-CR-001) ───────────────
+# ── Test 6: secret-not-on-argv during a probe run (self-probe mint, SEC-CR-001) ─
+# NOTE: since the coturn-tls PEER leg moved to openssl (no cred minted), the only
+# remaining HMAC mint in a --dry-run is the ch4 SELF-probe — that is what this
+# test now exercises (the peer leg carries no secret to leak at all).
 T6=$(mktemp -d)
 trap 'rm -rf "$T6"' EXIT
 make_bin "$T6"; mkdir -p "$T6/etc" "$T6/var"
@@ -354,9 +357,9 @@ PATH="$T6:/usr/bin:/bin" \
 set -e
 
 if [[ -s "$ARGV_LOG" ]]; then
-    ok "test6: HMAC binary invoked during peer probe (real mint path)"
+    ok "test6: HMAC binary invoked during probe run (self-probe mint path)"
 else
-    fail "test6: HMAC argv log empty — peer-probe mint path did not run"
+    fail "test6: HMAC argv log empty — self-probe mint path did not run"
 fi
 if grep -q "$LEAK_MARKER" "$ARGV_LOG" 2>/dev/null; then
     fail "test6: SECRET LEAK — base TURN secret found on HMAC argv: $(cat "$ARGV_LOG")"
@@ -938,9 +941,18 @@ else
     fail "test15: openssl invocation missing -servername; argv: $(cat "$ARGV15" 2>/dev/null)"
 fi
 if grep -q -- '-verify_return_error' "$ARGV15" 2>/dev/null; then
-    ok "test15: coturn-tls probe verifies cert (-verify_return_error, mirrors krolik webpki)"
+    ok "test15: coturn-tls probe hard-fails on verify error (-verify_return_error)"
 else
     fail "test15: openssl invocation missing -verify_return_error; argv: $(cat "$ARGV15" 2>/dev/null)"
+fi
+# SEC-CR-322-01 regression guard: WITHOUT -verify_hostname, openssl chain-verifies
+# but accepts a valid-chain / wrong-SAN cert (exit 0) while krolik's rustls rejects
+# it. The flag MUST be present (and match the host) for the two probers to agree.
+# Real wrong-SAN→exit1 behaviour is openssl's, validated empirically on ruoxp.
+if grep -q -- '-verify_hostname api-sni.example.com' "$ARGV15" 2>/dev/null; then
+    ok "test15: coturn-tls probe checks cert SAN (-verify_hostname <host>, mirrors krolik rustls)"
+else
+    fail "test15: openssl invocation missing -verify_hostname <host>; argv: $(cat "$ARGV15" 2>/dev/null)"
 fi
 
 trap - EXIT; rm -rf "$T15"
