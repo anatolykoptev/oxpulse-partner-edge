@@ -151,7 +151,7 @@ without re-running the audit.
 
 ---
 
-### Q. SEC-CR-302 — P3b peer-probe DNS-rebinding TOCTOU (MEDIUM, BLOCKING before default-ON)
+### Q. SEC-CR-302 — P3b peer-probe DNS-rebinding TOCTOU (MEDIUM, FIXED in #324)
 
 > **SEC-CR-306 (hex/NAT64 IPv4-mapped IPv6 SSRF bypass) — CLOSED in PR #306.**
 > A sibling residual: the v6 classifier matched the textual SHAPE of an embedded
@@ -215,3 +215,30 @@ peer (a false-negative storm). We do NOT hack turnutils to force it.
 assertion), the chosen probe binary if option 2.
 
 **Discovered:** PR #306 review (SEC-CR-302), 2026-06-12.
+
+**UPDATE (PR #322, 2026-06-16):** the TLS leg now dials with `openssl s_client`
+instead of `turnutils_uclient`. openssl accepts `-connect <vetted-IP>:<port>
+-servername <hostname>` SEPARATELY, so **option 2 became a small change**
+(turnutils could not split connect-target from SNI — that was the original
+blocker).
+
+**FIXED (PR #324, 2026-06-16):** `_host_is_internal` now ECHOES the first vetted
+public IP on its allow path; the peer loop captures it and PINS both legs' dial
+to that IP — `openssl -connect <vetted-IP> -servername <host> -verify_hostname
+<host>` (TLS) and `turnutils_stunclient <vetted-IP>` (UDP). Neither tool
+re-resolves the hostname, so the resolve-then-dial window is closed. caddy-l4
+still routes by SNI and the cert SAN is still checked against the hostname
+(empirically verified on ruoxp: connect-IP + SNI + verify_hostname → exit 0;
+connect-IP without SNI → exit 1). `tests/test_cross_probe_loop.sh` test16 asserts
+the pin (-connect = vetted IP, -servername/-verify_hostname = hostname, hostname
+never in -connect). **No longer blocking — the loop may go default-ON fleetwide.**
+
+### R. SEC-CR-322-01 — coturn-tls probe must SAN-check (HIGH, FIXED in #322)
+
+`openssl s_client -verify_return_error` chain-verifies but does NOT match the
+cert SAN/hostname; krolik's rustls always SAN-checks
+(`probe_tls_allocate_fails_on_sni_mismatch`). Without a SAN check a valid-chain /
+wrong-SAN cert (catch-all vhost, cert swap) reads UP at the edge but DOWN at
+krolik → the two coturn-tls probers disagree. **Fixed:** added `-verify_hostname
+"$turns_host"`; `test15` asserts the flag is present (real wrong-SAN→exit1 is
+openssl's, validated on ruoxp). **Discovered:** PR #322 crypto review, 2026-06-16.

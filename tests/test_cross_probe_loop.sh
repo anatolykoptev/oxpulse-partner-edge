@@ -47,6 +47,11 @@ make_bin() {
     # curl: no-op 200 stub (real curl via symlink can hit perms).
     printf '#!/bin/sh\nprintf "200"\nexit 0\n' > "$dir/curl"; chmod +x "$dir/curl"
     printf '#!/bin/sh\nexit 0\n' > "$dir/systemctl"; chmod +x "$dir/systemctl"
+    # openssl: default TLS-leg stub — handshake success (exit 0). The coturn-tls
+    # leg now uses `openssl s_client` on the HOST (replacing turnutils_uclient,
+    # which can't drive caddy-l4's SNI-mux — see oxpulse-channels-health-report.sh
+    # header). SSRF / failure / SNI tests below override this per-case.
+    printf '#!/bin/sh\nexit 0\n' > "$dir/openssl"; chmod +x "$dir/openssl"
 }
 
 # ---------- helper: node-config with a single coturn channel ----------
@@ -102,7 +107,7 @@ fi
 if printf '%s' "$REPORT1" | jq -e '
         .prober_node_id=="prober-node"
         and .target_node_id=="peer-pub"
-        and .channel_name=="coturn"
+        and .channel_name=="coturn-tls"
         and .probe_mode=="peer"
         and (.handshake_ok==true)
         and (.rtt_ms|type=="number")
@@ -143,17 +148,22 @@ STUB
 chmod +x "$T2/getent"
 
 DIAL_LOG="$T2/dial.log"
-# Record ONLY peer-probe (TLS, -S) dials — the ch4 self-probe (plain turn:3478,
-# 127.0.0.1 fallback) shares the turnutils_uclient stub but is NOT a peer probe;
-# logging it would conflate the self-probe loopback target with an SSRF leak.
+# Record coturn-tls peer-probe dials: the TLS leg runs `openssl s_client
+# -connect <vetted-ip> -servername <host>`, so the openssl stub logs the FULL
+# argv (post SEC-CR-322-02 the -connect target is the vetted IP, the host is in
+# -servername). The SSRF guard (_host_is_internal) runs once per peer BEFORE
+# either leg dials, so an internal host appears in NEITHER -connect nor
+# -servername (rejected pre-dial) while the public host's hostname is present.
+cat > "$T2/openssl" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$DIAL_LOG"
+exit 0
+STUB
+chmod +x "$T2/openssl"
+# docker stub: serve the TURN secret (UDP leg / ch4 self-probe still use docker).
 cat > "$T2/docker" <<STUB
 #!/bin/bash
 if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then echo "t2-secret"; exit 0; fi
-if [[ "\$*" == *"turnutils_uclient"* ]]; then
-    [[ "\$*" == *" -S "* ]] && printf '%s\n' "\$*" >> "$DIAL_LOG"
-    echo "allocate success"
-    exit 0
-fi
 exit 1
 STUB
 chmod +x "$T2/docker"
@@ -299,7 +309,10 @@ else
 fi
 trap - EXIT; rm -rf "$T5"
 
-# ── Test 6: secret-not-on-argv during a peer probe (SEC-CR-001) ───────────────
+# ── Test 6: secret-not-on-argv during a probe run (self-probe mint, SEC-CR-001) ─
+# NOTE: since the coturn-tls PEER leg moved to openssl (no cred minted), the only
+# remaining HMAC mint in a --dry-run is the ch4 SELF-probe — that is what this
+# test now exercises (the peer leg carries no secret to leak at all).
 T6=$(mktemp -d)
 trap 'rm -rf "$T6"' EXIT
 make_bin "$T6"; mkdir -p "$T6/etc" "$T6/var"
@@ -344,9 +357,9 @@ PATH="$T6:/usr/bin:/bin" \
 set -e
 
 if [[ -s "$ARGV_LOG" ]]; then
-    ok "test6: HMAC binary invoked during peer probe (real mint path)"
+    ok "test6: HMAC binary invoked during probe run (self-probe mint path)"
 else
-    fail "test6: HMAC argv log empty — peer-probe mint path did not run"
+    fail "test6: HMAC argv log empty — self-probe mint path did not run"
 fi
 if grep -q "$LEAK_MARKER" "$ARGV_LOG" 2>/dev/null; then
     fail "test6: SECRET LEAK — base TURN secret found on HMAC argv: $(cat "$ARGV_LOG")"
@@ -383,18 +396,19 @@ exit 2
 STUB
 chmod +x "$T7/getent"
 DIAL7="$T7/dial.log"
-# Count ONLY peer-probe (TLS, -S) dials — the ch4 self-probe shares the
-# turnutils_uclient stub but dials plain turn:3478 (no -S) and is NOT bounded by
-# the peer-probe cap; counting it would over-report by 1 (mirrors test2's -S
-# filter rationale).
+# Count coturn-tls peer-probe dials: the TLS leg runs `openssl s_client` once per
+# peer, so the openssl stub records one 'd' per dial. The ch4 self-probe dials
+# plain turn:3478 via docker/turnutils and never touches openssl, so it is
+# inherently excluded from the cap count (cleaner than the old -S filter).
+cat > "$T7/openssl" <<STUB
+#!/bin/sh
+printf 'd\n' >> "$DIAL7"
+exit 0
+STUB
+chmod +x "$T7/openssl"
 cat > "$T7/docker" <<STUB
 #!/bin/bash
 if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then echo "s"; exit 0; fi
-if [[ "\$*" == *"turnutils_uclient"* ]]; then
-    [[ "\$*" == *" -S "* ]] && printf 'd\n' >> "$DIAL7"
-    echo "allocate success"
-    exit 0
-fi
 exit 1
 STUB
 chmod +x "$T7/docker"
@@ -494,14 +508,18 @@ exit 2
 STUB
 chmod +x "$T9/getent"
 DIAL9="$T9/dial.log"
+# coturn-tls leg dials via `openssl s_client -connect <host>:<port>`; log the full
+# argv so the SSRF substring checks (internal literals must NOT appear; public
+# literals MUST) work unchanged. Rejected hosts never reach openssl (guarded).
+cat > "$T9/openssl" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$DIAL9"
+exit 0
+STUB
+chmod +x "$T9/openssl"
 cat > "$T9/docker" <<STUB
 #!/bin/bash
 if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then echo "s"; exit 0; fi
-if [[ "\$*" == *"turnutils_uclient"* ]]; then
-    [[ "\$*" == *" -S "* ]] && printf '%s\n' "\$*" >> "$DIAL9"
-    echo "allocate success"
-    exit 0
-fi
 exit 1
 STUB
 chmod +x "$T9/docker"
@@ -584,14 +602,18 @@ exit 2
 STUB
 chmod +x "$T10/getent"
 DIAL10="$T10/dial.log"
+# Record the dialed hostname per coturn-tls dial: the openssl stub extracts the
+# host from `-connect <host>:<port>` (strip the trailing :port). Only the TLS
+# peer leg uses openssl, so the self-probe never contaminates the rotation count.
+cat > "$T10/openssl" <<STUB
+#!/bin/bash
+prev=""; for a in "\$@"; do [ "\$prev" = "-connect" ] && printf '%s\n' "\${a%:*}" >> "$DIAL10"; prev="\$a"; done
+exit 0
+STUB
+chmod +x "$T10/openssl"
 cat > "$T10/docker" <<STUB
 #!/bin/bash
 if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then echo "s"; exit 0; fi
-if [[ "\$*" == *"turnutils_uclient"* ]]; then
-    # record the dialed hostname (last positional) for -S peer dials only
-    [[ "\$*" == *" -S "* ]] && { for a in \$*; do last="\$a"; done; printf '%s\n' "\$last" >> "$DIAL10"; }
-    echo "allocate success"; exit 0
-fi
 exit 1
 STUB
 chmod +x "$T10/docker"
@@ -741,6 +763,309 @@ else
     fail "test12: SIGTERM left marker MODE='$MODE12' (expected 'interrupted' — trap must fire)"
 fi
 trap - EXIT; rm -rf "$T12"
+
+# ── Test 13: UDP STUN leg — coturn-udp row emitted alongside coturn row ───────
+# Verifies that _probe_peer_udp_stun runs per probe cycle and _post_cross_probe
+# is called with channel_name="coturn-udp" in addition to "coturn" (TLS leg).
+# A real roster peer with a public host → both channel rows must appear in the
+# dry-run output.  This test fails if the UDP leg is removed (revert guard).
+T13=$(mktemp -d)
+trap 'rm -rf "$T13"' EXIT
+make_bin "$T13"; mkdir -p "$T13/etc" "$T13/var"
+write_node_config "$T13/etc"
+printf '[{"node_id":"peer-dual","turns_host":"api-dual.example.com","turns_port":443}]\n' \
+    > "$T13/var/peer-roster.json"
+
+# getent stub: public address.
+cat > "$T13/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "api-dual.example.com" ] && { echo "203.0.113.20 STREAM api-dual.example.com"; exit 0; }
+exit 2
+STUB
+chmod +x "$T13/getent"
+
+# The coturn-tls leg uses the default make_bin openssl stub (exit 0 → true).
+# The docker stub here serves the secret + the UDP STUN leg (turnutils_stunclient
+# → true), so both channel rows are handshake_ok=true.
+cat > "$T13/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then echo "t13-secret"; exit 0; fi
+if [[ "$*" == *"turnutils_stunclient"* ]]; then echo "STUN response received"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T13/docker"
+
+set +e
+OUT13=$(PATH="$T13:/usr/bin:/bin" \
+    _NODE_CONFIG="$T13/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T13/var" _PEER_ROSTER_FILE="$T13/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t13" OXPULSE_SERVICE_TOKEN="stkn_t13" \
+    OXPULSE_TURN_SECRET="t13-secret" OXPULSE_GETENT_BIN="$T13/getent" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+# Both the TLS leg (coturn-tls) and the UDP leg (coturn-udp) must be present.
+TLS_ROW13=$(printf '%s\n' "$OUT13" | jq -c 'select(.channel_name=="coturn-tls" and .probe_mode=="peer")' 2>/dev/null | head -1)
+UDP_ROW13=$(printf '%s\n' "$OUT13" | jq -c 'select(.channel_name=="coturn-udp" and .probe_mode=="peer")' 2>/dev/null | head -1)
+
+if [[ -n "$TLS_ROW13" ]]; then
+    ok "test13: coturn (TLS) row present"
+else
+    fail "test13: coturn TLS row missing; output: $OUT13"
+fi
+
+if [[ -n "$UDP_ROW13" ]]; then
+    ok "test13: coturn-udp (UDP STUN) row present"
+else
+    fail "test13: coturn-udp UDP row missing — UDP leg not emitting; output: $OUT13"
+fi
+
+# Both rows must carry the same prober_node_id and target_node_id.
+if printf '%s' "$UDP_ROW13" | jq -e '
+        .prober_node_id=="prober-node"
+        and .target_node_id=="peer-dual"
+        and .probe_mode=="peer"
+        and (.handshake_ok==true)
+        and (.rtt_ms|type=="number")
+    ' >/dev/null 2>&1; then
+    ok "test13: coturn-udp row schema valid (prober/target/mode/ok/rtt)"
+else
+    fail "test13: coturn-udp row schema mismatch: $UDP_ROW13"
+fi
+
+# The UDP leg uses the same xprb_ token bearer path — verify no new auth field
+# was introduced (both rows must be structurally identical except channel_name).
+TLS_KEYS13=$(printf '%s' "$TLS_ROW13" | jq -c '[keys[]]|sort' 2>/dev/null)
+UDP_KEYS13=$(printf '%s' "$UDP_ROW13" | jq -c '[keys[]]|sort' 2>/dev/null)
+if [[ "$TLS_KEYS13" == "$UDP_KEYS13" ]]; then
+    ok "test13: TLS and UDP rows have identical JSON key sets (no new auth fields)"
+else
+    fail "test13: key-set divergence TLS=$TLS_KEYS13 UDP=$UDP_KEYS13"
+fi
+
+trap - EXIT; rm -rf "$T13"
+
+# ── Test 14: openssl absent → coturn-tls leg SKIPS (no false negative) ─────────
+# A missing prober tool must NOT look like a down peer. With no openssl the TLS
+# leg emits NO coturn-tls row (handshake_ok="skip"); the independent UDP leg still
+# runs. Simulated via OXPULSE_OPENSSL_BIN pointing at a non-existent binary.
+T14=$(mktemp -d)
+trap 'rm -rf "$T14"' EXIT
+make_bin "$T14"; mkdir -p "$T14/etc" "$T14/var"
+write_node_config "$T14/etc"
+printf '[{"node_id":"peer-noss","turns_host":"api-noss.example.com","turns_port":443}]\n' \
+    > "$T14/var/peer-roster.json"
+cat > "$T14/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "api-noss.example.com" ] && { echo "203.0.113.30 STREAM api-noss.example.com"; exit 0; }
+exit 2
+STUB
+chmod +x "$T14/getent"
+# docker stub: secret + UDP STUN succeed (so the coturn-udp row IS emitted).
+cat > "$T14/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then echo "t14-secret"; exit 0; fi
+if [[ "$*" == *"turnutils_stunclient"* ]]; then echo "STUN response received"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T14/docker"
+
+set +e
+OUT14=$(PATH="$T14:/usr/bin:/bin" \
+    _NODE_CONFIG="$T14/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T14/var" _PEER_ROSTER_FILE="$T14/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t14" OXPULSE_SERVICE_TOKEN="stkn_t14" \
+    OXPULSE_TURN_SECRET="t14-secret" OXPULSE_GETENT_BIN="$T14/getent" \
+    OXPULSE_OPENSSL_BIN="openssl-absent-xyz" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+TLS_ROW14=$(printf '%s\n' "$OUT14" | jq -c 'select(.channel_name=="coturn-tls" and .probe_mode=="peer")' 2>/dev/null | head -1)
+UDP_ROW14=$(printf '%s\n' "$OUT14" | jq -c 'select(.channel_name=="coturn-udp" and .probe_mode=="peer")' 2>/dev/null | head -1)
+if [[ -z "$TLS_ROW14" ]]; then
+    ok "test14: openssl absent → NO coturn-tls row (skip, not a false negative)"
+else
+    fail "test14: openssl absent but a coturn-tls row was emitted: $TLS_ROW14"
+fi
+if [[ -n "$UDP_ROW14" ]]; then
+    ok "test14: UDP leg still emits coturn-udp when openssl is absent (legs independent)"
+else
+    fail "test14: UDP leg row missing under openssl-absent; output: $OUT14"
+fi
+
+trap - EXIT; rm -rf "$T14"
+
+# ── Test 15: coturn-tls probe sends SNI (-servername) + verifies cert ──────────
+# Regression guard for the #306 root cause: turnutils_uclient -S did NOT send SNI,
+# so caddy-l4's SNI-mux returned a TLS "internal error" on every probe (verified
+# on ruoxp 2026-06-16). The leg MUST invoke openssl with -servername <host> AND
+# -verify_return_error (mirrors krolik's probe_tls_allocate webpki verification).
+T15=$(mktemp -d)
+trap 'rm -rf "$T15"' EXIT
+make_bin "$T15"; mkdir -p "$T15/etc" "$T15/var"
+write_node_config "$T15/etc"
+printf '[{"node_id":"peer-sni","turns_host":"api-sni.example.com","turns_port":443}]\n' \
+    > "$T15/var/peer-roster.json"
+cat > "$T15/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "api-sni.example.com" ] && { echo "203.0.113.40 STREAM api-sni.example.com"; exit 0; }
+exit 2
+STUB
+chmod +x "$T15/getent"
+ARGV15="$T15/openssl-argv.log"
+cat > "$T15/openssl" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$ARGV15"
+exit 0
+STUB
+chmod +x "$T15/openssl"
+cat > "$T15/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then echo "t15-secret"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T15/docker"
+
+set +e
+PATH="$T15:/usr/bin:/bin" \
+    _NODE_CONFIG="$T15/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T15/var" _PEER_ROSTER_FILE="$T15/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t15" OXPULSE_SERVICE_TOKEN="stkn_t15" \
+    OXPULSE_TURN_SECRET="t15-secret" OXPULSE_GETENT_BIN="$T15/getent" \
+    bash "$SCRIPT" --dry-run >/dev/null 2>&1
+set -e
+
+if grep -q -- '-servername api-sni.example.com' "$ARGV15" 2>/dev/null; then
+    ok "test15: coturn-tls probe sends SNI (-servername <host>) — the #306 fix"
+else
+    fail "test15: openssl invocation missing -servername; argv: $(cat "$ARGV15" 2>/dev/null)"
+fi
+if grep -q -- '-verify_return_error' "$ARGV15" 2>/dev/null; then
+    ok "test15: coturn-tls probe hard-fails on verify error (-verify_return_error)"
+else
+    fail "test15: openssl invocation missing -verify_return_error; argv: $(cat "$ARGV15" 2>/dev/null)"
+fi
+# SEC-CR-322-01 regression guard: WITHOUT -verify_hostname, openssl chain-verifies
+# but accepts a valid-chain / wrong-SAN cert (exit 0) while krolik's rustls rejects
+# it. The flag MUST be present (and match the host) for the two probers to agree.
+# Real wrong-SAN→exit1 behaviour is openssl's, validated empirically on ruoxp.
+if grep -q -- '-verify_hostname api-sni.example.com' "$ARGV15" 2>/dev/null; then
+    ok "test15: coturn-tls probe checks cert SAN (-verify_hostname <host>, mirrors krolik rustls)"
+else
+    fail "test15: openssl invocation missing -verify_hostname <host>; argv: $(cat "$ARGV15" 2>/dev/null)"
+fi
+
+trap - EXIT; rm -rf "$T15"
+
+# ── Test 16: SEC-CR-322-02 — dial is PINNED to the vetted IP (no re-resolve) ───
+# _host_is_internal resolves+vets the host ONCE and echoes the IP; both legs must
+# dial THAT IP, not the hostname (which openssl/turnutils would re-resolve,
+# reopening the DNS-rebind TOCTOU). Assert -connect targets the vetted IP while
+# SNI + SAN-check keep the hostname (caddy-l4 routing + cert verification intact).
+T16=$(mktemp -d)
+trap 'rm -rf "$T16"' EXIT
+make_bin "$T16"; mkdir -p "$T16/etc" "$T16/var"
+write_node_config "$T16/etc"
+printf '[{"node_id":"peer-pin","turns_host":"api-pin.example.com","turns_port":443}]\n' \
+    > "$T16/var/peer-roster.json"
+cat > "$T16/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "api-pin.example.com" ] && { echo "198.51.100.77 STREAM api-pin.example.com"; exit 0; }
+exit 2
+STUB
+chmod +x "$T16/getent"
+ARGV16="$T16/openssl-argv.log"
+cat > "$T16/openssl" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$ARGV16"
+exit 0
+STUB
+chmod +x "$T16/openssl"
+cat > "$T16/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then echo "t16-secret"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T16/docker"
+
+set +e
+PATH="$T16:/usr/bin:/bin" \
+    _NODE_CONFIG="$T16/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T16/var" _PEER_ROSTER_FILE="$T16/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t16" OXPULSE_SERVICE_TOKEN="stkn_t16" \
+    OXPULSE_TURN_SECRET="t16-secret" OXPULSE_GETENT_BIN="$T16/getent" \
+    bash "$SCRIPT" --dry-run >/dev/null 2>&1
+set -e
+
+if grep -q -- '-connect 198.51.100.77:443' "$ARGV16" 2>/dev/null; then
+    ok "test16: TLS dial PINNED to vetted IP (-connect 198.51.100.77, SEC-CR-322-02)"
+else
+    fail "test16: -connect did not target the vetted IP; argv: $(cat "$ARGV16" 2>/dev/null)"
+fi
+if grep -q -- '-servername api-pin.example.com' "$ARGV16" 2>/dev/null \
+   && grep -q -- '-verify_hostname api-pin.example.com' "$ARGV16" 2>/dev/null; then
+    ok "test16: SNI + SAN-check still use the hostname (caddy-l4 route + cert intact)"
+else
+    fail "test16: hostname missing from -servername/-verify_hostname; argv: $(cat "$ARGV16" 2>/dev/null)"
+fi
+if grep -q -- '-connect api-pin.example.com' "$ARGV16" 2>/dev/null; then
+    fail "test16: -connect used the hostname (openssl would re-resolve — TOCTOU open)"
+else
+    ok "test16: -connect never uses the hostname (no re-resolution path)"
+fi
+
+trap - EXIT; rm -rf "$T16"
+
+# ── Test 17: 429 is TRANSIENT — must NOT set the persistent-4xx marker ─────────
+# A 429 (rate-limited) from the cross-probe POST is recoverable (RFC 6585), NOT a
+# revoked token. Unlike test11's 403, it must NOT set PEER_PROBE_POST_4XX — else a
+# transient rate-limit would mis-signal a revoked token and trip the systemd
+# unit failure. Mirrors test11 but the curl stub returns 429.
+T17=$(mktemp -d)
+trap 'rm -rf "$T17"' EXIT
+make_bin "$T17"; mkdir -p "$T17/etc" "$T17/var"
+write_node_config "$T17/etc"
+printf '[{"node_id":"peer-pub","turns_host":"good.example.com","turns_port":443}]\n' \
+    > "$T17/var/peer-roster.json"
+cat > "$T17/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "good.example.com" ] && { echo "198.51.100.9 STREAM"; exit 0; }
+exit 2
+STUB
+chmod +x "$T17/getent"
+cat > "$T17/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then echo "s"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T17/docker"
+# curl stub returns 429 for every POST → both legs see a transient rate-limit.
+cat > "$T17/openssl" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+chmod +x "$T17/openssl"
+cat > "$T17/curl" <<'STUB'
+#!/bin/sh
+printf '429'
+exit 0
+STUB
+chmod +x "$T17/curl"
+set +e
+PATH="$T17:/usr/bin:/bin" \
+    _NODE_CONFIG="$T17/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T17/var" _PEER_ROSTER_FILE="$T17/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t17" OXPULSE_SERVICE_TOKEN="stkn_t17" \
+    OXPULSE_TURN_SECRET="s" OXPULSE_GETENT_BIN="$T17/getent" \
+    OXPULSE_BACKEND_API="https://api.test.invalid" \
+    bash "$SCRIPT" >/dev/null 2>&1
+set -e
+if grep -q '^PEER_PROBE_POST_4XX=1$' "$T17/var/peer-probe-mode.env" 2>/dev/null; then
+    fail "test17: 429 wrongly set PEER_PROBE_POST_4XX=1 (treated as permanent); state: $(cat "$T17/var/peer-probe-mode.env" 2>/dev/null)"
+else
+    ok "test17: 429 is transient → PEER_PROBE_POST_4XX NOT set (no false revoked-token signal)"
+fi
+trap - EXIT; rm -rf "$T17"
 
 echo
 echo "Cross-probe loop: PASS=$PASS FAIL=$FAIL"
