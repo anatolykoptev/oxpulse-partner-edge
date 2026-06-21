@@ -1016,6 +1016,57 @@ fi
 
 trap - EXIT; rm -rf "$T16"
 
+# ── Test 17: 429 is TRANSIENT — must NOT set the persistent-4xx marker ─────────
+# A 429 (rate-limited) from the cross-probe POST is recoverable (RFC 6585), NOT a
+# revoked token. Unlike test11's 403, it must NOT set PEER_PROBE_POST_4XX — else a
+# transient rate-limit would mis-signal a revoked token and trip the systemd
+# unit failure. Mirrors test11 but the curl stub returns 429.
+T17=$(mktemp -d)
+trap 'rm -rf "$T17"' EXIT
+make_bin "$T17"; mkdir -p "$T17/etc" "$T17/var"
+write_node_config "$T17/etc"
+printf '[{"node_id":"peer-pub","turns_host":"good.example.com","turns_port":443}]\n' \
+    > "$T17/var/peer-roster.json"
+cat > "$T17/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "good.example.com" ] && { echo "198.51.100.9 STREAM"; exit 0; }
+exit 2
+STUB
+chmod +x "$T17/getent"
+cat > "$T17/docker" <<'STUB'
+#!/bin/bash
+if [[ "$*" == *"sed"* && "$*" == *"static-auth-secret"* ]]; then echo "s"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T17/docker"
+# curl stub returns 429 for every POST → both legs see a transient rate-limit.
+cat > "$T17/openssl" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+chmod +x "$T17/openssl"
+cat > "$T17/curl" <<'STUB'
+#!/bin/sh
+printf '429'
+exit 0
+STUB
+chmod +x "$T17/curl"
+set +e
+PATH="$T17:/usr/bin:/bin" \
+    _NODE_CONFIG="$T17/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T17/var" _PEER_ROSTER_FILE="$T17/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t17" OXPULSE_SERVICE_TOKEN="stkn_t17" \
+    OXPULSE_TURN_SECRET="s" OXPULSE_GETENT_BIN="$T17/getent" \
+    OXPULSE_BACKEND_API="https://api.test.invalid" \
+    bash "$SCRIPT" >/dev/null 2>&1
+set -e
+if grep -q '^PEER_PROBE_POST_4XX=1$' "$T17/var/peer-probe-mode.env" 2>/dev/null; then
+    fail "test17: 429 wrongly set PEER_PROBE_POST_4XX=1 (treated as permanent); state: $(cat "$T17/var/peer-probe-mode.env" 2>/dev/null)"
+else
+    ok "test17: 429 is transient → PEER_PROBE_POST_4XX NOT set (no false revoked-token signal)"
+fi
+trap - EXIT; rm -rf "$T17"
+
 echo
 echo "Cross-probe loop: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
