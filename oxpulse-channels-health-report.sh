@@ -667,6 +667,7 @@ _host_is_internal() {
     # IPv6 literal (contains a colon, possibly bracketed) → classify directly.
     if [[ "$bare" == *:* ]]; then
         _ip_is_internal "$bare" && return 0
+        printf '%s' "$bare"   # SEC-CR-322-02: echo the vetted dial IP (the literal itself)
         return 1
     fi
 
@@ -684,6 +685,7 @@ _host_is_internal() {
         fi
         # Canonical dotted-quad → range classification.
         _ip_is_internal "$bare" && return 0
+        printf '%s' "$bare"   # SEC-CR-322-02: echo the vetted dial IP (the literal itself)
         return 1
     fi
 
@@ -697,12 +699,23 @@ _host_is_internal() {
     if [[ -z "$resolved" ]]; then
         return 0   # unresolvable → reject
     fi
+    local first_ip=""
     while IFS= read -r ip; do
         [[ -z "$ip" ]] && continue
+        [[ -z "$first_ip" ]] && first_ip="$ip"
         if _ip_is_internal "$ip"; then
             return 0   # ANY internal address → reject the whole host
         fi
     done <<< "$resolved"
+    # SEC-CR-322-02: echo the first vetted IP so the caller can PIN the dial to it
+    # (-connect <ip> -servername <host>) — neither openssl nor turnutils then
+    # re-resolves the hostname, closing the resolve-then-dial DNS-rebind TOCTOU.
+    # "first" = lexically-smallest (the list is `sort -u`'d above); for a single-
+    # homed edge (the norm) it is the only address. A multi-homed peer whose
+    # lexically-first public IP is unreachable would be pinned to it — acceptable:
+    # the central needs ≥2 distinct probers to withdraw, so one prober's pin choice
+    # cannot unilaterally evict, and ALL its addresses were already vetted public.
+    printf '%s' "$first_ip"
     return 1   # all resolved addresses public → allow
 }
 
@@ -760,101 +773,168 @@ _write_peer_probe_state() {
 }
 
 # ---------- probe one peer's TURNS:443 relay ----------
-# Args: turns_host turns_port turn_secret
-# Echoes "<handshake_ok>\t<rtt_ms>"  (handshake_ok = true|false).
+# Args: turns_host turns_port turn_secret(unused)
+# Echoes "<handshake_ok>\t<rtt_ms>"  (handshake_ok = true|false|skip).
 #
-# Mints an RFC-7635 ephemeral cred against the SHARED TURN_SECRET (identical on
-# every edge + krolik coturn) — EXACTLY the probe_ch4 mint block (env-$K/python3,
-# OXPULSE_HMAC_BIN seam; secret never on argv). Dials the PEER's TURNS:443 with
-# TLS (not the own-coturn plain turn:3478 path):
+# TLS-handshake reachability probe via `openssl s_client` on the PROBER HOST:
 #
-#   turnutils_uclient -S -t -c -p <port> -u <eph-user> -w <eph-pass> -n 1 -X <host>
+#   openssl s_client -connect <host>:<port> -servername <host> \
+#                    -verify_return_error -brief </dev/null
 #
-#   -S  Secure SSL/TLS connection (TURNS) — caddy-l4 SNI-muxes :443 by SNI, and
-#       turnutils_uclient resolves the positional HOSTNAME and uses it as the
-#       TLS SNI, so the peer's caddy routes to its coturn. (verified: Debian
-#       coturn manpage + coturn#1333 — hostname positional → SNI.)
-#   -t  TCP client transport (TLS rides on TCP). Required with -S over :443.
-#   -c  no RTCP connection — one Allocate, lighter, fewer relays.
-#   -X  IPv4 relay address explicitly requested (matches real WebRTC clients).
-#   -n 1  one message attempt, then exit.
+#   -connect/-servername  caddy-l4 SNI-muxes :443 by SNI → routes to the peer's
+#       coturn. openssl sends SNI = the -servername hostname.
+#   -verify_hostname <host>  check the cert SAN matches the hostname (rustls always
+#       SAN-checks; -verify_return_error ALONE does chain-but-not-hostname, so
+#       without this a valid-chain / wrong-SAN cert would pass here yet fail at
+#       krolik → the two probers disagree, SEC-CR-322-01).
+#   -verify_return_error  hard-fail (non-zero exit) on any verification error,
+#       trusting the host system CA store. Together with -verify_hostname this
+#       MIRRORS krolik's probe_tls_allocate (rustls + webpki-roots: chain AND SAN,
+#       never danger_accept_invalid_certs) so the two probers agree on coturn-tls.
+#   -brief </dev/null  one handshake, no interactive stdin, concise output.
 #
-#   We do NOT pass -y (client-to-client self-test). The cross-probe signal is
-#   "TLS reaches the peer's caddy-l4 by SNI AND a TURN Allocate authenticates
-#   against the peer's shared secret" — i.e. the Allocate handshake. -y would
-#   relay loopback-to-loopback inside the peer's coturn, tripping its
-#   denied-peer-ip/no-loopback-peers guards (a false negative) AND leaking two
-#   allocations per probe — the exact failure probe_ch4 had to engineer around
-#   for the own-coturn path. A single Allocate with -n 1 then exit holds one
-#   short-lived allocation that coturn expires; at ≤cap peers / 60s the rate is
-#   bounded.
+# WHY NOT turnutils_uclient -S (the original #306 leg): coturn 4.6.3
+# turnutils_uclient does NOT send SNI when dialing TURNS over TLS, so caddy-l4's
+# SNI-mux cannot pick a route and answers EVERY probe — even the edge's OWN :443
+# — with a TLS "internal error" alert (exit 255). The 30/30 bash tests mocked
+# turnutils so never caught it; ruoxp (first real bash prober, 2026-06-16)
+# surfaced it: host openssl/curl complete TLS1.3+SNI to the same endpoints while
+# in-container turnutils fails. openssl is the host tool that drives the SNI-mux.
 #
-# We pass the HOSTNAME (not a resolved IP) so SNI is correct — the SSRF recheck
-# (_host_is_internal) has ALREADY validated every resolved address before this
-# function is called.
+# Signal difference vs krolik: krolik additionally does a TURN Allocate (auth)
+# after the TLS handshake; this leg stops at TLS+cert. The only divergence is a
+# peer whose TLS is up but coturn auth is broken (rare; shared TURN_SECRET is
+# stable) — krolik would report it down, this leg up, the quorum then DISAGREES
+# → no withdrawal (conservative/safe). All other failure modes (down/blackholed
+# :443, expired/mismatched cert, non-coturn backend) agree.
 #
-# SEC-CR-302 (DNS-rebinding TOCTOU) — KNOWN RESIDUAL, accepted for now:
-# _host_is_internal resolves the host, but turnutils_uclient re-resolves the
-# SAME hostname at dial time. A rebinding attacker could answer the recheck with
-# a public A record and the dial with an internal one. The clean fix is to dial
-# the vetted IP while keeping SNI = hostname — but turnutils_uclient CANNOT do
-# that: its only target is the positional <TURN-Server-IP-address>, which it
-# ALSO uses as the TLS SNI (coturn#1333). There is no connect-to-IP / SNI-
-# override flag (-X = "IPv4 relay address requested" is a TURN-protocol option,
-# NOT a connect target; -L = local bind source; -E = CA file). Passing the
-# resolved IP positionally would make SNI an IP literal → caddy-l4 :443 SNI-mux
-# has no matching route/cert → the probe fails on EVERY healthy peer. We do NOT
-# hack turnutils. The residual is bounded today: the roster is SERVER-CURATED
-# (P2 only lists vetted partner edges), so an attacker must first compromise the
-# central's curation to inject a rebinding host. Tracked in docs/FOLLOWUPS.md as
-# MEDIUM, BLOCKING before the loop is flipped default-ON across the fleet.
+# SEC-CR-302 (DNS-rebinding TOCTOU) — residual UNCHANGED from the turnutils leg:
+# _host_is_internal resolves+vets the host, but openssl re-resolves the SAME
+# hostname at dial time. Bounded: the roster is SERVER-CURATED (P2 only lists
+# vetted partner edges). UNLIKE turnutils, openssl CAN close this cleanly —
+# `-connect <vetted-IP>:<port> -servername <hostname>` dials the pre-vetted IP
+# while keeping SNI = hostname — once the caller threads the resolved IP through.
+# Tracked in docs/FOLLOWUPS.md as MEDIUM; the connect-IP+SNI fix is now a clean
+# follow-up (was IMPOSSIBLE with turnutils). BLOCKING before default-ON fleetwide.
 _probe_peer_coturn() {
     local turns_host="$1"
     local turns_port="$2"
-    local turn_secret="$3"
-    local turn_username turn_password t0 t1 exit_code rtt_ms uclient_out
+    # $3 (turn_secret) is accepted for caller-signature stability but UNUSED: the
+    # TLS leg is a TLS-handshake reachability probe (NOT a TURN Allocate), so no
+    # ephemeral credential is minted. See the header comment for why turnutils was
+    # replaced by openssl.
+    # $4 (dial_ip) — the SSRF-vetted IP from _host_is_internal. We dial THIS IP
+    # (SEC-CR-322-02) so openssl does not re-resolve the hostname; SNI + SAN-check
+    # keep using the hostname. Falls back to the hostname when absent (older
+    # call sites / tests) — that path keeps the pre-322-02 re-resolve residual.
+    local dial_ip="${4:-$turns_host}"
+    local t0 t1 exit_code rtt_ms ossl_out
+    local ossl_bin="${OXPULSE_OPENSSL_BIN:-openssl}"
 
-    turn_username="$(( $(date +%s) + 600 )):healthprobe"
-    local hmac_bin="${OXPULSE_HMAC_BIN:-python3}"
-    turn_password=$(K="$turn_secret" "$hmac_bin" -c \
-        'import hmac,hashlib,os,sys,base64; print(base64.b64encode(hmac.new(os.environb[b"K"], sys.argv[1].encode(), hashlib.sha1).digest()).decode())' \
-        "$turn_username")
+    # openssl runs on the PROBER HOST (the coturn container ships no openssl, and
+    # the host always has it). Graceful skip if absent — emit NO row rather than a
+    # false negative (a missing prober tool must never look like a down peer).
+    if ! command -v "$ossl_bin" >/dev/null 2>&1; then
+        warn "peer-probe: '$ossl_bin' not on host PATH — skipping coturn-tls leg for $turns_host (no row emitted; NOT a false negative)"
+        printf 'skip\t0'
+        return 0
+    fi
+
+    # openssl -connect targets the SSRF-vetted IP (dial_ip), NOT the hostname, so
+    # openssl never re-resolves (DNS-rebind TOCTOU closed). -connect needs a
+    # bracketed IPv6 literal ([::1]:443); a dotted-quad / fallback hostname is bare.
+    local connect_target="$dial_ip"
+    [[ "$dial_ip" == *:* ]] && connect_target="[$dial_ip]"
 
     t0="${EPOCHREALTIME}"
-    # Dial the peer directly from the prober host/container — NOT docker exec
-    # into the peer. turnutils_uclient must run where coturn-utils is installed;
-    # the own-coturn container has it, so we exec turnutils_uclient there but
-    # TARGET the remote peer host (the container has outbound network).
-    # Probe timeout default 8s (was 10s) — see _run_peer_probe_loop BUDGET block:
-    # the per-peer worst case (getent 3 + probe 8 + post 8 = 19s) × cap must fit
-    # TimeoutStartSec; shrinking this is one of the three levers that makes the
-    # arithmetic hold.
-    uclient_out=$(timeout "${OXPULSE_PEER_PROBE_TIMEOUT:-8}" \
+    # TLS handshake + public-CA chain verification + hostname/SAN match against the
+    # peer's caddy-l4 :443 with SNI = hostname (caddy-l4 SNI-muxes :443 → routes to
+    # the peer's coturn). This MIRRORS krolik's probe_tls_allocate TLS layer
+    # (rustls + webpki-roots: chain AND SAN, never danger_accept_invalid_certs) so
+    # the two probers make the SAME trust decision on coturn-tls:
+    #   -verify_return_error  hard-fail (non-zero exit) on any verification error
+    #   -verify_hostname      check the cert SAN matches the hostname — WITHOUT this
+    #     openssl chain-verifies but accepts a valid-chain / wrong-SAN cert (exit 0)
+    #     while rustls rejects it (SEC-CR-322-01); the two probers would then
+    #     DISAGREE on a misrouted/catch-all cert. With it, both fail-closed.
+    # Probe timeout default 8s — see _run_peer_probe_loop BUDGET block.
+    # NOTE: capture is command-substitution + `$?` — do NOT pipe openssl through
+    # tail/grep, or `$?` becomes the pipe-tail's status and every failure reads UP.
+    ossl_out=$(timeout "${OXPULSE_PEER_PROBE_TIMEOUT:-8}" \
+        "$ossl_bin" s_client \
+            -connect "${connect_target}:${turns_port}" \
+            -servername "$turns_host" \
+            -verify_hostname "$turns_host" \
+            -verify_return_error -brief </dev/null 2>&1)
+    exit_code=$?
+    t1="${EPOCHREALTIME}"
+    rtt_ms=$(_elapsed_ms "$t0" "$t1")
+
+    # exit 0 == TLS handshake completed AND the peer cert chained to a trusted
+    # public CA (system store) AND SNI matched. A down/blackholed :443, an
+    # expired/mismatched cert, or a non-TLS backend all exit non-zero → false.
+    # Empirically verified on ruoxp 2026-06-16: up→0, bogus→1, wrong-SNI→1.
+    if [[ "$exit_code" -eq 0 ]]; then
+        printf 'true\t%d' "$rtt_ms"
+    else
+        warn "peer-probe: $turns_host:$turns_port coturn-tls handshake/verify failed (exit=$exit_code): $(printf '%s' "$ossl_out" | tail -n1 | tr -d '\r')"
+        printf 'false\t%d' "$rtt_ms"
+    fi
+}
+
+# ---------- probe one peer's STUN/UDP port (coturn-udp leg) ----------
+# Args: stun_host stun_port
+# Echoes "<handshake_ok>\t<rtt_ms>"  (handshake_ok = true|false).
+#
+# Uses a plain STUN Binding request (turnutils_stunclient, no HMAC/auth needed)
+# to verify UDP reachability of the peer's coturn on port 3478.  This is a
+# connectivity probe, NOT an allocation probe — no TURN credentials are required
+# and no allocation is created.  The signal is "UDP path to the peer's coturn
+# ingress is open from THIS edge's vantage", which is exactly what the central
+# needs for a second distinct prober on the coturn-udp transport.
+#
+# Target set: SAME roster as the TLS leg (_run_peer_probe_loop provides the
+# SSRF-vetted turns_host — no new target source, P2-SEC-CR-001 unchanged).
+#
+# RU-edge note: a RU edge probing peers over UDP can only be advisory — it
+# cannot unilaterally withdraw a peer (central requires ≥2 distinct probers).
+# Worst-case a compromised RU edge reports false negatives; the quorum still
+# needs krolik + at least one other clean edge to agree.  This is the same
+# §P4-SEC-CR-301 self-declared-geo caveat already accepted for the TLS leg;
+# the UDP leg does NOT widen it.
+#
+# SSRF note: the SSRF recheck (_host_is_internal) runs ONCE per peer in
+# _run_peer_probe_loop BEFORE any dial; this function is called AFTER that
+# guard.  Re-running the guard here would add a redundant 3s getent wait with
+# no security benefit — the UDP dial uses the same already-vetted IP.
+# $3 (dial_ip) — the SSRF-vetted IP; STUN dials it directly so turnutils does
+# not re-resolve the hostname (SEC-CR-322-02; STUN has no SNI so no hostname is
+# needed). Falls back to the hostname when absent (older call sites / tests).
+_probe_peer_udp_stun() {
+    local stun_host="$1"
+    local stun_port="$2"
+    local dial_ip="${3:-$stun_host}"
+    local t0 t1 exit_code rtt_ms stun_out
+
+    t0="${EPOCHREALTIME}"
+    # OXPULSE_PEER_UDP_STUN_TIMEOUT default 5s (vs 8s for TLS Allocate) — the
+    # UDP Binding round-trip is a single packet exchange; 5s is ample even
+    # under transient loss.  This keeps the per-peer budget increase to 13s
+    # (5s probe + 8s POST) on top of the existing TLS leg, giving a worst-case
+    # per-peer total of 32s (was 19s) and a full cycle cap=2 worst case of:
+    #   32×2 + 3×2 + 10 = 80s ≤ TimeoutStartSec=90.
+    stun_out=$(timeout "${OXPULSE_PEER_UDP_STUN_TIMEOUT:-5}" \
         docker exec oxpulse-partner-coturn \
-        turnutils_uclient \
-            -S -t -c \
-            -p "$turns_port" \
-            -u "$turn_username" \
-            -w "$turn_password" \
-            -n 1 -X \
-            "$turns_host" \
+        turnutils_stunclient "$dial_ip" -p "$stun_port" \
         2>&1)
     exit_code=$?
     t1="${EPOCHREALTIME}"
     rtt_ms=$(_elapsed_ms "$t0" "$t1")
 
-    # Success classification: a peerless Allocate over TLS prints an allocation
-    # success line ("success" / "allocate" / a relay address) even though it
-    # receives 0 echoed bytes (no peer). exit 0 OR an explicit allocate-success
-    # in output = handshake_ok=true. A TLS/auth failure prints no allocate
-    # success and exits non-zero. We treat exit 0 as the primary signal and the
-    # output grep as a fallback so a clean Allocate that times out waiting for a
-    # (non-existent) peer echo is not misreported as a failure.
-    if [[ "$exit_code" -eq 0 ]] || \
-       printf '%s' "$uclient_out" | grep -qiE 'allocate[d]? (success|address)|relay address|success.*0x0003'; then
+    if [[ "$exit_code" -eq 0 ]]; then
         printf 'true\t%d' "$rtt_ms"
     else
-        warn "peer-probe: $turns_host:$turns_port handshake failed (exit=$exit_code): $(printf '%s' "$uclient_out" | tail -n2 | tr '\n' ' ')"
+        warn "peer-probe udp: $stun_host:$stun_port STUN failed (exit=$exit_code): $(printf '%s' "$stun_out" | tail -n2 | tr '\n' ' ')"
         printf 'false\t%d' "$rtt_ms"
     fi
 }
@@ -863,11 +943,17 @@ _probe_peer_coturn() {
 # Mirrors _post_channel but uses the cross_probe_token (xprb_) bearer and the
 # CrossProbeReportRequest body. ALL untrusted values (target node_id / host) go
 # through jq --arg / --argjson — never shell-interpolated into the request.
+#
+# Args: target_node_id handshake_ok rtt_ms token [channel_name]
+#   channel_name defaults to "coturn" (TLS leg); pass "coturn-udp" for the UDP leg.
+#   The same token, prober_node_id, and POST endpoint are used for both legs —
+#   no new auth path is introduced.
 _post_cross_probe() {
     local target_node_id="$1"
     local handshake_ok="$2"     # "true" | "false" (JSON bool)
     local rtt_ms="$3"
     local token="$4"
+    local channel_name="${5:-coturn-tls}"   # "coturn-tls" | "coturn-udp" (both callers pass explicitly)
 
     local probed_at
     probed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -876,10 +962,11 @@ _post_cross_probe() {
     body=$(jq -nc \
         --arg prober "$NODE_ID" \
         --arg target "$target_node_id" \
+        --arg ch "$channel_name" \
         --argjson ok "$handshake_ok" \
         --argjson rtt "$rtt_ms" \
         --arg ts "$probed_at" \
-        '{prober_node_id:$prober, target_node_id:$target, channel_name:"coturn", handshake_ok:$ok, rtt_ms:$rtt, probe_mode:"peer", probed_at:$ts}')
+        '{prober_node_id:$prober, target_node_id:$target, channel_name:$ch, handshake_ok:$ok, rtt_ms:$rtt, probe_mode:"peer", probed_at:$ts}')
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
         printf '%s\n' "$body"
@@ -903,6 +990,14 @@ _post_cross_probe() {
 
     if [[ "$http_code" =~ ^2 ]]; then
         log "cross-probe target=$target_node_id reported OK (HTTP $http_code)"
+        return 0
+    elif [[ "$http_code" == "429" || "$http_code" == "408" ]]; then
+        # TRANSIENT (RFC 6585): rate-limited / request-timeout — NOT a revoked
+        # token. The central sizes a dedicated channel-health limiter and sends
+        # Retry-After; the 60s timer is our back-off, so just skip this tick and
+        # retry next. Do NOT set the persistent-4xx marker (would mis-signal a
+        # revoked token and trip the systemd failure on a recoverable hiccup).
+        warn "cross-probe target=$target_node_id: HTTP $http_code — rate-limited/transient, retry next tick"
         return 0
     elif [[ "$http_code" =~ ^4 ]]; then
         warn "cross-probe target=$target_node_id: HTTP $http_code — check cross-probe token / roster membership"
@@ -935,10 +1030,16 @@ _read_peer_probe_offset() {
 
 # ---------- peer-probe loop (P3b) ----------
 # Reads roster + token; skips cleanly (debug-log) if either is empty/absent.
-# For each peer (capped at OXPULSE_PEER_PROBE_MAX): SSRF dial-recheck → mint →
-# TLS Allocate → POST. Bounded for the TimeoutStartSec=90 budget (see the BUDGET
-# block below for the arithmetic). Rotates the probed slice per cycle (MINOR 5)
-# and writes a SIGTERM-safe marker (MAJOR 1).
+# For each peer (capped at OXPULSE_PEER_PROBE_MAX): SSRF dial-recheck → pin →
+# TLS handshake + UDP STUN → POST. Bounded for the TimeoutStartSec=90 budget (see
+# the BUDGET block below). Rotates the probed slice per cycle (MINOR 5) and writes
+# a SIGTERM-safe marker (MAJOR 1).
+#
+# ⚠️  MUST be called as `_run_peer_probe_loop || true` under `set -e` — like
+# probe_ch4. The SSRF recheck `vetted_ip=$(_host_is_internal …)` returns 1 on the
+# ALLOW path (every healthy public peer), so a BARE call would trip errexit on the
+# first healthy peer and abort the loop, silently masked as success. Both current
+# call sites (the timer entrypoint + the dry-run path) already shield with `|| true`.
 _run_peer_probe_loop() {
     local token roster_file roster
     token=$(_read_cross_probe_token 2>/dev/null || true)
@@ -981,11 +1082,13 @@ _run_peer_probe_loop() {
 
     # ── BUDGET (MAJOR 1) ──────────────────────────────────────────────────────
     # The loop is SERIAL per peer; each peer costs, worst case:
-    #     getent SSRF recheck   timeout 3s   (OXPULSE_GETENT_TIMEOUT, _host_is_internal)
-    #   + TLS Allocate probe     timeout 8s   (OXPULSE_PEER_PROBE_TIMEOUT, _probe_peer_coturn)
-    #   + cross-probe POST      curl 8s       (OXPULSE_PEER_PROBE_POST_TIMEOUT, _post_cross_probe)
+    #     getent SSRF recheck      timeout 3s   (OXPULSE_GETENT_TIMEOUT, _host_is_internal)
+    #   + TLS handshake probe       timeout 8s   (OXPULSE_PEER_PROBE_TIMEOUT, _probe_peer_coturn)
+    #   + coturn cross-probe POST  curl 8s       (OXPULSE_PEER_PROBE_POST_TIMEOUT, _post_cross_probe)
+    #   + UDP STUN probe            timeout 5s   (OXPULSE_PEER_UDP_STUN_TIMEOUT, _probe_peer_udp_stun)
+    #   + coturn-udp cross-probe POST curl 8s    (OXPULSE_PEER_PROBE_POST_TIMEOUT, _post_cross_probe)
     #   ────────────────────────────────────
-    #     worst_per_peer       = 19s
+    #     worst_per_peer           = 32s
     #
     # Plus a one-time pre-loop reserve before the first peer:
     #     TURN-secret read     timeout 10s   (docker exec sed, above)
@@ -1010,15 +1113,13 @@ _run_peer_probe_loop() {
     #   ≤  TimeoutStartSec
     #
     # With cap = 2, scan_cap = 4:
-    #     19×2 + 3×2 + 10 = 38 + 6 + 10 = 54s.
-    # The systemd unit sets TimeoutStartSec=90 (raised from 45) so the WHOLE
-    # oneshot — self-channel loop + secret read + this peer pass + upstream-
-    # transition check — fits with real headroom (54s peer-side ≪ 90s). The old
-    # 45s budget counted ONLY the probe timeout and ignored the serial getent +
-    # POST, so a full cycle could overrun and systemd SIGTERM'd it mid-loop.
-    # Default cap dropped 3→2 to keep the arithmetic provable even at every
-    # timeout ceiling. Operators on a large mesh raise OXPULSE_PEER_PROBE_MAX
-    # knowingly AND must raise TimeoutStartSec to match the invariant above.
+    #     32×2 + 3×2 + 10 = 64 + 6 + 10 = 80s.
+    # The systemd unit sets TimeoutStartSec=90 so the WHOLE oneshot — self-channel
+    # loop + secret read + this peer pass + upstream-transition check — still fits
+    # with 10s headroom (80s ≪ 90s). The UDP leg adds 13s/peer (5s STUN + 8s POST)
+    # on top of the prior 19s; overall cap=2 worst case moved 54s → 80s.
+    # Operators on a large mesh raise OXPULSE_PEER_PROBE_MAX knowingly AND must
+    # raise TimeoutStartSec to match: worst_per_peer(32) × cap + 3×cap + 10 ≤ TSSec.
     local cap="${OXPULSE_PEER_PROBE_MAX:-2}"
     local scan_cap=$(( cap + ${OXPULSE_PEER_PROBE_REJECT_HEADROOM:-$cap} ))
 
@@ -1063,7 +1164,8 @@ _run_peer_probe_loop() {
     local probed=0 ok_count=0 rejected=0 post_4xx=0
     local scanned=0   # roster slots WALKED this cycle (dial or reject) — drives
                       # rotation + the scan bound. `probed` (dials only) gates cap.
-    local i idx node_id turns_host turns_port handshake_ok rtt result
+    local i idx node_id turns_host turns_port udp_port handshake_ok rtt result
+    local vetted_ip _peer_is_internal
     # Walk the roster starting at `start`, wrapping once. Stop when we have either
     # dialled `cap` peers OR scanned `scan_cap` slots (the reject bound) OR
     # exhausted the roster. Rejects advance `scanned` (bounding getent cost) but
@@ -1078,14 +1180,27 @@ _run_peer_probe_loop() {
         if ! [[ "$turns_port" =~ ^[0-9]+$ ]]; then
             turns_port=443
         fi
+        # udp_port: optional roster field for the STUN/UDP port. Falls back to
+        # OXPULSE_COTURN_STUN_PORT (operator override, default 3478). Must be a
+        # clean integer; any other value falls back to the default silently.
+        udp_port=$(printf '%s' "$roster" | jq -r --argjson i "$idx" '.[$i].udp_port // empty')
+        if ! [[ "$udp_port" =~ ^[0-9]+$ ]]; then
+            udp_port="${OXPULSE_COTURN_STUN_PORT:-3478}"
+        fi
         if [[ -z "$node_id" || -z "$turns_host" ]]; then
             warn "peer-probe: roster entry $idx missing node_id/turns_host — skipping"
             scanned=$((scanned + 1))
             continue
         fi
 
-        # SSRF dial-time recheck — REJECT before any dial.
-        if _host_is_internal "$turns_host"; then
+        # SSRF dial-time recheck — REJECT before any dial (both TLS and UDP legs
+        # target the same turns_host; a single recheck covers both). On ALLOW it
+        # echoes the vetted IP on stdout; we PIN both legs' dial to that IP
+        # (SEC-CR-322-02) so neither openssl nor turnutils re-resolves the hostname.
+        # NOTE: must capture stdout — an uncaptured echo would leak into the
+        # --dry-run JSON stream.
+        vetted_ip=$(_host_is_internal "$turns_host"); _peer_is_internal=$?
+        if [[ "$_peer_is_internal" -eq 0 ]]; then
             warn "peer-probe: REJECT $node_id ($turns_host) — resolves internal/unresolvable (SSRF guard)"
             rejected=$((rejected + 1))
             scanned=$((scanned + 1))
@@ -1093,18 +1208,38 @@ _run_peer_probe_loop() {
             continue
         fi
 
-        result=$(_probe_peer_coturn "$turns_host" "$turns_port" "$turn_secret")
+        # ── TLS leg (coturn-tls) ────────────────────────────────────────────────
+        result=$(_probe_peer_coturn "$turns_host" "$turns_port" "$turn_secret" "$vetted_ip")
         handshake_ok="${result%%$'\t'*}"
         rtt="${result##*$'\t'}"
         probed=$((probed + 1))
         scanned=$((scanned + 1))
         [[ "$handshake_ok" == "true" ]] && ok_count=$((ok_count + 1))
 
+        # handshake_ok="skip" means the host lacks openssl — emit NO coturn-tls row
+        # (a missing prober tool must not look like a down peer). The UDP leg below
+        # is independent and still runs.
         # MINOR 6: capture a persistent-4xx signal. _post_cross_probe returns 1
         # ONLY on a 4xx (revoked token / roster-membership) — distinct from the
         # 5xx/000 transient path which returns 0. Without this the `|| true`
         # swallows the 4xx and a revoked token loops forever invisibly.
-        if ! _post_cross_probe "$node_id" "$handshake_ok" "$rtt" "$token"; then
+        # Channel is "coturn-tls" (NOT "coturn"): the per-transport carve-out
+        # (#2064) + krolik's probe_tls_allocate both key on coturn-tls; sending the
+        # bare "coturn" self-channel name here defeats the cross-vantage quorum.
+        if [[ "$handshake_ok" != "skip" ]]; then
+            if ! _post_cross_probe "$node_id" "$handshake_ok" "$rtt" "$token" "coturn-tls"; then
+                post_4xx=1
+            fi
+        fi
+
+        # ── UDP leg (coturn-udp) ─────────────────────────────────────────────────
+        # Probe the peer's STUN/UDP port (3478 by default) via a plain STUN Binding
+        # request. The SSRF guard above already vetted turns_host; no second getent
+        # needed. The same xprb_ token and POST endpoint are used — no new auth path.
+        result=$(_probe_peer_udp_stun "$turns_host" "$udp_port" "$vetted_ip")
+        handshake_ok="${result%%$'\t'*}"
+        rtt="${result##*$'\t'}"
+        if ! _post_cross_probe "$node_id" "$handshake_ok" "$rtt" "$token" "coturn-udp"; then
             post_4xx=1
         fi
 
@@ -1191,6 +1326,13 @@ _post_channel() {
 
     if [[ "$http_code" =~ ^2 ]]; then
         log "channel $channel_name reported OK (HTTP $http_code)"
+        return 0
+    elif [[ "$http_code" == "429" || "$http_code" == "408" ]]; then
+        # TRANSIENT (RFC 6585): rate-limited / request-timeout — NOT an auth
+        # failure. Back off (the 60s timer is our retry; central sends
+        # Retry-After) and retry next tick. Must NOT return 1, or a recoverable
+        # rate-limit would surface as a systemd unit failure.
+        warn "channel $channel_name: HTTP $http_code — rate-limited/transient, retry next tick"
         return 0
     elif [[ "$http_code" =~ ^4 ]]; then
         warn "channel $channel_name: HTTP $http_code — check service token"
