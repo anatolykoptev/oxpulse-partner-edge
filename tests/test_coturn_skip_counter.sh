@@ -353,6 +353,198 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# SK5: genuine no-op (sha-match) resets counter to 0
+#
+# Pre-install a coturn.conf whose sha256 MATCHES the rendered mock output so
+# the reconcile path hits the idempotency branch at reconcile.sh:1148 (the
+# sha-equality guard) rather than the swap branch.  Counter must reset.
+#
+# Falsification: if the _write_coturn_skip_count 0 call at the no-op branch
+# (reconcile.sh:1148) is removed, the counter retains its prior value after
+# this reconcile → the assertion after≠0 fails → SK5 goes RED.
+# ---------------------------------------------------------------------------
+_tmpdir5=$(mktemp -d)
+
+_sk5_out=$(bash - << SHELLEOF 2>&1 || true
+set -euo pipefail
+REPO_ROOT=""
+for _try in "\$PWD" "\$PWD/.." "\$HOME/src/oxpulse-partner-edge"; do
+    [[ -f "\$_try/lib/reconcile.sh" ]] && { REPO_ROOT="\$_try"; break; }
+done
+LIB="\$REPO_ROOT/lib/reconcile.sh"
+[[ -f "\$LIB" ]] || { echo "SKIP_NO_LIB"; exit 0; }
+
+log()  { :; }
+warn() { :; }
+die()  { echo "[DIE] \$*" >&2; exit 1; }
+
+# Mock opec: writes a fixed, stable config every call so rendered sha == installed sha.
+_MOCK_CONTENT='# mock coturn fixed
+static-auth-secret=test-secret
+'
+opec() {
+    if [[ "\${1:-}" == "render" && "\${2:-}" == "coturn" ]]; then
+        local _o=""
+        local _i; for _i in "\$@"; do
+            [[ "\${_out_next:-0}" == "1" ]] && _o="\$_i" && _out_next=0
+            [[ "\$_i" == "--out" ]] && _out_next=1
+        done
+        [[ -n "\$_o" ]] && printf '%s' "\$_MOCK_CONTENT" > "\$_o"
+        return 0
+    fi
+    return 0
+}
+export -f opec
+
+PREFIX_ETC="$_tmpdir5/etc"
+STATE_DIR="$_tmpdir5/state"
+mkdir -p "\$PREFIX_ETC" "\$STATE_DIR"
+STATE_FILE="$_tmpdir5/install.env"
+cat > "\$STATE_FILE" << 'STATE'
+PARTNER_DOMAIN=test.example.com
+TURNS_SUBDOMAIN=api-test05
+SCHEMA_VERSION=1
+TURN_SECRET=test-secret
+PUBLIC_IP=1.2.3.4
+STATE
+export PREFIX_ETC STATE_FILE STATE_DIR DOCKER_BIN="false"
+export PARTNER_DOMAIN=test.example.com TURNS_SUBDOMAIN=api-test05
+export TURN_SECRET=test-secret PUBLIC_IP=1.2.3.4 REPO_DIR="\$REPO_ROOT"
+
+. "\$LIB"
+
+_tpl="$_tmpdir5/coturn.conf.tpl"
+touch "\$_tpl"
+
+# Pre-install coturn.conf with content that MATCHES the mock render output.
+# This forces the sha-equality branch (no-op) not the swap branch.
+printf '%s' "\$_MOCK_CONTENT" > "\$PREFIX_ETC/coturn.conf"
+
+# Seed counter with a non-zero value to verify it gets reset.
+_write_coturn_skip_count 9 "\$STATE_DIR"
+
+_skip_file="\$STATE_DIR/coturn-skip-count.env"
+_before=\$(grep '^COTURN_SKIP_CONSECUTIVE=' "\$_skip_file" 2>/dev/null | cut -d= -f2 || echo 0)
+echo "BEFORE=\${_before}"
+
+# Run: rendered sha == installed sha → no-op branch → reset.
+reconcile_coturn_surface "\$PREFIX_ETC" "\$_tpl" 2>/dev/null || true
+
+_after=\$(grep '^COTURN_SKIP_CONSECUTIVE=' "\$_skip_file" 2>/dev/null | cut -d= -f2 || echo -1)
+echo "AFTER=\${_after}"
+echo "DONE"
+SHELLEOF
+)
+
+rm -rf "$_tmpdir5"
+
+if echo "$_sk5_out" | grep -q "SKIP_NO_LIB"; then
+    fail "SK5: lib/reconcile.sh not found"
+elif echo "$_sk5_out" | grep -q "DONE"; then
+    _before=$(echo "$_sk5_out" | grep '^BEFORE=' | cut -d= -f2)
+    _after=$(echo "$_sk5_out"  | grep '^AFTER='  | cut -d= -f2)
+    if [[ "${_before:-0}" -ge 9 && "${_after:-1}" -eq 0 ]]; then
+        pass "SK5: genuine no-op (sha-match) resets counter ${_before} → ${_after}"
+    else
+        fail "SK5: before=${_before:-?} after=${_after:-?} (expected before≥9, after=0) — no-op reset missing?"
+    fi
+else
+    fail "SK5: subshell crashed"
+fi
+
+# ---------------------------------------------------------------------------
+# SK6: DRY_RUN=1 resets counter to 0
+#
+# When DRY_RUN=1 the reconcile function renders but does NOT swap; it still
+# proves external-ip was resolved, so the counter must be reset.  This
+# exercises the reset at reconcile.sh:1134.
+#
+# Falsification: if the _write_coturn_skip_count 0 call at the dry-run branch
+# (reconcile.sh:1134) is removed, the counter retains its prior value →
+# assertion after≠0 fails → SK6 goes RED.
+# ---------------------------------------------------------------------------
+_tmpdir6=$(mktemp -d)
+
+_sk6_out=$(bash - << SHELLEOF 2>&1 || true
+set -euo pipefail
+REPO_ROOT=""
+for _try in "\$PWD" "\$PWD/.." "\$HOME/src/oxpulse-partner-edge"; do
+    [[ -f "\$_try/lib/reconcile.sh" ]] && { REPO_ROOT="\$_try"; break; }
+done
+LIB="\$REPO_ROOT/lib/reconcile.sh"
+[[ -f "\$LIB" ]] || { echo "SKIP_NO_LIB"; exit 0; }
+
+log()  { :; }
+warn() { :; }
+die()  { echo "[DIE] \$*" >&2; exit 1; }
+
+opec() {
+    if [[ "\${1:-}" == "render" && "\${2:-}" == "coturn" ]]; then
+        local _o=""
+        local _i; for _i in "\$@"; do
+            [[ "\${_out_next:-0}" == "1" ]] && _o="\$_i" && _out_next=0
+            [[ "\$_i" == "--out" ]] && _out_next=1
+        done
+        [[ -n "\$_o" ]] && printf '# mock coturn dry\nstatic-auth-secret=test-secret\n' > "\$_o"
+        return 0
+    fi
+    return 0
+}
+export -f opec
+
+PREFIX_ETC="$_tmpdir6/etc"
+STATE_DIR="$_tmpdir6/state"
+mkdir -p "\$PREFIX_ETC" "\$STATE_DIR"
+STATE_FILE="$_tmpdir6/install.env"
+cat > "\$STATE_FILE" << 'STATE'
+PARTNER_DOMAIN=test.example.com
+TURNS_SUBDOMAIN=api-test06
+SCHEMA_VERSION=1
+TURN_SECRET=test-secret
+PUBLIC_IP=1.2.3.4
+STATE
+export PREFIX_ETC STATE_FILE STATE_DIR DOCKER_BIN="false"
+export PARTNER_DOMAIN=test.example.com TURNS_SUBDOMAIN=api-test06
+export TURN_SECRET=test-secret PUBLIC_IP=1.2.3.4 REPO_DIR="\$REPO_ROOT"
+export DRY_RUN=1
+
+. "\$LIB"
+
+_tpl="$_tmpdir6/coturn.conf.tpl"
+touch "\$_tpl"
+
+# Seed counter; DRY_RUN=1 should still reset it.
+_write_coturn_skip_count 3 "\$STATE_DIR"
+
+_skip_file="\$STATE_DIR/coturn-skip-count.env"
+_before=\$(grep '^COTURN_SKIP_CONSECUTIVE=' "\$_skip_file" 2>/dev/null | cut -d= -f2 || echo 0)
+echo "BEFORE=\${_before}"
+
+reconcile_coturn_surface "\$PREFIX_ETC" "\$_tpl" 2>/dev/null || true
+
+_after=\$(grep '^COTURN_SKIP_CONSECUTIVE=' "\$_skip_file" 2>/dev/null | cut -d= -f2 || echo -1)
+echo "AFTER=\${_after}"
+echo "DONE"
+SHELLEOF
+)
+
+rm -rf "$_tmpdir6"
+
+if echo "$_sk6_out" | grep -q "SKIP_NO_LIB"; then
+    fail "SK6: lib/reconcile.sh not found"
+elif echo "$_sk6_out" | grep -q "DONE"; then
+    _before=$(echo "$_sk6_out" | grep '^BEFORE=' | cut -d= -f2)
+    _after=$(echo "$_sk6_out"  | grep '^AFTER='  | cut -d= -f2)
+    if [[ "${_before:-0}" -ge 3 && "${_after:-1}" -eq 0 ]]; then
+        pass "SK6: DRY_RUN=1 resets counter ${_before} → ${_after}"
+    else
+        fail "SK6: before=${_before:-?} after=${_after:-?} (expected before≥3, after=0) — dry-run reset missing?"
+    fi
+else
+    fail "SK6: subshell crashed"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
