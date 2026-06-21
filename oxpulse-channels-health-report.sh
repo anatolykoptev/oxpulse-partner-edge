@@ -441,16 +441,32 @@ probe_ch4() {
     # reaches them.
     _write_probe_mode_state "$probe_mode" "$probe_target" "$probe_target_source" "$probe_reason"
 
+    # Read the consecutive-skip counter written by lib/reconcile.sh.  Missing
+    # file (pre-P4b edges) or non-numeric value both default to 0 so old edges
+    # are not dark — the field is simply 0 until the first SKIP cycle writes it.
+    local _skip_state_dir="${STATE_DIR:-/var/lib/oxpulse-partner-edge}"
+    local _skip_count=0
+    local _skip_raw
+    _skip_raw=$(grep '^COTURN_SKIP_CONSECUTIVE=' \
+        "${_COTURN_SKIP_COUNT_FILE:-${_skip_state_dir}/coturn-skip-count.env}" \
+        2>/dev/null | head -1 | cut -d= -f2 || true)
+    if [[ "$_skip_raw" =~ ^[0-9]+$ ]]; then
+        _skip_count="$_skip_raw"
+    fi
+
     # channel_probe_mode is also emitted in the JSON payload — the central
     # server receives it over the wire (POST body is NOT swallowed), giving a
     # second, observable degraded signal independent of edge-local stderr.
     # channel_probe_reason is added only on failure (the _post_channel jq filter
     # preserves extra fields), so a false-negative carries its cause to the
     # central server instead of an opaque handshake_ok=false.
+    # coturn_skip_consecutive surfaces reconcile.sh's durable stuck-edge counter
+    # so the central scraper / motherly health view can detect a non-zero count
+    # on a stuck edge without needing to read edge-local state files directly.
     if [[ "$exit_code" -eq 0 ]]; then
-        printf '{"channel_name":"coturn","channel_rtt_ms":%d,"channel_handshake_ok":true,"channel_probe_mode":"%s"}' "$rtt_ms" "$probe_mode"
+        printf '{"channel_name":"coturn","channel_rtt_ms":%d,"channel_handshake_ok":true,"channel_probe_mode":"%s","coturn_skip_consecutive":%d}' "$rtt_ms" "$probe_mode" "$_skip_count"
     else
-        printf '{"channel_name":"coturn","channel_rtt_ms":%d,"channel_handshake_ok":false,"channel_probe_mode":"%s","channel_probe_reason":"%s"}' "$rtt_ms" "$probe_mode" "${probe_reason:-unknown}"
+        printf '{"channel_name":"coturn","channel_rtt_ms":%d,"channel_handshake_ok":false,"channel_probe_mode":"%s","channel_probe_reason":"%s","coturn_skip_consecutive":%d}' "$rtt_ms" "$probe_mode" "${probe_reason:-unknown}" "$_skip_count"
     fi
 }
 
