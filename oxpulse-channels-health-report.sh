@@ -991,6 +991,14 @@ _post_cross_probe() {
     if [[ "$http_code" =~ ^2 ]]; then
         log "cross-probe target=$target_node_id reported OK (HTTP $http_code)"
         return 0
+    elif [[ "$http_code" == "429" || "$http_code" == "408" ]]; then
+        # TRANSIENT (RFC 6585): rate-limited / request-timeout — NOT a revoked
+        # token. The central sizes a dedicated channel-health limiter and sends
+        # Retry-After; the 60s timer is our back-off, so just skip this tick and
+        # retry next. Do NOT set the persistent-4xx marker (would mis-signal a
+        # revoked token and trip the systemd failure on a recoverable hiccup).
+        warn "cross-probe target=$target_node_id: HTTP $http_code — rate-limited/transient, retry next tick"
+        return 0
     elif [[ "$http_code" =~ ^4 ]]; then
         warn "cross-probe target=$target_node_id: HTTP $http_code — check cross-probe token / roster membership"
         return 1
@@ -1318,6 +1326,13 @@ _post_channel() {
 
     if [[ "$http_code" =~ ^2 ]]; then
         log "channel $channel_name reported OK (HTTP $http_code)"
+        return 0
+    elif [[ "$http_code" == "429" || "$http_code" == "408" ]]; then
+        # TRANSIENT (RFC 6585): rate-limited / request-timeout — NOT an auth
+        # failure. Back off (the 60s timer is our retry; central sends
+        # Retry-After) and retry next tick. Must NOT return 1, or a recoverable
+        # rate-limit would surface as a systemd unit failure.
+        warn "channel $channel_name: HTTP $http_code — rate-limited/transient, retry next tick"
         return 0
     elif [[ "$http_code" =~ ^4 ]]; then
         warn "channel $channel_name: HTTP $http_code — check service token"
