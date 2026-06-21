@@ -85,6 +85,7 @@ AWG_MOTHERLY_IP=10.9.0.2
 HY2_FALLBACK_HOST=host.docker.internal
 HY2_FALLBACK_PORT=18443
 CADDYFILE_SHA=sentinel_old_sha
+TURN_SECRET=test-secret-p5
 STATE
 cp "$REPO_ROOT/manifest.yaml" "$_tmpdir/manifest.yaml"
 
@@ -95,11 +96,18 @@ _p5_result=$(
     die()  { echo "DIE: $*" >&2; exit 1; }
 
     opec() {
-        if [[ "${1:-}" == "render" && "${2:-}" == "caddy" ]]; then
+        if [[ "${1:-}" == "render" ]]; then
             [[ "${3:-}" == "--help" ]] && return 0
-            local _out="" _nxt=0
+            local _kind="${2:-}" _out="" _nxt=0
             for _i in "$@"; do [[ "$_nxt" -eq 1 ]] && _out="$_i" && _nxt=0; [[ "$_i" == "--out" ]] && _nxt=1; done
-            [[ -n "$_out" ]] && printf '# NEW Caddyfile (triggers change)\n' > "$_out"
+            if [[ -n "$_out" ]]; then
+                case "$_kind" in
+                    caddy) printf '# NEW Caddyfile (triggers change)\n' > "$_out" ;;
+                    coturn) printf '# mock coturn\nstatic-auth-secret=test-secret\n' > "$_out" ;;
+                    xray) printf '{"log":{"loglevel":"warning"}}\n' > "$_out" ;;
+                    *) printf '# mock\n' > "$_out" ;;
+                esac
+            fi
         fi
         return 0
     }
@@ -115,6 +123,11 @@ _p5_result=$(
     . "$STATE_FILE"
     # shellcheck disable=SC1090
     . "$LIB"
+
+    # Phase 4b: stub firewall_apply.
+    export FIREWALL_LIB="$REPO_ROOT/lib/install-firewall.sh"
+    firewall_apply() { return 0; }
+    export -f firewall_apply
 
     # Override apply_caddy_reloads (no real docker)
     apply_caddy_reloads() {

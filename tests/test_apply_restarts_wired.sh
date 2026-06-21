@@ -45,6 +45,7 @@ AWG_MOTHERLY_IP=10.9.0.2
 HY2_FALLBACK_HOST=host.docker.internal
 HY2_FALLBACK_PORT=18443
 CADDYFILE_SHA=oldsha
+TURN_SECRET=test-secret-ar
 STATE
     cp "$MANIFEST" "$_tmpdir/$_subdir/manifest.yaml"
     echo "$_etc"
@@ -64,12 +65,21 @@ _ar1_result=$(
     _etc=$(_setup_sandbox ar1 "# OLD Caddyfile sha=oldsha" 2>/dev/null)
 
     opec() {
-        if [[ "${1:-}" == "render" && "${2:-}" == "caddy" ]]; then
+        if [[ "${1:-}" == "render" ]]; then
             [[ "${3:-}" == "--help" ]] && return 0
-            local _out="" _nxt=0
+            local _kind="${2:-}" _out="" _nxt=0
             for _i in "$@"; do [[ "$_nxt" -eq 1 ]] && _out="$_i" && _nxt=0; [[ "$_i" == "--out" ]] && _nxt=1; done
-            # Content whose sha256 differs from STATE CADDYFILE_SHA=oldsha → triggers change
-            [[ -n "$_out" ]] && printf '# NEW Caddyfile (different from STATE sha=oldsha)\nrespond "__CADDYFILE_SHA__" 200\n' > "$_out"
+            if [[ -n "$_out" ]]; then
+                case "$_kind" in
+                    caddy)
+                        # Content whose sha256 differs from STATE CADDYFILE_SHA=oldsha → triggers change
+                        printf '# NEW Caddyfile (different from STATE sha=oldsha)\nrespond "__CADDYFILE_SHA__" 200\n' > "$_out"
+                        ;;
+                    coturn) printf '# mock coturn\nstatic-auth-secret=test-secret\n' > "$_out" ;;
+                    xray) printf '{"log":{"loglevel":"warning"}}\n' > "$_out" ;;
+                    *) printf '# mock\n' > "$_out" ;;
+                esac
+            fi
         fi
         return 0
     }
@@ -85,6 +95,11 @@ _ar1_result=$(
     . "$STATE_FILE"
     # shellcheck disable=SC1090
     . "$LIB"
+
+    # Phase 4b: stub firewall_apply.
+    export FIREWALL_LIB="$REPO_ROOT/lib/install-firewall.sh"
+    firewall_apply() { return 0; }
+    export -f firewall_apply
 
     # Override apply_caddy_reloads to capture invocation without docker exec.
     _ar1_caddy_reload_fired=0
@@ -146,12 +161,21 @@ _ar2_result=$(
     sed -i "s|^CADDYFILE_SHA=.*|CADDYFILE_SHA=${_ar2_stable_sha}|" "$_tmpdir/ar2/install.env"
 
     opec() {
-        if [[ "${1:-}" == "render" && "${2:-}" == "caddy" ]]; then
+        if [[ "${1:-}" == "render" ]]; then
             [[ "${3:-}" == "--help" ]] && return 0
-            local _out="" _nxt=0
+            local _kind="${2:-}" _out="" _nxt=0
             for _i in "$@"; do [[ "$_nxt" -eq 1 ]] && _out="$_i" && _nxt=0; [[ "$_i" == "--out" ]] && _nxt=1; done
-            # Produce the same stable content; its sha256 == STATE CADDYFILE_SHA → no change
-            [[ -n "$_out" ]] && printf '%s\n' "# STABLE Caddyfile (no __CADDYFILE_SHA__ placeholder)" > "$_out"
+            if [[ -n "$_out" ]]; then
+                case "$_kind" in
+                    caddy)
+                        # Produce the same stable content; its sha256 == STATE CADDYFILE_SHA → no change
+                        printf '%s\n' "# STABLE Caddyfile (no __CADDYFILE_SHA__ placeholder)" > "$_out"
+                        ;;
+                    coturn) printf '# mock coturn\nstatic-auth-secret=test-secret\n' > "$_out" ;;
+                    xray) printf '{"log":{"loglevel":"warning"}}\n' > "$_out" ;;
+                    *) printf '# mock\n' > "$_out" ;;
+                esac
+            fi
         fi
         return 0
     }
@@ -167,6 +191,11 @@ _ar2_result=$(
     . "$STATE_FILE"
     # shellcheck disable=SC1090
     . "$LIB"
+
+    # Phase 4b: stub firewall_apply.
+    export FIREWALL_LIB="$REPO_ROOT/lib/install-firewall.sh"
+    firewall_apply() { return 0; }
+    export -f firewall_apply
 
     apply_caddy_reloads() {
         echo "CADDY_RELOAD:${_RECONCILE_CADDY_RELOAD:-0}"

@@ -22,14 +22,13 @@
 #                       Re-asserted every converge; live re-assert is the authority.
 #
 # wired: false — surface is DECLARED (so test_manifest_coverage guards it) but NOT yet
-#               reconciled by the engine. Wiring happens in Phase 4b.
-#               The reconcile_all loop skips these surfaces (logs "declared, not yet wired").
+#               reconciled by the engine. Flip to wired: true (remove the line) to enable.
 
 manifest_version: 1
 release_tag: "@RELEASE_TAG@"
 
 surfaces:
-  # --- render_from_state surfaces (Phase 4a: caddyfile WIRED; others Phase 4b) ---
+  # --- render_from_state surfaces ---
 
   - id: caddyfile
     kind: render_from_state
@@ -40,7 +39,7 @@ surfaces:
     placeholder_completeness: true      # CI + runtime: every {{X}} must resolve (S1)
     restart_unit: oxpulse-partner-edge.service  # reload only if checksum changed
     sha_key: CADDYFILE_SHA              # tracked in STATE for drift/canary
-    # wired: (absent = wired in P4a)
+    # wired: (absent = wired:true)
 
   - id: coturn
     kind: render_from_state
@@ -48,9 +47,9 @@ surfaces:
     out: /etc/oxpulse-partner-edge/coturn.conf
     renderer: "opec render coturn"
     placeholder_completeness: true
-    restart_signal: "SIGUSR2"           # coturn reload_ssl_certs, no session drop
+    restart_signal: "SIGUSR2"           # coturn reload_ssl_certs, no session drop (Phase 4b)
     restart_unit: oxpulse-partner-cert-watch.service
-    wired: false                        # Phase 4b
+    # wired: (absent = wired:true — Phase 4b)
 
   - id: xray_client
     kind: render_from_state
@@ -58,9 +57,9 @@ surfaces:
     out: /etc/oxpulse-partner-edge/xray-client.json
     renderer: "opec render xray"
     placeholder_completeness: true
-    fail_soft: true                     # bypass channel — render failure != install death
+    fail_soft: true                     # bypass channel — render failure != install death (Phase 4b)
     restart_unit_compose_service: xray-client
-    wired: false                        # Phase 4b
+    # wired: (absent = wired:true — Phase 4b)
 
   # --- persist_rendered surfaces (secrets present — never re-render from template) ---
 
@@ -69,22 +68,22 @@ surfaces:
     out: /etc/oxpulse-partner-edge/docker-compose.yml
     patch_only: ["image_tags"]          # sed image:TAG; everything else is authority
     secret_surface: true
-    wired: false                        # Phase 4b
+    wired: false                        # Phase 4b deferred (compose/node_config out of scope)
 
   - id: node_config
     kind: persist_rendered
     out: /etc/oxpulse-partner-edge/node-config.json
     secret_surface: true
     refresh_from: "/api/partner/keys"   # reality rotation merge (refresh.sh duty)
-    wired: false                        # Phase 4b
+    wired: false                        # Phase 4b deferred
 
   # --- network_apply surfaces ---
 
   - id: firewall
     kind: network_apply
-    applier: "firewall_apply"           # lib/install-firewall.sh — runs on every converge
-    scope: "oxpulse-owned nft only"     # canon §6: never docker ip nat / firewalld
-    wired: false                        # Phase 4b
+    applier: "firewall_apply"           # lib/install-firewall.sh — re-asserted every converge
+    scope: "oxpulse-owned nft only"     # canon §6: never docker ip nat / firewalld (Phase 4b)
+    # wired: (absent = wired:true — Phase 4b)
 
   # --- sync_verified surfaces ---
 
@@ -92,18 +91,18 @@ surfaces:
     kind: sync_verified
     out: /etc/oxpulse-partner-edge/xray.env
     required_by_unit: oxpulse-xray-update.service
-    wired: false                        # Phase 4b (closes #5 root cause when wired)
+    # wired: (absent = wired:true — Phase 4b, closes #5 root cause)
 
   - id: host_scripts
     kind: sync_verified
     checksum_source: SHA256SUMS
-    wired: false                        # Phase 4b
+    wired: false                        # Phase 5 (self-update + flock cluster)
 
   - id: systemd_units
     kind: sync_verified
     checksum_source: SHA256SUMS
     on_failure_alert: "oxpulse-alert@%n.service"
-    wired: false                        # Phase 4b
+    wired: false                        # Phase 5 (OnFailure wiring)
 
 unmanaged:
   # Documented EXCLUSIONS — never read or written by the reconcile engine.
