@@ -1027,7 +1027,7 @@ _setup_coturn_render_env() {
 #
 # Atomically writes (or resets) the consecutive-coturn-skip counter to the
 # durable state file COTURN_SKIP_COUNT_FILE under STATE_DIR.
-# Pattern mirrors _write_probe_mode_state in oxpulse-channels-health-report.sh.
+# Pattern based on _write_probe_mode_state in oxpulse-channels-health-report.sh.
 #
 # Fields:
 #   COTURN_SKIP_CONSECUTIVE — number of converge cycles that hit the SKIP path
@@ -1039,10 +1039,11 @@ _setup_coturn_render_env() {
 # inspect it without elevated privileges.
 # ---------------------------------------------------------------------------
 _COTURN_SKIP_COUNT_FILE_NAME="coturn-skip-count.env"
+_STATE_DIR_DEFAULT="/var/lib/oxpulse-partner-edge"
 
 _write_coturn_skip_count() {
     local _count="$1"
-    local _state_dir="${2:-${STATE_DIR:-/var/lib/oxpulse-partner-edge}}"
+    local _state_dir="${2:-${STATE_DIR:-${_STATE_DIR_DEFAULT}}}"
     local _state_file="${_COTURN_SKIP_COUNT_FILE:-${_state_dir}/${_COTURN_SKIP_COUNT_FILE_NAME}}"
     mkdir -p "$_state_dir" 2>/dev/null || return 0
     local _tmp
@@ -1107,7 +1108,7 @@ reconcile_coturn_surface() {
         log "reconcile_coturn: SKIP — external-ip unresolvable; live coturn.conf left untouched (no swap)"
         # Increment durable consecutive-skip counter so a stuck edge is detectable
         # by health-report scrapers without relying on transient log lines.
-        local _state_dir="${STATE_DIR:-/var/lib/oxpulse-partner-edge}"
+        local _state_dir="${STATE_DIR:-${_STATE_DIR_DEFAULT}}"
         local _skip_file="${_COTURN_SKIP_COUNT_FILE:-${_state_dir}/${_COTURN_SKIP_COUNT_FILE_NAME}}"
         local _prev_count=0
         _prev_count=$(grep '^COTURN_SKIP_CONSECUTIVE=' "$_skip_file" 2>/dev/null \
@@ -1131,7 +1132,7 @@ reconcile_coturn_surface() {
         rm -f "$_out_path"
         log "[dry-run] reconcile_coturn: would write coturn.conf (sha256=$_dry_sha) to $_installed_path"
         # Render succeeded (external-ip resolved, dry-run) — reset skip counter.
-        _write_coturn_skip_count 0 "${STATE_DIR:-/var/lib/oxpulse-partner-edge}"
+        _write_coturn_skip_count 0 "${STATE_DIR:-${_STATE_DIR_DEFAULT}}"
         return 0
     fi
 
@@ -1145,7 +1146,7 @@ reconcile_coturn_surface() {
         rm -f "$_out_path"
         log "reconcile_coturn: coturn.conf unchanged (sha256=$_rendered_sha) — no swap needed"
         # Render succeeded (external-ip resolved, no-op) — reset skip counter.
-        _write_coturn_skip_count 0 "${STATE_DIR:-/var/lib/oxpulse-partner-edge}"
+        _write_coturn_skip_count 0 "${STATE_DIR:-${_STATE_DIR_DEFAULT}}"
         return 0
     fi
 
@@ -1153,7 +1154,7 @@ reconcile_coturn_surface() {
     atomic_swap "$_installed_path" "$_out_path" 0644
     log "reconcile_coturn: coturn.conf updated (sha256=$_rendered_sha)"
     # Render succeeded (new config) — reset skip counter.
-    _write_coturn_skip_count 0 "${STATE_DIR:-/var/lib/oxpulse-partner-edge}"
+    _write_coturn_skip_count 0 "${STATE_DIR:-${_STATE_DIR_DEFAULT}}"
 
     # Set per-surface change flag (CC1 fix: sound multi-surface _changed_count).
     _RECONCILE_COTURN_CHANGED=1
