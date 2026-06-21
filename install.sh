@@ -1561,6 +1561,14 @@ EOF
 	# from STATE_FILE when the naive container is down during an upgrade.
 	# Value is authoritative at install time (env > node-config > default 1080).
 	printf 'NAIVE_SOCKS_PORT=%s\n' "${NAIVE_SOCKS_PORT:-1080}" >> "$PREFIX_LIB/install.env"
+	# Persist PUBLIC_IP/PRIVATE_IP so reconcile.sh _setup_coturn_render_env can read
+	# coturn's external-ip from STATE_FILE instead of live-probing the network on
+	# every converge. On a DPI-blocked edge a live probe to ipify/ifconfig.me can
+	# fail → empty external-ip → a degraded coturn.conf swapped live on a no-op
+	# converge. STATE persistence makes the steady-state render deterministic.
+	# Values authoritative at install time (network_run: env override > autodetect).
+	printf 'PUBLIC_IP=%s\n' "${PUBLIC_IP:-}" >> "$PREFIX_LIB/install.env"
+	printf 'PRIVATE_IP=%s\n' "${PRIVATE_IP:-}" >> "$PREFIX_LIB/install.env"
 	chmod 0600 "$PREFIX_LIB/install.env"
 	# Phase 1: record sha256 of rendered Caddyfile for drift detection.
 	# healthcheck.sh check 15 compares this against /canary/config-hash.

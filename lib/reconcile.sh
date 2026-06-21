@@ -62,14 +62,16 @@ atomic_swap() {
 # ---------------------------------------------------------------------------
 # assert_no_unresolved_placeholders RENDERED_FILE
 #
-# Fails (die) if any {{NAME}} placeholder remains in RENDERED_FILE after
-# rendering. This is the runtime completeness guard (S1 — fail-closed before
-# atomic_swap is called). Catches any opec render gap at deploy time.
+# Fails (die) if any {{...}} placeholder remains in RENDERED_FILE after
+# rendering (any inner chars — not only [A-Z0-9_] — so lowercase/hyphenated
+# placeholders are caught too). This is the runtime completeness guard (S1 —
+# fail-closed before atomic_swap is called). Catches any opec render gap at
+# deploy time.
 # ---------------------------------------------------------------------------
 assert_no_unresolved_placeholders() {
     local _file="$1"
     local _leftover
-    _leftover=$(grep -oE '\{\{[A-Z0-9_]+\}\}' "$_file" 2>/dev/null | sort -u || true)
+    _leftover=$(grep -oE '\{\{[^}]+\}\}' "$_file" 2>/dev/null | sort -u || true)
     if [[ -n "$_leftover" ]]; then
         die "reconcile: render incomplete — unsubstituted placeholders in $(basename "$_file"):"$'\n'"$(printf '%s\n' "$_leftover" | sed 's/^/  /')"$'\n'"Fix: export the missing var or update opec to handle the placeholder."
     fi
@@ -719,6 +721,12 @@ reconcile_all() {
     # shellcheck disable=SC2064
     [[ "$_own_tmpdir" -eq 1 ]] && trap "rm -rf '${RECONCILE_TMPDIR}'" RETURN
 
+    # Reset per-surface CHANGED flags so a second reconcile_all in the same process
+    # starts from a clean slate (the flags are module-level, init once at source
+    # time). The before/after delta below stays correct either way, but a stale
+    # raw-flag read (1 from a prior run) would mislead any future direct reader.
+    _reset_surface_flags
+
     local _surface_count=0 _wired_count=0 _skipped_count=0 _changed_count=0
 
     while IFS=$'\t' read -r _sid _kind _wired _template _out \
@@ -919,13 +927,26 @@ _reset_surface_flags() {
 #   PARTNER_DOMAIN  — from caller (STATE_FILE; validated)
 #   TURNS_SUBDOMAIN — from caller (STATE_FILE; validated)
 #   TURN_SECRET     — from live docker-compose.yml TURN_SECRET env var
-#   PUBLIC_IP       — from STATE_FILE or live network probe
-#   PRIVATE_IP      — from STATE_FILE or ip addr heuristic
+#   PUBLIC_IP       — env override → STATE_FILE → installed coturn.conf external-ip
+#   PRIVATE_IP      — env override → STATE_FILE → installed coturn.conf external-ip
 #   EXTERNAL_IP_LINE— "PUBLIC_IP/PRIVATE_IP" behind NAT, else "PUBLIC_IP"
 #
 # Die on: PARTNER_DOMAIN/TURNS_SUBDOMAIN missing (non-derivable).
 # Die on: TURN_SECRET unresolvable (it's in compose only — required, not derivable).
-# Warn on: PUBLIC_IP unresolvable (non-fatal; coturn starts without it but NAT traversal breaks).
+#
+# CRITICAL (idempotency / fail-closed): the steady-state converge MUST NOT live-
+# probe the network for PUBLIC_IP. On a DPI-blocked edge (RU / ТСПУ) outbound
+# HTTPS to ipify/ifconfig.me can be throttled/blocked → empty external-ip → a
+# DEGRADED coturn.conf swapped live on a converge with ZERO real state change.
+# So the resolution order is deterministic and last-known-good biased:
+#   1. PUBLIC_IP/PRIVATE_IP already in env (explicit install/bootstrap override).
+#   2. STATE_FILE (persisted at install — the authority for steady state).
+#   3. The external-ip currently in the INSTALLED coturn.conf (last-known-good)
+#      — reuse it so the render is a deterministic no-op swap.
+# If NONE of those yield an external-ip, return 2 (SKIP signal): the caller leaves
+# the live coturn.conf untouched (no swap, no SIGUSR2). We NEVER render an empty
+# external-ip= and swap it live. The live network probe lives only on the
+# install/bootstrap path (lib/install-network.sh network_run), never here.
 # ---------------------------------------------------------------------------
 _setup_coturn_render_env() {
     local _prefix_etc="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
@@ -950,27 +971,44 @@ _setup_coturn_render_env() {
     [[ -n "${TURN_SECRET:-}" ]] \
         || die "reconcile_coturn: TURN_SECRET not found in compose or coturn container — cannot render coturn.conf safely"
 
-    # PUBLIC_IP: STATE_FILE → curl external probe.
+    # PUBLIC_IP: env override (already set) → STATE_FILE. NO live network probe in
+    # the steady-state converge (see header — DPI edges would swap a degraded conf).
     if [[ -z "${PUBLIC_IP:-}" ]]; then
         PUBLIC_IP=$(grep '^PUBLIC_IP=' "${STATE_FILE:-}" 2>/dev/null | cut -d= -f2 | head -1 || true)
     fi
-    if [[ -z "${PUBLIC_IP:-}" ]]; then
-        PUBLIC_IP=$(curl -fsS --max-time 8 https://ifconfig.me 2>/dev/null \
-            || curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null || true)
-    fi
-    if [[ -z "${PUBLIC_IP:-}" ]]; then
-        warn "reconcile_coturn: could not determine PUBLIC_IP — coturn.conf EXTERNAL_IP_LINE will be empty; TURN NAT traversal may fail"
-        PUBLIC_IP=""
-    fi
 
-    # PRIVATE_IP: STATE_FILE → ip addr heuristic.
+    # PRIVATE_IP: env override (already set) → STATE_FILE. No ip-addr heuristic in
+    # the hot path — last-known-good comes from the installed coturn.conf below.
     if [[ -z "${PRIVATE_IP:-}" ]]; then
         PRIVATE_IP=$(grep '^PRIVATE_IP=' "${STATE_FILE:-}" 2>/dev/null | cut -d= -f2 | head -1 || true)
     fi
-    if [[ -z "${PRIVATE_IP:-}" ]]; then
-        PRIVATE_IP=$(ip addr show 2>/dev/null \
-            | grep 'inet ' | grep -v '127\.' | head -1 \
-            | awk '{print $2}' | cut -d/ -f1 || true)
+
+    # Last-known-good fallback: if STATE gave nothing, reuse the external-ip already
+    # in the INSTALLED coturn.conf so the render is a deterministic no-op swap
+    # rather than a degraded (empty external-ip) live swap.
+    if [[ -z "${PUBLIC_IP:-}" ]]; then
+        local _installed_conf="${_prefix_etc}/coturn.conf"
+        if [[ -r "$_installed_conf" ]]; then
+            local _installed_ext
+            _installed_ext=$(grep -E '^external-ip=' "$_installed_conf" 2>/dev/null \
+                | head -1 | sed 's/^external-ip=//' | tr -d '[:space:]' || true)
+            if [[ -n "$_installed_ext" ]]; then
+                # Format is "PUBLIC/PRIVATE" behind NAT, else "PUBLIC".
+                PUBLIC_IP="${_installed_ext%%/*}"
+                if [[ "$_installed_ext" == */* ]]; then
+                    PRIVATE_IP="${_installed_ext#*/}"
+                fi
+                log "reconcile_coturn: PUBLIC_IP not in STATE — reusing last-known-good external-ip from installed coturn.conf"
+            fi
+        fi
+    fi
+
+    # If STILL no PUBLIC_IP, SKIP the coturn surface this cycle. Return 2 (SKIP):
+    # caller leaves the live coturn.conf untouched (no swap, no SIGUSR2). NEVER
+    # render an empty external-ip= and swap it into a degraded config live.
+    if [[ -z "${PUBLIC_IP:-}" ]]; then
+        warn "reconcile_coturn: no PUBLIC_IP from env/STATE/installed coturn.conf — SKIPPING coturn render this converge (live config left untouched). Fix: persist PUBLIC_IP in $STATE_FILE or set OXPULSE_PUBLIC_IP and re-run install."
+        return 2
     fi
 
     # EXTERNAL_IP_LINE: "public/private" if behind NAT (different IPs), else "public".
@@ -1018,8 +1056,16 @@ reconcile_coturn_surface() {
     command -v opec >/dev/null 2>&1 \
         || die "reconcile_coturn: opec not on PATH — required for coturn.conf render"
 
-    # Set up all placeholder env vars.
-    _setup_coturn_render_env "$_prefix_etc"
+    # Set up all placeholder env vars. Return code 2 = SKIP signal: no PUBLIC_IP
+    # from env/STATE/installed coturn.conf → leave the live config untouched
+    # (no swap, no SIGUSR2). NEVER swap a degraded (empty external-ip) config live.
+    local _env_rc=0
+    _setup_coturn_render_env "$_prefix_etc" || _env_rc=$?
+    if [[ "$_env_rc" -eq 2 ]]; then
+        rm -f "$_out_path"
+        log "reconcile_coturn: SKIP — external-ip unresolvable; live coturn.conf left untouched (no swap)"
+        return 0
+    fi
 
     # Render via opec (single render authority — Decision 2).
     opec render coturn --tpl "$_tpl_path" --out "$_out_path" \
@@ -1174,9 +1220,11 @@ reconcile_xray_client_surface() {
     fi
 
     # Completeness guard — fail_soft: warn on residue, skip swap.
-    if grep -qE '\{\{[A-Z0-9_]+\}\}' "$_out_path" 2>/dev/null; then
+    # Match any {{...}} placeholder (not only [A-Z0-9_]) so a future lowercase /
+    # hyphenated placeholder cannot slip an unresolved value into a live swap.
+    if grep -qE '\{\{[^}]+\}\}' "$_out_path" 2>/dev/null; then
         local _leftover
-        _leftover=$(grep -oE '\{\{[A-Z0-9_]+\}\}' "$_out_path" | sort -u | tr '\n' ' ')
+        _leftover=$(grep -oE '\{\{[^}]+\}\}' "$_out_path" | sort -u | tr '\n' ' ')
         rm -f "$_out_path"
         warn "reconcile_xray_client: unresolved placeholders (${_leftover}) — skipping (fail_soft)"
         return 0
@@ -1216,8 +1264,11 @@ reconcile_xray_client_surface() {
     if "$_docker" compose -f "$_compose_file" up -d --force-recreate xray-client 2>/dev/null; then
         log "reconcile_xray_client: xray-client recreated (caddy/coturn/SFU/naive untouched)"
     else
-        warn "reconcile_xray_client: xray-client recreate failed — check: $_docker compose -f $_compose_file logs xray-client"
-        # fail_soft: do not die even on recreate failure
+        # fail_soft: do not die. But the config was ALREADY swapped above, so the
+        # container is now running the OLD config — a silent partial-apply. Emit a
+        # DISTINCT, scrapeable marker so a healthcheck/operator can detect the drift
+        # (config-on-disk newer than the running container).
+        warn "reconcile_xray_client: STALE_CONFIG xray-client config swapped on disk but recreate FAILED — container running STALE config; check: $_docker compose -f $_compose_file logs xray-client"
     fi
 }
 
