@@ -129,6 +129,61 @@ awk '
 
 pass "test3: every sample line immediately follows its own metric's # TYPE line (valid family grouping)"
 
+# ---- Test 4 (PR review round 2, council LOW): a tampered state file survives ----
+# Pre-seed the state file with a non-numeric 3rd (counter-value) field —
+# simulates a hand-edited or otherwise corrupted partner_edge.prom.state.
+# Without the `[[ $_v =~ ^[0-9]+$ ]] || _v=0` guard, `_v + delta` under
+# `set -euo pipefail` throws an arithmetic error and takes down the WHOLE
+# script — the same failure class HIGH-1 fixed for the write path, one line
+# lower in emit_metric.
+T4=$(mktemp -d)
+trap 'rm -rf "$T4"' EXIT
+
+make_bin "$T4"
+cat > "$T4/curl" <<'CURLSTUB4'
+#!/bin/bash
+for arg in "$@"; do
+    if [[ "$arg" == *partner/heartbeat* ]]; then
+        echo '{"ok":true}'
+        echo '200'
+        exit 0
+    fi
+done
+echo 'curl: (6) Could not resolve host' >&2
+exit 6
+CURLSTUB4
+chmod +x "$T4/curl"
+
+mkdir -p "$T4/etc" "$T4/var" "$T4/textfile"
+printf '{"node_id":"test-node-tamper"}\n' > "$T4/etc/node-config.json"
+printf 'partner_edge_keys_fetch_failure_total\tpartner_id="test-node-tamper"\tNOTANUMBER\n' \
+    > "$T4/textfile/partner_edge.prom.state"
+
+set +e
+PATH="$T4" \
+    LOG_FILE="$T4/refresh.log" \
+    PARTNER_EDGE_PREFIX_ETC="$T4/etc" \
+    PARTNER_EDGE_PREFIX_LIB="$T4/var" \
+    PARTNER_EDGE_TEXTFILE_DIR="$T4/textfile" \
+    OXPULSE_BACKEND_URL="http://broken-dns-hostname.invalid" \
+    bash "$SCRIPT" >"$T4/out.txt" 2>&1
+EXIT4=$?
+set -e
+
+[[ $EXIT4 -eq 0 ]] \
+    || fail "test4: script must survive a tampered state file (non-numeric counter value), got exit $EXIT4; output: $(cat "$T4/out.txt")"
+
+PROM_FILE4="$T4/textfile/partner_edge.prom"
+[[ -f "$PROM_FILE4" ]] || fail "test4: $PROM_FILE4 not regenerated after a tampered state file"
+VALUE4=$(grep '^partner_edge_keys_fetch_failure_total{' "$PROM_FILE4" | awk '{print $2}')
+[[ "$VALUE4" == "1" ]] \
+    || fail "test4: tampered value must reset to 0 before adding delta=1 (expected '1', got '$VALUE4')"
+
+pass "test4 (arithmetic guard, round 2): a hand-tampered non-numeric state-file value resets to 0 instead of crashing the script"
+
+trap - EXIT
+rm -rf "$T4"
+
 # ---- Syntax check ----
 bash -n "$SCRIPT" || fail "refresh script has syntax errors"
 pass "syntax check clean"

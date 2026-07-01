@@ -60,6 +60,19 @@ write_secret_atomic() {
 		rm -f "$tmp" 2>/dev/null || true
 		return 1
 	fi
+	# Durability (PR review round 2, MEDIUM): fsync the tmp file's data
+	# before the rename. Without this, a crash right after mv() commits the
+	# rename can still leave a truncated/torn token file if the write never
+	# reached disk. `sync -f FILE` (GNU coreutils 8.24+) syncs the
+	# filesystem containing FILE; fall back to a full `sync` on hosts
+	# without per-file support. Advisory only — some sandboxes/exotic
+	# filesystems reject fsync entirely, and failing the whole write over a
+	# best-effort durability step would be a worse outcome than proceeding
+	# (the caller already treats a genuine write failure as "warn + preserve
+	# the existing file", so this stays log-only, never a `return 1`).
+	if ! sync -f "$tmp" 2>/dev/null && ! sync 2>/dev/null; then
+		echo "sync before rename failed (non-fatal, proceeding)" >&2
+	fi
 	if ! mv -f "$tmp" "$path" 2>/dev/null; then
 		echo "mv into place failed" >&2
 		rm -f "$tmp" 2>/dev/null || true

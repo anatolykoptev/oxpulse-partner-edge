@@ -71,6 +71,14 @@ emit_metric() {
     if [[ -f "$state_file" ]]; then
         while IFS=$'\t' read -r _n _l _v || [[ -n "$_n" ]]; do
             [[ -z "$_n" ]] && continue
+            # Defensive (PR review round 2, council LOW): a hand-edited or
+            # otherwise tampered state file could carry a non-numeric 3rd
+            # field. Without this guard, `_v + delta` under `set -euo
+            # pipefail` throws "value too great for base" / a syntax error
+            # and takes the WHOLE script down via an uncaught arithmetic
+            # failure — the exact class of bug HIGH-1 fixed for the write
+            # path, just one line lower. Reset to 0 instead of trusting it.
+            [[ "$_v" =~ ^[0-9]+$ ]] || _v=0
             if [[ "$_n" == "$name" && "$_l" == "$labels" ]]; then
                 _v=$(( _v + delta )); found=1
             fi
@@ -161,6 +169,11 @@ else
             echo "chmod $mode failed" >&2
             rm -f "$tmp" 2>/dev/null || true
             return 1
+        fi
+        # Durability (PR review round 2, MEDIUM) — see oxpulse-token-lib.sh
+        # for the full rationale. Advisory only, never a `return 1`.
+        if ! sync -f "$tmp" 2>/dev/null && ! sync 2>/dev/null; then
+            echo "sync before rename failed (non-fatal, proceeding)" >&2
         fi
         if ! mv -f "$tmp" "$path" 2>/dev/null; then
             echo "mv into place failed" >&2
@@ -314,6 +327,53 @@ emit_xprb_failure() {
         "partner_id=\"${NODE_ID}\",reason=\"$1\"" "1"
 }
 
+# xprb_curl_get_with_retry url bearer — mirrors opec's get_with_retry
+# semantics (PR review round 2, gating MEDIUM): up to 3 attempts, short
+# backoff (2s, then 5s), retry ONLY on a curl transport failure (DNS,
+# connect, TLS, timeout) or an HTTP 5xx — a transient backend blip must not
+# defer re-mint by a full day (the next daily tick). A 4xx is NEVER
+# retried: auth/permission errors are deterministic, and burning the retry
+# budget on one just delays surfacing a real misconfiguration.
+#
+# --max-time 15 per attempt (unchanged budget per try). On success (any
+# transfer that completes, including a 4xx/5xx the caller still needs to
+# see) prints "body\n%{http_code}" to stdout exactly like a single curl -w
+# call, so the caller's EXISTING tail/sed parsing below is untouched.
+# Returns 0 when a transfer completed (any status); returns the last curl
+# exit code when every attempt was a transport failure. This function does
+# not know about log()/emit_metric() — same two-state-primitive contract as
+# write_secret_atomic — the caller decides how to report the outcome.
+xprb_curl_get_with_retry() {
+    local url="$1" bearer="$2"
+    local attempt out rc code delays=(2 5)
+    for attempt in 1 2 3; do
+        rc=0
+        out=$(curl -sS --max-time 15 -L \
+            -H "Authorization: Bearer ${bearer}" \
+            "$url" -w '\n%{http_code}' 2>&1) || rc=$?
+
+        if [[ "$rc" -ne 0 ]]; then
+            if [[ "$attempt" -lt 3 ]]; then
+                sleep "${delays[$((attempt - 1))]}"
+                continue
+            fi
+            printf '%s' "$out"
+            return "$rc"
+        fi
+
+        code=$(printf '%s' "$out" | tail -n1)
+        if [[ "$code" =~ ^5[0-9][0-9]$ && "$attempt" -lt 3 ]]; then
+            sleep "${delays[$((attempt - 1))]}"
+            continue
+        fi
+
+        # Transfer completed: success, a non-retryable 4xx, or a 5xx that
+        # survived all retries — hand back to the caller as-is either way.
+        printf '%s' "$out"
+        return 0
+    done
+}
+
 if [[ "$_xprb_needs_refresh" -eq 1 ]]; then
     _xprb_svc_token=$(read_service_token 2>/dev/null || true)
     if [[ -z "$_xprb_svc_token" ]]; then
@@ -324,14 +384,11 @@ if [[ "$_xprb_needs_refresh" -eq 1 ]]; then
         # having curl fold a 4xx/5xx into its own exit code — that lets us
         # log the status without ever touching the response BODY (HIGH-2:
         # this is a credential-issuing endpoint; a token-shaped-but-
-        # unexpected body must never reach the log verbatim). curl's own
-        # exit code still fires (and is handled) for network-level failures
-        # — DNS, connect, TLS, timeout.
+        # unexpected body must never reach the log verbatim).
         _xprb_curl_rc=0
-        _xprb_curl_out=$(curl -sS --max-time 15 -L \
-            -H "Authorization: Bearer ${_xprb_svc_token}" \
-            "${BACKEND_URL}/api/partner/cross-probe-token" \
-            -w '\n%{http_code}' 2>&1) || _xprb_curl_rc=$?
+        _xprb_curl_out=$(xprb_curl_get_with_retry \
+            "${BACKEND_URL}/api/partner/cross-probe-token" "${_xprb_svc_token}") \
+            || _xprb_curl_rc=$?
 
         if [[ "$_xprb_curl_rc" -ne 0 ]]; then
             log "WARN cross-probe token fetch failed (curl exit=${_xprb_curl_rc}; existing file, if any, preserved)"
@@ -387,7 +444,7 @@ if [[ "$_xprb_needs_refresh" -eq 1 ]]; then
     fi
     unset _xprb_svc_token
 fi
-unset -f emit_xprb_failure
+unset -f emit_xprb_failure xprb_curl_get_with_retry
 unset _xprb_needs_refresh
 unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTER_SECS
 

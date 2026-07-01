@@ -27,7 +27,7 @@ make_bin() {
     local dir="$1"
     for cmd in bash sh date printf cat tee cp mv mkdir chmod install sleep \
                 sed grep head tail wc stat cut tr expr test touch \
-                dirname mktemp basename sha256sum; do
+                dirname mktemp basename sha256sum sync; do
         local loc
         loc=$(command -v "$cmd" 2>/dev/null || true)
         if [[ -n "$loc" ]]; then ln -sf "$loc" "$dir/$cmd"; fi
@@ -50,7 +50,9 @@ KEYS_BODY='{"version":"v1","sfu_signing_public_key":"","channels_version":"c1","
 # curl stub factory: routes on URL substring.
 #   $1 = dir to write the stub into
 #   $2 = cross-probe-token endpoint behavior: "success" | "curl_fail" | "malformed"
-#   $3 = marker file path — touched iff the cross-probe-token endpoint was hit
+#   $3 = marker file path — one line APPENDED per cross-probe-token call, so
+#        `wc -l < marker` doubles as an attempt-count assertion for the
+#        retry-on-5xx / no-retry-on-4xx regression tests below.
 write_curl_stub() {
     local dir="$1" mode="$2" marker="$3"
     local xprb_body xprb_code xprb_exit
@@ -108,7 +110,7 @@ for arg in "\$@"; do
         exit 0
     fi
     if [[ "\$arg" == *partner/cross-probe-token* ]]; then
-        : > "$marker"
+        printf 'call\n' >> "$marker"
         if [[ $xprb_exit -ne 0 ]]; then
             echo 'curl: (28) Operation timed out' >&2
             exit $xprb_exit
@@ -121,6 +123,41 @@ for arg in "\$@"; do
     fi
 done
 # Default: keys endpoint
+echo '$KEYS_BODY'
+exit 0
+CURLSTUB
+    chmod +x "$dir/curl"
+}
+
+# write_curl_stub_retry_then_success dir marker succeed_at
+# Stateful cross-probe-token stub for the retry-on-5xx regression (PR review
+# round 2): returns HTTP 503 on every call before attempt $succeed_at, then
+# a valid 200+token response. Attempt number is derived from $marker's line
+# count (one line appended per call, read BEFORE incrementing) — same
+# counting convention as write_curl_stub's marker.
+write_curl_stub_retry_then_success() {
+    local dir="$1" marker="$2" succeed_at="$3"
+    cat > "$dir/curl" <<CURLSTUB
+#!/bin/bash
+for arg in "\$@"; do
+    if [[ "\$arg" == *partner/heartbeat* ]]; then
+        echo '{"ok":true}'
+        echo '200'
+        exit 0
+    fi
+    if [[ "\$arg" == *partner/cross-probe-token* ]]; then
+        _n=\$(( \$(wc -l < "$marker" 2>/dev/null || echo 0) + 1 ))
+        printf 'call\n' >> "$marker"
+        if [[ "\$_n" -ge $succeed_at ]]; then
+            echo '{"cross_probe_token":"xprb_retry_success_token","issued_at":"2026-07-01T06:00:00Z","ttl_secs":604800}'
+            echo '200'
+        else
+            echo '{"error":"backend overloaded, try again"}'
+            echo '503'
+        fi
+        exit 0
+    fi
+done
 echo '$KEYS_BODY'
 exit 0
 CURLSTUB
@@ -273,8 +310,11 @@ PROM_FILE3="$T3/textfile/partner_edge.prom"
     || fail "test3: $PROM_FILE3 not created after cross-probe fetch failure"
 grep -q 'partner_edge_cross_probe_token_refresh_failure_total' "$PROM_FILE3" \
     || fail "test3: failure counter not emitted; got: $(cat "$PROM_FILE3")"
+CALLS3=$(wc -l < "$MARKER3")
+[[ "$CALLS3" -eq 3 ]] \
+    || fail "test3: a persistent transport failure must exhaust all 3 retry attempts (2s/5s backoff), got $CALLS3 call(s)"
 
-pass "test3: curl failure on an old token → existing file preserved untouched, failure counter emitted"
+pass "test3: curl failure on an old token → all 3 retry attempts exhausted, existing file preserved, failure counter emitted"
 
 trap - EXIT
 rm -rf "$T3"
@@ -532,11 +572,149 @@ grep -q "invalid service token" "$T9/out.txt" \
     && fail "test9: the error response body must not be logged verbatim; got: $(cat "$T9/out.txt")"
 grep -q 'reason="http_401"' "$T9/textfile/partner_edge.prom" \
     || fail "test9: expected reason=\"http_401\" in the emitted metric; got: $(cat "$T9/textfile/partner_edge.prom" 2>/dev/null)"
+CALLS9=$(wc -l < "$MARKER9")
+[[ "$CALLS9" -eq 1 ]] \
+    || fail "test9 (retry-on-5xx round 2): a 4xx is deterministic and must NEVER be retried, got $CALLS9 call(s)"
 
-pass "test9: non-200 status → status logged, body withheld, http_401 metric emitted"
+pass "test9: non-200 status → status logged, body withheld, http_401 metric emitted, NOT retried (exactly 1 attempt)"
 
 trap - EXIT
 rm -rf "$T9"
+
+# ── Test 10 (retry-on-5xx round 2): transient 5xx retried, THEN succeeds ─────
+# Backend returns 503 on attempts 1-2, then a valid token on attempt 3 — the
+# exact scenario the gating MEDIUM named: a transient backend blip must not
+# defer re-mint by a full day. Asserts the token IS installed (retry
+# recovered) and all 3 attempts were actually consumed.
+T10=$(mktemp -d)
+trap 'rm -rf "$T10"' EXIT
+
+make_bin "$T10"
+MARKER10="$T10/xprb_hit"
+write_curl_stub_retry_then_success "$T10" "$MARKER10" 3
+
+mkdir -p "$T10/etc" "$T10/var" "$T10/textfile"
+printf '{"node_id":"test-node-xprb10"}\n' > "$T10/etc/node-config.json"
+echo "v1" > "$T10/var/keys-version"
+echo "c1" > "$T10/var/channels-version"
+# No cross-probe-token file → the leg always attempts a fetch here.
+
+set +e
+run_refresh "$T10" stkn_test_valid
+EXIT10=$?
+set -e
+
+[[ $EXIT10 -eq 0 ]] \
+    || fail "test10: script must exit 0 (got $EXIT10); output: $(cat "$T10/out.txt")"
+TOKEN_FILE10="$T10/etc/cross-probe-token"
+[[ -f "$TOKEN_FILE10" ]] \
+    || fail "test10: token file not created despite eventual success on attempt 3; output: $(cat "$T10/out.txt")"
+CONTENT10=$(cat "$TOKEN_FILE10")
+[[ "$CONTENT10" == "xprb_retry_success_token" ]] \
+    || fail "test10: expected the attempt-3 token, got '$CONTENT10'"
+CALLS10=$(wc -l < "$MARKER10")
+[[ "$CALLS10" -eq 3 ]] \
+    || fail "test10: expected exactly 3 attempts (2 x 503 + 1 success), got $CALLS10"
+grep -q "cross-probe token refreshed" "$T10/out.txt" \
+    || fail "test10: expected a success log line; got: $(cat "$T10/out.txt")"
+
+pass "test10 (retry-on-5xx round 2): 503 on attempts 1-2, success on attempt 3 → token installed, all 3 attempts consumed"
+
+trap - EXIT
+rm -rf "$T10"
+
+# ── Test 11 (retry-on-5xx round 2): persistent 5xx exhausts retries cleanly ──
+# Same shape as test3 (curl transport failure) but for an HTTP-level 5xx
+# that never recovers — confirms the retry loop hands back the LAST 503
+# response (not a transport-failure code path) after exhausting attempts,
+# and the existing token is preserved.
+T11=$(mktemp -d)
+trap 'rm -rf "$T11"' EXIT
+
+make_bin "$T11"
+MARKER11="$T11/xprb_hit"
+write_curl_stub_retry_then_success "$T11" "$MARKER11" 99   # never reaches attempt 99 → always 503
+
+mkdir -p "$T11/etc" "$T11/var" "$T11/textfile"
+printf '{"node_id":"test-node-xprb11"}\n' > "$T11/etc/node-config.json"
+echo "v1" > "$T11/var/keys-version"
+echo "c1" > "$T11/var/channels-version"
+
+TOKEN_FILE11="$T11/etc/cross-probe-token"
+printf 'xprb_existing_stale_token_11' > "$TOKEN_FILE11"
+chmod 0600 "$TOKEN_FILE11"
+backdate_mtime "$TOKEN_FILE11"
+
+set +e
+run_refresh "$T11" stkn_test_valid
+EXIT11=$?
+set -e
+
+[[ $EXIT11 -eq 0 ]] \
+    || fail "test11: script must exit 0 on a persistent 5xx (got $EXIT11); output: $(cat "$T11/out.txt")"
+CALLS11=$(wc -l < "$MARKER11")
+[[ "$CALLS11" -eq 3 ]] \
+    || fail "test11: a persistent 503 must exhaust all 3 retry attempts, got $CALLS11"
+grep -q "HTTP 503" "$T11/out.txt" \
+    || fail "test11: expected the final 503 status in the warning; got: $(cat "$T11/out.txt")"
+grep -q "backend overloaded" "$T11/out.txt" \
+    && fail "test11: the 5xx error body must not be logged verbatim; got: $(cat "$T11/out.txt")"
+CONTENT11=$(cat "$TOKEN_FILE11")
+[[ "$CONTENT11" == "xprb_existing_stale_token_11" ]] \
+    || fail "test11: existing token must be preserved after exhausting retries — got '$CONTENT11'"
+
+pass "test11 (retry-on-5xx round 2): persistent 503 exhausts all 3 attempts, existing token preserved, body never logged"
+
+trap - EXIT
+rm -rf "$T11"
+
+# ── Test 12 (fsync-before-rename round 2): a failing `sync` must not break ───
+# the write path. write_secret_atomic's new durability step is explicitly
+# advisory (log-only) — a host/filesystem that rejects fsync entirely (or
+# lacks the `sync` binary) must still complete the write.
+T12=$(mktemp -d)
+trap 'rm -rf "$T12"' EXIT
+
+make_bin "$T12"
+MARKER12="$T12/xprb_hit"
+write_curl_stub "$T12" success "$MARKER12"
+# Remove the real symlink first — `cat >` follows symlinks when opening for
+# write, so writing straight over it would try to overwrite the real
+# system sync binary (same gotcha as the mktemp stub in test8).
+rm -f "$T12/sync"
+cat > "$T12/sync" <<'SYNCSTUB'
+#!/bin/sh
+echo "sync: Function not implemented" >&2
+exit 1
+SYNCSTUB
+chmod +x "$T12/sync"
+
+mkdir -p "$T12/etc" "$T12/var"
+printf '{"node_id":"test-node-xprb12"}\n' > "$T12/etc/node-config.json"
+echo "v1" > "$T12/var/keys-version"
+echo "c1" > "$T12/var/channels-version"
+# No cross-probe-token file → the leg always attempts a fetch+write here.
+
+set +e
+run_refresh "$T12" stkn_test_valid
+EXIT12=$?
+set -e
+
+[[ $EXIT12 -eq 0 ]] \
+    || fail "test12: script must exit 0 even when sync always fails (got $EXIT12); output: $(cat "$T12/out.txt")"
+TOKEN_FILE12="$T12/etc/cross-probe-token"
+[[ -f "$TOKEN_FILE12" ]] \
+    || fail "test12: token file must still be written when sync fails (advisory-only durability step); output: $(cat "$T12/out.txt")"
+CONTENT12=$(cat "$TOKEN_FILE12")
+[[ "$CONTENT12" == "xprb_new_token_abc123" ]] \
+    || fail "test12: token content mismatch despite sync failure — got '$CONTENT12'"
+grep -q "cross-probe token refreshed" "$T12/out.txt" \
+    || fail "test12: expected the normal success log line despite sync failing; got: $(cat "$T12/out.txt")"
+
+pass "test12 (fsync-before-rename round 2): a failing sync is advisory-only — write still completes"
+
+trap - EXIT
+rm -rf "$T12"
 
 # ── Syntax check ───────────────────────────────────────────────────────────
 bash -n "$SCRIPT" \
