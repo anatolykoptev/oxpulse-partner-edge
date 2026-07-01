@@ -103,6 +103,19 @@ configure_amneziawg() {
 	# pick a fresh port at install time so two edges on the same NAT don't
 	# collide.
 	local listen_port="${AWG_LISTEN_PORT:-$((43800 + RANDOM % 200))}"
+	# Single-writer coordination with the awg-params-agent daemon: both this
+	# installer and the agent write awg0.conf. Serialize via an advisory flock on
+	# <conf_path>.lock — shared byte-for-byte with the agent's rustix flock(2)
+	# target (OXPULSE_AWG_CONF_LOCK_PATH defaults to the same "<conf>.lock").
+	# Without it, a mid-install agent tick reads a pre-install conf and renames
+	# its stale-identity merge over the just-rotated PrivateKey/Endpoint/Jc/S1-S4/
+	# H1-H4 (data_loss). Reuses the established flock protocol (upgrade.sh:365,
+	# lib/telegram-alert-lib.sh:46). -w 10 matches the agent's OXPULSE_AWG_LOCK_TIMEOUT.
+	# We fd-open + flock + write + release around ONLY the conf write, so the slow
+	# systemctl/handshake steps below never hold the lock against the agent.
+	local lock_path="${AWG_CONF_LOCK_PATH:-${conf_path}.lock}"
+	exec 9>"$lock_path"
+	flock -w 10 9 || die "configure_amneziawg: could not acquire $lock_path within 10s (awg-params-agent may be mid-write) — retry the install"
 	cat > "$conf_path" <<-AWGCONF
 		[Interface]
 		PrivateKey = $(cat "$AWG_PRIV_PATH")
@@ -128,6 +141,9 @@ configure_amneziawg() {
 		PersistentKeepalive = 25
 	AWGCONF
 	chmod 0600 "$conf_path"
+	# Release the conf lock (close fd 9) before the slow systemctl/handshake
+	# steps so a waiting agent tick is unblocked as soon as the write is durable.
+	exec 9>&-
 	systemctl daemon-reload
 	systemctl enable --now awg-quick@awg0 >/dev/null 2>&1 || \
 	  warn "awg-quick@awg0 enable failed — see 'systemctl status awg-quick@awg0'"
