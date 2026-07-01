@@ -5,6 +5,23 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.79...v0.13.0) (2026-07-01)
+
+
+### Features
+
+* **observability:** surface consecutive coturn-skip count for stuck-edge detection ([7f7226f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7f7226f735d6f69efe26c0e3ac346542617a4f62))
+* **observability:** surface consecutive coturn-skip count for stuck-edge detection ([fea6184](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/fea61847728beb29f4b746bc6746f81aec5a1576))
+* **observability:** surface coturn-skip count in edge health report + cover no-op/dry-run resets ([acaa072](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/acaa0728533dfa1d850c3df879b1340ddda8fbdb))
+* **reconcile:** wire coturn/xray_client/firewall/xray_env surfaces (Phase 4b) ([8de275b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/8de275b45674f911b64bf3eefbd99f3c8ea920b9))
+* **refresh:** daily cross-probe token re-mint via the T2.4.c endpoint ([#328](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/328)) ([df98c02](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/df98c02337eef237f75499914207431204c45080))
+
+
+### Bug Fixes
+
+* **probe:** treat 429/408 as transient, not a permanent 4xx (RFC 6585) ([#325](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/325)) ([cebcd1f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/cebcd1f386aa031989e1563ef284e56cc4350bcc))
+* **reconcile:** make coturn render deterministic + fail-closed; close HIGH/MEDIUM review findings ([aeba59a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/aeba59a94b39f8b1c0ff98dd32ae53b1a7c6d5f4))
+
 ## [0.12.79](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.78...v0.12.79) (2026-06-16)
 
 
