@@ -4,14 +4,36 @@ use crate::{
     client::AgentClient,
     conf_merge::merge_obfuscation_params,
     error::{Context, Result},
+    params::AwgParams,
     state::{load_state, save_state, AwgState},
 };
 use chrono::Utc;
+use rustix::fs::{flock, FlockOperation};
 use std::io::Write;
-use std::{path::PathBuf, time::Duration};
+use std::os::unix::fs::OpenOptionsExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tempfile::NamedTempFile;
 use tokio::{process::Command, time::sleep};
 use tracing::{debug, error, info, warn};
+
+/// Poll interval while waiting for the shared awg0.conf lock (LOCK_EX|LOCK_NB
+/// retry cadence). Mirrors the sub-second granularity of `flock -w`.
+const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Interim node_exporter textfile-collector metric name for lock-acquire
+/// conflicts. The durable counter lands in the Task 12 exporter; this textfile
+/// line keeps the signal observable until then.
+const CONF_CONFLICT_METRIC: &str = "awg_params_agent_conf_write_conflicts_total";
+
+/// Filename written under `textfile_dir` for the interim conflict counter.
+/// A dedicated file (not shared with partner_edge.prom) so the node_exporter
+/// textfile collector accumulates both without either clobbering the other.
+const CONF_CONFLICT_PROM_FILE: &str = "awg_params_agent.prom";
 
 /// All configuration for the agent loop, parsed from env at startup.
 pub struct AgentConfig {
@@ -34,17 +56,50 @@ pub struct AgentConfig {
     ///
     /// Set via `OXPULSE_RESTART_UNIT_AFTER_APPLY` env var.  Empty string → disabled.
     pub restart_unit_after_apply: Option<String>,
+
+    /// Advisory lock file, shared **byte-for-byte** with the installer
+    /// (`lib/install-awg.sh` flocks the same path). Both writers of
+    /// `awg_conf_path` serialize on this file so a mid-install agent tick can no
+    /// longer revert just-rotated identity fields (PrivateKey/Endpoint/Jc/S1-S4/
+    /// H1-H4) — the awg0.conf lost-update race. Default `<awg_conf_path>.lock`,
+    /// overridable via `OXPULSE_AWG_CONF_LOCK_PATH`.
+    pub awg_conf_lock_path: PathBuf,
+
+    /// Max wall time to wait for the shared conf lock before skipping the tick.
+    /// Matches the installer's `flock -w 10`. Set via `OXPULSE_AWG_LOCK_TIMEOUT`.
+    pub lock_acquire_timeout: Duration,
+
+    /// node_exporter textfile-collector directory for the interim
+    /// `awg_params_agent_conf_write_conflicts_total` counter. Default matches
+    /// `oxpulse-partner-edge-refresh.sh`'s textfile dir; set via
+    /// `OXPULSE_TEXTFILE_DIR`.
+    pub textfile_dir: PathBuf,
+
+    /// **Test hook only.** Injected delay between the locked conf read and the
+    /// atomic rename, used to deterministically reproduce the lost-update race
+    /// in tests. Always `Duration::ZERO` in production (`load_config` never sets
+    /// it non-zero).
+    pub test_read_write_delay: Duration,
 }
 
 pub struct AgentLoop {
     cfg: AgentConfig,
     client: AgentClient,
+    /// Interim, process-lifetime conflict counter mirrored to the textfile
+    /// collector. Seeded from the existing `.prom` file at startup so the
+    /// exported value stays monotonic across daemon restarts.
+    conf_write_conflicts: AtomicU64,
 }
 
 impl AgentLoop {
     pub fn new(cfg: AgentConfig) -> Result<Self> {
         let client = AgentClient::new(cfg.central_url.clone(), cfg.service_token_path.clone())?;
-        Ok(Self { cfg, client })
+        let seed = seed_conflict_counter(&cfg.textfile_dir);
+        Ok(Self {
+            cfg,
+            client,
+            conf_write_conflicts: AtomicU64::new(seed),
+        })
     }
 
     /// Run forever. Each iteration: poll → compare → apply (if needed) → sleep.
@@ -93,18 +148,28 @@ impl AgentLoop {
             "new epoch — applying"
         );
 
-        // 3. Merge params into conf.
-        let conf_text = tokio::fs::read_to_string(&self.cfg.awg_conf_path)
+        // 3+4. Read → merge → atomic-write the conf, serialized against the
+        // installer (lib/install-awg.sh) via the shared advisory lock. Holding
+        // the lock across the whole read→rename span is what closes the
+        // lost-update race: without it, this tick could read a pre-install conf
+        // and rename its stale-identity merge over the installer's just-rotated
+        // PrivateKey/Endpoint. The lock is released BEFORE apply_to_kernel so the
+        // installer's `flock -w 10` never waits on the up-to-30s kernel apply.
+        if !self
+            .merge_and_write_conf_locked(&response.params)
             .await
-            .with_context(|| format!("read {:?}", self.cfg.awg_conf_path))?;
-
-        let new_conf = merge_obfuscation_params(&conf_text, &response.params)
-            .context("merge obfuscation params")?;
-
-        // 4. Atomic write of new conf.
-        self.write_conf_atomic(&new_conf)
-            .await
-            .context("atomic write conf")?;
+            .context("merge+write conf under lock")?
+        {
+            // Another writer (the installer, or an overlapping tick) held the
+            // lock past the timeout. Skip this tick WITHOUT saving state so the
+            // next poll re-applies the same epoch; never partial-write unlocked.
+            warn!(
+                lock = ?self.cfg.awg_conf_lock_path,
+                "awg0.conf lock held by another writer — skipping this tick, will retry next poll"
+            );
+            self.record_conf_write_conflict();
+            return Ok(());
+        }
 
         // 5. Apply to running kernel via awg-quick strip | awg syncconf.
         self.apply_to_kernel().await.context("apply to kernel")?;
@@ -176,6 +241,67 @@ impl AgentLoop {
             Err(_) => {
                 warn!("unit restart timed out after 90s — unit may still be starting; systemd will continue the unit lifecycle");
             }
+        }
+    }
+
+    /// Merge new obfuscation `params` into awg0.conf and atomically rewrite it,
+    /// holding the installer-shared advisory lock across the entire read→rename
+    /// span (the lost-update-critical section). The lock is released when `_lock`
+    /// drops at the end of this method — i.e. BEFORE the caller runs
+    /// `apply_to_kernel`, keeping the critical section sub-second so the
+    /// installer's `flock -w 10` never times out on a concurrent kernel apply.
+    ///
+    /// Returns `Ok(true)` if the conf was rewritten; `Ok(false)` if the lock
+    /// could not be acquired within `lock_acquire_timeout` (caller skips this
+    /// tick and retries on the next poll).
+    async fn merge_and_write_conf_locked(&self, params: &AwgParams) -> Result<bool> {
+        let _lock = match self.acquire_conf_lock().await.context("acquire conf lock")? {
+            Some(lock) => lock,
+            None => return Ok(false),
+        };
+
+        // Read the current conf — identity fields (PrivateKey/Endpoint/Address)
+        // authored by the installer live here and are preserved verbatim by the
+        // merge below.
+        let conf_text = tokio::fs::read_to_string(&self.cfg.awg_conf_path)
+            .await
+            .with_context(|| format!("read {:?}", self.cfg.awg_conf_path))?;
+
+        // Test hook: deterministically widen the read→rename window so the
+        // lost-update race is reproducible in tests. Always ZERO in production.
+        if !self.cfg.test_read_write_delay.is_zero() {
+            sleep(self.cfg.test_read_write_delay).await;
+        }
+
+        let new_conf =
+            merge_obfuscation_params(&conf_text, params).context("merge obfuscation params")?;
+
+        self.write_conf_atomic(&new_conf)
+            .await
+            .context("atomic write conf")?;
+
+        // `_lock` drops here → flock released before apply_to_kernel.
+        Ok(true)
+    }
+
+    /// Acquire the shared conf advisory lock (LOCK_EX), polling until
+    /// `lock_acquire_timeout`. `Ok(None)` = timed out (another writer holds it).
+    /// Runs on the blocking pool because `flock(2)` and the retry sleeps block.
+    async fn acquire_conf_lock(&self) -> Result<Option<ConfLock>> {
+        let lock_path = self.cfg.awg_conf_lock_path.clone();
+        let timeout = self.cfg.lock_acquire_timeout;
+        tokio::task::spawn_blocking(move || acquire_conf_lock_blocking(&lock_path, timeout))
+            .await
+            .context("spawn_blocking for conf lock acquire")?
+    }
+
+    /// Bump the interim conflict counter and best-effort mirror it to the
+    /// node_exporter textfile collector. Non-fatal: a failed textfile write is
+    /// logged at debug and does not affect the loop.
+    fn record_conf_write_conflict(&self) {
+        let value = self.conf_write_conflicts.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Err(e) = write_conflict_metric(&self.cfg.textfile_dir, value) {
+            debug!(error = %e, "conflict textfile metric write failed (non-fatal)");
         }
     }
 
@@ -290,6 +416,98 @@ impl AgentLoop {
     }
 }
 
+/// RAII guard for the shared awg0.conf advisory lock. Holds the open lock-file
+/// descriptor; `flock(LOCK_UN)` on drop releases it deterministically (the
+/// kernel also releases on fd close, but the explicit unlock documents intent).
+struct ConfLock {
+    file: std::fs::File,
+}
+
+impl Drop for ConfLock {
+    fn drop(&mut self) {
+        let _ = flock(&self.file, FlockOperation::Unlock);
+    }
+}
+
+/// Blocking acquire of the shared conf lock. Opens (creating if absent) the lock
+/// file, then retries `LOCK_EX|LOCK_NB` on `LOCK_POLL_INTERVAL` until `timeout`.
+/// `Ok(None)` = another writer held the lock for the whole window.
+fn acquire_conf_lock_blocking(lock_path: &Path, timeout: Duration) -> Result<Option<ConfLock>> {
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create lock dir {:?}", parent))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(lock_path)
+        .with_context(|| format!("open lock file {:?}", lock_path))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(Some(ConfLock { file })),
+            Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::AGAIN => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                std::thread::sleep(LOCK_POLL_INTERVAL);
+            }
+            Err(e) => {
+                return Err(crate::error::anyhow!("flock {:?} failed: {}", lock_path, e));
+            }
+        }
+    }
+}
+
+/// Best-effort write of the interim conflict counter as a node_exporter
+/// textfile-collector line. Atomic replace (temp + rename) so the collector
+/// never scrapes a partially written file.
+fn write_conflict_metric(dir: &Path, value: u64) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create textfile dir {:?}", dir))?;
+    let body = format!(
+        "# HELP {name} Ticks where the agent could not acquire the awg0.conf lock within the timeout and skipped.\n\
+         # TYPE {name} counter\n\
+         {name} {value}\n",
+        name = CONF_CONFLICT_METRIC,
+        value = value,
+    );
+    let mut tmp =
+        NamedTempFile::new_in(dir).with_context(|| format!("temp textfile in {:?}", dir))?;
+    tmp.write_all(body.as_bytes())
+        .context("write conflict textfile")?;
+    tmp.flush().context("flush conflict textfile")?;
+    tmp.persist(dir.join(CONF_CONFLICT_PROM_FILE))
+        .context("persist conflict textfile")?;
+    Ok(())
+}
+
+/// Seed the process-lifetime conflict counter from the existing textfile so the
+/// exported value stays monotonic across daemon restarts. Best-effort: any
+/// read/parse failure yields 0 (fresh start).
+fn seed_conflict_counter(dir: &Path) -> u64 {
+    let path = dir.join(CONF_CONFLICT_PROM_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(CONF_CONFLICT_METRIC) {
+            if let Some(tok) = rest.split_whitespace().next() {
+                if let Ok(n) = tok.parse::<u64>() {
+                    return n;
+                }
+            }
+        }
+    }
+    0
+}
+
 /// Decide whether to fire the post-apply unit restart hook.
 ///
 /// Returns `Some(unit)` only when:
@@ -345,5 +563,239 @@ mod tests {
         // Empty-string env var is converted to None in load_config (main.rs).
         // Verify should_restart also returns None for None regardless of epoch.
         assert_eq!(should_restart(None, true), None);
+    }
+}
+
+// ── awg0.conf lost-update race: shared flock coordination ────────────────────
+//
+// These tests exercise the REAL locked write path (`merge_and_write_conf_locked`
+// + `acquire_conf_lock`), not a hand-copy. Removing the flock from
+// `merge_and_write_conf_locked` makes `agent_lock_prevents_identity_revert...`
+// go RED — that is the falsification proof for the fix.
+#[cfg(test)]
+mod conf_lock_tests {
+    use super::*;
+
+    const OLD_PRIV: &str = "OLDoldOLDoldOLDoldOLDoldOLDoldOLDoldOLDold0=";
+    const NEW_PRIV: &str = "NEWnewNEWnewNEWnewNEWnewNEWnewNEWnewNEWnew1=";
+    const OLD_ENDPOINT: &str = "1.1.1.1:51820";
+    const NEW_ENDPOINT: &str = "2.2.2.2:51820";
+
+    fn params(jc: i64) -> AwgParams {
+        AwgParams {
+            jc,
+            jmin: 3,
+            jmax: 500,
+            s1: 10,
+            s2: 20,
+            s4: 30,
+            h1: 1,
+            h2: 2,
+            h3: 3,
+            h4: 4,
+            i1: None,
+        }
+    }
+
+    fn base_cfg(dir: &Path) -> AgentConfig {
+        let conf = dir.join("awg0.conf");
+        let mut lock = conf.clone().into_os_string();
+        lock.push(".lock");
+        AgentConfig {
+            central_url: "http://127.0.0.1:1/unused".into(),
+            service_token_path: dir.join("token"),
+            awg_conf_path: conf,
+            awg_iface: "awg0".into(),
+            state_path: dir.join("state.json"),
+            poll_interval: Duration::from_secs(30),
+            node_id: "test-node".into(),
+            restart_unit_after_apply: None,
+            awg_conf_lock_path: PathBuf::from(lock),
+            lock_acquire_timeout: Duration::from_secs(10),
+            textfile_dir: dir.join("textfile"),
+            test_read_write_delay: Duration::ZERO,
+        }
+    }
+
+    fn seed_conf(path: &Path, priv_key: &str, endpoint: &str, jc: i64) {
+        let body = format!(
+            "[Interface]\n\
+             PrivateKey = {priv_key}\n\
+             Address = 10.0.0.9/32\n\
+             ListenPort = 43811\n\
+             Jc = {jc}\n\
+             Jmin = 3\n\
+             Jmax = 500\n\
+             S1 = 10\n\
+             S2 = 20\n\
+             S4 = 30\n\
+             H1 = 1\n\
+             H2 = 2\n\
+             H3 = 3\n\
+             H4 = 4\n\
+             Table = off\n\
+             MTU = 1300\n\
+             \n\
+             [Peer]\n\
+             PublicKey = SOMEPUBKEYbase64000000000000000000000000000=\n\
+             Endpoint = {endpoint}\n\
+             AllowedIPs = 10.0.0.1/32\n\
+             PersistentKeepalive = 25\n"
+        );
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// The installer's write, done under the SAME shared flock the agent uses
+    /// (blocking `LOCK_EX`, mirroring `flock -w 10 9` in lib/install-awg.sh).
+    /// Represents `configure_amneziawg` writing fresh identity mid-flight.
+    fn installer_write_locked(
+        lock_path: &Path,
+        conf_path: &Path,
+        priv_key: &str,
+        endpoint: &str,
+        jc: i64,
+    ) {
+        let lf = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(lock_path)
+            .unwrap();
+        loop {
+            match flock(&lf, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => break,
+                Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::AGAIN => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("installer flock failed: {e}"),
+            }
+        }
+        seed_conf(conf_path, priv_key, endpoint, jc);
+        let _ = flock(&lf, FlockOperation::Unlock);
+    }
+
+    // The agent reads OLD identity, then (mid its widened read→rename window) the
+    // installer writes fresh NEW identity. With the shared flock the installer
+    // blocks until the agent releases, so its NEW identity is the last write and
+    // survives. Without the flock (regression) the agent's stale-read merge
+    // renames OLD identity over NEW → this assertion fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_lock_prevents_identity_revert_under_concurrent_installer_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = base_cfg(dir.path());
+        cfg.test_read_write_delay = Duration::from_millis(700);
+        let conf_path = cfg.awg_conf_path.clone();
+        let lock_path = cfg.awg_conf_lock_path.clone();
+
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+        let agent = AgentLoop::new(cfg).unwrap();
+
+        // Start the agent write; it acquires the lock, reads OLD, then holds the
+        // lock through the 700ms delay.
+        let agent_task =
+            tokio::spawn(async move { agent.merge_and_write_conf_locked(&params(7)).await });
+
+        // Give the agent a head start so it is provably mid-delay (holding the
+        // lock, having already read OLD) before the installer attempts its write.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let inst_lock = lock_path.clone();
+        let inst_conf = conf_path.clone();
+        let installer_task = tokio::task::spawn_blocking(move || {
+            installer_write_locked(&inst_lock, &inst_conf, NEW_PRIV, NEW_ENDPOINT, 9);
+        });
+
+        let wrote = agent_task.await.unwrap().expect("agent write ok");
+        installer_task.await.unwrap();
+        assert!(wrote, "agent should have rewritten the conf");
+
+        let final_conf = std::fs::read_to_string(&conf_path).unwrap();
+        assert!(
+            final_conf.contains(&format!("PrivateKey = {NEW_PRIV}")),
+            "installer's fresh PrivateKey must survive the concurrent agent tick \
+             (lost-update race). Final conf:\n{final_conf}"
+        );
+        assert!(
+            final_conf.contains(&format!("Endpoint = {NEW_ENDPOINT}")),
+            "installer's fresh Endpoint must survive the concurrent agent tick. \
+             Final conf:\n{final_conf}"
+        );
+    }
+
+    // When the lock is held past the acquire timeout, the agent must NOT write
+    // (returns false) and the conflict counter textfile must be emitted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_skips_and_counts_when_lock_held_past_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = base_cfg(dir.path());
+        cfg.lock_acquire_timeout = Duration::from_millis(200);
+        let conf_path = cfg.awg_conf_path.clone();
+        let lock_path = cfg.awg_conf_lock_path.clone();
+        let textfile_dir = cfg.textfile_dir.clone();
+
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+
+        // A separate open-file-description holds LOCK_EX for the whole test.
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lock_path)
+            .unwrap();
+        flock(&holder, FlockOperation::LockExclusive).unwrap();
+
+        let agent = AgentLoop::new(cfg).unwrap();
+        let wrote = agent
+            .merge_and_write_conf_locked(&params(7))
+            .await
+            .expect("busy lock must not error");
+        assert!(
+            !wrote,
+            "agent must skip (return false) when the lock is held beyond the timeout"
+        );
+
+        // The conf must be untouched (still OLD) — no partial unlocked write.
+        let after = std::fs::read_to_string(&conf_path).unwrap();
+        assert!(
+            after.contains(&format!("PrivateKey = {OLD_PRIV}")),
+            "conf must be untouched when the lock could not be acquired"
+        );
+
+        // tick() calls record_conf_write_conflict on the skip path.
+        agent.record_conf_write_conflict();
+        let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
+        assert!(
+            prom.contains(&format!("{CONF_CONFLICT_METRIC} 1")),
+            "conflict counter textfile must be emitted. Got:\n{prom}"
+        );
+
+        let _ = flock(&holder, FlockOperation::Unlock);
+    }
+
+    // Positive control: with no competing writer, the agent acquires the lock,
+    // merges the new obfuscation params, and rewrites the conf successfully.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_writes_merged_params_when_lock_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let conf_path = cfg.awg_conf_path.clone();
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+
+        let agent = AgentLoop::new(cfg).unwrap();
+        let wrote = agent
+            .merge_and_write_conf_locked(&params(42))
+            .await
+            .expect("write ok");
+        assert!(wrote);
+
+        let out = std::fs::read_to_string(&conf_path).unwrap();
+        assert!(out.contains("Jc = 42"), "merged Jc must be applied:\n{out}");
+        assert!(
+            out.contains(&format!("PrivateKey = {OLD_PRIV}")),
+            "identity preserved through the merge:\n{out}"
+        );
     }
 }
