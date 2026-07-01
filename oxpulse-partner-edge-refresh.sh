@@ -38,16 +38,68 @@ BACKEND_URL="${BACKEND_URL%/}"
 ts()   { date -Iseconds; }
 log()  { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG_FILE"; }
 die()  { log "ERR $*"; exit 1; }
-# Append or create a Prometheus textfile metric (node_exporter textfile collector).
-# Idempotent: overwrites the file on every run so stale gauges do not accumulate.
-# Skips silently when TEXTFILE_DIR is unwritable or absent (non-fatal).
+# emit_metric name labels delta — increments a persisted Prometheus textfile
+# counter (node_exporter textfile collector) and rewrites partner_edge.prom
+# from scratch, atomically.
+#
+# PR review MED-4 on #328: the prior implementation blindly `>>`-appended a
+# fresh `# TYPE <name> counter` + sample line on EVERY call, forever. Two
+# daily failures produce TWO `# TYPE partner_edge_keys_fetch_failure_total`
+# lines in the same file — invalid Prometheus exposition format (a metric
+# family's TYPE line must appear exactly once, with all its samples
+# contiguous). node_exporter's textfile collector does not skip just the bad
+# family on a parse error — it drops the ENTIRE .prom file, silently
+# blackholing every counter this script emits, including ones unrelated to
+# the failure that caused the duplicate.
+#
+# Fix: persist cumulative counter state (name, labels) -> value in a small
+# tab-separated side file, then regenerate partner_edge.prom fresh from that
+# state on every call — one `# TYPE` line per metric name, its samples
+# grouped directly under it, written atomically (tmp+mv, same idiom as the
+# secret writes elsewhere in this script). This also makes the counters
+# real monotonic counters (increase()/rate() over the scrape window shows an
+# actual delta) instead of a flat "1" re-written every failing day.
 emit_metric() {
-    local name="$1" labels="$2" value="$3"
+    local name="$1" labels="$2" delta="$3"
     [[ -d "$TEXTFILE_DIR" ]] || mkdir -p "$TEXTFILE_DIR" 2>/dev/null || return 0
     local prom_file="$TEXTFILE_DIR/partner_edge.prom"
-    # Append metric line; node_exporter accumulates all lines per scrape.
-    printf '# TYPE %s counter\n%s{%s} %s\n' \
-        "$name" "$name" "$labels" "$value" >> "$prom_file" 2>/dev/null || true
+    local state_file="$TEXTFILE_DIR/partner_edge.prom.state"
+
+    # ---- merge (name, labels) -> cumulative value into the state file ----
+    local state_tmp found=0 _n _l _v
+    state_tmp=$(mktemp "${state_file}.XXXXXX" 2>/dev/null) || return 0
+    if [[ -f "$state_file" ]]; then
+        while IFS=$'\t' read -r _n _l _v || [[ -n "$_n" ]]; do
+            [[ -z "$_n" ]] && continue
+            if [[ "$_n" == "$name" && "$_l" == "$labels" ]]; then
+                _v=$(( _v + delta )); found=1
+            fi
+            printf '%s\t%s\t%s\n' "$_n" "$_l" "$_v"
+        done < "$state_file" > "$state_tmp"
+    fi
+    if [[ "$found" -eq 0 ]]; then
+        printf '%s\t%s\t%s\n' "$name" "$labels" "$delta" >> "$state_tmp"
+    fi
+    mv -f "$state_tmp" "$state_file" 2>/dev/null || { rm -f "$state_tmp" 2>/dev/null || true; return 0; }
+
+    # ---- regenerate partner_edge.prom fresh, grouped by metric name ----
+    local prom_tmp
+    prom_tmp=$(mktemp "${prom_file}.XXXXXX" 2>/dev/null) || return 0
+    {
+        local -A _samples=()
+        local -a _order=()
+        while IFS=$'\t' read -r _n _l _v || [[ -n "$_n" ]]; do
+            [[ -z "$_n" ]] && continue
+            [[ -z "${_samples[$_n]+x}" ]] && _order+=("$_n")
+            _samples[$_n]+="${_n}{${_l}} ${_v}"$'\n'
+        done < "$state_file"
+        local _name
+        for _name in "${_order[@]}"; do
+            printf '# TYPE %s counter\n' "$_name"
+            printf '%s' "${_samples[$_name]}"
+        done
+    } > "$prom_tmp" 2>/dev/null
+    mv -f "$prom_tmp" "$prom_file" 2>/dev/null || rm -f "$prom_tmp" 2>/dev/null || true
 }
 
 # OS-aware install hint: returns the appropriate install command for the host PM.
@@ -91,6 +143,31 @@ else
             cat "${PREFIX_ETC}/token"; return 0
         fi
         return 1
+    }
+    # write_secret_atomic — mirrors oxpulse-token-lib.sh's helper (see there
+    # for the full rationale: every step guarded so a failure here can NEVER
+    # take down a `set -euo pipefail` caller via an uncaught mktemp/chmod/mv
+    # exit).
+    write_secret_atomic() {
+        local path="$1" content="$2" mode="$3"
+        local tmp
+        tmp=$(mktemp "${path}.XXXXXX" 2>&1) || { echo "mktemp failed: $tmp" >&2; return 1; }
+        if ! printf '%s' "$content" > "$tmp" 2>/dev/null; then
+            echo "write to tmp file failed" >&2
+            rm -f "$tmp" 2>/dev/null || true
+            return 1
+        fi
+        if ! chmod "$mode" "$tmp" 2>/dev/null; then
+            echo "chmod $mode failed" >&2
+            rm -f "$tmp" 2>/dev/null || true
+            return 1
+        fi
+        if ! mv -f "$tmp" "$path" 2>/dev/null; then
+            echo "mv into place failed" >&2
+            rm -f "$tmp" 2>/dev/null || true
+            return 1
+        fi
+        return 0
     }
 fi
 unset _TOKEN_LIB
@@ -230,43 +307,87 @@ if [[ -f "$CROSS_PROBE_TOKEN_FILE" ]]; then
     unset _xprb_mtime _xprb_age
 fi
 
+emit_xprb_failure() {
+    # $1 = reason label value. Centralizes the metric call so every failure
+    # branch below stays a one-liner.
+    emit_metric "partner_edge_cross_probe_token_refresh_failure_total" \
+        "partner_id=\"${NODE_ID}\",reason=\"$1\"" "1"
+}
+
 if [[ "$_xprb_needs_refresh" -eq 1 ]]; then
     _xprb_svc_token=$(read_service_token 2>/dev/null || true)
     if [[ -z "$_xprb_svc_token" ]]; then
         log "WARN cross-probe token refresh: no service token available — skipping (existing file, if any, preserved)"
-        emit_metric "partner_edge_cross_probe_token_refresh_failure_total" \
-            "partner_id=\"${NODE_ID}\",reason=\"no_service_token\"" "1"
+        emit_xprb_failure "no_service_token"
     else
-        _xprb_resp=$(curl -sS --max-time 15 -fL \
+        # No `-f`: we want the HTTP status explicitly (below) rather than
+        # having curl fold a 4xx/5xx into its own exit code — that lets us
+        # log the status without ever touching the response BODY (HIGH-2:
+        # this is a credential-issuing endpoint; a token-shaped-but-
+        # unexpected body must never reach the log verbatim). curl's own
+        # exit code still fires (and is handled) for network-level failures
+        # — DNS, connect, TLS, timeout.
+        _xprb_curl_rc=0
+        _xprb_curl_out=$(curl -sS --max-time 15 -L \
             -H "Authorization: Bearer ${_xprb_svc_token}" \
-            "${BACKEND_URL}/api/partner/cross-probe-token" 2>&1) \
-            || { log "WARN cross-probe token fetch failed (existing file, if any, preserved): $_xprb_resp"; \
-                 emit_metric "partner_edge_cross_probe_token_refresh_failure_total" \
-                     "partner_id=\"${NODE_ID}\",reason=\"fetch_failed\"" "1"; \
-                 _xprb_resp=""; }
+            "${BACKEND_URL}/api/partner/cross-probe-token" \
+            -w '\n%{http_code}' 2>&1) || _xprb_curl_rc=$?
 
-        _xprb_new_token=""
-        if [[ -n "$_xprb_resp" ]]; then
-            _xprb_new_token=$(printf '%s' "$_xprb_resp" | jq -r '.cross_probe_token // empty' 2>/dev/null || true)
-        fi
+        if [[ "$_xprb_curl_rc" -ne 0 ]]; then
+            log "WARN cross-probe token fetch failed (curl exit=${_xprb_curl_rc}; existing file, if any, preserved)"
+            emit_xprb_failure "fetch_failed"
+        else
+            _xprb_code=$(printf '%s' "$_xprb_curl_out" | tail -n1)
+            _xprb_body=$(printf '%s' "$_xprb_curl_out" | sed '$d')
 
-        if [[ -n "$_xprb_new_token" && "$_xprb_new_token" == xprb_* ]]; then
-            install -d -m 0700 "$PREFIX_ETC" 2>/dev/null || true
-            _xprb_tmp=$(mktemp "$CROSS_PROBE_TOKEN_FILE.XXXXXX")
-            printf '%s' "$_xprb_new_token" > "$_xprb_tmp"
-            chmod 0600 "$_xprb_tmp"
-            mv -f "$_xprb_tmp" "$CROSS_PROBE_TOKEN_FILE"
-            unset _xprb_tmp
-            log "cross-probe token refreshed → $CROSS_PROBE_TOKEN_FILE (raw value redacted)"
-        elif [[ -n "$_xprb_resp" ]]; then
-            log "WARN cross-probe token refresh: missing/malformed response (existing file, if any, preserved): $_xprb_resp"
-            emit_metric "partner_edge_cross_probe_token_refresh_failure_total" \
-                "partner_id=\"${NODE_ID}\",reason=\"malformed_response\"" "1"
+            if [[ "$_xprb_code" != "200" ]]; then
+                # Status only — never the body (HIGH-2).
+                log "WARN cross-probe token refresh: HTTP ${_xprb_code} (existing file, if any, preserved)"
+                emit_xprb_failure "http_${_xprb_code}"
+            elif [[ -z "$_xprb_body" ]]; then
+                # MED-3: an empty 200 body previously matched neither the
+                # success arm nor the "malformed" arm — silently invisible.
+                log "WARN cross-probe token refresh: empty response body on HTTP 200 (existing file, if any, preserved)"
+                emit_xprb_failure "empty_response"
+            else
+                _xprb_new_token=$(printf '%s' "$_xprb_body" | jq -r '.cross_probe_token // empty' 2>/dev/null || true)
+
+                if [[ -n "$_xprb_new_token" && "$_xprb_new_token" == xprb_* ]]; then
+                    # HIGH-1 / MED-5: the guarded shared helper (sourced above
+                    # from oxpulse-token-lib.sh, real or inline fallback) —
+                    # every step of the mktemp/write/chmod/mv sequence is
+                    # explicitly checked inside it, so a missing/unwritable
+                    # $PREFIX_ETC can NEVER kill this `set -euo pipefail`
+                    # script via an uncaught mktemp failure. Called as an
+                    # `if` condition, so even without that internal guarding
+                    # a nonzero return would not trip `set -e` here either —
+                    # belt-and-suspenders.
+                    if _xprb_write_err=$(write_secret_atomic "$CROSS_PROBE_TOKEN_FILE" "$_xprb_new_token" 0600 2>&1); then
+                        log "cross-probe token refreshed → $CROSS_PROBE_TOKEN_FILE (raw value redacted)"
+                    else
+                        log "WARN cross-probe token persist failed: $_xprb_write_err (existing file, if any, preserved)"
+                        emit_xprb_failure "write_failed"
+                    fi
+                    unset _xprb_write_err
+                else
+                    # HIGH-2: never log $_xprb_body verbatim — it may contain
+                    # a token-shaped string from a misbehaving/misauthed
+                    # response. A fixed-length sha256 prefix is enough to
+                    # correlate/dedup without leaking a credential to logs.
+                    _xprb_body_sha=$(printf '%s' "$_xprb_body" | sha256sum 2>/dev/null | cut -c1-16)
+                    log "WARN cross-probe token refresh: missing/malformed cross_probe_token in response (body sha256=${_xprb_body_sha:-unknown}...; existing file, if any, preserved)"
+                    emit_xprb_failure "malformed_response"
+                    unset _xprb_body_sha
+                fi
+                unset _xprb_new_token
+            fi
+            unset _xprb_code _xprb_body
         fi
-        unset _xprb_new_token
+        unset _xprb_curl_rc _xprb_curl_out
     fi
-    unset _xprb_svc_token _xprb_resp
+    unset _xprb_svc_token
 fi
+unset -f emit_xprb_failure
 unset _xprb_needs_refresh
 unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTER_SECS
 

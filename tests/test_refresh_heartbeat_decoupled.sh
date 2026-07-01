@@ -19,10 +19,13 @@ pass() { echo "OK: $*"; }
 fail() { echo "FAIL: $*"; exit 1; }
 
 # Helper: create a stub bin dir with essential POSIX utilities.
+# mktemp: needed by emit_metric's atomic state/prom-file rewrite (PR review
+# MED-4 on #328 — the fixed sink persists cumulative counter state via
+# mktemp+mv instead of a naive `>>` append).
 make_bin() {
     local dir="$1"
     for cmd in bash sh date printf cat tee cp mv mkdir chmod install sleep \
-                sed grep head tail wc stat cut tr expr test; do
+                sed grep head tail wc stat cut tr expr test mktemp; do
         local loc
         loc=$(command -v "$cmd" 2>/dev/null || true)
         if [[ -n "$loc" ]]; then ln -sf "$loc" "$dir/$cmd"; fi

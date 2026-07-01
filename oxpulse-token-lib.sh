@@ -26,3 +26,44 @@ read_service_token() {
 	fi
 	return 1
 }
+
+# write_secret_atomic path content mode — atomically persist a credential.
+#
+# Third copy of the mktemp+chmod+mv secret-write idiom (hydrate.sh's
+# cross-probe-token write site, install.sh's service_token/cross-probe-token
+# write sites) — extracted here as the shared seam so callers stop hand-
+# rolling it (and, per PR review HIGH-1 on #328, stop hand-rolling it
+# UNGUARDED: a bare `_tmp=$(mktemp ...)` as a plain top-level command dies
+# the WHOLE calling script under `set -euo pipefail` the moment $path's
+# directory is missing/unwritable — mktemp's failure is never allowed to
+# reach the caller as an uncaught `set -e` exit).
+#
+# Every step here is explicitly guarded so this function is safe to call
+# from a `set -euo pipefail` script without ever taking it down: on ANY
+# failure (mktemp / write / chmod / mv) it cleans up its own tmp file, prints
+# a one-line reason to stderr, and returns 1 — letting the CALLER decide how
+# to log/alert (this helper does not know about the caller's log()/
+# emit_metric() conventions, so it stays a pure two-state primitive).
+#
+# Usage: if err=$(write_secret_atomic "$path" "$content" 0600 2>&1); then ...
+write_secret_atomic() {
+	local path="$1" content="$2" mode="$3"
+	local tmp
+	tmp=$(mktemp "${path}.XXXXXX" 2>&1) || { echo "mktemp failed: $tmp" >&2; return 1; }
+	if ! printf '%s' "$content" > "$tmp" 2>/dev/null; then
+		echo "write to tmp file failed" >&2
+		rm -f "$tmp" 2>/dev/null || true
+		return 1
+	fi
+	if ! chmod "$mode" "$tmp" 2>/dev/null; then
+		echo "chmod $mode failed" >&2
+		rm -f "$tmp" 2>/dev/null || true
+		return 1
+	fi
+	if ! mv -f "$tmp" "$path" 2>/dev/null; then
+		echo "mv into place failed" >&2
+		rm -f "$tmp" 2>/dev/null || true
+		return 1
+	fi
+	return 0
+}

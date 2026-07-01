@@ -27,7 +27,7 @@ make_bin() {
     local dir="$1"
     for cmd in bash sh date printf cat tee cp mv mkdir chmod install sleep \
                 sed grep head tail wc stat cut tr expr test touch \
-                dirname mktemp basename; do
+                dirname mktemp basename sha256sum; do
         local loc
         loc=$(command -v "$cmd" 2>/dev/null || true)
         if [[ -n "$loc" ]]; then ln -sf "$loc" "$dir/$cmd"; fi
@@ -53,18 +53,47 @@ KEYS_BODY='{"version":"v1","sfu_signing_public_key":"","channels_version":"c1","
 #   $3 = marker file path — touched iff the cross-probe-token endpoint was hit
 write_curl_stub() {
     local dir="$1" mode="$2" marker="$3"
-    local xprb_body xprb_exit
+    local xprb_body xprb_code xprb_exit
     case "$mode" in
         success)
             xprb_body='{"cross_probe_token":"xprb_new_token_abc123","issued_at":"2026-07-01T06:00:00Z","ttl_secs":604800}'
+            xprb_code=200
             xprb_exit=0
             ;;
         curl_fail)
+            # Total transfer failure (DNS/connect/TLS/timeout): curl prints
+            # nothing to stdout (no -w output either — the transfer never
+            # completed) and exits nonzero. No marker of an HTTP code.
             xprb_body=""
+            xprb_code=""
             xprb_exit=1
             ;;
         malformed)
+            # Completed 200 response, but no (valid) cross_probe_token in it.
             xprb_body='{"error":"unauthorized"}'
+            xprb_code=200
+            xprb_exit=0
+            ;;
+        malformed_with_leak)
+            # Completed 200 response with no *valid* cross_probe_token field
+            # (missing the xprb_ prefix requirement checked by the caller),
+            # but an xprb_-shaped string appears elsewhere in the body — the
+            # credential-leak regression case for HIGH-2.
+            xprb_body='{"error":"token xprb_should_never_leak_into_logs_12345 is stale, mint a new one"}'
+            xprb_code=200
+            xprb_exit=0
+            ;;
+        empty_body)
+            # Completed 200 response with a genuinely empty body.
+            xprb_body=""
+            xprb_code=200
+            xprb_exit=0
+            ;;
+        http_error)
+            # Completed transfer, non-2xx status. No -f flag on the real
+            # call, so curl exits 0 here — the caller branches on $xprb_code.
+            xprb_body='{"error":"invalid service token"}'
+            xprb_code=401
             xprb_exit=0
             ;;
         *)
@@ -84,7 +113,10 @@ for arg in "\$@"; do
             echo 'curl: (28) Operation timed out' >&2
             exit $xprb_exit
         fi
+        # Mirrors real curl -w '\n%{http_code}': body line(s), then the
+        # status code as the LAST line.
         echo '$xprb_body'
+        echo '$xprb_code'
         exit 0
     fi
 done
@@ -108,6 +140,16 @@ run_refresh() {
         OXPULSE_BACKEND_URL="http://stub.invalid" \
         OXPULSE_SERVICE_TOKEN="$svc_token" \
         bash "$SCRIPT" >"$dir/out.txt" 2>&1
+}
+
+# backdate_mtime file — set mtime to (now - 400000s), well past the
+# 302400s (half of the default 604800s TTL) refresh threshold, so the
+# refresh leg actually attempts a fetch instead of skipping.
+backdate_mtime() {
+    local f="$1" stamp
+    stamp=$(date -d '@'"$(( $(date +%s) - 400000 ))" +%Y%m%d%H%M.%S 2>/dev/null \
+        || date -r "$(( $(date +%s) - 400000 ))" +%Y%m%d%H%M.%S 2>/dev/null)
+    touch -t "$stamp" "$f" 2>/dev/null || true
 }
 
 # ── Test 1: file missing → fetched and installed, 0600, exact content ────────
@@ -207,12 +249,7 @@ echo "c1" > "$T3/var/channels-version"
 TOKEN_FILE3="$T3/etc/cross-probe-token"
 printf 'xprb_existing_stale_token' > "$TOKEN_FILE3"
 chmod 0600 "$TOKEN_FILE3"
-# Backdate mtime well past the refresh threshold (302400s) so the leg attempts
-# a fetch. touch -d not available in a minimal PATH-restricted stub env, so
-# use python-free approach: set an old mtime via `touch -t`.
-OLD_STAMP=$(date -d '@'"$(( $(date +%s) - 400000 ))" +%Y%m%d%H%M.%S 2>/dev/null \
-    || date -r "$(( $(date +%s) - 400000 ))" +%Y%m%d%H%M.%S 2>/dev/null)
-touch -t "$OLD_STAMP" "$TOKEN_FILE3" 2>/dev/null || true
+backdate_mtime "$TOKEN_FILE3"
 
 set +e
 run_refresh "$T3" stkn_test_valid
@@ -258,9 +295,7 @@ echo "c1" > "$T4/var/channels-version"
 TOKEN_FILE4="$T4/etc/cross-probe-token"
 printf 'xprb_existing_stale_token_2' > "$TOKEN_FILE4"
 chmod 0600 "$TOKEN_FILE4"
-OLD_STAMP4=$(date -d '@'"$(( $(date +%s) - 400000 ))" +%Y%m%d%H%M.%S 2>/dev/null \
-    || date -r "$(( $(date +%s) - 400000 ))" +%Y%m%d%H%M.%S 2>/dev/null)
-touch -t "$OLD_STAMP4" "$TOKEN_FILE4" 2>/dev/null || true
+backdate_mtime "$TOKEN_FILE4"
 
 set +e
 run_refresh "$T4" stkn_test_valid
@@ -274,8 +309,10 @@ set -e
 CONTENT4=$(cat "$TOKEN_FILE4")
 [[ "$CONTENT4" == "xprb_existing_stale_token_2" ]] \
     || fail "test4: existing token must be preserved on a malformed response — got '$CONTENT4'"
-grep -q "missing/malformed response" "$T4/out.txt" \
+grep -q "missing/malformed cross_probe_token in response" "$T4/out.txt" \
     || fail "test4: expected a malformed-response warning; got: $(cat "$T4/out.txt")"
+grep -q "body sha256=" "$T4/out.txt" \
+    || fail "test4: expected a sha256 correlation prefix, not the raw body, in the warning; got: $(cat "$T4/out.txt")"
 
 pass "test4: malformed/missing-prefix response on an old token → existing file preserved untouched"
 
@@ -314,6 +351,192 @@ pass "test5: no service token available → skipped gracefully, script still exi
 
 trap - EXIT
 rm -rf "$T5"
+
+# ── Test 6 (MED-3): HTTP 200 + empty body → explicit warn+metric, preserved ──
+T6=$(mktemp -d)
+trap 'rm -rf "$T6"' EXIT
+
+make_bin "$T6"
+MARKER6="$T6/xprb_hit"
+write_curl_stub "$T6" empty_body "$MARKER6"
+
+mkdir -p "$T6/etc" "$T6/var" "$T6/textfile"
+printf '{"node_id":"test-node-xprb6"}\n' > "$T6/etc/node-config.json"
+echo "v1" > "$T6/var/keys-version"
+echo "c1" > "$T6/var/channels-version"
+
+TOKEN_FILE6="$T6/etc/cross-probe-token"
+printf 'xprb_existing_stale_token_6' > "$TOKEN_FILE6"
+chmod 0600 "$TOKEN_FILE6"
+backdate_mtime "$TOKEN_FILE6"
+
+set +e
+run_refresh "$T6" stkn_test_valid
+EXIT6=$?
+set -e
+
+[[ $EXIT6 -eq 0 ]] \
+    || fail "test6: script must exit 0 on an empty 200 body (got $EXIT6); output: $(cat "$T6/out.txt")"
+CONTENT6=$(cat "$TOKEN_FILE6")
+[[ "$CONTENT6" == "xprb_existing_stale_token_6" ]] \
+    || fail "test6: existing token must be preserved on an empty response body — got '$CONTENT6'"
+grep -q "empty response body on HTTP 200" "$T6/out.txt" \
+    || fail "test6: expected an explicit empty-body warning (previously matched NEITHER the success nor malformed arm); got: $(cat "$T6/out.txt")"
+grep -q 'reason="empty_response"' "$T6/textfile/partner_edge.prom" \
+    || fail "test6: expected reason=\"empty_response\" in the emitted metric; got: $(cat "$T6/textfile/partner_edge.prom" 2>/dev/null)"
+
+pass "test6 (MED-3): empty 200 body → explicit warn + empty_response metric, existing file preserved"
+
+trap - EXIT
+rm -rf "$T6"
+
+# ── Test 7 (HIGH-2): a token-shaped string in a malformed body never logs ────
+T7=$(mktemp -d)
+trap 'rm -rf "$T7"' EXIT
+
+make_bin "$T7"
+MARKER7="$T7/xprb_hit"
+write_curl_stub "$T7" malformed_with_leak "$MARKER7"
+
+mkdir -p "$T7/etc" "$T7/var"
+printf '{"node_id":"test-node-xprb7"}\n' > "$T7/etc/node-config.json"
+echo "v1" > "$T7/var/keys-version"
+echo "c1" > "$T7/var/channels-version"
+
+TOKEN_FILE7="$T7/etc/cross-probe-token"
+printf 'xprb_existing_stale_token_7' > "$TOKEN_FILE7"
+chmod 0600 "$TOKEN_FILE7"
+backdate_mtime "$TOKEN_FILE7"
+
+set +e
+run_refresh "$T7" stkn_test_valid
+EXIT7=$?
+set -e
+
+[[ $EXIT7 -eq 0 ]] \
+    || fail "test7: script must exit 0 (got $EXIT7); output: $(cat "$T7/out.txt")"
+[[ -f "$MARKER7" ]] \
+    || fail "test7: cross-probe-token endpoint was never attempted; output: $(cat "$T7/out.txt")"
+if grep -qE 'xprb_[A-Za-z0-9_]+' "$T7/out.txt"; then
+    fail "test7: the credential-issuing endpoint's raw response body leaked into logs verbatim (contains an xprb_ token): $(cat "$T7/out.txt")"
+fi
+grep -q "body sha256=" "$T7/out.txt" \
+    || fail "test7: expected a sha256 correlation prefix instead of the raw body; got: $(cat "$T7/out.txt")"
+CONTENT7=$(cat "$TOKEN_FILE7")
+[[ "$CONTENT7" == "xprb_existing_stale_token_7" ]] \
+    || fail "test7: existing token must be preserved — got '$CONTENT7'"
+
+pass "test7 (HIGH-2): xprb_-shaped string inside a malformed body never reaches the log verbatim"
+
+trap - EXIT
+rm -rf "$T7"
+
+# ── Test 8 (HIGH-1): read-only \$PREFIX_ETC must not kill the whole script ───
+# Regression for the exact failure the reviewer reproduced: mktemp/chmod/mv
+# in the write path, unguarded, dies the WHOLE script under
+# `set -euo pipefail` the moment $PREFIX_ETC is unwritable — skipping
+# channels re-render AND Reality-key rotation entirely. This test forces a
+# real Reality-key rotation (NEW_VERSION != stored version) and asserts the
+# script still reaches — and completes — that code path.
+#
+# Two layers, both exercised:
+#  (a) $PREFIX_ETC actually chmod'd 0500 (r-x, no write) — the literal
+#      scenario named in the review.
+#  (b) `mktemp` itself stubbed to unconditionally fail — deterministic and
+#      portable across hosts. (a) alone is NOT sufficient as a REVERT-safe
+#      regression guard on every host: GNU coreutils `install -d -m MODE`
+#      re-chmods an EXISTING, same-owner directory back to MODE (verified
+#      empirically — `install -d -m 0700` on a 0500 dir this process owns
+#      silently heals it before mktemp ever runs), which is incidentally
+#      what the ORIGINAL code's `install -d -m 0700 "$PREFIX_ETC" || true`
+#      line did — so a bare chmod-0500 test can pass against the OLD code
+#      too on a GNU host, purely by that healing side effect, not because
+#      the old code was actually guarded. (b) removes that confound and
+#      isolates exactly the guarantee HIGH-1 requires: mktemp failing, for
+#      ANY reason (permission, disk full, quota, a non-GNU `install` that
+#      doesn't re-chmod existing dirs), must never kill the script.
+T8=$(mktemp -d)
+trap 'rm -rf "$T8"' EXIT
+
+make_bin "$T8"
+MARKER8="$T8/xprb_hit"
+write_curl_stub "$T8" success "$MARKER8"
+# Stub mktemp AFTER make_bin symlinks the real one — override it to fail
+# unconditionally, simulating an unwritable/missing $PREFIX_ETC regardless
+# of any install -d healing behavior. Remove the symlink first: `cat >`
+# follows symlinks when opening for write, so writing straight over it would
+# try (and fail, as non-root) to overwrite the REAL system mktemp binary.
+rm -f "$T8/mktemp"
+cat > "$T8/mktemp" <<'MKTEMPSTUB'
+#!/bin/sh
+echo "mktemp: cannot create: Permission denied" >&2
+exit 1
+MKTEMPSTUB
+chmod +x "$T8/mktemp"
+
+mkdir -p "$T8/etc" "$T8/var" "$T8/textfile"
+printf '{"node_id":"test-node-xprb8"}\n' > "$T8/etc/node-config.json"
+echo "v1" > "$T8/var/keys-version"
+echo "c1" > "$T8/var/channels-version"
+# No cross-probe-token file → the leg always attempts a fetch+write here.
+
+chmod 0500 "$T8/etc"   # (a) literal read-only reproduction, belt-and-suspenders
+trap 'chmod 0700 "$T8/etc" 2>/dev/null || true; rm -rf "$T8"' EXIT
+
+set +e
+run_refresh "$T8" stkn_test_valid
+EXIT8=$?
+set -e
+
+[[ $EXIT8 -eq 0 ]] \
+    || fail "test8: script must exit 0 even with an unwritable \$PREFIX_ETC (got $EXIT8); output: $(cat "$T8/out.txt")"
+grep -q "no rotation: version=v1" "$T8/out.txt" \
+    || fail "test8: script must still reach the Reality-rotation code (terminal 'no rotation' log line) despite the cross-probe write failure; output: $(cat "$T8/out.txt")"
+grep -q "cross-probe token persist failed" "$T8/out.txt" \
+    || fail "test8: expected a persist-failed warning for the unwritable dir; got: $(cat "$T8/out.txt")"
+
+pass "test8 (HIGH-1): unwritable \$PREFIX_ETC → write fails loudly but the script still completes to the Reality-rotation check"
+
+chmod 0700 "$T8/etc" 2>/dev/null || true
+trap - EXIT
+rm -rf "$T8"
+
+# ── Test 9: HTTP non-200 status → explicit warn, body never logged ───────────
+T9=$(mktemp -d)
+trap 'rm -rf "$T9"' EXIT
+
+make_bin "$T9"
+MARKER9="$T9/xprb_hit"
+write_curl_stub "$T9" http_error "$MARKER9"
+
+mkdir -p "$T9/etc" "$T9/var" "$T9/textfile"
+printf '{"node_id":"test-node-xprb9"}\n' > "$T9/etc/node-config.json"
+echo "v1" > "$T9/var/keys-version"
+echo "c1" > "$T9/var/channels-version"
+
+TOKEN_FILE9="$T9/etc/cross-probe-token"
+printf 'xprb_existing_stale_token_9' > "$TOKEN_FILE9"
+chmod 0600 "$TOKEN_FILE9"
+backdate_mtime "$TOKEN_FILE9"
+
+set +e
+run_refresh "$T9" stkn_test_valid
+EXIT9=$?
+set -e
+
+[[ $EXIT9 -eq 0 ]] \
+    || fail "test9: script must exit 0 on a non-200 status (got $EXIT9); output: $(cat "$T9/out.txt")"
+grep -q "HTTP 401" "$T9/out.txt" \
+    || fail "test9: expected the HTTP status in the warning; got: $(cat "$T9/out.txt")"
+grep -q "invalid service token" "$T9/out.txt" \
+    && fail "test9: the error response body must not be logged verbatim; got: $(cat "$T9/out.txt")"
+grep -q 'reason="http_401"' "$T9/textfile/partner_edge.prom" \
+    || fail "test9: expected reason=\"http_401\" in the emitted metric; got: $(cat "$T9/textfile/partner_edge.prom" 2>/dev/null)"
+
+pass "test9: non-200 status → status logged, body withheld, http_401 metric emitted"
+
+trap - EXIT
+rm -rf "$T9"
 
 # ── Syntax check ───────────────────────────────────────────────────────────
 bash -n "$SCRIPT" \
