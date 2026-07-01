@@ -116,7 +116,13 @@ configure_amneziawg() {
 	local lock_path="${AWG_CONF_LOCK_PATH:-${conf_path}.lock}"
 	exec 9>"$lock_path"
 	flock -w 10 9 || die "configure_amneziawg: could not acquire $lock_path within 10s (awg-params-agent may be mid-write) — retry the install"
-	cat > "$conf_path" <<-AWGCONF
+	# Atomic write: stream into a temp file in the SAME dir, chmod, then rename(2)
+	# over awg0.conf. The agent's apply_to_kernel() reads the conf via awg-quick
+	# strip OUTSIDE this shared lock, so a plain in-place "cat >" truncate could be
+	# observed half-written; rename(2) is atomic, so that reader sees either the
+	# whole old file or the whole new one. Mirrors the agent write_conf_atomic.
+	local conf_tmp="${conf_path}.tmp.$$"
+	cat > "$conf_tmp" <<-AWGCONF
 		[Interface]
 		PrivateKey = $(cat "$AWG_PRIV_PATH")
 		Address = ${AWG_ALLOCATED_IP}
@@ -140,7 +146,8 @@ configure_amneziawg() {
 		AllowedIPs = ${AWG_MOTHERLY_AWG_IP}/32
 		PersistentKeepalive = 25
 	AWGCONF
-	chmod 0600 "$conf_path"
+	chmod 0600 "$conf_tmp"
+	mv -f "$conf_tmp" "$conf_path"
 	# Release the conf lock (close fd 9) before the slow systemctl/handshake
 	# steps so a waiting agent tick is unblocked as soon as the write is durable.
 	exec 9>&-
