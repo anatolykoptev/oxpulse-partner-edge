@@ -191,6 +191,85 @@ else
     log "heartbeat ok: $HB_BODY"
 fi
 
+# ---------- cross-probe token refresh (T2.4.c re-mint endpoint) ----------
+# Root cause 2026-07-01: the central mints cross_probe_token (xprb_) ONLY in
+# the /api/partner/register response (persisted by hydrate.sh / install.sh),
+# which runs once at first boot. TTL=7d → all 5 fleet edges (registered
+# ~06-24 05:36) expired their tokens together, firing
+# MeshCrossProbeRejectionStorm (stale_token 0.29/s) from 07-01 05:46 — the
+# central's GET /api/partner/cross-probe-token re-mint endpoint (built for
+# exactly this) had zero consumers anywhere in this repo. This step is that
+# consumer: refresh the token daily, well before it expires.
+#
+# Cadence: refresh once the file is older than half the TTL (default
+# 302400s = 3.5d of a 604800s/7d TTL) — cheap file-mtime check, no network
+# call on the common "still fresh" path.
+#
+# COALESCE-PRESERVE (mirrors hydrate.sh MAJOR 2 / install.sh's cross-probe
+# write site): ANY failure — curl non-2xx/timeout, missing/malformed token,
+# no service token available — warns and leaves the existing file untouched.
+# Never rm/truncate a working token on a transient failure; a revoked token
+# simply 4xx's on the prober-report POST and is ignored there.
+#
+# NON-FATAL: no `die` in this block. Mirrors the 2026-05-13 lesson above
+# (heartbeat decoupled from keys-fetch) — this step must not be able to
+# abort the script before later refresh work runs.
+CROSS_PROBE_TOKEN_FILE="$PREFIX_ETC/cross-probe-token"
+CROSS_PROBE_TOKEN_TTL_SECS="${OXPULSE_CROSS_PROBE_TOKEN_TTL_SECS:-604800}"
+CROSS_PROBE_REFRESH_AFTER_SECS=$(( CROSS_PROBE_TOKEN_TTL_SECS / 2 ))
+
+_xprb_needs_refresh=1
+if [[ -f "$CROSS_PROBE_TOKEN_FILE" ]]; then
+    _xprb_mtime=$(stat -c '%Y' "$CROSS_PROBE_TOKEN_FILE" 2>/dev/null \
+        || stat -f '%m' "$CROSS_PROBE_TOKEN_FILE" 2>/dev/null || echo 0)
+    _xprb_age=$(( $(date +%s) - _xprb_mtime ))
+    if [[ "$_xprb_age" -lt "$CROSS_PROBE_REFRESH_AFTER_SECS" ]]; then
+        _xprb_needs_refresh=0
+        log "cross-probe token: age=${_xprb_age}s < refresh threshold ${CROSS_PROBE_REFRESH_AFTER_SECS}s — skipping"
+    fi
+    unset _xprb_mtime _xprb_age
+fi
+
+if [[ "$_xprb_needs_refresh" -eq 1 ]]; then
+    _xprb_svc_token=$(read_service_token 2>/dev/null || true)
+    if [[ -z "$_xprb_svc_token" ]]; then
+        log "WARN cross-probe token refresh: no service token available — skipping (existing file, if any, preserved)"
+        emit_metric "partner_edge_cross_probe_token_refresh_failure_total" \
+            "partner_id=\"${NODE_ID}\",reason=\"no_service_token\"" "1"
+    else
+        _xprb_resp=$(curl -sS --max-time 15 -fL \
+            -H "Authorization: Bearer ${_xprb_svc_token}" \
+            "${BACKEND_URL}/api/partner/cross-probe-token" 2>&1) \
+            || { log "WARN cross-probe token fetch failed (existing file, if any, preserved): $_xprb_resp"; \
+                 emit_metric "partner_edge_cross_probe_token_refresh_failure_total" \
+                     "partner_id=\"${NODE_ID}\",reason=\"fetch_failed\"" "1"; \
+                 _xprb_resp=""; }
+
+        _xprb_new_token=""
+        if [[ -n "$_xprb_resp" ]]; then
+            _xprb_new_token=$(printf '%s' "$_xprb_resp" | jq -r '.cross_probe_token // empty' 2>/dev/null || true)
+        fi
+
+        if [[ -n "$_xprb_new_token" && "$_xprb_new_token" == xprb_* ]]; then
+            install -d -m 0700 "$PREFIX_ETC" 2>/dev/null || true
+            _xprb_tmp=$(mktemp "$CROSS_PROBE_TOKEN_FILE.XXXXXX")
+            printf '%s' "$_xprb_new_token" > "$_xprb_tmp"
+            chmod 0600 "$_xprb_tmp"
+            mv -f "$_xprb_tmp" "$CROSS_PROBE_TOKEN_FILE"
+            unset _xprb_tmp
+            log "cross-probe token refreshed → $CROSS_PROBE_TOKEN_FILE (raw value redacted)"
+        elif [[ -n "$_xprb_resp" ]]; then
+            log "WARN cross-probe token refresh: missing/malformed response (existing file, if any, preserved): $_xprb_resp"
+            emit_metric "partner_edge_cross_probe_token_refresh_failure_total" \
+                "partner_id=\"${NODE_ID}\",reason=\"malformed_response\"" "1"
+        fi
+        unset _xprb_new_token
+    fi
+    unset _xprb_svc_token _xprb_resp
+fi
+unset _xprb_needs_refresh
+unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTER_SECS
+
 # channels_version check — independent of Reality key rotation.
 # Skip when keys fetch failed (NEW_CHANNELS_VERSION will be empty).
 # Re-renders all channel configs when operator updates channel settings.
