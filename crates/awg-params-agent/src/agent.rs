@@ -10,7 +10,7 @@ use crate::{
 use chrono::Utc;
 use rustix::fs::{flock, FlockOperation};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::{
@@ -155,20 +155,59 @@ impl AgentLoop {
         // and rename its stale-identity merge over the installer's just-rotated
         // PrivateKey/Endpoint. The lock is released BEFORE apply_to_kernel so the
         // installer's `flock -w 10` never waits on the up-to-30s kernel apply.
-        if !self
+        let written = match self
             .merge_and_write_conf_locked(&response.params)
             .await
             .context("merge+write conf under lock")?
         {
-            // Another writer (the installer, or an overlapping tick) held the
-            // lock past the timeout. Skip this tick WITHOUT saving state so the
-            // next poll re-applies the same epoch; never partial-write unlocked.
-            warn!(
-                lock = ?self.cfg.awg_conf_lock_path,
-                "awg0.conf lock held by another writer — skipping this tick, will retry next poll"
-            );
-            self.record_conf_write_conflict();
-            return Ok(());
+            Some(id) => id,
+            None => {
+                // Another writer (the installer, or an overlapping tick) held the
+                // lock past the timeout. Skip this tick WITHOUT saving state so the
+                // next poll re-applies the same epoch; never partial-write unlocked.
+                warn!(
+                    lock = ?self.cfg.awg_conf_lock_path,
+                    "awg0.conf lock held by another writer — skipping this tick, will retry next poll"
+                );
+                self.record_conf_write_conflict();
+                return Ok(());
+            }
+        };
+
+        // 4b. Supersede guard. The lock is released before apply_to_kernel so the
+        // installer's `flock -w 10` never waits on the up-to-30s kernel apply — but
+        // that opens a window where configure_amneziawg (which also takes the
+        // shared lock, so it can only land AFTER our release) rewrites awg0.conf
+        // between our locked write and this unlocked apply. Applying then would
+        // push the INSTALLER's params to the kernel while we record OUR epoch — a
+        // false "epoch live" state indistinguishable from a correct apply. Re-stat
+        // the conf against the identity captured under the lock; if it changed,
+        // skip the apply WITHOUT saving state — the next poll re-merges the central
+        // params onto the installer's fresh conf and applies cleanly. (The
+        // installer's write is atomic — temp+rename in lib/install-awg.sh — so
+        // awg-quick strip can never observe a torn file; the only residual is a
+        // microsecond-wide TOCTOU between this re-stat and awg-quick's open(),
+        // which leaves the kernel running the installer's own valid conf,
+        // self-healing on the next epoch bump.)
+        match self.conf_changed_since(&written) {
+            Ok(false) => {}
+            Ok(true) => {
+                warn!(
+                    conf = ?self.cfg.awg_conf_path,
+                    "awg0.conf superseded by another writer after our locked write — \
+                     skipping kernel apply this tick, will re-merge next poll"
+                );
+                self.record_conf_write_conflict();
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    conf = ?self.cfg.awg_conf_path,
+                    "could not re-stat awg0.conf before apply — skipping this tick"
+                );
+                return Ok(());
+            }
         }
 
         // 5. Apply to running kernel via awg-quick strip | awg syncconf.
@@ -251,13 +290,21 @@ impl AgentLoop {
     /// `apply_to_kernel`, keeping the critical section sub-second so the
     /// installer's `flock -w 10` never times out on a concurrent kernel apply.
     ///
-    /// Returns `Ok(true)` if the conf was rewritten; `Ok(false)` if the lock
-    /// could not be acquired within `lock_acquire_timeout` (caller skips this
-    /// tick and retries on the next poll).
-    async fn merge_and_write_conf_locked(&self, params: &AwgParams) -> Result<bool> {
-        let _lock = match self.acquire_conf_lock().await.context("acquire conf lock")? {
+    /// Returns `Ok(Some(identity))` with the filesystem identity of the conf we
+    /// just wrote (captured under the lock, for the caller's supersede guard); or
+    /// `Ok(None)` if the lock could not be acquired within `lock_acquire_timeout`
+    /// (caller skips this tick and retries on the next poll).
+    async fn merge_and_write_conf_locked(
+        &self,
+        params: &AwgParams,
+    ) -> Result<Option<ConfIdentity>> {
+        let _lock = match self
+            .acquire_conf_lock()
+            .await
+            .context("acquire conf lock")?
+        {
             Some(lock) => lock,
-            None => return Ok(false),
+            None => return Ok(None),
         };
 
         // Read the current conf — identity fields (PrivateKey/Endpoint/Address)
@@ -280,8 +327,26 @@ impl AgentLoop {
             .await
             .context("atomic write conf")?;
 
+        // Snapshot the on-disk identity of the file we just wrote, STILL under the
+        // lock — no other writer can have touched it yet. The caller compares this
+        // against a re-stat right before the unlocked kernel apply to catch a
+        // concurrent installer supersede.
+        let identity =
+            conf_identity(&self.cfg.awg_conf_path).context("stat conf after atomic write")?;
+
         // `_lock` drops here → flock released before apply_to_kernel.
-        Ok(true)
+        Ok(Some(identity))
+    }
+
+    /// Re-stat `awg_conf_path` and report whether it differs from the identity
+    /// captured under the lock right after our atomic write. `true` means another
+    /// writer (the installer's `configure_amneziawg`, whose write also takes the
+    /// shared lock and therefore lands only AFTER our release) superseded our
+    /// merged conf in the window between the lock release and the kernel apply.
+    /// `Err` = the file could not be stat'd; the caller treats that as a skip
+    /// rather than pushing an unknown conf to the kernel.
+    fn conf_changed_since(&self, written: &ConfIdentity) -> Result<bool> {
+        Ok(conf_identity(&self.cfg.awg_conf_path)? != *written)
     }
 
     /// Acquire the shared conf advisory lock (LOCK_EX), polling until
@@ -416,6 +481,31 @@ impl AgentLoop {
     }
 }
 
+/// Filesystem identity of awg0.conf, captured under the shared lock immediately
+/// after the agent's atomic write. Compared against a re-stat before the unlocked
+/// kernel apply to detect a concurrent installer supersede: the inode changes when
+/// the other writer renames a fresh file over it (the installer's temp+rename and
+/// the agent's own `write_conf_atomic`), and size/mtime change on any in-place
+/// rewrite — so the tuple catches either shape.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ConfIdentity {
+    ino: u64,
+    size: u64,
+    mtime_sec: i64,
+    mtime_nsec: i64,
+}
+
+/// Stat `path` into a `ConfIdentity`.
+fn conf_identity(path: &Path) -> Result<ConfIdentity> {
+    let m = std::fs::metadata(path).with_context(|| format!("stat {:?}", path))?;
+    Ok(ConfIdentity {
+        ino: m.ino(),
+        size: m.size(),
+        mtime_sec: m.mtime(),
+        mtime_nsec: m.mtime_nsec(),
+    })
+}
+
 /// RAII guard for the shared awg0.conf advisory lock. Holds the open lock-file
 /// descriptor; `flock(LOCK_UN)` on drop releases it deterministically (the
 /// kernel also releases on fd close, but the explicit unlock documents intent).
@@ -434,8 +524,7 @@ impl Drop for ConfLock {
 /// `Ok(None)` = another writer held the lock for the whole window.
 fn acquire_conf_lock_blocking(lock_path: &Path, timeout: Duration) -> Result<Option<ConfLock>> {
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create lock dir {:?}", parent))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create lock dir {:?}", parent))?;
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -481,6 +570,11 @@ fn write_conflict_metric(dir: &Path, value: u64) -> Result<()> {
     tmp.flush().context("flush conflict textfile")?;
     tmp.persist(dir.join(CONF_CONFLICT_PROM_FILE))
         .context("persist conflict textfile")?;
+    // dir-fsync for parity with write_conf_atomic — best-effort durability of the
+    // rename across a crash. Non-fatal (the counter reseeds from disk on restart).
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
     Ok(())
 }
 
@@ -708,7 +802,7 @@ mod conf_lock_tests {
 
         let wrote = agent_task.await.unwrap().expect("agent write ok");
         installer_task.await.unwrap();
-        assert!(wrote, "agent should have rewritten the conf");
+        assert!(wrote.is_some(), "agent should have rewritten the conf");
 
         let final_conf = std::fs::read_to_string(&conf_path).unwrap();
         assert!(
@@ -753,8 +847,8 @@ mod conf_lock_tests {
             .await
             .expect("busy lock must not error");
         assert!(
-            !wrote,
-            "agent must skip (return false) when the lock is held beyond the timeout"
+            wrote.is_none(),
+            "agent must skip (return None) when the lock is held beyond the timeout"
         );
 
         // The conf must be untouched (still OLD) — no partial unlocked write.
@@ -789,13 +883,57 @@ mod conf_lock_tests {
             .merge_and_write_conf_locked(&params(42))
             .await
             .expect("write ok");
-        assert!(wrote);
+        assert!(wrote.is_some());
 
         let out = std::fs::read_to_string(&conf_path).unwrap();
         assert!(out.contains("Jc = 42"), "merged Jc must be applied:\n{out}");
         assert!(
             out.contains(&format!("PrivateKey = {OLD_PRIV}")),
             "identity preserved through the merge:\n{out}"
+        );
+    }
+
+    // Supersede guard (the exact residual apply_to_kernel race). After the agent's
+    // locked write, an installer write — also under the shared lock, so it lands
+    // only AFTER the agent's release — rewrites the conf before the kernel apply.
+    // The identity captured under the lock must no longer match the on-disk conf,
+    // so conf_changed_since() reports true and tick() skips the apply (which would
+    // otherwise push the installer's params to the kernel while recording the
+    // agent's epoch). Reverting the guard makes conf_changed_since always-false and
+    // this test goes RED at the second assert.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_detects_installer_supersede_between_write_and_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let conf_path = cfg.awg_conf_path.clone();
+        let lock_path = cfg.awg_conf_lock_path.clone();
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+
+        let agent = AgentLoop::new(cfg).unwrap();
+        let written = agent
+            .merge_and_write_conf_locked(&params(7))
+            .await
+            .expect("write ok")
+            .expect("agent should have written the conf");
+
+        // No supersede yet → the guard reads the conf as unchanged.
+        assert!(
+            !agent.conf_changed_since(&written).unwrap(),
+            "conf must read as unchanged immediately after the locked write"
+        );
+
+        // Ensure a mtime delta beyond any coarse filesystem granularity, then let
+        // the installer supersede the conf under the shared lock (its write lands
+        // after the agent's release, mirroring configure_amneziawg mid-flight).
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        installer_write_locked(&lock_path, &conf_path, NEW_PRIV, NEW_ENDPOINT, 9);
+
+        // The guard now detects the supersede → tick() will skip the kernel apply
+        // and re-merge next poll instead of applying the installer's params under
+        // the agent's epoch.
+        assert!(
+            agent.conf_changed_since(&written).unwrap(),
+            "conf_changed_since must detect the installer supersede so the apply is skipped"
         );
     }
 }
