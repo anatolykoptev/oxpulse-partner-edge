@@ -815,29 +815,142 @@ restore_host_scripts() {
 }
 
 # ---------------------------------------------------------------------------
+# PARTNER-EDGE SERVICE SCOPING
+#
+# Partners may add their OWN services to the SAME compose file (live example,
+# rvpn v0.13.0 incident 2026-07: `all-rvpn-gate`, a local-only image with no
+# ghcr.io upstream). This script only manages ghcr.io/anatolykoptev/
+# partner-edge-* images (see the tag-rewrite sed a few hundred lines down) —
+# a blanket `docker compose pull` with no service args tries to pull EVERY
+# service, foreign ones included, and fails the WHOLE pull with "pull access
+# denied for all-rvpn-gate, repository does not exist". Every pull, digest
+# comparison, and recreate below must be scoped to services we actually own;
+# a foreign service must never be pulled OR recreated.
+#
+# fetch_compose_config — one `docker compose config` invocation; prints the
+# rendered YAML on stdout on success, or the docker/compose error text on
+# stdout when it fails (same two-state-primitive contract as
+# write_secret_atomic — caller decides how to report). A foreign service
+# with ANY invalid definition fails VALIDATION for the WHOLE file (PR review
+# round 2 MAJOR-2) — a materially different operator problem than "config
+# parsed fine but has zero of our images" (compose file corrupted / all
+# services foreign). Callers that die must distinguish the two.
+# ---------------------------------------------------------------------------
+fetch_compose_config() {
+	cd "$PREFIX_ETC" && $DOCKER_BIN compose config 2>&1
+}
+
+# _parse_compose_config_images CONFIG_TEXT MAP_NAME — parse EVERY service's
+# image ref from ONE already-fetched `docker compose config` snapshot in a
+# SINGLE awk pass (PR review round 2 MINOR: list_partner_edge_services +
+# the old per-service _compose_service_image spawned ~3+4N `docker compose
+# config` child processes per upgrade — a full config fetch+parse per
+# service, repeated by every caller, and a TOCTOU risk between calls).
+# Populates MAP_NAME[svc]=image for every service in the file (foreign ones
+# included — filtering happens in _partner_edge_services_from_map). Strips
+# quotes from the image value (PR review round 2 NIT: a quoted
+# `image: "ghcr.io/..."` value otherwise misses the bare
+# ghcr.io/anatolykoptev/partner-edge-* glob match — mirrors the quote-strip
+# already used for compose bind-mount parsing elsewhere in this file).
+_parse_compose_config_images() {
+	local _cfg="$1"
+	local -n _pcc_map="$2"
+	local svc img
+	while IFS=$'\t' read -r svc img; do
+		[[ -n "$svc" ]] || continue
+		_pcc_map["$svc"]="$img"
+	done < <(printf '%s\n' "$_cfg" | awk '
+		/^services:/{in_services=1; next}
+		in_services && /^  [^ ]/{
+			gsub(/:$/,""); current_svc=$0; gsub(/^  /,"",current_svc)
+			next
+		}
+		in_services && current_svc != "" && /image:/{
+			img=$0
+			sub(/.*image:[[:space:]]*/,"",img)
+			gsub(/"/,"",img)
+			print current_svc "\t" img
+		}
+	')
+}
+
+# _partner_edge_services_from_map MAP_NAME — print (one per line) the
+# service names from an already-parsed svc->image map whose image belongs
+# to us (ghcr.io/anatolykoptev/partner-edge-*).
+_partner_edge_services_from_map() {
+	local -n _pesm_map="$1"
+	local svc
+	for svc in "${!_pesm_map[@]}"; do
+		[[ "${_pesm_map[$svc]}" == ghcr.io/anatolykoptev/partner-edge-* ]] && printf '%s\n' "$svc"
+	done
+}
+
+# list_partner_edge_services — fresh-fetch + parse + filter in one call, for
+# callers that don't already hold a config snapshot: the rollback-recovery
+# call sites (do_rollback_templates, --rollback mode, mid-upgrade recovery
+# pulls), which run after the compose file has just been restored from
+# .prev — a cached early-guard snapshot would be stale there. Best-effort: a
+# fetch failure or zero-match returns an empty list; those callers already
+# treat empty as "warn + skip pull" (non-fatal recovery context). The
+# PRIMARY (early-guard) call site — resolve_edge_service_scope below —
+# distinguishes the two failure modes instead, since it's the one that dies.
+list_partner_edge_services() {
+	local _cfg
+	_cfg=$(fetch_compose_config) || return 0
+	local -A _images
+	_parse_compose_config_images "$_cfg" _images
+	_partner_edge_services_from_map _images
+}
+
+# resolve_edge_service_scope ARRAY_NAME — the MAJOR-1/MAJOR-2 early guard
+# (PR review round 2 on #333). Fetches + parses compose config ONCE and
+# populates ARRAY_NAME with the partner-edge-* service list, dying
+# immediately — with a message distinguishing WHICH failure mode (MAJOR-2)
+# — if either step fails.
+#
+# MUST be called before ANY mutation (tag-rewrite / sync_host_scripts /
+# reconcile_all + caddy hot-reload) in each apply path: dying here leaves
+# NOTHING to restore, since no backup has been taken yet and no file has
+# been touched. This check previously ran AFTER those mutations (right
+# before the pull), so an empty/corrupted scope died with compose +
+# host-scripts (+ live caddy, --with-templates) already rewritten to the
+# new version and containers still on the old one — no rollback, the exact
+# split-state class this PR exists to prevent.
+resolve_edge_service_scope() {
+	local -n _res_svcs="$1"
+	local _cfg
+	if ! _cfg=$(fetch_compose_config); then
+		die "docker compose config failed — check $COMPOSE_FILE for a broken service definition (a partner-added foreign service with invalid config fails validation for the WHOLE file):
+$_cfg"
+	fi
+	local -A _images
+	_parse_compose_config_images "$_cfg" _images
+	mapfile -t _res_svcs < <(_partner_edge_services_from_map _images)
+	[[ "${#_res_svcs[@]}" -gt 0 ]] \
+		|| die "compose config parsed but zero ghcr.io/anatolykoptev/partner-edge-* services found in $COMPOSE_FILE — compose file looks corrupted, refusing to proceed"
+}
+
+# ---------------------------------------------------------------------------
 # PER-CONTAINER DIGEST-SKIP — zero-downtime recreate
 #
-# capture_running_digests — snapshot the imageID (sha256:...) of every
-# currently-running container managed by compose.  Stores in a bash
-# associative array passed by name.
+# capture_running_digests EDGE_SVCS_ARRAY_NAME MAP_NAME — snapshot the
+# imageID (sha256:...) of every currently-running container for the
+# CALLER-SUPPLIED service list (already scoped to partner-edge-* by
+# resolve_edge_service_scope). Does not touch compose config at all — only
+# queries running containers by name.
 #
 # Usage:
 #   declare -A before_digests
-#   capture_running_digests before_digests
+#   capture_running_digests _edge_svcs before_digests
 #
 # Each key is the compose service name; value is the running imageID or ""
 # if the container is absent / not running (first-pull or stopped).
 # ---------------------------------------------------------------------------
 capture_running_digests() {
-	local -n _crd_map="$1"
+	local -n _crd_svcs="$1"
+	local -n _crd_map="$2"
 	local svc container_name image_id
-	# List service names from the compose file.
-	local services
-	services=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose config --services 2>/dev/null || true)
-	[[ -n "$services" ]] || return 0
-
-	while IFS= read -r svc; do
-		[[ -n "$svc" ]] || continue
+	for svc in "${_crd_svcs[@]}"; do
 		# docker compose ps --quiet returns container IDs for the service.
 		container_name=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose ps --quiet "$svc" 2>/dev/null | head -1 || true)
 		if [[ -n "$container_name" ]]; then
@@ -846,43 +959,47 @@ capture_running_digests() {
 			image_id=""
 		fi
 		_crd_map["$svc"]="$image_id"
-	done <<< "$services"
+	done
 }
 
-# resolve_pulled_digests — after compose pull, resolve the imageID for the
-# currently configured image of each service (what compose would use on up).
-# Stores in a bash associative array passed by name.
+# resolve_pulled_digests EDGE_SVCS_ARRAY_NAME MAP_NAME — after compose pull,
+# resolve the imageID for the currently configured image of each
+# CALLER-SUPPLIED service (partner-edge-* only). Fetches ONE fresh
+# `docker compose config` — the file's tags changed since the early-guard
+# snapshot, so a fresh read is structurally unavoidable here — and parses
+# ALL images in a single pass.
 #
-# Fail-safe: if a service's image digest cannot be resolved, stores "" which
-# causes the caller to fall back to recreating that service.
+# Fail-safe: if an individual service's image digest cannot be resolved,
+# stores "" which causes the caller to fall back to recreating that
+# service. Because the service list itself is already scoped to ours, this
+# fail-safe can no longer recreate a foreign service.
+#
+# Returns 1 if the fresh compose-config fetch itself fails. PR review round
+# 2 MAJOR-1: this is a POST-MUTATION call site (compose + host-scripts are
+# already rewritten by the time this runs) — the caller MUST restore
+# host-scripts + compose/state before dying, mirroring the pull-failure
+# branch, not just `die` outright.
 resolve_pulled_digests() {
-	local -n _rpd_map="$1"
+	local -n _rpd_svcs="$1"
+	local -n _rpd_map="$2"
+	local _cfg
+	if ! _cfg=$(fetch_compose_config); then
+		printf '%s\n' "$_cfg" >&2
+		return 1
+	fi
+	local -A _images
+	_parse_compose_config_images "$_cfg" _images
 	local svc image_ref image_id
-	local services
-	services=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose config --services 2>/dev/null || true)
-	[[ -n "$services" ]] || return 0
-
-	while IFS= read -r svc; do
-		[[ -n "$svc" ]] || continue
-		# Resolve the image reference for this service from compose config output.
-		image_ref=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose config 2>/dev/null \
-			| awk -v svc="$svc" '
-				/^services:/{in_services=1; next}
-				in_services && /^  [^ ]/{
-					gsub(/:$/,""); current_svc=$0; gsub(/^  /,"",current_svc)
-					next
-				}
-				in_services && current_svc==svc && /image:/{
-					sub(/.*image:[[:space:]]*/,""); print; exit
-				}
-			' || true)
+	for svc in "${_rpd_svcs[@]}"; do
+		image_ref="${_images[$svc]:-}"
 		if [[ -n "$image_ref" ]]; then
 			image_id=$($DOCKER_BIN inspect --format '{{.Id}}' "$image_ref" 2>/dev/null || true)
 		else
 			image_id=""
 		fi
 		_rpd_map["$svc"]="$image_id"
-	done <<< "$services"
+	done
+	return 0
 }
 
 # recreate_changed_services BEFORE_MAP_NAME AFTER_MAP_NAME
@@ -1506,9 +1623,20 @@ do_rollback_templates() {
 	# evicted from the local cache, compose up would use whatever is cached —
 	# possibly stale or wrong. Pull is best-effort; failure is non-fatal because
 	# the image may still be present from the original pull.
-	log "rollback: ensuring previous image is in local cache"
-	(cd "$PREFIX_ETC" && ghcr_login_from_file || true; $DOCKER_BIN compose pull) \
-		|| warn "rollback pull failed — proceeding with cached image"
+	#
+	# Scoped to partner-edge-* services only (foreign-service pull-scope fix,
+	# rvpn v0.13.0 incident) — COMPOSE_FILE was JUST restored from .prev above,
+	# so re-derive the service list against the restored file.
+	local -a _rollback_edge_svcs
+	mapfile -t _rollback_edge_svcs < <(list_partner_edge_services)
+
+	if [[ "${#_rollback_edge_svcs[@]}" -eq 0 ]]; then
+		warn "rollback: no ghcr.io/anatolykoptev/partner-edge-* services found in restored $COMPOSE_FILE — skipping cache-warm pull"
+	else
+		log "rollback: ensuring previous image is in local cache (${_rollback_edge_svcs[*]})"
+		(cd "$PREFIX_ETC" && ghcr_login_from_file || true; $DOCKER_BIN compose pull "${_rollback_edge_svcs[@]}") \
+			|| warn "rollback pull failed — proceeding with cached image"
+	fi
 }
 
 maybe_v01_to_v02_preflight() {
@@ -1562,7 +1690,15 @@ if [[ "$MODE" == rollback ]]; then
 	restore_host_scripts   # restores sbin scripts + systemd units from snapshot
 
 	if [[ "$DRY_RUN" -eq 0 ]]; then
-		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull)
+		# Scoped to partner-edge-* services only (foreign-service pull-scope
+		# fix, rvpn v0.13.0 incident) — do_rollback_templates already restored
+		# COMPOSE_FILE from .prev above.
+		mapfile -t _rollback_mode_edge_svcs < <(list_partner_edge_services)
+		if [[ "${#_rollback_mode_edge_svcs[@]}" -eq 0 ]]; then
+			warn "rollback: no ghcr.io/anatolykoptev/partner-edge-* services found in restored $COMPOSE_FILE — skipping pull"
+		else
+			(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_rollback_mode_edge_svcs[@]}")
+		fi
 		(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate)
 		sleep 10
 		if "$HEALTHCHECK" --local; then
@@ -2090,6 +2226,15 @@ if [[ "$MODE" == with_templates ]]; then
 	# without an unbound-variable error under set -u.
 	_wt_baseline_snap=""
 
+	# MAJOR-1/MAJOR-2 early guard (PR review round 2 on #333) — resolve the
+	# partner-edge-* service scope BEFORE any mutation. See
+	# resolve_edge_service_scope()'s docstring: dying here leaves nothing to
+	# restore. _wt_edge_svcs is reused below for the pull, digest capture,
+	# and post-pull digest resolution — one compose-config fetch, not one
+	# per caller.
+	declare -a _wt_edge_svcs
+	resolve_edge_service_scope _wt_edge_svcs
+
 	# Step 1: backup current state before any mutation (images + templates + host-scripts).
 	[[ -f "$PREFIX_ETC/Caddyfile" ]]  && cp -a "$PREFIX_ETC/Caddyfile" "$PREV_CADDYFILE"
 	[[ -f "$HEALTHCHECK" ]]           && cp -a "$HEALTHCHECK" "$PREV_HEALTHCHECK"
@@ -2176,11 +2321,21 @@ if [[ "$MODE" == with_templates ]]; then
 	# Step 8: pull new images (with per-service digest capture for zero-downtime recreate).
 	ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
 	declare -A _wt_before_digests
-	capture_running_digests _wt_before_digests
-	log "pulling images (tag=$TARGET)"
-	pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull 2>&1)
-	pull_rc=$?
-	if [[ $pull_rc -ne 0 ]]; then
+	capture_running_digests _wt_edge_svcs _wt_before_digests
+
+	# _wt_edge_svcs was resolved by the early guard above (before any
+	# mutation) — reused here, not recomputed (PR review round 2 MINOR).
+	log "pulling images (tag=$TARGET): ${_wt_edge_svcs[*]}"
+	# BUG FIX (dead rollback under set -e): `if ! var=$(...); then` — a bare
+	# `var=$(...)` assignment as a plain top-level statement is NOT exempt
+	# from `set -e`; a failing pull killed the WHOLE script right here,
+	# before the rollback branch below ever ran (rvpn v0.13.0 incident: the
+	# script died mid-upgrade with compose+host-scripts already rewritten to
+	# the new version, containers still on the old one, no rollback, no
+	# diagnostic beyond the last log line). Wrapping the assignment as an
+	# `if` condition IS the exemption — bash does not apply errexit to a
+	# command whose status is being tested.
+	if ! pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_wt_edge_svcs[@]}" 2>&1); then
 		printf '%s\n' "$pull_out" >&2
 		if ! ghcr_pull_diagnose "$pull_out"; then
 			warn "ghcr: pull failed but not for an auth reason (see output above)"
@@ -2193,12 +2348,22 @@ if [[ "$MODE" == with_templates ]]; then
 
 	# Step 7: recreate only services whose image digest changed (zero-downtime).
 	declare -A _wt_after_digests
-	resolve_pulled_digests _wt_after_digests
+	if ! resolve_pulled_digests _wt_edge_svcs _wt_after_digests; then
+		# PR review round 2 MAJOR-1: this is a POST-MUTATION call site — mirror
+		# the pull-failure branch above (restore, don't just die outright).
+		warn "post-pull compose config resolution failed — rolling back"
+		do_rollback_templates
+		restore_host_scripts
+		die "post-pull compose config resolution failed — rolled back to previous state"
+	fi
 	if ! recreate_changed_services _wt_before_digests _wt_after_digests; then
 		warn "compose up failed — rolling back"
 		do_rollback_templates
 		restore_host_scripts
-		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull) || true
+		mapfile -t _wt_rb_edge_svcs < <(list_partner_edge_services)
+		if [[ "${#_wt_rb_edge_svcs[@]}" -gt 0 ]]; then
+			(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_wt_rb_edge_svcs[@]}") || true
+		fi
 		(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d) || true
 		die "--with-templates upgrade rolled back due to compose up failure"
 	fi
@@ -2210,7 +2375,10 @@ if [[ "$MODE" == with_templates ]]; then
 		rm -f "${_wt_baseline_snap:-}"
 		do_rollback_templates
 		restore_host_scripts
-		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull) || true
+		mapfile -t _wt_rb2_edge_svcs < <(list_partner_edge_services)
+		if [[ "${#_wt_rb2_edge_svcs[@]}" -gt 0 ]]; then
+			(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_wt_rb2_edge_svcs[@]}") || true
+		fi
 		(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d) || true
 		if ! "$HEALTHCHECK" --local; then
 			die "--with-templates rolled back but healthcheck still failing — manual recovery required"
@@ -2264,6 +2432,14 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 	exit 0
 fi
 
+# MAJOR-1/MAJOR-2 early guard (PR review round 2 on #333) — resolve the
+# partner-edge-* service scope BEFORE any mutation. See
+# resolve_edge_service_scope()'s docstring: dying here leaves nothing to
+# restore. _edge_svcs is reused below for the pull, digest capture, and
+# post-pull digest resolution — one compose-config fetch, not one per caller.
+declare -a _edge_svcs
+resolve_edge_service_scope _edge_svcs
+
 # ---- Backup current config + host-scripts before mutating ----
 cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
 cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
@@ -2306,12 +2482,18 @@ fi
 # the sfu image is byte-for-byte identical across tags).
 # NOTE: capture uses `docker inspect` on running containers — read-only, safe.
 declare -A _before_digests
-capture_running_digests _before_digests
+capture_running_digests _edge_svcs _before_digests
 
-log "pulling new images (tag=$TARGET)"
-pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull 2>&1)
-pull_rc=$?
-if [[ $pull_rc -ne 0 ]]; then
+# _edge_svcs was resolved by the early guard above (before any mutation) —
+# reused here, not recomputed (PR review round 2 MINOR).
+log "pulling new images (tag=$TARGET): ${_edge_svcs[*]}"
+# BUG FIX (dead rollback under set -e): `if ! var=$(...); then` — see the
+# --with-templates pull above for the full rationale. A bare `pull_out=$(...)`
+# assignment as a plain statement is NOT exempt from `set -e`; a failing pull
+# killed the WHOLE script right here on rvpn, before this rollback branch
+# ever ran — compose+host-scripts ended up at v0.13.0, containers stuck on
+# v0.12.72, no rollback, no diagnostic beyond the last log line.
+if ! pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_edge_svcs[@]}" 2>&1); then
 	# Print pull output so operator can see context.
 	printf '%s\n' "$pull_out" >&2
 	# If denied pattern → friendly hint (prints suggestion to use --ghcr-token=).
@@ -2334,7 +2516,15 @@ fi
 # fail-safe: if digest resolution fails for a service, recreate_changed_services
 # treats an empty after-digest as "unknown → recreate" (not "skip").
 declare -A _after_digests
-resolve_pulled_digests _after_digests
+if ! resolve_pulled_digests _edge_svcs _after_digests; then
+	# PR review round 2 MAJOR-1: this is a POST-MUTATION call site — mirror
+	# the pull-failure branch above (restore, don't just die outright).
+	printf '%s\n' "post-pull compose config resolution failed" >&2
+	restore_host_scripts
+	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
+	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
+	die "post-pull compose config resolution failed — previous config and host-scripts restored"
+fi
 
 if ! recreate_changed_services _before_digests _after_digests; then
 	warn "up failed — rolling back to $CURRENT"
@@ -2358,7 +2548,10 @@ if ! settle_healthcheck_with_retry "plain-upgrade" "${_baseline_snapshot:-}"; th
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 	cp -a "$PREV_STATE_FILE"   "$STATE_FILE"
 	restore_host_scripts
-	(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull)
+	mapfile -t _rb_edge_svcs < <(list_partner_edge_services)
+	if [[ "${#_rb_edge_svcs[@]}" -gt 0 ]]; then
+		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_rb_edge_svcs[@]}")
+	fi
 	(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate) || true
 	die "upgrade rolled back due to post-upgrade healthcheck regression"
 fi
