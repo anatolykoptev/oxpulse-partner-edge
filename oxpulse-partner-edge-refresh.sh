@@ -30,6 +30,12 @@ NODE_CFG="$PREFIX_ETC/node-config.json"
 VERSION_FILE="$PREFIX_LIB/keys-version"
 CHANNELS_VERSION_FILE="$PREFIX_LIB/channels-version"
 SFU_KEYS_ENV="$PREFIX_LIB/sfu-keys.env"
+# Single source for the SFU container_name (docker-compose.yml.tpl `container_name:`).
+# Used by the applied-gauge detector (docker ps filter + docker exec target) and as
+# the `_restart_if_changed` state_container (docker inspect liveness). NOT the compose
+# SERVICE key — that is the literal `sfu` (docker compose targets services, not
+# container_names). Functions sourced in isolation by the tests set this themselves.
+SFU_CONTAINER_NAME="oxpulse-partner-sfu"
 TEXTFILE_DIR="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
 LOG_FILE="${LOG_FILE:-/var/log/oxpulse-partner-edge-refresh.log}"
 BACKEND_URL="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
@@ -108,6 +114,20 @@ emit_metric() {
         done
     } > "$prom_tmp" 2>/dev/null
     mv -f "$prom_tmp" "$prom_file" 2>/dev/null || rm -f "$prom_tmp" 2>/dev/null || true
+}
+
+# Emit a current-state GAUGE to its own textfile, TRUNCATED each run so exactly
+# one sample per series survives. A gauge must not share the append-only
+# partner_edge.prom (emit_metric): re-emitting the same series every daily run
+# would accumulate duplicate lines and node_exporter would reject the whole file.
+# One file per gauge name keeps it idempotent. Skips silently when TEXTFILE_DIR
+# is unwritable or absent (non-fatal), matching emit_metric.
+emit_gauge() {
+    local name="$1" labels="$2" value="$3"
+    [[ -d "$TEXTFILE_DIR" ]] || mkdir -p "$TEXTFILE_DIR" 2>/dev/null || return 0
+    local prom_file="$TEXTFILE_DIR/${name}.prom"
+    printf '# TYPE %s gauge\n%s{%s} %s\n' \
+        "$name" "$name" "$labels" "$value" > "$prom_file" 2>/dev/null || true
 }
 
 # OS-aware install hint: returns the appropriate install command for the host PM.
@@ -459,10 +479,15 @@ unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTE
 # restarted. Healthy unchanged containers are left running. Failed channels
 # (from channels-status.env) are skipped entirely.
 
-# _restart_if_changed kind cfg_file sha_file compose_file container
+# _restart_if_changed kind cfg_file sha_file compose_file container [apply_mode] [state_container] [skip_channel_status]
 # Restarts a single docker compose service only when its config file hash
 # differs from the last persisted hash. Updates the sha file on success.
-# Consults channels-status.env: skips channels that are not active.
+# Consults channels-status.env: skips channels that are not active — UNLESS the
+# 8th arg (skip_channel_status) is set. channels-status.env is written by the
+# backend's channel-provisioning surface (xray/naive/hysteria2/…) and has no
+# `sfu` vocabulary, so the sfu key-apply caller sets that flag to decouple its
+# lifecycle from a status file that was never designed for it (a stray `sfu=`
+# line there must NOT silently suppress a signing-key recreate).
 #
 # MAJOR 6 review-fix note: uses `docker compose restart` (not `up --force-recreate`).
 # This is intentional: the channels_version path re-renders only channel config
@@ -471,18 +496,48 @@ unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTE
 # only the mounted config files change. `restart` is therefore correct here.
 # If compose.yml drift is detected via `install.sh --check`, the operator must
 # run a full re-install. This assumption is CI-verified via test_install_sh_check_drift.sh.
+#
+# apply_mode (6th arg, default "restart"):
+#   restart  — `docker compose restart SVC`. Correct for BIND-MOUNTED config
+#              files (xray/naive/hy2): the container re-reads the mounted file on
+#              restart. `container` is the service name compose knows.
+#   recreate — `docker compose up -d --no-deps --force-recreate SVC`. Required
+#              for env_file consumers (sfu): env_file is injected at container
+#              CREATION, so a plain `restart` keeps the OLD environment — the new
+#              key would never take effect (verified: restart does not re-read
+#              env_file). --no-deps keeps the blast radius to the one service.
+#
+# state_container (7th arg, default = `container`): the CONTAINER NAME to verify
+#   post-apply via `docker inspect --format '{{.State.Running}}'`. Kept separate
+#   from `container` because compose targets a SERVICE name (`sfu`) while inspect
+#   needs the fixed container_name (`oxpulse-partner-sfu`). `docker inspect`'s
+#   `{{.State.Running}}` template is evaluated by the daemon and its output shape
+#   (`true`/`false`) is stable across Docker/Compose versions — unlike parsing
+#   `docker compose ps --format json`, whose object/array/JSONL shape has drifted
+#   between Compose releases. A fragile parse here would fall back to "not running"
+#   on a healthy container, never advance the sha, and re-trigger a live-media
+#   `force-recreate` on every daily cycle (review HIGH: cross-host recreate loop).
 _restart_if_changed() {
     local kind="$1" cfg_file="$2" sha_file="$3" compose_file="$4" container="$5"
+    local apply_mode="${6:-restart}"
+    local state_container="${7:-$container}"
+    # 8th arg (default off): when non-empty, bypass the channels-status.env gate.
+    # The sfu key-apply caller sets it because that file's status vocabulary
+    # (written by the channel-provisioning surface) has no notion of `sfu`; a
+    # stray `sfu=` line must not silently suppress a signing-key recreate.
+    local skip_channel_status="${8:-}"
 
-    # Consult channels-status.env: skip non-active channels
-    local _ch_status=""
-    local _chs_env="${PREFIX_LIB}/channels-status.env"
-    if [[ -f "$_chs_env" ]]; then
-        _ch_status=$(grep "^${kind}=" "$_chs_env" 2>/dev/null | cut -d= -f2 || true)
-    fi
-    if [[ -n "$_ch_status" && "$_ch_status" != "active" ]]; then
-        log "  [surgical] channel $kind status=$_ch_status — skipping restart"
-        return 0
+    # Consult channels-status.env: skip non-active channels (channel callers only)
+    if [[ -z "$skip_channel_status" ]]; then
+        local _ch_status=""
+        local _chs_env="${PREFIX_LIB}/channels-status.env"
+        if [[ -f "$_chs_env" ]]; then
+            _ch_status=$(grep "^${kind}=" "$_chs_env" 2>/dev/null | cut -d= -f2 || true)
+        fi
+        if [[ -n "$_ch_status" && "$_ch_status" != "active" ]]; then
+            log "  [surgical] channel $kind status=$_ch_status — skipping restart"
+            return 0
+        fi
     fi
 
     [[ -f "$cfg_file" ]] || return 0
@@ -491,32 +546,171 @@ _restart_if_changed() {
     local _old_sha
     _old_sha=$(cat "$sha_file" 2>/dev/null || printf '')
     if [[ "$_new_sha" != "$_old_sha" ]]; then
-        log "  [surgical] channel $kind config changed — restarting $container"
-        if docker compose -f "$compose_file" restart "$container" 2>>"$LOG_FILE"; then
+        local _apply_ok=1
+        if [[ "$apply_mode" == "recreate" ]]; then
+            log "  [surgical] $kind config changed — recreating $container (env_file re-read)"
+            docker compose -f "$compose_file" up -d --no-deps --force-recreate "$container" \
+                2>>"$LOG_FILE" || _apply_ok=0
+        else
+            log "  [surgical] channel $kind config changed — restarting $container"
+            docker compose -f "$compose_file" restart "$container" 2>>"$LOG_FILE" || _apply_ok=0
+        fi
+        if [[ "$_apply_ok" -eq 1 ]]; then
             # MAJOR 3 review-fix: write sha only after verifying the container
             # is actually running. If the container is in CrashLoopBackOff /
             # restarting state, writing the sha would suppress the next refresh
             # cycle from retrying — leaving the container stuck on stale config.
             # Allow ~5s for Docker to transition the state post-restart.
+            #
+            # Review HIGH (cross-host): verify liveness with `docker inspect
+            # --format '{{.State.Running}}' CONTAINER` (daemon-evaluated, stable
+            # `true`/`false` output) instead of parsing `docker compose ps
+            # --format json`, whose shape drifts across Compose versions on the
+            # partner fleet. A parse failure on a HEALTHY container would leave
+            # the sha unadvanced and re-fire `force-recreate` (a live-UDP session
+            # drop for the sfu) on every subsequent daily cycle.
             sleep 5
-            local _state
-            _state=$(docker compose -f "$compose_file" ps "$container" \
-                --format json 2>/dev/null \
-                | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("State","unknown"))' \
-                2>/dev/null || printf 'unknown')
-            if [[ "$_state" == "running" ]]; then
+            local _running
+            _running=$(docker inspect --format '{{.State.Running}}' "$state_container" \
+                2>/dev/null || printf 'false')
+            if [[ "$_running" == "true" ]]; then
                 printf '%s\n' "$_new_sha" > "$sha_file"
-                log "  [surgical] $container restarted OK"
+                log "  [surgical] $container restarted OK ($state_container running)"
             else
-                log "WARNING: [surgical] $container state=$_state after restart — sha not updated, next refresh will retry"
+                log "WARNING: [surgical] $state_container State.Running=$_running after restart — sha not updated, next refresh will retry"
             fi
+        elif [[ "$apply_mode" == "recreate" ]]; then
+            log "WARNING: [surgical] docker compose up -d --force-recreate $container failed — container may use stale config"
         else
-            log "WARNING: [surgical] docker restart $container failed — container may use stale config"
+            log "WARNING: [surgical] docker compose restart $container failed — container may use stale config"
         fi
     else
         log "  [surgical] channel $kind unchanged — no restart"
     fi
 }
+
+# _sfu_env_file_wired COMPOSE_FILE — true iff the live compose's `sfu` service
+# already reads the signing key via `env_file: … sfu-keys.env`. Guards the recreate
+# below: upgrade.sh syncs a NEW refresh.sh on every run but NEVER re-renders the
+# on-disk compose to add the env_file stanza (it only sed-patches image tags — no
+# `env_file` reference exists anywhere in upgrade.sh), so an already-deployed node
+# can run this new refresh against an OLD compose that still bakes the key under
+# `environment:`. A `--force-recreate sfu` there would drop live WebRTC media for
+# ZERO benefit (the baked literal wins over the absent env_file). The check
+# anchors the sfu-keys.env match to the actual `env_file:` directive INSIDE the
+# `sfu:` service block (scalar form on the directive line, or a list entry within
+# its sub-block), so neither a stray comment mentioning sfu-keys.env nor another
+# service's env_file stanza can produce a false wired=true.
+_sfu_env_file_wired() {
+    local compose_file="$1"
+    awk '
+        /^  sfu:/               { insfu=1; next }   # enter sfu service block
+        insfu && /^  [A-Za-z]/  { insfu=0 }         # next 2-space sibling service ends it
+        insfu {
+            # env_file: is a 4-space key under the service. Anchor the sfu-keys.env
+            # match to it (scalar form on the same line, or a list entry inside its
+            # sub-block) so a stray comment or a different service cannot false-match.
+            if ($0 ~ /^    env_file:/) {
+                inenv=1
+                if ($0 ~ /sfu-keys\.env/) found=1
+                next
+            }
+            if (inenv && $0 ~ /^    [A-Za-z]/) inenv=0   # next 4-space key ends env_file:
+            if (inenv && $0 ~ /sfu-keys\.env/) found=1   # short/object list entry
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$compose_file" 2>/dev/null
+}
+
+# Detector: compare the SFU signing pubkey WRITTEN to sfu-keys.env (what should
+# be running) against the SFU container's LIVE env (what is running), and emit
+# partner_edge_sfu_pubkey_applied{partner_id} (1=applied, 0=mismatch). A 0 is the
+# epoch_apply_gap this task closes: the daily write landed but the container was
+# never recreated, so the running SFU still verifies relay JWTs with a stale key.
+# Skipped (no emit) when the container is not running / docker is unavailable, or
+# when the live read itself fails (docker exec non-zero, e.g. container mid-startup
+# right after a force-recreate), so neither a stopped SFU nor a transient exec
+# failure can emit a misleading 0.
+_emit_sfu_applied_gauge() {
+    # $1 (default 1): whether the live compose has env_file wired for sfu. Drives
+    # only the WARNING wording on a mismatch — the gauge value stays a pure
+    # written-vs-live detector so an unwired node still reports the gap as 0.
+    local _wired="${1:-1}"
+    [[ -f "$SFU_KEYS_ENV" ]] || return 0
+    local _written _live
+    # Strip one layer of surrounding quotes (opec writes single-quoted; refresh
+    # writes bare) so the comparison is representation-independent.
+    _written=$(sed -n 's/^SFU_SIGNING_PUBLIC_KEY=//p' "$SFU_KEYS_ENV" | tail -n1)
+    _written="${_written%\"}"; _written="${_written#\"}"
+    _written="${_written%\'}"; _written="${_written#\'}"
+    [[ -n "$_written" ]] || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$SFU_CONTAINER_NAME" || return 0
+    # Read the running value via the exec's EXIT STATUS, not just its output. A
+    # non-zero exit means docker exec / printenv failed (container mid-startup after
+    # a force-recreate, daemon hiccup, or var unset). In every production compose
+    # shape the key is injected (env_file when wired, the baked literal otherwise),
+    # so a non-zero read here is a transient exec failure — skip emission rather than
+    # let an empty _live compare unequal and fire a false gauge=0 + stale-key WARNING.
+    if ! _live=$(docker exec "$SFU_CONTAINER_NAME" printenv SFU_SIGNING_PUBLIC_KEY 2>/dev/null); then
+        log "  [sfu] could not read live SFU_SIGNING_PUBLIC_KEY from $SFU_CONTAINER_NAME (docker exec returned non-zero) — skipping applied gauge this cycle"
+        return 0
+    fi
+    if [[ "$_written" == "$_live" ]]; then
+        emit_gauge partner_edge_sfu_pubkey_applied "partner_id=\"${NODE_ID}\"" "1"
+    else
+        emit_gauge partner_edge_sfu_pubkey_applied "partner_id=\"${NODE_ID}\"" "0"
+        if [[ "$_wired" -eq 0 ]]; then
+            log "WARNING: [sfu] signing-pubkey NOT applied — live compose lacks env_file wiring for sfu-keys.env (run install.sh to re-render); running SFU verifies relay JWTs with the stale key (HS256 fallback)"
+        else
+            log "WARNING: [sfu] signing-pubkey applied-vs-written MISMATCH despite env_file wiring — running SFU has a stale key (relay JWTs fall back to HS256); check the last recreate"
+        fi
+    fi
+}
+
+# ── Phase 2: apply the refreshed SFU signing pubkey ─────────────────────────
+# sfu-keys.env is rewritten above on every run, but the sfu service reads it via
+# env_file, which docker compose evaluates only at container (re)creation. Mirror
+# the surgical channel-restart pattern (sha-gated) but with apply_mode=recreate
+# so `up -d --force-recreate sfu` actually re-reads the new key — a plain restart
+# would keep the old baked env and the write would be a dead producer. `sfu` is
+# the compose SERVICE name (docker compose targets services, not container_name).
+# Runs on EVERY cycle (self-gated by the sha diff) and BEFORE the no-rotation
+# early-exit below: the SFU key rotates independently of the Reality key version.
+if [[ "$KEYS_OK" -eq 1 ]]; then
+    _sfu_compose="${PREFIX_ETC}/docker-compose.yml"
+    _sfu_wired=0
+    if [[ -f "$_sfu_compose" ]] && _sfu_env_file_wired "$_sfu_compose"; then
+        _sfu_wired=1
+    fi
+    if [[ ! -f "$_sfu_compose" ]]; then
+        log "  [sfu] docker-compose.yml not found at $_sfu_compose — skipping SFU key apply (custom stack node)"
+    elif [[ ! -f "$SFU_KEYS_ENV" ]]; then
+        # Compose present but the key file was never written (opec install-time
+        # fetch failed, or no /api/partner/keys response has carried a key yet).
+        # Surface it — otherwise this node is invisible to both logs and the gauge.
+        log "WARNING: [sfu] sfu-keys.env not found at $SFU_KEYS_ENV — SFU signing key not yet provisioned; skipping apply (opec install / a /api/partner/keys response carrying the key must write it first)"
+    elif [[ "$_sfu_wired" -eq 0 ]]; then
+        # Review HIGH (epoch_apply_gap reachability): upgrade.sh ships THIS refresh
+        # script on every run but never re-renders the on-disk compose to add the
+        # env_file stanza, so an already-deployed node can pair the new refresh with
+        # an OLD compose that still bakes the key under `environment:`. A recreate
+        # there drops live WebRTC media for ZERO benefit. Skip until a full re-install
+        # (install.sh) renders env_file; the gauge below still reports 0 so the gap
+        # stays visible and alertable.
+        log "WARNING: [sfu] live docker-compose.yml has no env_file wiring for sfu-keys.env — SFU signing-key refresh cannot apply on this node; run install.sh to re-render compose. Skipping recreate to avoid dropping live media"
+    else
+        _restart_if_changed sfu \
+            "$SFU_KEYS_ENV" \
+            "${PREFIX_LIB}/sfu-keys.sha" \
+            "$_sfu_compose" \
+            sfu \
+            recreate \
+            "$SFU_CONTAINER_NAME" \
+            skip-channel-status
+    fi
+    _emit_sfu_applied_gauge "$_sfu_wired"
+    unset _sfu_compose _sfu_wired
+fi
 
 if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" != "none" && \
       "$NEW_CHANNELS_VERSION" != "$CURRENT_CHANNELS_VERSION" ]]; then
