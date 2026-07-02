@@ -1331,6 +1331,75 @@ reconcile_xray_client_surface() {
 }
 
 # ---------------------------------------------------------------------------
+# _reconcile_firewall_emit_gauge UNMANAGED
+#
+# Standing-signal companion to _reconcile_firewall_escalate below: a
+# Prometheus textfile-collector gauge so a probe/dashboard can key on
+# firewall coverage even if the alert itself is missed or rate-limited.
+#
+# Owns its own file (partner_edge_firewall.prom) distinct from
+# oxpulse-partner-edge-refresh.sh's partner_edge.prom — that script resets
+# (truncates) its file once per ITS OWN run; appending a differently-typed
+# metric into the same file from this (separate systemd unit / process)
+# would race that truncation and risk duplicate `# TYPE` lines, which
+# corrupts the whole file for node_exporter's textfile collector.
+#
+# UNMANAGED: "1" when firewall_apply could not enforce the whitelist this
+# converge, "0" when it succeeded. Atomic tmp+mv write (mirrors atomic_swap
+# above). Skips silently when the textfile dir is unwritable/absent
+# (non-fatal — matches the refresh script's emit_metric).
+# ---------------------------------------------------------------------------
+_reconcile_firewall_emit_gauge() {
+    local _unmanaged="$1"
+    local _dir="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
+    [[ -d "$_dir" ]] || mkdir -p "$_dir" 2>/dev/null || return 0
+    local _f="$_dir/partner_edge_firewall.prom"
+    local _tmp="${_f}.tmp.$$"
+    { printf '# TYPE partner_edge_firewall_unmanaged gauge\n'
+      printf 'partner_edge_firewall_unmanaged %s\n' "$_unmanaged"
+    } >"$_tmp" 2>/dev/null && mv -f "$_tmp" "$_f" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _reconcile_firewall_escalate RC
+#
+# Escalates a firewall_apply failure via the shared dozor AM-webhook notify
+# path — lib/telegram-alert-lib.sh's tg_alert(), the repo-wide notify
+# primitive (also used by oxpulse-channels-health-report.sh). NEVER curls
+# Telegram directly and NEVER invents a second alert channel.
+#
+# Severity vocab = critical|warning|info ONLY. dozor's monitor/healthcheck
+# receiver classifies severity by lexical match on the message text
+# (classifyMonitorMessage) — the message below includes "CRITICAL" and
+# "failed" so it lands as critical, not the silent-default warning.
+# force="force" bypasses tg_alert's 600s rate-limit floor: an unenforced
+# host firewall must alert every converge cycle it recurs, not just once.
+#
+# Non-fatal by design (warn + return, never die): reconcile_firewall_surface
+# must still let the rest of reconcile_all's surfaces converge even when the
+# firewall escalation itself cannot be delivered.
+# ---------------------------------------------------------------------------
+_reconcile_firewall_escalate() {
+    local _rc="$1"
+    local _tg_lib="${TELEGRAM_ALERT_LIB:-${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)}/telegram-alert-lib.sh}"
+
+    if [[ ! -f "$_tg_lib" ]]; then
+        warn "reconcile_firewall: telegram-alert-lib.sh not found at $_tg_lib — cannot escalate (rc=$_rc)"
+        return 0
+    fi
+    if ! declare -f tg_alert >/dev/null 2>&1; then
+        # shellcheck source=lib/telegram-alert-lib.sh
+        . "$_tg_lib"
+    fi
+
+    local _host
+    _host=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "unknown-host")
+    tg_alert "[oxpulse-partner-edge] CRITICAL firewall_apply failed (rc=${_rc}) on ${_host} — no supported firewall tool (ufw/firewalld) or apply error; SFU mesh-only ports (9317,8912/tcp) and the public whitelist are NOT enforced. Apply the whitelist manually or install ufw/firewalld." \
+        "force"
+}
+
+# ---------------------------------------------------------------------------
 # reconcile_firewall_surface
 #
 # Phase 4b network_apply handler.
@@ -1345,6 +1414,14 @@ reconcile_xray_client_surface() {
 # count is not incremented because re-assert is the intended behavior, not a
 # deviation. Callers should not interpret firewall output as "changed" in the
 # idempotency sense.
+#
+# t14 fix: firewall_apply returning non-zero (no supported tool, or an apply
+# error) used to be swallowed by a buried `warn` while
+# _RECONCILE_FIREWALL_APPLIED was set to 1 regardless — the converge cycle
+# logged green with SFU/coturn ports left publicly reachable. Now: a non-zero
+# rc leaves _RECONCILE_FIREWALL_APPLIED unset (reflects the true state) and
+# escalates via a critical AM-webhook alert instead of a warn line nobody
+# reads. Supported-tool (ufw/firewalld) success path is unchanged.
 #
 # Requires: lib/install-firewall.sh sourced (provides firewall_apply).
 # ---------------------------------------------------------------------------
@@ -1363,10 +1440,20 @@ reconcile_firewall_surface() {
 
     log "reconcile_firewall: re-asserting oxpulse-owned nft rules (idempotent, every converge)"
     # firewall_apply: idempotent (ufw --force reset+rules or firewalld --permanent+reload).
-    # Returns 0 even when no supported tool found (warn+skip path in firewall_apply).
+    # Non-zero (e.g. 2 = no supported tool) is now propagated, not swallowed —
+    # see t14 fix note above.
     # Canon §6: only oxpulse-owned nft — NOT docker ip nat / firewalld zones docker owns.
-    firewall_apply || warn "reconcile_firewall: firewall_apply returned non-zero (non-fatal if unsupported tool)"
-    _RECONCILE_FIREWALL_APPLIED=1
+    local _fw_rc=0
+    firewall_apply || _fw_rc=$?
+    if [[ "$_fw_rc" -eq 0 ]]; then
+        _RECONCILE_FIREWALL_APPLIED=1
+        _reconcile_firewall_emit_gauge 0
+    else
+        warn "reconcile_firewall: firewall_apply FAILED (rc=$_fw_rc) — host firewall NOT enforced this converge; SFU mesh-only ports (9317,8912) and the public whitelist may be publicly reachable"
+        _reconcile_firewall_escalate "$_fw_rc"
+        _reconcile_firewall_emit_gauge 1
+        # Do NOT set _RECONCILE_FIREWALL_APPLIED=1 — reflect the true state.
+    fi
 }
 
 # ---------------------------------------------------------------------------

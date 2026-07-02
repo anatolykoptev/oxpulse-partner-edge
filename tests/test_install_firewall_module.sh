@@ -75,16 +75,29 @@ grep -q "firewall-cmd --permanent --zone=public --add-rich-rule rule family=ipv4
 grep -q "firewall-cmd --reload"                                                  "$TMP/calls.log" || { echo "FAIL test2: reload"; exit 1; }
 echo "[ok] test2: firewalld whitelist applied with awg=44322"
 
-# ── Test 3: no firewall tool → warn, no commands executed ────────────────────
+# ── Test 3: no firewall tool → warn + FAIL-LOUD (distinct rc=2), no commands ──
+# t14 fail-loud contract (lib/install-firewall.sh none|*) branch): this path
+# applies NOTHING, so it MUST report a distinct non-zero (2), not success.
+# The old `return 0` here silently no-op'd — reconcile_firewall_surface's
+# `firewall_apply || warn` never fired and the converge cycle logged green with
+# _RECONCILE_FIREWALL_APPLIED=1 while the SFU mesh-only ports (:9317,:8912) and
+# the public whitelist stayed unenforced on any distro without ufw/firewalld.
+# The escalation on that rc is reconcile.sh's job, covered by
+# tests/test_reconcile_firewall_unsupported.sh; here we pin install-firewall.sh's
+# own exit-code contract. NOTE: the bare call must capture rc — under this
+# file's `set -e`, an unguarded `firewall_apply` on this branch aborts the
+# whole test (which is exactly the pre-fix false-negative this assertion fixes).
 : >"$TMP/calls.log"
 _firewall_detect_tool() { printf 'none'; }
 
-AWG_LISTEN_PORT=44323 firewall_apply
+_rc=0
+AWG_LISTEN_PORT=44323 firewall_apply || _rc=$?
+[ "$_rc" -eq 2 ] || { echo "FAIL test3: no-tool path must return distinct non-zero 2 (t14 fail-loud), got rc=$_rc"; cat "$TMP/calls.log"; exit 1; }
 grep -q "no supported firewall tool" "$TMP/calls.log" || { echo "FAIL test3: warn missing"; cat "$TMP/calls.log"; exit 1; }
 # Each tool-mock writes its own argv on a line starting with the tool name.
 # Real invocations look like 'ufw allow 22/tcp' or 'firewall-cmd --permanent ...'.
 grep -E '^ufw |^firewall-cmd ' "$TMP/calls.log" >/dev/null && { echo "FAIL test3: should NOT have invoked any firewall tool"; cat "$TMP/calls.log"; exit 1; }
-echo "[ok] test3: missing-firewall path warns and runs no commands"
+echo "[ok] test3: missing-firewall path returns rc=2, warns, runs no commands"
 
 # ── Test 4: missing AWG_LISTEN_PORT + no awg0 → skip with warn ───────────────
 : >"$TMP/calls.log"
