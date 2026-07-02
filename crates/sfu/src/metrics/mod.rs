@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use prometheus::{
-    Encoder, GaugeVec, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
-    TextEncoder,
+    Encoder, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Opts, Registry, TextEncoder,
 };
 
 /// T4.3: `algorithm` label value for the Ed25519 (EdDSA) relay-JWT verify path.
@@ -131,6 +131,22 @@ pub struct SfuMetrics {
     /// select! arm spinning — typically a closed channel that wasn't
     /// `Option::None`'d out. Alert at >500/s sustained.
     pub udp_loop_iterations_total: IntCounter,
+    /// 2026-07 bug-hunt (T10): wall-clock duration of one complete
+    /// `udp_loop::serve` iteration — from the top of the `loop {}` through
+    /// the `select!` branch that resolved it. `udp_loop_iterations_total`'s
+    /// *rate* alone cannot see a saturated core: under contention the
+    /// iteration RATE DROPS (fewer completed wakeups/sec) rather than
+    /// rising, so the existing spin-detection alert (`rate > 500/s`) never
+    /// fires. This histogram closes that gap — p99 climbing while the
+    /// iteration rate stays flat or drops is the saturation signature.
+    /// Buckets span sub-ms scheduling noise up to a few multiples of
+    /// `MAX_SLEEP` (100ms) so the tail is visible without an overflow
+    /// bucket swallowing it. Note: a fully idle loop (no clients, no
+    /// packets) legitimately sits near the 100ms `MAX_SLEEP` ceiling every
+    /// iteration, so the suggested `p99 > 50ms` warning threshold assumes a
+    /// populated deployment — tune per-environment if idle-room alerting
+    /// noise shows up.
+    pub sfu_udp_loop_iteration_seconds: Histogram,
     /// One-shot counter for inject channels closing at runtime, label `kind`
     /// = `relay | client`. Should stay 0 in healthy operation; any non-zero
     /// reading means a producer task panicked or exited.
@@ -578,6 +594,21 @@ impl SfuMetrics {
             "UDP select! loop iteration count. Steady-state ~10/s (one wake per MAX_SLEEP=100ms). Sustained rate >>10/s = a select! arm is hot — typically a closed channel polled without an `if guard` or `Option::None` substitution. Alert: rate(sfu_udp_loop_iterations_total[1m]) > 500.",
         ))
         .context("udp_loop_iterations_total")?);
+
+        // T10 bug-hunt: per-iteration duration. See field doc on
+        // `SfuMetrics::sfu_udp_loop_iteration_seconds` for why this exists
+        // alongside `udp_loop_iterations_total` (rate alone misses
+        // saturation — the rate drops instead of rising).
+        let sfu_udp_loop_iteration_seconds = reg!(Histogram::with_opts(
+            HistogramOpts::new(
+                "sfu_udp_loop_iteration_seconds",
+                "Wall-clock duration of one udp_loop::serve select! loop iteration (processing + select wait). Suggested alert: warning on p99 > 0.05s.",
+            )
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+            ]),
+        )
+        .context("sfu_udp_loop_iteration_seconds")?);
 
         let inject_channel_closed_total = reg!(IntCounterVec::new(
             Opts::new(
@@ -1185,6 +1216,7 @@ impl SfuMetrics {
             udp_send_failed,
             client_delivered_media_count,
             udp_loop_iterations_total,
+            sfu_udp_loop_iteration_seconds,
             inject_channel_closed_total,
             chat_relay_tx_bytes_total,
             chat_relay_rx_bytes_total,
