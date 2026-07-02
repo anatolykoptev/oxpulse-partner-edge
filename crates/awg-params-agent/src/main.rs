@@ -36,7 +36,10 @@ mod state;
 
 use agent::{AgentConfig, AgentLoop};
 use error::Result;
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tracing::info;
 
 fn main() -> anyhow::Result<()> {
@@ -98,6 +101,28 @@ fn load_config() -> Result<AgentConfig> {
 
     let poll_interval = parse_duration(&env_or("OXPULSE_POLL_INTERVAL", "30s"))?;
 
+    // Shared advisory lock coordinating awg0.conf writes with the installer
+    // (lib/install-awg.sh). Default `<awg_conf_path>.lock`, derived identically
+    // on both sides so the bash `flock` and the Rust `flock(2)` target the same
+    // file byte-for-byte. Only override if the installer's AWG_CONF_LOCK_PATH is
+    // also overridden to the same value.
+    let awg_conf_lock_path: PathBuf = match std::env::var("OXPULSE_AWG_CONF_LOCK_PATH") {
+        Ok(v) if !v.trim().is_empty() => v.into(),
+        _ => default_lock_path(&awg_conf_path),
+    };
+
+    // Max wait for the shared lock before skipping the tick. Matches the
+    // installer's `flock -w 10`.
+    let lock_acquire_timeout = parse_duration(&env_or("OXPULSE_AWG_LOCK_TIMEOUT", "10s"))?;
+
+    // node_exporter textfile-collector dir for the interim conflict counter.
+    // Default matches oxpulse-partner-edge-refresh.sh's PARTNER_EDGE_TEXTFILE_DIR.
+    let textfile_dir: PathBuf = env_or(
+        "OXPULSE_TEXTFILE_DIR",
+        "/var/lib/prometheus-node-exporter/textfile",
+    )
+    .into();
+
     // Optional post-apply hook: restart this systemd unit after each successful
     // kernel apply.  Empty string → disabled.  Used by split-routing to re-assert
     // AllowedIPs widening strictly after awg syncconf re-narrowed it.
@@ -115,6 +140,9 @@ fn load_config() -> Result<AgentConfig> {
         node_id = %node_id,
         token_path = %token_path,
         awg_conf = ?awg_conf_path,
+        awg_conf_lock = ?awg_conf_lock_path,
+        lock_acquire_timeout = ?lock_acquire_timeout,
+        textfile_dir = ?textfile_dir,
         awg_iface = %awg_iface,
         state_path = ?state_path,
         poll_interval = ?poll_interval,
@@ -131,7 +159,21 @@ fn load_config() -> Result<AgentConfig> {
         poll_interval,
         node_id,
         restart_unit_after_apply,
+        awg_conf_lock_path,
+        lock_acquire_timeout,
+        textfile_dir,
+        // Production always disables the test-only read→rename delay hook.
+        test_read_write_delay: Duration::ZERO,
     })
+}
+
+/// Default lock path = `"<conf_path>.lock"`, derived identically to
+/// lib/install-awg.sh's `${conf_path}.lock` so the bash `flock` and the Rust
+/// `flock(2)` serialize on the same file byte-for-byte.
+fn default_lock_path(conf_path: &Path) -> PathBuf {
+    let mut s = conf_path.as_os_str().to_owned();
+    s.push(".lock");
+    PathBuf::from(s)
 }
 
 fn require_env(key: &str) -> Result<String> {
