@@ -237,6 +237,23 @@ else
 	fail "partner_edge_reality_pubkey_applied=1 not found in $PROM: $(cat "$PROM" 2>/dev/null || echo '<absent>')"
 fi
 
+# Assertion 5 (review r3, critical): the textfile is world-readable (0644).
+# emit_metric writes via mktemp+mv; GNU mktemp forces mode 0600 (mkstemp,
+# umask-independent) and the rename carries 0600 onto partner_edge.prom, so
+# without an explicit chmod node_exporter's unprivileged textfile collector
+# loses read access after the first emit and every partner_edge_* metric goes
+# dark. Assert the mode is 0644 — RED if the chmod is dropped from emit_metric.
+if [[ -f "$PROM" ]]; then
+	PROM_MODE=$(stat -c '%a' "$PROM" 2>/dev/null || stat -f '%Lp' "$PROM" 2>/dev/null || echo "unknown")
+	if [[ "$PROM_MODE" == "644" ]]; then
+		pass "partner_edge.prom is 0644 (node_exporter can read it)"
+	else
+		fail "partner_edge.prom mode=$PROM_MODE expected 644 (mktemp 0600 not restored — node_exporter loses read access)"
+	fi
+else
+	fail "partner_edge.prom absent — cannot check mode"
+fi
+
 # ── Prod-default path: NO local template ⇒ re_render_xray curl self-fetch ─────
 # Finding (high, review round 2): a normally installed edge carries NO on-disk
 # *.tpl — install renders from an ephemeral staging dir and upgrade.sh's sbin sync
@@ -571,6 +588,153 @@ if [[ "$IDEM_XRAY" == "$PUBKEY_C" ]]; then
 	pass "second rotation applied PubKeyC (both rotations executed)"
 else
 	fail "after 2 rotations xray pubkey='$IDEM_XRAY' expected '$PUBKEY_C'"
+fi
+
+# ── Reload-failure rollback: xray-client.json + container reverted, not just node-config ──
+# Finding (high, review round 3): re_render_xray (the OPERATIVE renderer on a normal
+# node) writes the rotated pubkey to xray-client.json AND `docker compose restart
+# xray-client`s the live container BEFORE the reload/verify gate. If `systemctl reload`
+# then fails, the old rollback reverted node-config.json ALONE — leaving xray-client.json
+# and the running container on the NEW key while node-config.json (source of truth) went
+# back to OLD, an inverted epoch_apply_gap, and the "keys NOT applied" log a lie. This
+# runs the REAL prod path (opec present, no local tpl ⇒ re_render_xray curl self-fetch +
+# restart) with reload FAILING, and asserts BOTH files roll back to PubKeyA and the
+# container is re-restarted onto the restored config. RED before the rollback fix (xray
+# stays PubKeyB).
+echo "==> Reload-failure: render succeeds, reload fails ⇒ node-config AND xray roll back"
+R=$(mktemp -d)
+trap 'rm -rf "$T" "$F" "$N" "$I" "$R"' EXIT
+
+R_ETC="$R/etc"; R_LIB="$R/lib"; R_TEXT="$R/textfile"; R_BIN="$R/bin"
+mkdir -p "$R_ETC" "$R_LIB" "$R_BIN"
+
+# opec present but NO local tpl ⇒ opec SrcMisses ⇒ re_render_xray fallback (prod path).
+cp "$BIN/opec" "$R_BIN/opec"
+cp "$REPO_ROOT/channel-render-lib.sh" "$R_BIN/channel-render-lib.sh"
+
+cat > "$R_ETC/node-config.json" <<JSON
+{
+  "node_id": "test-edge-t3-reloadfail",
+  "backend_endpoint": "oxpulse.chat:443",
+  "reality_uuid": "11111111-2222-3333-4444-555555555555",
+  "reality_public_key": "$PUBKEY_A",
+  "reality_encryption": "mlkem768x25519",
+  "reality_short_id": "abcd",
+  "reality_server_names": ["www.samsung.com"]
+}
+JSON
+cat > "$R_ETC/xray-client.json" <<JSON
+{ "outbounds": [ { "streamSettings": { "security": "reality", "realitySettings": { "publicKey": "$PUBKEY_A" } } } ] }
+JSON
+printf 'v1\n'  > "$R_LIB/keys-version"
+printf 'cv1\n' > "$R_LIB/channels-version"
+
+# curl: keys GET → v2/PubKeyB; heartbeat → 200; REPO_RAW xray tpl fetch → SUCCEEDS.
+cat > "$R_BIN/curl" <<CURL
+#!/usr/bin/env bash
+args="\$*"
+if [[ "\$args" == *"xray-client.json.tpl"* ]]; then
+  out=""
+  while [[ \$# -gt 0 ]]; do
+    if [[ "\$1" == "-o" ]]; then out="\$2"; shift 2; continue; fi
+    shift
+  done
+  [[ -n "\$out" ]] && cp "$REPO_ROOT/xray-client.json.tpl" "\$out"
+  exit 0
+fi
+if [[ "\$args" == *"/api/partner/keys"* ]]; then
+  cat <<'RESP'
+{"version":"v2","channels_version":"cv1","reality_public_key":"$PUBKEY_B","reality_encryption":"mlkem768x25519","reality_server_names":["www.samsung.com"],"sfu_signing_public_key":"ZmFrZQ=="}
+RESP
+  exit 0
+fi
+if [[ "\$args" == *"/api/partner/heartbeat"* ]]; then printf 'ok\n200'; exit 0; fi
+exit 0
+CURL
+
+# systemctl: service installed; reload FAILS (exit 1) — triggers the rollback path.
+cat > "$R_BIN/systemctl" <<'SYSCTL'
+#!/usr/bin/env bash
+case "$*" in
+  "list-unit-files oxpulse-partner-edge.service --no-legend"*)
+    echo "oxpulse-partner-edge.service enabled enabled" ;;
+  "reload oxpulse-partner-edge.service"*) exit 1 ;;
+  "is-active --quiet oxpulse-partner-edge.service"*) exit 0 ;;
+  *) : ;;
+esac
+exit 0
+SYSCTL
+
+# docker: log every invocation so we can assert the rollback re-restart fired.
+cat > "$R_BIN/docker" <<DOCKER
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$R/docker.log"
+exit 0
+DOCKER
+printf '#!/usr/bin/env bash\nexit 0\n' > "$R_BIN/sleep"
+chmod +x "$R_BIN"/*
+
+set +e
+env -i \
+  PATH="$R_BIN:/usr/bin:/bin" \
+  HOME="$R" \
+  PARTNER_EDGE_PREFIX_ETC="$R_ETC" \
+  PARTNER_EDGE_PREFIX_LIB="$R_LIB" \
+  PARTNER_EDGE_TEXTFILE_DIR="$R_TEXT" \
+  OXPULSE_PREFIX_SBIN="$R_BIN" \
+  PREFIX_SBIN="$R_BIN" \
+  LOG_FILE="$R/refresh.log" \
+  OXPULSE_BACKEND_URL="https://oxpulse.chat" \
+  bash "$SCRIPT" > "$R/run.out" 2>&1
+RF_EXIT=$?
+set -e
+
+if [[ $RF_EXIT -ne 0 ]]; then
+	pass "refresh.sh exited non-zero ($RF_EXIT) on reload failure (rollback path taken)"
+else
+	fail "refresh.sh exited 0 despite reload failure — rollback path not taken"
+	sed 's/^/    /' "$R/run.out" 2>/dev/null || true
+fi
+
+RF_NODE=$(jq -r '.reality_public_key // "none"' "$R_ETC/node-config.json" 2>/dev/null || echo none)
+if [[ "$RF_NODE" == "$PUBKEY_A" ]]; then
+	pass "node-config.json rolled back to PubKeyA after reload failure"
+else
+	fail "node-config.json pubkey='$RF_NODE' expected rollback to '$PUBKEY_A'"
+fi
+
+# THE FIX: xray-client.json must ALSO roll back (render wrote PubKeyB before reload).
+RF_XRAY=$(jq -r '.outbounds[0].streamSettings.realitySettings.publicKey // "none"' "$R_ETC/xray-client.json" 2>/dev/null || echo none)
+if [[ "$RF_XRAY" == "$PUBKEY_A" ]]; then
+	pass "xray-client.json rolled back to PubKeyA (no inverted epoch_apply_gap)"
+else
+	fail "xray-client.json pubkey='$RF_XRAY' expected rollback to '$PUBKEY_A' (stale-NEW mount left after reload failure)"
+fi
+
+RF_VER=$(cat "$R_LIB/keys-version" 2>/dev/null || echo none)
+if [[ "$RF_VER" == "v1" ]]; then
+	pass "keys-version NOT advanced (still v1) after reload failure"
+else
+	fail "keys-version='$RF_VER' expected 'v1' (must not persist on reload failure)"
+fi
+
+# The container was restarted once by re_render_xray (new key) and once by the
+# rollback (restored old config) ⇒ at least 2 `restart xray-client` invocations.
+RF_RESTARTS=$(grep -cE 'restart xray-client' "$R/docker.log" 2>/dev/null || true)
+RF_RESTARTS="${RF_RESTARTS:-0}"
+if [[ "$RF_RESTARTS" -ge 2 ]]; then
+	pass "xray container re-restarted during rollback ($RF_RESTARTS restart invocations)"
+else
+	fail "expected >=2 'restart xray-client' invocations (re_render + rollback), got $RF_RESTARTS; docker.log:"
+	sed 's/^/    /' "$R/docker.log" 2>/dev/null || true
+fi
+
+# No leftover .rotbak backup on the rollback path (moved back into place).
+RF_LEFTOVER=$(find "$R_ETC" -maxdepth 1 -name 'xray-client.json.rotbak.*' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$RF_LEFTOVER" == "0" ]]; then
+	pass "no leftover .rotbak backup after rollback"
+else
+	fail "$RF_LEFTOVER leftover .rotbak backup(s) after rollback"
 fi
 
 # ── Result ───────────────────────────────────────────────────────────────────
