@@ -28,6 +28,7 @@ use anyhow::Context;
 use tokio::net::UdpSocket;
 use tokio::time::MissedTickBehavior;
 
+use crate::client::Transmit;
 use crate::config::SfuConfig;
 use crate::metrics::SfuMetrics;
 use crate::registry::Registry;
@@ -165,9 +166,21 @@ where
     // Per-destination dedup for send_to failures: first failure per dest per
     // SEND_FAIL_DEDUP_WINDOW emits a WARN; subsequent ones only bump the counter.
     let mut send_fail_dedup: HashMap<SocketAddr, Instant> = HashMap::new();
+    // T10 bug-hunt: hoisted out of `flush_transmits` — previously a fresh
+    // `Vec::new()` was allocated on every flush (once per loop iteration on
+    // the packet hot path). Declared once here and `clear()`ed at the top
+    // of each flush; `clear()` truncates length but retains the underlying
+    // allocation, so once this reaches steady-state capacity the flush
+    // allocates zero bytes.
+    let mut pending_transmits: Vec<Transmit> = Vec::new();
     tokio::pin!(shutdown);
 
     loop {
+        // T10 bug-hunt: per-iteration duration, observed once this whole
+        // loop pass (processing + select wait) completes below. See
+        // `SfuMetrics::sfu_udp_loop_iteration_seconds` doc for why this is
+        // the saturation signal `udp_loop_iterations_total`'s rate misses.
+        let iter_start = Instant::now();
         metrics_ref.udp_loop_iterations_total.inc();
         registry.reap_dead();
         // Solo-peer auto-kick: if configured, check whether the lone remaining
@@ -193,6 +206,7 @@ where
             &metrics_ref,
             &mut send_fail_dedup,
             now,
+            &mut pending_transmits,
         )
         .await;
         // Evict entries older than 6× window so the map can't grow unbounded
@@ -206,6 +220,15 @@ where
 
         tokio::select! {
             () = &mut shutdown => {
+                // Observe here too (not just at the bottom of the loop,
+                // which this early `return` skips) — this iteration still
+                // did real work above (reap_dead/poll_all/fanout/flush)
+                // before choosing to shut down, so its duration belongs in
+                // the histogram. Keeps sample count == iterations_total
+                // exactly, with no shutdown-iteration gap to explain away.
+                metrics_ref
+                    .sfu_udp_loop_iteration_seconds
+                    .observe(iter_start.elapsed().as_secs_f64());
                 tracing::info!("SFU shutting down — UDP loop stopping");
                 return Ok(());
             }
@@ -348,6 +371,14 @@ where
                 }
             }
         }
+
+        // Every arm except shutdown (which observes inline above, then
+        // returns) falls through to this point — exactly one observe()
+        // per loop pass, matching `udp_loop_iterations_total`'s increment
+        // at the top.
+        metrics_ref
+            .sfu_udp_loop_iteration_seconds
+            .observe(iter_start.elapsed().as_secs_f64());
     }
 }
 
@@ -435,10 +466,16 @@ async fn flush_transmits(
     metrics: &SfuMetrics,
     dedup: &mut HashMap<SocketAddr, Instant>,
     now: Instant,
+    pending: &mut Vec<Transmit>,
 ) {
-    let mut pending = Vec::new();
+    // T10 bug-hunt: `pending` is caller-owned and reused across iterations
+    // (see `pending_transmits` in `serve()`) instead of allocated fresh
+    // here every flush. `clear()` truncates length to 0 but keeps the
+    // underlying allocation, so steady-state flushes on the packet hot
+    // path allocate nothing.
+    pending.clear();
     registry.drain_transmits(|t| pending.push(t));
-    for t in pending {
+    for t in pending.drain(..) {
         // Drop packets destined for bogon addresses before calling send_to.
         // Mobile CGNAT peers (T-Mobile/Verizon) advertise private IPs as ICE
         // candidates; send_to on those produces EDESTADDRREQ (OS error 89)
@@ -981,11 +1018,215 @@ mod tests {
         assert_eq!(is_bogon(&sa), Some("multicast"));
     }
 
+    // ── T10 bug-hunt: iteration-duration histogram + Vec-hoist ─────────────────
+
+    /// `sfu_udp_loop_iteration_seconds` must be registered and observed
+    /// exactly once per completed `serve()` loop iteration.
+    ///
+    /// Before this change the only loop-health signal was
+    /// `udp_loop_iterations_total`, whose *rate* alerts on a spin (>500/s)
+    /// but says nothing when a core is saturated — under saturation the
+    /// iteration rate DROPS (fewer completed wakeups/sec), not rises, so a
+    /// starved core produced no alert. This test proves the histogram's
+    /// sample count tracks the iteration counter 1:1, so a per-iteration
+    /// duration signal exists independent of the rate.
+    #[tokio::test]
+    async fn serve_observes_iteration_duration_once_per_loop() {
+        use crate::metrics::SfuMetrics;
+        use std::sync::Arc;
+
+        let cfg = SfuConfig {
+            udp_port: 0,
+            bind_address: "127.0.0.1".to_string(),
+            ..SfuConfig::default()
+        };
+        let socket = bind(&cfg).await.expect("bind");
+        let candidate_addr = socket.local_addr().expect("local_addr");
+        let metrics = Arc::new(SfuMetrics::default());
+        let iter_counter = metrics.udp_loop_iterations_total.clone();
+        let hist = metrics.sfu_udp_loop_iteration_seconds.clone();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(serve(
+            socket,
+            metrics,
+            None,
+            None,
+            None, // standalone — no relay channel
+            None, // standalone — no client inject channel
+            candidate_addr,
+            None, // solo_kick_timeout: disabled in test
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        shutdown_tx.send(()).expect("shutdown signal");
+        task.await.expect("join").expect("serve ok");
+
+        let iters = iter_counter.get();
+        let samples = hist.get_sample_count();
+        assert!(iters > 0, "expected at least one loop iteration in 200ms");
+        assert_eq!(
+            samples, iters,
+            "sfu_udp_loop_iteration_seconds sample count ({samples}) must equal \
+             udp_loop_iterations_total ({iters}) — the histogram must observe() \
+             exactly once per completed serve() iteration"
+        );
+    }
+
+    /// Pins `flush_transmits`'s current send/skip behaviour end-to-end
+    /// through the REAL registry → client `pending_out` seam, before
+    /// hoisting the per-call `Vec` out of the function (2026-07 bug-hunt
+    /// finding, resource_exhaustion/low: `Vec::new()` was allocated fresh on
+    /// every flush, i.e. once per UDP loop iteration on the packet hot
+    /// path).
+    ///
+    /// Two same-destination packets must arrive in send order and a
+    /// bogon-destined packet queued between them must never leave the
+    /// process. Unlike `is_bogon_counter_increment_rfc1918` below (which
+    /// documents that it does NOT exercise `flush_transmits`), this test
+    /// drives the real function via `Client::pending_out` — the seam that
+    /// test previously lacked.
+    #[tokio::test]
+    async fn flush_transmits_preserves_order_and_skips_bogon() {
+        use crate::client::test_seed::new_client;
+        use crate::client::Transmit;
+        use crate::metrics::SfuMetrics;
+        use crate::propagate::ClientId;
+        use std::net::{Ipv4Addr, SocketAddr};
+        use std::sync::Arc;
+        use str0m::net::Protocol;
+
+        // `is_bogon` correctly rejects loopback (and RFC1918/link-local) as
+        // send destinations — real ICE peers never live there — which means
+        // a loopback-bound receiver can't observe the *non-bogon* leg of
+        // this test. This host's IPv4 default route goes through NAT (its
+        // own address is RFC1918, e.g. 10.0.0.x), but it has a real
+        // global-scope IPv6 address, and sending UDP to your own
+        // globally-routable address is delivered locally by the kernel
+        // (verified empirically on this box). Discover it with the
+        // standard connect-without-sending trick: `connect()` on a UDP
+        // socket only does a routing-table lookup — no packet leaves the
+        // host. This test exercises the real `oxpulse-sfu` self-hosted CI
+        // box only (see repo CI model), so depending on its real interface
+        // is expected, not incidental.
+        let probe = std::net::UdpSocket::bind("[::]:0").expect("bind v6 probe");
+        probe
+            .connect("[2001:4860:4860::8888]:80")
+            .expect("route lookup for a global IPv6 destination must succeed on this host");
+        let local_v6 = probe.local_addr().expect("probe local_addr").ip();
+
+        let metrics = Arc::new(SfuMetrics::default());
+        let mut registry = Registry::new(metrics.clone());
+
+        let recv_sock = UdpSocket::bind(SocketAddr::new(local_v6, 0))
+            .await
+            .expect("bind recv on global IPv6 address");
+        let dest = recv_sock.local_addr().expect("recv local_addr");
+        assert!(
+            is_bogon(&dest).is_none(),
+            "test precondition failed: {dest} must not be bogon-classified (got {:?}) — \
+             this host's global IPv6 address changed shape, update the probe target",
+            is_bogon(&dest)
+        );
+        let send_sock = UdpSocket::bind(SocketAddr::new(local_v6, 0))
+            .await
+            .expect("bind send on global IPv6 address");
+        let send_src = send_sock.local_addr().expect("send local_addr");
+        let bogon_dest: SocketAddr = (Ipv4Addr::new(10, 0, 0, 1), 5000u16).into();
+
+        let mut client = new_client(ClientId(1));
+        client.pending_out.push_back(Transmit {
+            proto: Protocol::Udp,
+            source: send_src,
+            destination: dest,
+            contents: b"packet-one".to_vec().into(),
+        });
+        client.pending_out.push_back(Transmit {
+            proto: Protocol::Udp,
+            source: send_src,
+            destination: bogon_dest,
+            contents: b"never-sent".to_vec().into(),
+        });
+        client.pending_out.push_back(Transmit {
+            proto: Protocol::Udp,
+            source: send_src,
+            destination: dest,
+            contents: b"packet-two".to_vec().into(),
+        });
+        registry.insert(client);
+
+        let mut dedup: HashMap<SocketAddr, Instant> = HashMap::new();
+        let mut pending: Vec<Transmit> = Vec::new();
+        flush_transmits(
+            &send_sock,
+            &mut registry,
+            &metrics,
+            &mut dedup,
+            Instant::now(),
+            &mut pending,
+        )
+        .await;
+
+        let mut buf = [0u8; 64];
+        let (n1, _) = tokio::time::timeout(Duration::from_secs(1), recv_sock.recv_from(&mut buf))
+            .await
+            .expect("recv1 timeout")
+            .expect("recv1 ok");
+        assert_eq!(
+            &buf[..n1],
+            b"packet-one",
+            "first same-dest packet must arrive first"
+        );
+
+        let (n2, _) = tokio::time::timeout(Duration::from_secs(1), recv_sock.recv_from(&mut buf))
+            .await
+            .expect("recv2 timeout")
+            .expect("recv2 ok");
+        assert_eq!(
+            &buf[..n2],
+            b"packet-two",
+            "second same-dest packet must arrive second, preserving send order"
+        );
+
+        assert_eq!(
+            metrics
+                .udp_bogon_dest_dropped_total
+                .with_label_values(&["rfc1918"])
+                .get(),
+            1,
+            "bogon-destined transmit must be dropped before send_to, not delivered"
+        );
+        let send_failed: u64 = [
+            "dest_required",
+            "network_unreachable",
+            "host_unreachable",
+            "perm",
+            "other",
+        ]
+        .iter()
+        .map(|k| metrics.udp_send_failed.with_label_values(&[k]).get())
+        .sum();
+        assert_eq!(
+            send_failed, 0,
+            "no real send_to failures expected for a loopback destination"
+        );
+
+        // The hoisted Vec must be empty and ready for the next iteration's
+        // clear()+push cycle — proves flush_transmits drains what it queues.
+        assert!(
+            pending.is_empty(),
+            "pending Vec must be drained after flush_transmits"
+        );
+    }
+
     /// Verifies `is_bogon` classifies RFC-1918 addresses correctly and that
     /// the counter increment path works. This is an honest-scope unit test —
     /// it does NOT exercise the `flush_transmits` code path end-to-end.
-    /// Actual flush_transmits coverage requires socket integration tests
-    /// (deferred: needs a seam to inject transmits without a live Rtc).
+    /// `flush_transmits_preserves_order_and_skips_bogon` above exercises the
+    /// real path via the `Client::pending_out` seam.
     #[tokio::test]
     async fn is_bogon_counter_increment_rfc1918() {
         use crate::metrics::SfuMetrics;
@@ -996,10 +1237,9 @@ mod tests {
         let metrics = Arc::new(SfuMetrics::default());
         let bogon_dest: SocketAddr = (Ipv4Addr::new(10, 8, 0, 3), 62230u16).into();
 
-        // Inject a fake transmit to the bogon address via a minimal Registry.
-        // We test is_bogon + counter directly since flush_transmits is private
-        // and has no seam for injecting transmits without a live Rtc.
-        // This test exercises the classification + counter path.
+        // Exercises the classification + counter path in isolation (see
+        // `flush_transmits_preserves_order_and_skips_bogon` for the same
+        // assertion driven through the real `flush_transmits` fn).
         let kind = is_bogon(&bogon_dest).expect("10.8.0.3 must be classified as bogon");
         assert_eq!(kind, "rfc1918");
         metrics
