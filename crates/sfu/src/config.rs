@@ -82,6 +82,16 @@ pub struct SfuConfig {
     /// (docker bridge gw), so safe to bind to the bridge IP when known;
     /// otherwise leave unset and rely on host firewall. Env: `SFU_CLIENT_WS_BIND`.
     pub client_ws_bind: Option<String>,
+    /// T4.3 kill-switch for the EdDSA→HS256 relay-JWT fallback. When `true`
+    /// (default), a token that fails EdDSA verification with `InvalidSignature`
+    /// / `AlgorithmMismatch` is retried under the deprecated HS256 shared
+    /// secret — the rollout-interop path. When `false`, that retry is refused
+    /// and a non-EdDSA token is rejected outright, turning a fleet-wide
+    /// `relay_jwt_verify_total{algorithm=hs256}` == 0 observation into an
+    /// enforced cutover. Only gates the *fallback*: when no EdDSA key is
+    /// configured, HS256 is the primary verifier and this flag does not apply.
+    /// Env: `SFU_RELAY_HS256_FALLBACK` (default-on; `0`/`false` disables).
+    pub relay_hs256_fallback_enabled: bool,
 }
 
 impl Default for SfuConfig {
@@ -102,6 +112,7 @@ impl Default for SfuConfig {
             metrics_bind: None,
             relay_api_bind: None,
             client_ws_bind: None,
+            relay_hs256_fallback_enabled: true,
         }
     }
 }
@@ -148,6 +159,7 @@ impl SfuConfig {
             client_ws_bind: std::env::var("SFU_CLIENT_WS_BIND")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            relay_hs256_fallback_enabled: parse_hs256_fallback_env(),
         }
     }
 }
@@ -189,6 +201,45 @@ impl SfuConfig {
 
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Parse `SFU_RELAY_HS256_FALLBACK` into the fallback kill-switch. Default-on:
+/// unset (or empty) means the EdDSA→HS256 fallback stays enabled so existing
+/// deployments are not silently hardened mid-rollout. The explicit off-values
+/// `0` and `false` disable it; the explicit on-values `1` and `true` enable it
+/// (all case-insensitive).
+///
+/// An *unrecognized* value (e.g. the typo `flase`) also defaults to on so it
+/// fails safe for interop rather than cutting the fallback out from under
+/// HS256-only senders — but, unlike a bare typo silently winning, it emits a
+/// `warn` log so the drift is visible in Loki. Mirrors `parse_public_ip_env`'s
+/// warn-on-garbage convention: this kill-switch is the sole advertised lever for
+/// hardening after EdDSA rollout, so an operator who runs
+/// `SFU_RELAY_HS256_FALLBACK=flase` believing they enforced the cutover must get
+/// a signal that the fallback is still live.
+fn parse_hs256_fallback_env() -> bool {
+    let raw = match std::env::var("SFU_RELAY_HS256_FALLBACK") {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    let v = raw.trim();
+    // Empty behaves like unset: leave the default (enabled) in place with no
+    // warning, so `SFU_RELAY_HS256_FALLBACK=` in an env file is a no-op.
+    if v.is_empty() {
+        return true;
+    }
+    if v.eq_ignore_ascii_case("false") || v == "0" {
+        return false;
+    }
+    if v.eq_ignore_ascii_case("true") || v == "1" {
+        return true;
+    }
+    tracing::warn!(
+        value = %v,
+        "SFU_RELAY_HS256_FALLBACK: unrecognized value, defaulting to enabled \
+         (EdDSA→HS256 fallback stays on) — expected one of true/false/1/0"
+    );
+    true
 }
 
 /// Parse `SFU_PUBLIC_IP` into an `IpAddr`. Garbage input produces a
@@ -290,6 +341,44 @@ mod tests {
         let cfg = SfuConfig::from_env();
         assert!(!cfg.fips_mode);
         std::env::remove_var("SFU_FIPS");
+    }
+
+    #[test]
+    fn relay_hs256_fallback_defaults_on() {
+        // Default-on: no env var set → the fallback stays enabled so an
+        // existing rollout is not silently hardened.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::remove_var("SFU_RELAY_HS256_FALLBACK");
+        assert!(SfuConfig::default().relay_hs256_fallback_enabled);
+        assert!(SfuConfig::from_env().relay_hs256_fallback_enabled);
+    }
+
+    #[test]
+    fn relay_hs256_fallback_env_zero_and_false_disable() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for off in ["0", "false", "FALSE", "False"] {
+            std::env::set_var("SFU_RELAY_HS256_FALLBACK", off);
+            assert!(
+                !SfuConfig::from_env().relay_hs256_fallback_enabled,
+                "SFU_RELAY_HS256_FALLBACK={off:?} must disable the fallback"
+            );
+        }
+        std::env::remove_var("SFU_RELAY_HS256_FALLBACK");
+    }
+
+    #[test]
+    fn relay_hs256_fallback_env_on_values_keep_enabled() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Empty (compose passes "" for an unset var) and any non-off value
+        // keep the fallback enabled — a typo fails safe toward interop.
+        for on in ["", "1", "true", "yes", "on", "garbage"] {
+            std::env::set_var("SFU_RELAY_HS256_FALLBACK", on);
+            assert!(
+                SfuConfig::from_env().relay_hs256_fallback_enabled,
+                "SFU_RELAY_HS256_FALLBACK={on:?} must keep the fallback enabled"
+            );
+        }
+        std::env::remove_var("SFU_RELAY_HS256_FALLBACK");
     }
 
     #[test]

@@ -8,28 +8,53 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
 use tracing::instrument;
 
+use crate::metrics::{SfuMetrics, RELAY_JWT_ALG_EDDSA, RELAY_JWT_ALG_HS256};
 use crate::relay::task::RelayTask;
 use crate::relay::types::{RelayConnectRequest, RelayConnectResponse};
 use crate::relay::{RelayJwt, RelayJwtError};
 
 pub type SeenJtis = Arc<Mutex<HashMap<String, u64>>>;
 
-/// `(hs256_secret, signing_public_key, task_tx, seen_jtis)`
-/// `signing_public_key` is `Some` when SFU_SIGNING_PUBLIC_KEY is configured (Ed25519 preferred).
-/// When `None`, falls back to HS256 via `hs256_secret` (deprecated path).
-type AppState = (Arc<[u8]>, Option<Arc<String>>, Sender<RelayTask>, SeenJtis);
+/// Shared state threaded into every `/relay/connect` request, and the single
+/// argument to [`spawn_relay_api`].
+///
+/// A named struct rather than a positional tuple (or a 7-arg constructor) so a
+/// field reorder is a compile error instead of a silent same-type swap — two
+/// `Arc<_>` fields would otherwise transpose with no compiler safety net. This
+/// also keeps `spawn_relay_api` under the repo's `>4 params → struct` trigger.
+/// Cloned cheaply per request (`Arc`/`Option<Arc>`/`Sender`/`bool`).
+///
+/// `signing_public_key` is `Some` when `SFU_SIGNING_PUBLIC_KEY` is configured
+/// (Ed25519 preferred); when `None`, verification falls back to HS256 via
+/// `secret` (deprecated path). `metrics` carries the process-wide `SfuMetrics`
+/// so `relay_connect` can bump `relay_jwt_verify_total{algorithm}` (T4.3).
+/// `hs256_fallback_enabled` is the `SFU_RELAY_HS256_FALLBACK` kill-switch: when
+/// `false`, a non-EdDSA token is rejected instead of being silently downgraded
+/// to the HS256 fallback.
+#[derive(Clone)]
+pub struct RelayApiState {
+    /// HS256 shared secret (deprecated symmetric verifier / fallback).
+    pub secret: Arc<[u8]>,
+    /// Ed25519 public key PEM when `SFU_SIGNING_PUBLIC_KEY` is set (preferred).
+    pub signing_public_key: Option<Arc<String>>,
+    /// Channel into the relay runner.
+    pub task_tx: Sender<RelayTask>,
+    /// Replay-prevention JTI cache (SEC-CR-002).
+    pub seen_jtis: SeenJtis,
+    /// Process-wide SFU metrics — bumps `relay_jwt_verify_total{algorithm}`.
+    pub metrics: Arc<SfuMetrics>,
+    /// `SFU_RELAY_HS256_FALLBACK` kill-switch (T4.3).
+    pub hs256_fallback_enabled: bool,
+}
 
 /// Spawn the relay API HTTP server on the given `listener`.
 pub fn spawn_relay_api(
     listener: TcpListener,
-    secret: Arc<[u8]>,
-    signing_public_key: Option<Arc<String>>,
-    task_tx: Sender<RelayTask>,
-    seen_jtis: SeenJtis,
+    state: RelayApiState,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let app = Router::new()
         .route("/relay/connect", post(relay_connect))
-        .with_state((secret, signing_public_key, task_tx, seen_jtis));
+        .with_state(state);
     let handle = tokio::spawn(async move {
         axum::serve(listener, app)
             .await
@@ -72,37 +97,80 @@ pub(crate) fn select_candidates(jwt: &RelayJwt) -> Vec<String> {
         .collect()
 }
 
-#[instrument(skip_all, fields(otel.kind = "server", relay.endpoint = "/relay/connect"))]
-async fn relay_connect(
-    State((secret, signing_public_key, task_tx, seen_jtis)): State<AppState>,
-    Json(body): Json<RelayConnectRequest>,
-) -> (StatusCode, Json<RelayConnectResponse>) {
-    // Prefer Ed25519 if public key is configured; fall back to the HS256 shared
-    // secret when the EdDSA verifier reports the token was not signed with EdDSA.
-    // Two distinct outcomes both mean "this is an HS256 token, retry under HS256":
-    //   - InvalidSignature   — an EdDSA signature check that failed, and
-    //   - AlgorithmMismatch  — the header alg is HS256, so `decode` rejects it
-    //     with ErrorKind::InvalidAlgorithm BEFORE the signature check.
-    // Without the AlgorithmMismatch arm a genuine HS256-header token (the normal
-    // rollout case while SFU_SIGNING_PUBLIC_KEY is set) collapses to Malformed and
-    // the promised HS256 fallback never fires. This keeps EdDSA-capable and
-    // HS256-only senders interoperable during rollout while preserving the
-    // strictness of the Expired/Malformed paths — an expired EdDSA token is
-    // rejected outright, not re-checked under HS256 (which could otherwise mask
-    // clock skew discrepancies between the two verifiers).
-    let verify_result = if let Some(pubkey) = &signing_public_key {
-        match RelayJwt::verify_ed25519(&body.relay_token, pubkey) {
-            Ok(j) => Ok(j),
+/// Verify a relay JWT, returning the claims plus which algorithm authenticated
+/// the token (for `relay_jwt_verify_total{algorithm}`).
+///
+/// Prefer Ed25519 when a public key is configured; fall back to the HS256 shared
+/// secret when the EdDSA verifier reports the token was not signed with EdDSA.
+/// Two distinct outcomes both mean "this is an HS256 token, retry under HS256":
+///   - `InvalidSignature`   — an EdDSA signature check that failed, and
+///   - `AlgorithmMismatch`  — the header alg is HS256, so `decode` rejects it
+///     with `ErrorKind::InvalidAlgorithm` BEFORE the signature check.
+///
+/// Without the `AlgorithmMismatch` arm a genuine HS256-header token (the normal
+/// rollout case while `SFU_SIGNING_PUBLIC_KEY` is set) collapses to `Malformed`
+/// and the promised HS256 fallback never fires. The `Expired`/`Malformed` paths
+/// stay strict — an expired EdDSA token is rejected outright, not re-checked
+/// under HS256 (which could otherwise mask clock-skew between the two verifiers).
+///
+/// `hs256_fallback_enabled` is the T4.3 kill-switch: when `false`, the EdDSA→HS256
+/// retry is refused and a non-EdDSA token is rejected as `InvalidSignature`
+/// instead of being silently downgraded. The switch only gates the *fallback* —
+/// when no EdDSA key is configured HS256 is the primary verifier and always runs.
+fn verify_relay_jwt(
+    token: &str,
+    secret: &[u8],
+    signing_public_key: Option<&Arc<String>>,
+    hs256_fallback_enabled: bool,
+) -> Result<(RelayJwt, &'static str), RelayJwtError> {
+    match signing_public_key {
+        Some(pubkey) => match RelayJwt::verify_ed25519(token, pubkey) {
+            Ok(j) => Ok((j, RELAY_JWT_ALG_EDDSA)),
             Err(RelayJwtError::InvalidSignature | RelayJwtError::AlgorithmMismatch) => {
-                RelayJwt::verify(&body.relay_token, &secret)
+                if hs256_fallback_enabled {
+                    RelayJwt::verify(token, secret).map(|j| (j, RELAY_JWT_ALG_HS256))
+                } else {
+                    // Kill-switch engaged: EdDSA rollout is complete, so a token
+                    // that is not EdDSA-signed is rejected outright rather than
+                    // downgraded to the deprecated symmetric path.
+                    Err(RelayJwtError::InvalidSignature)
+                }
             }
             Err(e) => Err(e),
-        }
-    } else {
-        RelayJwt::verify(&body.relay_token, &secret)
-    };
+        },
+        None => RelayJwt::verify(token, secret).map(|j| (j, RELAY_JWT_ALG_HS256)),
+    }
+}
+
+#[instrument(skip_all, fields(otel.kind = "server", relay.endpoint = "/relay/connect"))]
+async fn relay_connect(
+    State(state): State<RelayApiState>,
+    Json(body): Json<RelayConnectRequest>,
+) -> (StatusCode, Json<RelayConnectResponse>) {
+    let RelayApiState {
+        secret,
+        signing_public_key,
+        task_tx,
+        seen_jtis,
+        metrics,
+        hs256_fallback_enabled,
+    } = state;
+    let verify_result = verify_relay_jwt(
+        &body.relay_token,
+        &secret,
+        signing_public_key.as_ref(),
+        hs256_fallback_enabled,
+    );
     let jwt = match verify_result {
-        Ok(j) => j,
+        Ok((j, algorithm)) => {
+            // T4.3: record which algorithm authenticated the token so the
+            // silent HS256 downgrade becomes observable and cuttable.
+            metrics
+                .relay_jwt_verify_total
+                .with_label_values(&[algorithm])
+                .inc();
+            j
+        }
         Err(RelayJwtError::Expired) => {
             tracing::warn!("relay_connect: expired JWT");
             return error_response("expired token");
@@ -429,5 +497,203 @@ mod replay_cache_tests {
             !cache.contains_key("jti-expired"),
             "jti with past exp must be evicted by retain"
         );
+    }
+}
+
+/// T4.3: relay-JWT verify-path observability + HS256-fallback kill-switch.
+///
+/// These exercise the REAL shipped path: `verify_relay_jwt` (the algorithm
+/// discriminator + kill-switch) and `relay_connect` (the wired
+/// `relay_jwt_verify_total{algorithm}` increment). They go RED if the counter
+/// is removed (compile error on the field) or the kill-switch branch is
+/// reverted (the disabled-fallback token would verify instead of being rejected).
+#[cfg(test)]
+mod t4_3_relay_jwt_verify_tests {
+    use super::*;
+    use crate::metrics::SfuMetrics;
+    use crate::relay::{now_unix_secs, RelayJwt};
+    use std::sync::Arc;
+
+    fn allowlisted_jwt(jti: &str) -> RelayJwt {
+        let now = now_unix_secs();
+        RelayJwt {
+            room_id: "room-t43".to_string(),
+            // Allow-listed AWG mesh URL so relay_connect reaches the 200 path.
+            upstream_url: "ws://10.9.0.2:8907/ws/call/r".to_string(),
+            upstream_room_token: "tok".to_string(),
+            iat: now,
+            exp: now + 300,
+            jti: jti.to_string(),
+            upstream_candidates: vec![],
+        }
+    }
+
+    fn gen_ed25519_keypair() -> (String, String) {
+        use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use ed25519_dalek::SigningKey as DalekKey;
+        use pkcs8::LineEnding;
+        let key = DalekKey::generate(&mut rand::rngs::OsRng);
+        let priv_pem = key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
+        let pub_pem = key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        (priv_pem, pub_pem)
+    }
+
+    fn sign_ed25519(jwt: &RelayJwt, priv_pem: &str) -> String {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        let key = EncodingKey::from_ed_pem(priv_pem.as_bytes()).unwrap();
+        encode(&Header::new(Algorithm::EdDSA), jwt, &key).unwrap()
+    }
+
+    fn hs256_verify_count(m: &SfuMetrics) -> u64 {
+        m.relay_jwt_verify_total
+            .with_label_values(&[RELAY_JWT_ALG_HS256])
+            .get()
+    }
+    fn eddsa_verify_count(m: &SfuMetrics) -> u64 {
+        m.relay_jwt_verify_total
+            .with_label_values(&[RELAY_JWT_ALG_EDDSA])
+            .get()
+    }
+
+    // --- verify_relay_jwt: algorithm discrimination + kill-switch ---
+
+    #[test]
+    fn eddsa_token_labels_eddsa_with_both_creds() {
+        let secret: &[u8] = b"unit-test-hs256-secret-value-32b!!";
+        let (priv_pem, pub_pem) = gen_ed25519_keypair();
+        let pubkey = Arc::new(pub_pem);
+        let token = sign_ed25519(&allowlisted_jwt("ed-1"), &priv_pem);
+
+        let (_jwt, alg) =
+            verify_relay_jwt(&token, secret, Some(&pubkey), true).expect("eddsa token must verify");
+        assert_eq!(alg, RELAY_JWT_ALG_EDDSA);
+    }
+
+    #[test]
+    fn hs256_token_labels_hs256_via_fallback() {
+        let secret: &[u8] = b"unit-test-hs256-secret-value-32b!!";
+        let (_priv_pem, pub_pem) = gen_ed25519_keypair();
+        let pubkey = Arc::new(pub_pem);
+        // HS256-signed token presented while EdDSA is the active verifier.
+        let token = allowlisted_jwt("hs-1").sign(secret).unwrap();
+
+        let (_jwt, alg) = verify_relay_jwt(&token, secret, Some(&pubkey), true)
+            .expect("hs256 token must verify via fallback");
+        assert_eq!(alg, RELAY_JWT_ALG_HS256);
+    }
+
+    #[test]
+    fn hs256_token_labels_hs256_as_primary_when_no_eddsa_key() {
+        // No EdDSA key configured: HS256 is the primary verifier, and the
+        // kill-switch does NOT gate it (fallback-only), so even disabled it runs.
+        let secret: &[u8] = b"unit-test-hs256-secret-value-32b!!";
+        let token = allowlisted_jwt("hs-2").sign(secret).unwrap();
+
+        let (_jwt, alg) =
+            verify_relay_jwt(&token, secret, None, false).expect("primary hs256 must verify");
+        assert_eq!(alg, RELAY_JWT_ALG_HS256);
+    }
+
+    #[test]
+    fn kill_switch_off_rejects_hs256_token() {
+        let secret: &[u8] = b"unit-test-hs256-secret-value-32b!!";
+        let (_priv_pem, pub_pem) = gen_ed25519_keypair();
+        let pubkey = Arc::new(pub_pem);
+        let token = allowlisted_jwt("hs-3").sign(secret).unwrap();
+
+        // Fallback disabled → the HS256 token is rejected, not downgraded.
+        let result = verify_relay_jwt(&token, secret, Some(&pubkey), false);
+        assert!(
+            matches!(result, Err(RelayJwtError::InvalidSignature)),
+            "kill-switch OFF must reject an HS256 token, got {result:?}"
+        );
+    }
+
+    // --- relay_connect: the wired counter increment (deploy-shaped) ---
+
+    async fn call_relay_connect(
+        token: String,
+        secret: Arc<[u8]>,
+        pubkey: Option<Arc<String>>,
+        metrics: Arc<SfuMetrics>,
+        hs256_fallback_enabled: bool,
+    ) -> StatusCode {
+        // Keep the receiver alive for the whole call so task_tx.send succeeds
+        // (a dropped rx would make relay_connect return 500 before enqueue).
+        let (task_tx, _task_rx) = tokio::sync::mpsc::channel::<RelayTask>(4);
+        let seen_jtis: SeenJtis = Arc::new(Mutex::new(HashMap::new()));
+        let state = RelayApiState {
+            secret,
+            signing_public_key: pubkey,
+            task_tx,
+            seen_jtis,
+            metrics,
+            hs256_fallback_enabled,
+        };
+        let (status, _body) = relay_connect(
+            State(state),
+            Json(RelayConnectRequest { relay_token: token }),
+        )
+        .await;
+        status
+    }
+
+    #[tokio::test]
+    async fn relay_connect_increments_eddsa_on_success() {
+        let secret: Arc<[u8]> = Arc::from(b"unit-test-hs256-secret-value-32b!!".as_slice());
+        let (priv_pem, pub_pem) = gen_ed25519_keypair();
+        let pubkey = Arc::new(pub_pem);
+        let metrics = Arc::new(SfuMetrics::new().unwrap());
+        let token = sign_ed25519(&allowlisted_jwt("ed-conn"), &priv_pem);
+
+        let before = eddsa_verify_count(&metrics);
+        let status = call_relay_connect(token, secret, Some(pubkey), metrics.clone(), true).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            eddsa_verify_count(&metrics),
+            before + 1,
+            "relay_jwt_verify_total{{algorithm=eddsa}} must bump on an EdDSA success"
+        );
+        assert_eq!(hs256_verify_count(&metrics), 0);
+    }
+
+    #[tokio::test]
+    async fn relay_connect_increments_hs256_on_fallback_success() {
+        let secret: Arc<[u8]> = Arc::from(b"unit-test-hs256-secret-value-32b!!".as_slice());
+        let (_priv_pem, pub_pem) = gen_ed25519_keypair();
+        let pubkey = Arc::new(pub_pem);
+        let metrics = Arc::new(SfuMetrics::new().unwrap());
+        let token = allowlisted_jwt("hs-conn").sign(&secret).unwrap();
+
+        let before = hs256_verify_count(&metrics);
+        let status = call_relay_connect(token, secret, Some(pubkey), metrics.clone(), true).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            hs256_verify_count(&metrics),
+            before + 1,
+            "relay_jwt_verify_total{{algorithm=hs256}} must bump on an HS256 fallback success"
+        );
+        assert_eq!(eddsa_verify_count(&metrics), 0);
+    }
+
+    #[tokio::test]
+    async fn relay_connect_kill_switch_off_rejects_and_does_not_count() {
+        let secret: Arc<[u8]> = Arc::from(b"unit-test-hs256-secret-value-32b!!".as_slice());
+        let (_priv_pem, pub_pem) = gen_ed25519_keypair();
+        let pubkey = Arc::new(pub_pem);
+        let metrics = Arc::new(SfuMetrics::new().unwrap());
+        let token = allowlisted_jwt("hs-cut").sign(&secret).unwrap();
+
+        // Kill-switch OFF: HS256 token is rejected (401), no verify counted.
+        let status = call_relay_connect(token, secret, Some(pubkey), metrics.clone(), false).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(hs256_verify_count(&metrics), 0);
+        assert_eq!(eddsa_verify_count(&metrics), 0);
     }
 }
