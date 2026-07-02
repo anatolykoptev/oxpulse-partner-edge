@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{encode, EncodingKey, Header};
-use oxpulse_sfu::client_ws::{spawn_client_ws_api, PendingClient};
+use oxpulse_sfu::client_ws::{spawn_client_ws_api, ClientWsApiConfig, PendingClient};
 use oxpulse_sfu::metrics::SfuMetrics;
 use oxpulse_sfu::room_auth::RoomClaims;
 use serde_json::Value;
@@ -116,12 +116,15 @@ async fn start_full_pipeline() -> (
     let secret: Arc<[u8]> = Arc::from(HS256_SECRET);
     let _ws_handle = spawn_client_ws_api(
         ws_listener,
-        secret,
-        None,
-        client_inject_tx.clone(),
-        local_udp,
-        metrics.clone(),
-        0, // stats disabled in tests
+        ClientWsApiConfig {
+            secret,
+            signing_pubkey: None,
+            client_inject_tx: client_inject_tx.clone(),
+            local_udp_addr: local_udp,
+            metrics: metrics.clone(),
+            stats_interval_secs: 0,       // stats disabled in tests
+            hs256_fallback_enabled: true, // T4.3: HS256 fallback kill-switch (default-on)
+        },
     )
     .unwrap();
     drop(client_inject_tx);

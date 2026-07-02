@@ -4,11 +4,11 @@ use tokio::signal;
 
 use anyhow::Context;
 use oxpulse_sfu::{
-    client_ws::{spawn_client_ws_api, PendingClient},
+    client_ws::{spawn_client_ws_api, ClientWsApiConfig, PendingClient},
     metrics::spawn_metrics_server,
     relay::{
         client::connect_relay,
-        handler::{spawn_relay_api, SeenJtis},
+        handler::{spawn_relay_api, RelayApiState, SeenJtis},
         task::RelayTask,
     },
     telemetry, udp_loop, SfuConfig, SfuMetrics,
@@ -122,10 +122,14 @@ async fn main() -> anyhow::Result<()> {
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let handle = spawn_relay_api(
             relay_listener,
-            relay_secret,
-            relay_signing_pubkey.clone(),
-            relay_tx,
-            seen_jtis,
+            RelayApiState {
+                secret: relay_secret,
+                signing_public_key: relay_signing_pubkey.clone(),
+                task_tx: relay_tx,
+                seen_jtis,
+                metrics: metrics.clone(),
+                hs256_fallback_enabled: config.relay_hs256_fallback_enabled,
+            },
         )?;
         tracing::info!(addr = %relay_addr, "relay API listening");
         (relay_rx_inner, Some(handle))
@@ -200,12 +204,15 @@ async fn main() -> anyhow::Result<()> {
         let secret_arc: Arc<[u8]> = Arc::from(secret_bytes.as_slice());
         let handle = spawn_client_ws_api(
             client_ws_listener,
-            secret_arc,
-            relay_signing_pubkey.clone(),
-            client_inject_tx,
-            host_candidate_addr,
-            metrics.clone(),
-            config.stats_interval_secs,
+            ClientWsApiConfig {
+                secret: secret_arc,
+                signing_pubkey: relay_signing_pubkey.clone(),
+                client_inject_tx,
+                local_udp_addr: host_candidate_addr,
+                metrics: metrics.clone(),
+                stats_interval_secs: config.stats_interval_secs,
+                hs256_fallback_enabled: config.relay_hs256_fallback_enabled,
+            },
         )?;
         // Round-2 review fix: gauge defaults to 1 (disabled) in
         // SfuMetrics::new() so /metrics scrapes that race container

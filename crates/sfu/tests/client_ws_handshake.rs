@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use jsonwebtoken::{encode, EncodingKey, Header};
-use oxpulse_sfu::client_ws::{spawn_client_ws_api, PendingClient};
+use oxpulse_sfu::client_ws::{spawn_client_ws_api, ClientWsApiConfig, PendingClient};
 use oxpulse_sfu::metrics::SfuMetrics;
 use oxpulse_sfu::room_auth::RoomClaims;
 use tokio::net::TcpListener;
@@ -62,12 +62,15 @@ async fn start_test_handler_with_metrics() -> (String, Arc<SfuMetrics>) {
     let metrics = Arc::new(SfuMetrics::default());
     let _handle = spawn_client_ws_api(
         listener,
-        secret,
-        None,
-        inject_tx,
-        local_udp,
-        metrics.clone(),
-        0, // stats disabled in tests
+        ClientWsApiConfig {
+            secret,
+            signing_pubkey: None,
+            client_inject_tx: inject_tx,
+            local_udp_addr: local_udp,
+            metrics: metrics.clone(),
+            stats_interval_secs: 0,       // stats disabled in tests
+            hs256_fallback_enabled: true, // T4.3: HS256 fallback kill-switch (default-on)
+        },
     )
     .unwrap();
     Box::leak(Box::new(_inject_rx));

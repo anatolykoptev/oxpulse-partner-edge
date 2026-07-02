@@ -1,6 +1,7 @@
 //! Integration tests for the relay HTTP API.
 
-use oxpulse_sfu::relay::handler::{spawn_relay_api, SeenJtis};
+use oxpulse_sfu::metrics::SfuMetrics;
+use oxpulse_sfu::relay::handler::{spawn_relay_api, RelayApiState, SeenJtis};
 use oxpulse_sfu::relay::task::RelayTask;
 use oxpulse_sfu::relay::types::{RelayConnectRequest, RelayConnectResponse};
 use oxpulse_sfu::relay::{now_unix_secs, RelayJwt};
@@ -15,7 +16,19 @@ async fn start_test_api(secret: Arc<[u8]>) -> (String, mpsc::Receiver<RelayTask>
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<RelayTask>(8);
     let seen_jtis: SeenJtis = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    spawn_relay_api(listener, secret, None, tx, seen_jtis).unwrap();
+    let metrics = Arc::new(SfuMetrics::default());
+    spawn_relay_api(
+        listener,
+        RelayApiState {
+            secret,
+            signing_public_key: None,
+            task_tx: tx,
+            seen_jtis,
+            metrics,
+            hs256_fallback_enabled: true,
+        },
+    )
+    .unwrap();
     (format!("http://{addr}"), rx)
 }
 
@@ -29,7 +42,19 @@ async fn start_test_api_with_pubkey(
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<RelayTask>(8);
     let seen_jtis: SeenJtis = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    spawn_relay_api(listener, secret, Some(pubkey), tx, seen_jtis).unwrap();
+    let metrics = Arc::new(SfuMetrics::default());
+    spawn_relay_api(
+        listener,
+        RelayApiState {
+            secret,
+            signing_public_key: Some(pubkey),
+            task_tx: tx,
+            seen_jtis,
+            metrics,
+            hs256_fallback_enabled: true,
+        },
+    )
+    .unwrap();
     (format!("http://{addr}"), rx)
 }
 
