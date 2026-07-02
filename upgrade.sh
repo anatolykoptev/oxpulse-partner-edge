@@ -538,36 +538,14 @@ re_render_caddy() {
 	fi
 }
 
-# ---------------------------------------------------------------------------
-# re_render_healthcheck — fetch fresh healthcheck.sh, install atomically.
-# healthcheck.sh has no template placeholders — straight copy.
-# ---------------------------------------------------------------------------
-re_render_healthcheck() {
-	local tmpdir out_hc
-
-	tmpdir=$(mktemp -d)
-	# shellcheck disable=SC2064
-	trap "rm -rf '$tmpdir'" RETURN
-
-	out_hc="$tmpdir/healthcheck.sh"
-
-	log "fetching healthcheck.sh from $REPO_RAW"
-	if ! curl -fsSL --max-time 30 "$REPO_RAW/healthcheck.sh" -o "$out_hc" 2>/dev/null; then
-		die "could not fetch healthcheck.sh from $REPO_RAW — aborting (no changes applied)"
-	fi
-
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "[dry-run] would install healthcheck.sh to $HEALTHCHECK"
-		return 0
-	fi
-
-	# FIX 3: atomic install — sibling temp + mv (same filesystem → rename(2)).
-	local tmp_hc
-	tmp_hc="$(dirname "$HEALTHCHECK")/healthcheck.sh.new.$$"
-	install -m 0755 "$out_hc" "$tmp_hc"
-	mv -f "$tmp_hc" "$HEALTHCHECK"
-	log "healthcheck.sh updated"
-}
+# re_render_healthcheck() was removed (cheburator chicken-and-egg incident
+# fix, 2026-07): it was the ONLY thing that ever updated healthcheck.sh, and
+# it only ran on --with-templates — the plain apply path never delivered
+# healthcheck.sh at all. It also ran AFTER the --with-templates baseline
+# snapshot, so even that path measured its "before" state with the OLD
+# healthcheck. sync_host_scripts (see _HOST_SCRIPT_SBIN_FILES above) is now
+# the single source of truth for healthcheck.sh in BOTH apply paths, and
+# already runs before each path's baseline snapshot.
 
 # ---------------------------------------------------------------------------
 # HOST-SCRIPT SYNC — fetch sbin scripts + systemd units for the target tag,
@@ -612,6 +590,20 @@ _HOST_SCRIPT_SBIN_FILES=(
 	oxpulse-partner-edge-ru-subnets-update
 	# Hysteria2 CH3 activation helper (Phase 1.7 standalone entry point).
 	oxpulse-partner-edge-enable-hy2
+	# healthcheck.sh (cheburator chicken-and-egg incident, 2026-07): previously
+	# updated ONLY by re_render_healthcheck() on --with-templates. The plain
+	# apply path (sync_host_scripts, this array) never delivered it, so a
+	# plain-upgraded edge kept running its ORIGINAL healthcheck forever —
+	# permanently missing fixes to checks (e.g. an SFU_METRICS_BIND mesh-IP
+	# fix) and, on any pre-v0.12.60-ish edge, permanently lacking --snapshot
+	# support (settle_healthcheck_with_retry then falls back to the absolute
+	# --local gate, which a pre-existing red blocks FOREVER — every plain
+	# upgrade auto-rolls-back, and the healthcheck that would fix both can
+	# never arrive because only --with-templates delivered it). Now delivered
+	# here — same fetch+sha256-verify+idempotent-install+atomic-rename path
+	# as every other host-script, single source of truth (see
+	# _host_script_remote_name / sha256_asset_name mappings below).
+	oxpulse-partner-edge-healthcheck
 )
 
 # Remote path in the release bundle for each sbin file.  Maps installed name →
@@ -636,6 +628,7 @@ _host_script_remote_name() {
 		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
 		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;
 		oxpulse-partner-edge-enable-hy2)        echo "oxpulse-partner-edge-enable-hy2" ;;
+		oxpulse-partner-edge-healthcheck)       echo "healthcheck.sh" ;;
 		*)                               echo "$installed_name" ;;
 	esac
 }
@@ -1370,6 +1363,8 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 			# xray-update and geoip-refresh: staged without scripts/ prefix
 			oxpulse-xray-update.sh)        sha256_asset_name="oxpulse-xray-update.sh" ;;
 			oxpulse-geoip-refresh)         sha256_asset_name="oxpulse-geoip-refresh.sh" ;;
+			# healthcheck.sh staged as partner-edge-healthcheck.sh (cheburator incident fix).
+			oxpulse-partner-edge-healthcheck) sha256_asset_name="partner-edge-healthcheck.sh" ;;
 		esac
 
 		expected_sha=$(_lookup_sha256 "$sha256_asset_name")
@@ -2311,10 +2306,19 @@ if [[ "$MODE" == with_templates ]]; then
 	# Phase 4a wires caddyfile only; apply_caddy_reloads fires a targeted caddy hot-reload
 	# (no peer containers down). Caddyfile.tpl is fetched inside reconcile_all via REPO_RAW.
 	# re_render_caddy remains for backward compat; Phase 6 deletes.
+	#
+	# healthcheck.sh is NOT re-rendered here anymore (cheburator incident fix):
+	# sync_host_scripts (Step 4, above) now delivers it — that call already
+	# runs BEFORE the Step 5 baseline snapshot, so the standalone
+	# re_render_healthcheck() call that used to live here was not just
+	# redundant but WRONG: it ran AFTER the baseline (Step 5), meaning the
+	# baseline was captured with the OLD healthcheck and only the post-change
+	# measurement used the new one — silent phantom-regression risk on every
+	# --with-templates upgrade. Deleted; sync_host_scripts is the single
+	# source of truth for healthcheck.sh in both apply paths now.
 	export RECONCILE_TMPDIR="$_manifest_tmpdir_wt"
 	reconcile_all "$_manifest_path_wt"
 	unset RECONCILE_TMPDIR
-	re_render_healthcheck
 
 	# Step 7 (formerly Step 6): pull new images.
 
