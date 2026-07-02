@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.13.0...v0.13.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **upgrade:** dead rollback under set -e + foreign-service pull scope (rvpn v0.13.0 incident) ([#333](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/333)) ([26b66af](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/26b66af178b12b91e6dd4e0a0525ca937d17f555))
+* **upgrade:** sync healthcheck.sh in plain apply + repair CI test fragility ([#335](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/335)) ([204e506](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/204e50684fda7bcfc27e178fe629d7411872e4c1))
+
 ## [0.13.0](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.79...v0.13.0) (2026-07-01)
 
 
