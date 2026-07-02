@@ -78,11 +78,11 @@ c3() {
     printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyA\n' > "$lib/sfu-keys.env"
     sha256sum "$lib/sfu-keys.env" | awk '{print $1}' > "$lib/sfu-keys.sha"
 
-    # docker spy: log every call; answer the ps state-probe and the gauge probes.
+    # docker spy: log every call; answer the inspect liveness-probe and the gauge probes.
     cat > "$tmp/shims/docker" <<DOCK
 #!/usr/bin/env bash
 echo "docker \$*" >> "$docker_log"
-if [[ "\$*" == *"compose"*" ps "* ]]; then echo '{"State":"running"}'; exit 0; fi
+if [[ "\$1" == "inspect" && "\$*" == *"{{.State.Running}}"* ]]; then echo "true"; exit 0; fi
 if [[ "\$1" == "ps" && "\$*" == *"{{.Names}}"* ]]; then echo "oxpulse-partner-sfu"; exit 0; fi
 if [[ "\$*" == *"printenv"* ]]; then echo "PubKeyB"; exit 0; fi
 exit 0
@@ -182,19 +182,79 @@ YML
         LOG_FILE="/dev/null"
         # shellcheck disable=SC1090
         source <(sed -n '/^_restart_if_changed()/,/^}/p' "$REFRESH")
-        _restart_if_changed sfu "$etc/sfu-keys.env" "$lib/sfu-keys.sha" "$etc/docker-compose.yml" sfu recreate
+        # 7th arg = the real container_name so the post-recreate `docker inspect
+        # --format {{.State.Running}}` liveness check resolves and the sha advances.
+        _restart_if_changed sfu "$etc/sfu-keys.env" "$lib/sfu-keys.sha" "$etc/docker-compose.yml" sfu recreate sfu-apply-c4-sfu
     )
     local after; after=$(docker exec sfu-apply-c4-sfu printenv SFU_SIGNING_PUBLIC_KEY 2>/dev/null)
     ( cd "$etc" && docker compose down >/dev/null 2>&1 )
 
-    if [[ "$before" == "PubKeyA" && "$after" == "PubKeyB" ]]; then
-        pass "C4: real recreate flipped the container env PubKeyA → PubKeyB (effective env resolves to PubKeyB)"
+    local want_sha; want_sha=$(printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyB\n' | sha256sum | awk '{print $1}')
+    local got_sha; got_sha=$(cat "$lib/sfu-keys.sha" 2>/dev/null || printf '')
+    if [[ "$before" == "PubKeyA" && "$after" == "PubKeyB" && "$got_sha" == "$want_sha" ]]; then
+        pass "C4: real recreate flipped the container env PubKeyA → PubKeyB and docker-inspect liveness advanced the sha"
     else
-        fail "C4: container env did not flip (before='$before' after='$after') — recreate did not re-read env_file"
+        fail "C4: recreate/inspect path broken (before='$before' after='$after' sha_ok=$([[ "$got_sha" == "$want_sha" ]] && echo 1 || echo 0))"
     fi
     rm -rf "$tmp"
 }
 c4
+
+# ---------------------------------------------------------------------------
+# C5: the applied-vs-written gauge (REAL _emit_sfu_applied_gauge) must treat an
+#     opec-authored single-quoted sfu-keys.env as EQUAL to the bare live env.
+#     opec (crates/opec/src/secrets/sfu_key.rs::write_env_file) writes the key
+#     single-quoted; docker compose env_file strips the quotes, so the container's
+#     live env is bare. This branch is reachable in production whenever a daily
+#     refresh does NOT rewrite sfu-keys.env (e.g. the /api/partner/keys response
+#     omits sfu_signing_public_key), leaving opec's single-quoted file in place
+#     while _emit_sfu_applied_gauge still runs. Removing the quote-stripping turns
+#     this RED (written='PubKeyA' != live PubKeyA → gauge=0).
+# ---------------------------------------------------------------------------
+c5() {
+    local tmp; tmp=$(mktemp -d)
+    local lib="$tmp/lib"
+    mkdir -p "$tmp/shims" "$lib" "$tmp/textfile"
+    # opec representation: single-quoted value.
+    printf "SFU_SIGNING_PUBLIC_KEY='PubKeyA'\n" > "$lib/sfu-keys.env"
+
+    # docker spy: container present; printenv returns the BARE value (compose
+    # env_file strips the surrounding quotes at injection time).
+    cat > "$tmp/shims/docker" <<'DOCK'
+#!/usr/bin/env bash
+if [[ "$1" == "ps" && "$*" == *"{{.Names}}"* ]]; then echo "oxpulse-partner-sfu"; exit 0; fi
+if [[ "$*" == *"printenv"* ]]; then echo "PubKeyA"; exit 0; fi
+exit 0
+DOCK
+    chmod +x "$tmp/shims/docker"
+
+    (
+        set +e
+        # shellcheck disable=SC2034
+        NODE_ID="test-node"
+        # shellcheck disable=SC2034
+        SFU_KEYS_ENV="$lib/sfu-keys.env"
+        # shellcheck disable=SC2034
+        TEXTFILE_DIR="$tmp/textfile"
+        log() { :; }
+        export PATH="$tmp/shims:$PATH"
+        # Source the REAL gauge helpers from refresh.sh (not hand-copies).
+        # shellcheck disable=SC1090
+        source <(sed -n '/^emit_gauge()/,/^}/p' "$REFRESH")
+        # shellcheck disable=SC1090
+        source <(sed -n '/^_emit_sfu_applied_gauge()/,/^}/p' "$REFRESH")
+        _emit_sfu_applied_gauge
+    )
+
+    local g="$tmp/textfile/partner_edge_sfu_pubkey_applied.prom"
+    if [[ -f "$g" ]] && grep -qE 'partner_edge_sfu_pubkey_applied\{[^}]*\} 1' "$g"; then
+        pass "C5: single-quoted (opec) sfu-keys.env compares equal to the bare live env → gauge=1"
+    else
+        fail "C5: single-quoted opec key mis-compared against the bare live env (quote-stripping broken) — gauge not =1"
+    fi
+    rm -rf "$tmp"
+}
+c5
 
 echo ""
 echo "=== SFU signing-pubkey apply: $PASS passed, $FAIL failed ==="

@@ -473,7 +473,7 @@ unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTE
 # restarted. Healthy unchanged containers are left running. Failed channels
 # (from channels-status.env) are skipped entirely.
 
-# _restart_if_changed kind cfg_file sha_file compose_file container
+# _restart_if_changed kind cfg_file sha_file compose_file container [apply_mode] [state_container]
 # Restarts a single docker compose service only when its config file hash
 # differs from the last persisted hash. Updates the sha file on success.
 # Consults channels-status.env: skips channels that are not active.
@@ -495,9 +495,21 @@ unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTE
 #              CREATION, so a plain `restart` keeps the OLD environment — the new
 #              key would never take effect (verified: restart does not re-read
 #              env_file). --no-deps keeps the blast radius to the one service.
+#
+# state_container (7th arg, default = `container`): the CONTAINER NAME to verify
+#   post-apply via `docker inspect --format '{{.State.Running}}'`. Kept separate
+#   from `container` because compose targets a SERVICE name (`sfu`) while inspect
+#   needs the fixed container_name (`oxpulse-partner-sfu`). `docker inspect`'s
+#   `{{.State.Running}}` template is evaluated by the daemon and its output shape
+#   (`true`/`false`) is stable across Docker/Compose versions — unlike parsing
+#   `docker compose ps --format json`, whose object/array/JSONL shape has drifted
+#   between Compose releases. A fragile parse here would fall back to "not running"
+#   on a healthy container, never advance the sha, and re-trigger a live-media
+#   `force-recreate` on every daily cycle (review HIGH: cross-host recreate loop).
 _restart_if_changed() {
     local kind="$1" cfg_file="$2" sha_file="$3" compose_file="$4" container="$5"
     local apply_mode="${6:-restart}"
+    local state_container="${7:-$container}"
 
     # Consult channels-status.env: skip non-active channels
     local _ch_status=""
@@ -531,17 +543,23 @@ _restart_if_changed() {
             # restarting state, writing the sha would suppress the next refresh
             # cycle from retrying — leaving the container stuck on stale config.
             # Allow ~5s for Docker to transition the state post-restart.
+            #
+            # Review HIGH (cross-host): verify liveness with `docker inspect
+            # --format '{{.State.Running}}' CONTAINER` (daemon-evaluated, stable
+            # `true`/`false` output) instead of parsing `docker compose ps
+            # --format json`, whose shape drifts across Compose versions on the
+            # partner fleet. A parse failure on a HEALTHY container would leave
+            # the sha unadvanced and re-fire `force-recreate` (a live-UDP session
+            # drop for the sfu) on every subsequent daily cycle.
             sleep 5
-            local _state
-            _state=$(docker compose -f "$compose_file" ps "$container" \
-                --format json 2>/dev/null \
-                | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("State","unknown"))' \
-                2>/dev/null || printf 'unknown')
-            if [[ "$_state" == "running" ]]; then
+            local _running
+            _running=$(docker inspect --format '{{.State.Running}}' "$state_container" \
+                2>/dev/null || printf 'false')
+            if [[ "$_running" == "true" ]]; then
                 printf '%s\n' "$_new_sha" > "$sha_file"
-                log "  [surgical] $container restarted OK"
+                log "  [surgical] $container restarted OK ($state_container running)"
             else
-                log "WARNING: [surgical] $container state=$_state after restart — sha not updated, next refresh will retry"
+                log "WARNING: [surgical] $state_container State.Running=$_running after restart — sha not updated, next refresh will retry"
             fi
         else
             log "WARNING: [surgical] docker restart $container failed — container may use stale config"
@@ -594,7 +612,8 @@ if [[ "$KEYS_OK" -eq 1 ]]; then
             "${PREFIX_LIB}/sfu-keys.sha" \
             "$_sfu_compose" \
             sfu \
-            recreate
+            recreate \
+            oxpulse-partner-sfu
     elif [[ ! -f "$_sfu_compose" ]]; then
         log "  [sfu] docker-compose.yml not found at $_sfu_compose — skipping SFU key apply (custom stack node)"
     fi
