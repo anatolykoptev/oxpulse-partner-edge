@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{encode, EncodingKey, Header};
-use oxpulse_sfu::client_ws::{spawn_client_ws_api, PendingClient};
+use oxpulse_sfu::client_ws::{spawn_client_ws_api, ClientWsApiConfig, PendingClient};
 use oxpulse_sfu::metrics::SfuMetrics;
 use oxpulse_sfu::room_auth::RoomClaims;
 use serial_test::serial;
@@ -98,12 +98,15 @@ async fn start_handler_with_metrics() -> (
     let metrics = Arc::new(SfuMetrics::default());
     let handle = spawn_client_ws_api(
         listener,
-        secret,
-        None,
-        inject_tx,
-        local_udp,
-        metrics.clone(),
-        0,
+        ClientWsApiConfig {
+            secret,
+            signing_pubkey: None,
+            client_inject_tx: inject_tx,
+            local_udp_addr: local_udp,
+            metrics: metrics.clone(),
+            stats_interval_secs: 0,
+            hs256_fallback_enabled: true, // T4.3: HS256 fallback kill-switch (default-on)
+        },
     )
     .unwrap();
     (format!("ws://{addr}"), inject_rx, handle, metrics)

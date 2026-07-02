@@ -93,19 +93,55 @@ pub struct ClientWsState {
     /// a task-local `last_hint: Option<Instant>`, allowing two concurrent tasks
     /// for the same peer to each accept one hint independently (2× the cap).
     pub hint_rate_registry: Arc<std::sync::Mutex<HashMap<u64, Instant>>>,
+    /// T4.3 kill-switch (`SFU_RELAY_HS256_FALLBACK`) for the EdDSA→HS256 room-token
+    /// fallback. When `false`, a token that fails EdDSA with `InvalidSignature`
+    /// is rejected instead of being silently retried under the deprecated HS256
+    /// secret. Only gates the *fallback* — when no EdDSA key is configured HS256
+    /// is the primary verifier and always runs. Mirrors `relay/handler.rs`.
+    pub hs256_fallback_enabled: bool,
+}
+
+/// Caller-supplied configuration for [`spawn_client_ws_api`].
+///
+/// A named struct rather than a 7-arg constructor so a field reorder is a
+/// compile error instead of a silent same-type swap (e.g. transposing two
+/// `Arc<_>` args), and so `spawn_client_ws_api` stays under the repo's
+/// `>4 params → struct` trigger. This holds only the externally-provided
+/// fields; `hint_rate_registry` is constructed internally by the spawn fn and
+/// is therefore not part of the config. Every field maps 1:1 onto the
+/// like-named [`ClientWsState`] field it populates.
+pub struct ClientWsApiConfig {
+    /// HS256 shared secret (`SIGNALING_SFU_SECRET`).
+    pub secret: Arc<[u8]>,
+    /// Optional EdDSA public key PEM (`SFU_SIGNING_PUBLIC_KEY`).
+    pub signing_pubkey: Option<Arc<String>>,
+    /// Channel back to the main UDP loop for accepted sessions.
+    pub client_inject_tx: Sender<PendingClient>,
+    /// Address advertised in the SFU host candidate in the SDP answer.
+    pub local_udp_addr: SocketAddr,
+    /// Process-wide SFU metrics.
+    pub metrics: Arc<SfuMetrics>,
+    /// str0m built-in stats interval (seconds; 0 = disabled).
+    pub stats_interval_secs: u64,
+    /// `SFU_RELAY_HS256_FALLBACK` kill-switch (T4.3).
+    pub hs256_fallback_enabled: bool,
 }
 
 /// Spawn the client WS API on the given listener. Returns the join handle
 /// of the background server task.
 pub fn spawn_client_ws_api(
     listener: TcpListener,
-    secret: Arc<[u8]>,
-    signing_pubkey: Option<Arc<String>>,
-    client_inject_tx: Sender<PendingClient>,
-    local_udp_addr: SocketAddr,
-    metrics: Arc<SfuMetrics>,
-    stats_interval_secs: u64,
+    config: ClientWsApiConfig,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    let ClientWsApiConfig {
+        secret,
+        signing_pubkey,
+        client_inject_tx,
+        local_udp_addr,
+        metrics,
+        stats_interval_secs,
+        hs256_fallback_enabled,
+    } = config;
     let state = ClientWsState {
         secret,
         signing_pubkey,
@@ -114,6 +150,7 @@ pub fn spawn_client_ws_api(
         metrics,
         stats_interval_secs,
         hint_rate_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        hs256_fallback_enabled,
     };
     let app = Router::new()
         // axum 0.8 routes WS upgrades through `any` (the upgrade is GET
@@ -172,6 +209,13 @@ fn extract_bearer_from_subprotocols(headers: &HeaderMap) -> Option<String> {
 /// `Expired` and `Malformed` propagate immediately so a forged token
 /// cannot bypass exp validation by being re-checked under HS256, and a
 /// malformed token cannot mask a real signature failure.
+///
+/// T4.3: on a fully-verified token (signature + room match) bumps
+/// `relay_jwt_verify_total{algorithm}` so the silent HS256 downgrade is
+/// observable, and honors the `hs256_fallback_enabled` kill-switch — when it
+/// is `false` a non-EdDSA token is rejected as `InvalidSignature` instead of
+/// being downgraded. The switch gates only the fallback: with no EdDSA key
+/// configured HS256 is the primary verifier and always runs.
 fn verify_token(
     token: &str,
     room_id: &str,
@@ -179,15 +223,34 @@ fn verify_token(
 ) -> Result<RoomClaims, RoomAuthError> {
     if let Some(pubkey) = &state.signing_pubkey {
         match verify_room_token_ed25519(token, room_id, pubkey) {
-            Ok(c) => return Ok(c),
+            Ok(c) => {
+                state
+                    .metrics
+                    .relay_jwt_verify_total
+                    .with_label_values(&[crate::metrics::RELAY_JWT_ALG_EDDSA])
+                    .inc();
+                return Ok(c);
+            }
             // The token was probably HS256-signed by a legacy signaling
-            // server; try HS256.
-            Err(RoomAuthError::InvalidSignature) => {}
+            // server; try HS256 only when the fallback is still enabled.
+            Err(RoomAuthError::InvalidSignature) => {
+                if !state.hs256_fallback_enabled {
+                    // Kill-switch engaged: reject instead of silently
+                    // downgrading to the deprecated symmetric path.
+                    return Err(RoomAuthError::InvalidSignature);
+                }
+            }
             // Mismatch / expired / malformed are definitive verdicts.
             Err(e) => return Err(e),
         }
     }
-    verify_room_token(token, room_id, &state.secret)
+    let claims = verify_room_token(token, room_id, &state.secret)?;
+    state
+        .metrics
+        .relay_jwt_verify_total
+        .with_label_values(&[crate::metrics::RELAY_JWT_ALG_HS256])
+        .inc();
+    Ok(claims)
 }
 
 /// HTTP handler for the WS upgrade. Returns `401` (no upgrade) on auth
@@ -356,5 +419,173 @@ mod tests {
             HeaderValue::from_static("oxpulse-sfu-v1, Bearer "),
         );
         assert!(extract_bearer_from_subprotocols(&h).is_none());
+    }
+}
+
+/// T4.3: room-token verify-path observability + HS256-fallback kill-switch.
+///
+/// Exercises the REAL shipped `verify_token` (the wired
+/// `relay_jwt_verify_total{algorithm}` increment + the kill-switch branch).
+/// Goes RED if the counter is removed (compile error on the field) or the
+/// kill-switch branch is reverted (the disabled-fallback token would verify
+/// instead of being rejected).
+#[cfg(test)]
+mod t4_3_client_ws_verify_tests {
+    use super::*;
+    use crate::metrics::{SfuMetrics, RELAY_JWT_ALG_EDDSA, RELAY_JWT_ALG_HS256};
+    use crate::room_auth::RoomClaims;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use std::time::Duration;
+
+    const ROOM: &str = "room-t43-ws";
+    const SECRET: &[u8] = b"unit-test-hs256-secret-value-32b!!";
+
+    fn claims() -> RoomClaims {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        RoomClaims {
+            sub: 42,
+            room: ROOM.to_string(),
+            iat: now,
+            exp: now + 300,
+        }
+    }
+
+    fn sign_hs256() -> String {
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims(),
+            &EncodingKey::from_secret(SECRET),
+        )
+        .unwrap()
+    }
+
+    fn gen_ed25519_keypair() -> (String, String) {
+        use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use ed25519_dalek::SigningKey as DalekKey;
+        use pkcs8::LineEnding;
+        let key = DalekKey::generate(&mut rand::rngs::OsRng);
+        let priv_pem = key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
+        let pub_pem = key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        (priv_pem, pub_pem)
+    }
+
+    fn sign_ed25519(priv_pem: &str) -> String {
+        let key = EncodingKey::from_ed_pem(priv_pem.as_bytes()).unwrap();
+        encode(&Header::new(Algorithm::EdDSA), &claims(), &key).unwrap()
+    }
+
+    fn make_state(
+        signing_pubkey: Option<Arc<String>>,
+        metrics: Arc<SfuMetrics>,
+        hs256_fallback_enabled: bool,
+    ) -> ClientWsState {
+        // client_inject_tx is never touched by verify_token; a dropped rx is fine.
+        let (client_inject_tx, _rx) = tokio::sync::mpsc::channel(1);
+        ClientWsState {
+            secret: Arc::from(SECRET),
+            signing_pubkey,
+            client_inject_tx,
+            local_udp_addr: "127.0.0.1:0".parse().unwrap(),
+            metrics,
+            stats_interval_secs: 0,
+            hint_rate_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            hs256_fallback_enabled,
+        }
+    }
+
+    fn count(m: &SfuMetrics, alg: &str) -> u64 {
+        m.relay_jwt_verify_total.with_label_values(&[alg]).get()
+    }
+
+    #[test]
+    fn eddsa_token_increments_eddsa_with_both_creds() {
+        let metrics = Arc::new(SfuMetrics::new().unwrap());
+        let (priv_pem, pub_pem) = gen_ed25519_keypair();
+        let state = make_state(Some(Arc::new(pub_pem)), metrics.clone(), true);
+        let token = sign_ed25519(&priv_pem);
+
+        let claims = verify_token(&token, ROOM, &state).expect("eddsa token must verify");
+        assert_eq!(claims.room, ROOM);
+        assert_eq!(count(&metrics, RELAY_JWT_ALG_EDDSA), 1);
+        assert_eq!(count(&metrics, RELAY_JWT_ALG_HS256), 0);
+    }
+
+    #[test]
+    fn hs256_token_increments_hs256_via_fallback() {
+        let metrics = Arc::new(SfuMetrics::new().unwrap());
+        let (_priv_pem, pub_pem) = gen_ed25519_keypair();
+        let state = make_state(Some(Arc::new(pub_pem)), metrics.clone(), true);
+        let token = sign_hs256();
+
+        let claims =
+            verify_token(&token, ROOM, &state).expect("hs256 token must verify via fallback");
+        assert_eq!(claims.room, ROOM);
+        assert_eq!(count(&metrics, RELAY_JWT_ALG_HS256), 1);
+        assert_eq!(count(&metrics, RELAY_JWT_ALG_EDDSA), 0);
+    }
+
+    #[test]
+    fn hs256_token_primary_when_no_eddsa_key_ignores_kill_switch() {
+        // No EdDSA key → HS256 is the primary verifier; the kill-switch is
+        // fallback-only, so even disabled the primary path verifies + counts.
+        let metrics = Arc::new(SfuMetrics::new().unwrap());
+        let state = make_state(None, metrics.clone(), false);
+        let token = sign_hs256();
+
+        let claims = verify_token(&token, ROOM, &state).expect("primary hs256 must verify");
+        assert_eq!(claims.room, ROOM);
+        assert_eq!(count(&metrics, RELAY_JWT_ALG_HS256), 1);
+    }
+
+    #[test]
+    fn kill_switch_off_rejects_hs256_token_and_does_not_count() {
+        let metrics = Arc::new(SfuMetrics::new().unwrap());
+        let (_priv_pem, pub_pem) = gen_ed25519_keypair();
+        let state = make_state(Some(Arc::new(pub_pem)), metrics.clone(), false);
+        let token = sign_hs256();
+
+        let result = verify_token(&token, ROOM, &state);
+        assert!(
+            matches!(result, Err(RoomAuthError::InvalidSignature)),
+            "kill-switch OFF must reject an HS256 token, got {result:?}"
+        );
+        assert_eq!(count(&metrics, RELAY_JWT_ALG_HS256), 0);
+        assert_eq!(count(&metrics, RELAY_JWT_ALG_EDDSA), 0);
+    }
+
+    #[test]
+    fn expired_eddsa_token_is_not_downgraded_and_not_counted() {
+        // Sanity: Expired from the EdDSA path is a definitive verdict — it must
+        // NOT fall through to HS256, and nothing is counted.
+        let metrics = Arc::new(SfuMetrics::new().unwrap());
+        let (priv_pem, pub_pem) = gen_ed25519_keypair();
+        let state = make_state(Some(Arc::new(pub_pem)), metrics.clone(), true);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            - Duration::from_secs(600);
+        let expired = RoomClaims {
+            sub: 42,
+            room: ROOM.to_string(),
+            iat: now.as_secs(),
+            exp: now.as_secs() + 60, // still in the past
+        };
+        let key = EncodingKey::from_ed_pem(priv_pem.as_bytes()).unwrap();
+        let token = encode(&Header::new(Algorithm::EdDSA), &expired, &key).unwrap();
+
+        let result = verify_token(&token, ROOM, &state);
+        assert!(
+            matches!(result, Err(RoomAuthError::Expired)),
+            "got {result:?}"
+        );
+        assert_eq!(count(&metrics, RELAY_JWT_ALG_HS256), 0);
+        assert_eq!(count(&metrics, RELAY_JWT_ALG_EDDSA), 0);
     }
 }

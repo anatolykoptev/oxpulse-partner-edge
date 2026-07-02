@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{encode, EncodingKey, Header};
-use oxpulse_sfu::client_ws::{spawn_client_ws_api, PendingClient};
+use oxpulse_sfu::client_ws::{spawn_client_ws_api, ClientWsApiConfig, PendingClient};
 use oxpulse_sfu::metrics::SfuMetrics;
 use oxpulse_sfu::room_auth::RoomClaims;
 use serde_json::Value;
@@ -123,12 +123,15 @@ async fn start_handler_with_metrics() -> (
     let metrics = Arc::new(SfuMetrics::default());
     let handle = spawn_client_ws_api(
         listener,
-        secret,
-        None,
-        inject_tx,
-        local_udp,
-        metrics.clone(),
-        0, // stats disabled in tests
+        ClientWsApiConfig {
+            secret,
+            signing_pubkey: None,
+            client_inject_tx: inject_tx,
+            local_udp_addr: local_udp,
+            metrics: metrics.clone(),
+            stats_interval_secs: 0,       // stats disabled in tests
+            hs256_fallback_enabled: true, // T4.3: HS256 fallback kill-switch (default-on)
+        },
     )
     .unwrap();
     (format!("ws://{addr}"), inject_rx, handle, metrics)
@@ -330,8 +333,19 @@ async fn answer_sdp_advertises_public_ip_host_candidate() {
     //    Port 7878 is the partner-edge default; any value works.
     let public_addr: std::net::SocketAddr = "203.0.113.42:7878".parse().unwrap();
     let metrics = Arc::new(SfuMetrics::default());
-    let _handle =
-        spawn_client_ws_api(listener, secret, None, inject_tx, public_addr, metrics, 0).unwrap();
+    let _handle = spawn_client_ws_api(
+        listener,
+        ClientWsApiConfig {
+            secret,
+            signing_pubkey: None,
+            client_inject_tx: inject_tx,
+            local_udp_addr: public_addr,
+            metrics,
+            stats_interval_secs: 0,
+            hs256_fallback_enabled: true,
+        },
+    )
+    .unwrap();
 
     // 3. Browser side: connect WS, send offer, await answer.
     let token = make_token(ROOM_ID, 11, HS256_SECRET, 3600);
@@ -409,12 +423,15 @@ async fn end_to_end_browser_client_lands_in_registry() {
     let secret: Arc<[u8]> = Arc::from(HS256_SECRET);
     let _ws_handle = spawn_client_ws_api(
         ws_listener,
-        secret,
-        None,
-        client_inject_tx.clone(),
-        local_udp,
-        metrics.clone(),
-        0, // stats disabled in tests
+        ClientWsApiConfig {
+            secret,
+            signing_pubkey: None,
+            client_inject_tx: client_inject_tx.clone(),
+            local_udp_addr: local_udp,
+            metrics: metrics.clone(),
+            stats_interval_secs: 0,       // stats disabled in tests
+            hs256_fallback_enabled: true, // T4.3: HS256 fallback kill-switch (default-on)
+        },
     )
     .unwrap();
     drop(client_inject_tx);
@@ -568,12 +585,15 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
     let secret: Arc<[u8]> = Arc::from(HS256_SECRET);
     let _ws_handle = spawn_client_ws_api(
         ws_listener,
-        secret,
-        None,
-        client_inject_tx.clone(),
-        local_udp,
-        metrics.clone(),
-        0, // stats disabled in tests
+        ClientWsApiConfig {
+            secret,
+            signing_pubkey: None,
+            client_inject_tx: client_inject_tx.clone(),
+            local_udp_addr: local_udp,
+            metrics: metrics.clone(),
+            stats_interval_secs: 0,       // stats disabled in tests
+            hs256_fallback_enabled: true, // T4.3: HS256 fallback kill-switch (default-on)
+        },
     )
     .unwrap();
     drop(client_inject_tx);
