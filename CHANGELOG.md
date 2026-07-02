@@ -5,6 +5,26 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.13.1...v0.14.0) (2026-07-02)
+
+
+### Features
+
+* **sfu:** activate cascade-relay on Ed25519 signing key too (T8, re-stacked) ([#349](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/349)) ([ab3c4d5](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ab3c4d5a138cf48d725a830b660be9a13860bd02))
+* **sfu:** admission cap + udp histogram + relay-connect counters (T9+T10+T13 metrics cluster) ([#350](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/350)) ([c9fbf1e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c9fbf1e297d0afb78421f9365ccc821581c2f4e5))
+* **sfu:** label + kill-switch the EdDSA-&gt;HS256 relay-JWT fallback (T4.3) ([#339](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/339)) ([2e42020](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/2e42020bf8122fab49c8b4c9fe0ef0498e3039c7))
+
+
+### Bug Fixes
+
+* **awg:** serialize awg0.conf writes with a shared flock (install/agent lost-update race) ([#330](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/330)) ([69aec3e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/69aec3eaa073aa51804536794d797f4dc9e53982))
+* **awg:** validate I1 charset before conf splice to block kernel peer injection ([#336](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/336)) ([6384a98](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/6384a983dc761ae437664d9cb15a4edbc8324160))
+* **health-report:** route ch0/naive channel to honest not-yet-wired skip ([#346](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/346)) ([1d0267d](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1d0267d33f39a4849051bbe87c92914b3758552f))
+* **refresh:** re-render xray-client.json on Reality rotation (epoch_apply_gap) ([#332](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/332)) ([4699123](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/469912395b33a8a22d067c8bfe81622ae7124d4c))
+* **sfu:** reconcile relay_source room-token verify with dual-credential rollout policy ([#338](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/338)) ([d9e3e69](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d9e3e698931a5a6238dd12253beb499933a74f03))
+* **sfu:** route InvalidAlgorithm to AlgorithmMismatch so HS256 relay-JWT fallback fires ([#337](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/337)) ([46a5df7](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/46a5df7090c8bb7a5b2a1ac07f3dfa194b51d56c))
+* **sfu:** wire SFU signing-pubkey refresh to a live consumer (env_file + recreate) ([#331](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/331)) ([c1ab710](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c1ab71097c3b43c245d810d552b24e76c6d594ff))
+
 ## [0.13.1](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.13.0...v0.13.1) (2026-07-02)
 
 
