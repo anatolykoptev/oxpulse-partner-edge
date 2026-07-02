@@ -103,7 +103,58 @@ configure_amneziawg() {
 	# pick a fresh port at install time so two edges on the same NAT don't
 	# collide.
 	local listen_port="${AWG_LISTEN_PORT:-$((43800 + RANDOM % 200))}"
-	cat > "$conf_path" <<-AWGCONF
+	# Single-writer coordination with the awg-params-agent daemon: both this
+	# installer and the agent write awg0.conf. Serialize via an advisory flock on
+	# <conf_path>.lock — shared byte-for-byte with the agent's rustix flock(2)
+	# target (OXPULSE_AWG_CONF_LOCK_PATH defaults to the same "<conf>.lock").
+	# Without it, a mid-install agent tick reads a pre-install conf and renames
+	# its stale-identity merge over the just-rotated PrivateKey/Endpoint/Jc/S1-S4/
+	# H1-H4 (data_loss). Reuses the established flock protocol (upgrade.sh:365,
+	# lib/telegram-alert-lib.sh:46). -w 10 matches the agent's OXPULSE_AWG_LOCK_TIMEOUT.
+	# We fd-open + flock + write + release around ONLY the conf write, so the slow
+	# systemctl/handshake steps below never hold the lock against the agent.
+	# Prefer OXPULSE_AWG_CONF_LOCK_PATH — the agent's own env-var name (main.rs) —
+	# so an operator who redirects the agent's lock also redirects ours to the same
+	# byte-for-byte file; AWG_CONF_LOCK_PATH stays as a legacy alias. Both default
+	# to "<conf>.lock", identical to the agent's default_lock_path().
+	local lock_path="${OXPULSE_AWG_CONF_LOCK_PATH:-${AWG_CONF_LOCK_PATH:-${conf_path}.lock}}"
+	exec 9>"$lock_path"
+	# Fail-soft, NOT die(): AWG is an optional mesh channel (install.sh Phase 5.7
+	# Item 2) and configure_amneziawg is called directly — NOT in a die-isolating
+	# subshell like install_amneziawg — so a die() here would `exit 1` the whole
+	# install under `set -e`, skipping firewall_apply (which closes the otherwise
+	# publicly-reachable :9317/:8912 per the 2026-05-21 audit) and every step after.
+	# On lock contention we warn, leave the existing awg0.conf untouched (never a
+	# partial unlocked write), and return so the install continues; the agent
+	# reconciles on its next poll or the operator re-runs. `return 0` (not 1)
+	# because the bare call site under `set -e` treats a non-zero return the same
+	# as die() would.
+	if ! flock -w 10 9; then
+		# The awg-params-agent reconciles ONLY the obfuscation params (Jc/Jmin/Jmax/
+		# S1-S4/H1-H4) — it preserves PrivateKey/Endpoint/Address verbatim (see
+		# crates/awg-params-agent/src/conf_merge.rs::merge_obfuscation_params). So it
+		# CANNOT self-heal a rotated identity: only re-running the install applies it.
+		# The message must not imply an agent recovery path that does not exist for
+		# identity fields.
+		warn "configure_amneziawg: could not acquire $lock_path within 10s (awg-params-agent may be mid-write) — leaving awg0.conf UNTOUCHED this pass. The agent reconciles only obfuscation params, NOT identity (PrivateKey/Endpoint/Address), so any rotated identity was NOT applied — re-run the install to apply it."
+		# Durable signal for non-interactive / scripted installs: warn() is a bare
+		# stderr printf and this function returns 0 (a non-zero return would exit 1
+		# the whole install under set -e and skip firewall_apply — see below), so the
+		# skip would otherwise leave no observable trace. Drop a marker file a
+		# post-install check (or the operator) can detect. Best-effort — the install
+		# never fails on the marker write itself.
+		printf '%s\n' "awg0.conf write SKIPPED $(date -u +%Y-%m-%dT%H:%M:%SZ): lock $lock_path held >10s by another writer; identity rotation NOT applied; re-run the install to apply it." \
+			> "${conf_path}.rotation-skipped" 2>/dev/null || true
+		exec 9>&-
+		return 0
+	fi
+	# Atomic write: stream into a temp file in the SAME dir, chmod, then rename(2)
+	# over awg0.conf. The agent's apply_to_kernel() reads the conf via awg-quick
+	# strip OUTSIDE this shared lock, so a plain in-place "cat >" truncate could be
+	# observed half-written; rename(2) is atomic, so that reader sees either the
+	# whole old file or the whole new one. Mirrors the agent write_conf_atomic.
+	local conf_tmp="${conf_path}.tmp.$$"
+	cat > "$conf_tmp" <<-AWGCONF
 		[Interface]
 		PrivateKey = $(cat "$AWG_PRIV_PATH")
 		Address = ${AWG_ALLOCATED_IP}
@@ -127,7 +178,14 @@ configure_amneziawg() {
 		AllowedIPs = ${AWG_MOTHERLY_AWG_IP}/32
 		PersistentKeepalive = 25
 	AWGCONF
-	chmod 0600 "$conf_path"
+	chmod 0600 "$conf_tmp"
+	mv -f "$conf_tmp" "$conf_path"
+	# This pass wrote a fresh conf under the lock — clear any stale skip marker a
+	# prior lock-contended run left behind so it cannot linger as a false signal.
+	rm -f "${conf_path}.rotation-skipped"
+	# Release the conf lock (close fd 9) before the slow systemctl/handshake
+	# steps so a waiting agent tick is unblocked as soon as the write is durable.
+	exec 9>&-
 	systemctl daemon-reload
 	systemctl enable --now awg-quick@awg0 >/dev/null 2>&1 || \
 	  warn "awg-quick@awg0 enable failed — see 'systemctl status awg-quick@awg0'"
