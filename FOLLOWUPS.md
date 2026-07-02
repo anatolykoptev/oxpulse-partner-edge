@@ -173,3 +173,72 @@ continuously-timing-out probe will keep the quota wedged.
 
 **Comment updated** in `oxpulse-channels-health-report.sh` (around line 215)
 to state the residual leak honestly rather than claiming it is solved.
+
+---
+
+## `_restart_if_changed` passes container_name where `docker compose restart` needs the service key (pre-existing)
+
+`oxpulse-partner-edge-refresh.sh`'s `_restart_if_changed` uses its 5th positional
+arg (`container`) directly as the target of
+`docker compose -f "$compose_file" restart "$container"`. But `docker compose
+restart` addresses the compose **SERVICE key**, not `container_name`. The three
+channel call sites pass the **container_name**:
+
+- `_restart_if_changed xray … oxpulse-partner-xray`
+- `_restart_if_changed naive … oxpulse-partner-naive`
+- `_restart_if_changed hysteria2 … oxpulse-partner-hysteria2`
+
+so `docker compose restart oxpulse-partner-xray` fails with `no such service`
+(the service key is `xray`, not `oxpulse-partner-xray`). Surgical channel
+restarts on config change are therefore a no-op today — the container keeps stale
+config until the next full recreate.
+
+This predates the SFU key-apply work (PR #331). PR #331's own SFU call site is
+**correct**: it passes the service key `sfu` as `container` (used by
+`docker compose up -d --no-deps --force-recreate sfu`) and the `container_name`
+`oxpulse-partner-sfu` only as the 7th `state_container` arg (for the
+`docker inspect {{.State.Running}}` liveness probe). So the SFU path is not
+affected — this row tracks only the pre-existing xray/naive/hysteria2 defect.
+
+**Followup:** change the three channel call sites to pass the compose service key
+(`xray` / `naive` / `hysteria2`) as `container`, and pass the container_name as
+the (new) `state_container` arg for the liveness check — mirroring PR #331's SFU
+call site. Add a test that greps the docker-spy log for
+`compose … restart <service-key>` (not the container_name).
+
+**Severity:** MEDIUM — channel config changes silently fail to apply on the daily
+refresh until the next `channels_version`-driven full recreate.
+
+**File:line:** `oxpulse-partner-edge-refresh.sh` — the `xray` / `naive` /
+`hysteria2` `_restart_if_changed` call sites (channel surgical-restart block).
+
+---
+
+## Render-parity fixtures still snapshot the baked `{{SFU_SIGNING_PUBLIC_KEY}}` literal
+
+PR #331 removed the `SFU_SIGNING_PUBLIC_KEY` `environment:` literal from
+`docker-compose.yml.tpl` (the sfu service now reads the key via `env_file:
+sfu-keys.env`) and dropped the now-dead `SFU_SIGNING_PUBLIC_KEY` export +
+`. sfu-keys.env` sourcing from `install.sh`. The render-parity **fixtures** were
+deliberately left untouched (out of scope for the SFU key-apply arc), so they
+still model the OLD shape:
+
+- `tests/fixtures/install-render/compose.tpl` + `.../expected/compose.txt` still
+  bake `SFU_SIGNING_PUBLIC_KEY: "{{…}}"` under `environment:`.
+- `tests/test_install_render_identical.sh` and `tests/test_install_opec_parity.sh`
+  still list `SFU_SIGNING_PUBLIC_KEY` in their local `mirror_install_exports`.
+
+These tests stay green (each is self-contained: its own mirror + its own
+fixtures), but the fixture snapshot has drifted from the real template and
+`install.sh`'s export list.
+
+**Followup:** regenerate the `install-render` fixture snapshot from the current
+`docker-compose.yml.tpl` (dropping the placeholder + golden line) and drop
+`SFU_SIGNING_PUBLIC_KEY` from both parity tests' `mirror_install_exports`, as one
+coordinated render-parity-suite change.
+
+**Severity:** LOW — cosmetic fixture drift; no runtime effect, no test failure.
+
+**File:line:** `tests/fixtures/install-render/compose.tpl`,
+`tests/fixtures/install-render/expected/compose.txt`,
+`tests/test_install_render_identical.sh`, `tests/test_install_opec_parity.sh`.

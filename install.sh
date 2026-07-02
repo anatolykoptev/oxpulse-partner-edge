@@ -1042,21 +1042,15 @@ if [[ $DRY_RUN -eq 1 ]]; then
 else
 	log "  sfu-signing-key: delegating to opec secrets sfu-signing-key"
 	install -d -m 0700 "$PREFIX_LIB"
+	# opec writes the key to sfu-keys.env, which the sfu service consumes at
+	# runtime via `env_file:` (docker-compose.yml.tpl) — NOT a baked template
+	# placeholder. Nothing to source into install.sh's shell scope here: the old
+	# `. sfu-keys.env` + {{SFU_SIGNING_PUBLIC_KEY}} substitution was removed with
+	# the literal; re-reading it would only leave a stale exported value.
 	if ! opec secrets sfu-signing-key \
 		--backend-api "$BACKEND_API" \
 		--out-file "$PREFIX_LIB/sfu-keys.env"; then
-		warn "  opec secrets sfu-signing-key failed — SFU_SIGNING_PUBLIC_KEY will be empty"
-		# Skip sourcing — if opec aborted between tempfile create and persist,
-		# we do not trust whatever is on disk.
-	else
-		# Re-read the env-file to set SFU_SIGNING_PUBLIC_KEY in shell scope
-		# (downstream templates substitute {{SFU_SIGNING_PUBLIC_KEY}}).
-		# Note: opec's "empty key from backend" path Ok-returns WITHOUT writing
-		# the file, so the [[ -r ]] guard correctly skips it.
-		if [[ -r "$PREFIX_LIB/sfu-keys.env" ]]; then
-			# shellcheck disable=SC1091
-			. "$PREFIX_LIB/sfu-keys.env"
-		fi
+		warn "  opec secrets sfu-signing-key failed — sfu-keys.env not written; the SFU falls back to HS256 until the daily refresh (oxpulse-partner-edge-refresh.sh) provisions the key and recreates the container"
 	fi
 fi
 
@@ -1152,7 +1146,12 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        IMAGE_VERSION \
        SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID \
        OTEL_EXPORTER_OTLP_ENDPOINT \
-       SFU_SIGNING_PUBLIC_KEY RELAY_JWT_SECRET SIGNALING_SFU_SECRET
+       RELAY_JWT_SECRET SIGNALING_SFU_SECRET
+# SFU_SIGNING_PUBLIC_KEY is intentionally NOT exported: the sfu service now reads
+# the signing key from env_file (sfu-keys.env) at runtime, so no template renders
+# a {{SFU_SIGNING_PUBLIC_KEY}} placeholder. (The render-parity fixtures under
+# tests/fixtures/install-render/ still snapshot the old baked literal — see
+# FOLLOWUPS.md; regenerating them is a separate render-parity-suite cleanup.)
 # Phase 4.4: all 5 stage templates (compose, caddy, xray, coturn, naive) now go
 # through `opec render`. The bash render_template fallback is GONE — opec is a
 # hard requirement (auto-fetched at install.sh L60+; `partner-edge-installer.sh`
