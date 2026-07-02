@@ -396,7 +396,9 @@ impl AgentLoop {
             }
         }
         let counts = ConflictCounts {
-            lock_timeout: self.conf_write_conflicts_lock_timeout.load(Ordering::Relaxed),
+            lock_timeout: self
+                .conf_write_conflicts_lock_timeout
+                .load(Ordering::Relaxed),
             apply_superseded: self
                 .conf_write_conflicts_apply_superseded
                 .load(Ordering::Relaxed),
@@ -916,9 +918,8 @@ mod conf_lock_tests {
 
         // Start the agent write; it acquires the lock, reads OLD, then holds the
         // lock through the 700ms delay.
-        let agent_task = tokio::spawn(async move {
-            agent.merge_and_write_conf_locked(&agent_params).await
-        });
+        let agent_task =
+            tokio::spawn(async move { agent.merge_and_write_conf_locked(&agent_params).await });
 
         // Give the agent a head start so it is provably mid-delay (holding the
         // lock, having already read OLD) before the installer attempts its write.
