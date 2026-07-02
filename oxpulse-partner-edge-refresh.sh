@@ -888,11 +888,27 @@ if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/nul
     # restart xray-client) so both renderers converge on the OLD config. Uses the
     # literal path (not $_rot_xray_cfg, which is unset on the success path before these
     # rollback sites run) and consumes XRAY_ROT_BACKUP once (single rollback per run).
+    # Honest message for a rollback whose OWN restore mv failed (the "rollback of a
+    # rollback" case). Repeated at all three rollback call sites — defined once.
+    _ROT_ROLLBACK_INCOMPLETE_MSG="rollback INCOMPLETE — could not restore xray-client.json from backup (see partner_edge_reality_rollback_failure_total); node left in inverted state, MANUAL upgrade.sh required; new keys NOT applied"
     _rot_rollback_xray() {
         local _do_restart="${1:-}"
         local _xray="${PREFIX_ETC}/xray-client.json"
         [[ -n "${XRAY_ROT_BACKUP:-}" && -f "$XRAY_ROT_BACKUP" ]] || return 0
-        mv -f "$XRAY_ROT_BACKUP" "$_xray" 2>/dev/null || { XRAY_ROT_BACKUP=""; return 0; }
+        # Finding 2 (MEDIUM): do NOT swallow an mv failure. A cross-device rename
+        # (mount change), full disk, or perms error here leaves xray-client.json on
+        # the BAD (new / half-rendered) pubkey while node-config.json is reverted to
+        # OLD — an inverted epoch_apply_gap. Returning 0 (as before) let the caller
+        # print "rollback complete" over a node that was NOT recovered. Emit a metric
+        # + ERROR log and return non-zero so the failure is LOUD and the caller dies
+        # with the honest message instead of a false success.
+        if ! mv -f "$XRAY_ROT_BACKUP" "$_xray" 2>/dev/null; then
+            log "ERROR: rollback FAILED to restore xray-client.json from $XRAY_ROT_BACKUP (mv failed — cross-device / disk-full / perms); xray-client.json left in BAD state"
+            emit_metric "partner_edge_reality_rollback_failure_total" \
+                "partner_id=\"${NODE_ID}\"" "1"
+            XRAY_ROT_BACKUP=""
+            return 1
+        fi
         XRAY_ROT_BACKUP=""
         log "  rollback: restored xray-client.json from pre-render backup"
         if [[ "$_do_restart" == "restart" ]]; then
@@ -901,15 +917,27 @@ if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/nul
         fi
         return 0
     }
-    # Best-effort render. The render exit status is NOT a trustworthy success
-    # signal: re_render_xray's soft-fail paths (template fetch failure, missing
-    # node-config fields, missing node-config.json) warn and `return 0` WITHOUT
-    # writing a new config, and the render_channel_soft "lib not found" fallback
-    # returns re_render_xray's code too. So we ignore the exit status here and
-    # verify the on-disk OUTCOME below instead.
-    render_channel_soft xray "$_rot_tpl" "$_rot_xray_cfg" 2>/dev/null \
-        || { declare -f re_render_xray >/dev/null 2>&1 && re_render_xray; } \
-        || true
+    # Best-effort render, CONTAINED in a subshell. We neither trust nor propagate
+    # its exit status, for TWO distinct reasons:
+    #  1. Soft-fail: re_render_xray's soft paths (template fetch failure, missing
+    #     node-config fields/file) warn and `return 0` WITHOUT writing a new config,
+    #     and the render_channel_soft "lib not found" fallback returns that code too
+    #     — so a 0 exit does NOT prove the pubkey landed.
+    #  2. Hard die (Finding 1, HIGH): re_render_xray ALSO has a hard `die`
+    #     (channel-render-lib.sh:196, "jq xmux strip failed — refusing to install
+    #     half-stripped config") that `exit 1`s the CURRENT process. Called inline,
+    #     that die would abort mid-rotation — leaving node-config.json patched to the
+    #     NEW pubkey while xray-client.json stays STALE, and SKIPPING both the rollback
+    #     and the VERSION_FILE-not-persisted guard below (an inverted epoch_apply_gap,
+    #     the exact class this task closes). The subshell confines that exit to the
+    #     subshell, so control ALWAYS reaches the on-disk OUTCOME gate below — which
+    #     then drives the SAME rollback path (restore node-config.json + _rot_rollback_xray
+    #     + no VERSION_FILE) as a reload failure. Atomic: node-config.json and
+    #     xray-client.json both advance to the new pubkey, or NEITHER does.
+    (
+        render_channel_soft xray "$_rot_tpl" "$_rot_xray_cfg" 2>/dev/null \
+            || { declare -f re_render_xray >/dev/null 2>&1 && re_render_xray; }
+    ) || true
     unset _rot_tpl _rot_share
     # Outcome verification: the rotated pubkey MUST now be on disk in the file
     # the xray container mounts. This is the SAME comparison the applied-vs-written
@@ -928,7 +956,7 @@ if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/nul
         # Restore the file only — the render did not land the new pubkey, so on this
         # path the container was never restarted with a new key (re_render_xray's
         # restart is after its write; opec never restarts). No container restart needed.
-        _rot_rollback_xray
+        _rot_rollback_xray || die "$_ROT_ROLLBACK_INCOMPLETE_MSG"
         die "rollback complete; new keys NOT applied (xray render did not land new pubkey)"
     fi
     unset _rot_applied_pub _rot_xray_cfg
@@ -944,7 +972,7 @@ if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/nul
         # container onto it. Restore the file AND re-restart so the container tracks
         # the rolled-back node-config.json — otherwise the "keys NOT applied" claim
         # below is false and the node runs an inverted epoch_apply_gap.
-        _rot_rollback_xray restart
+        _rot_rollback_xray restart || die "$_ROT_ROLLBACK_INCOMPLETE_MSG"
         systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE" || true
         die "rollback complete; new keys NOT applied"
     fi
@@ -959,7 +987,7 @@ if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/nul
         # Same as the reload-failure path: the render already landed the new pubkey and
         # restarted the container. Restore the file AND re-restart onto the OLD config
         # so on-disk + live state agree with the rolled-back node-config.json.
-        _rot_rollback_xray restart
+        _rot_rollback_xray restart || die "$_ROT_ROLLBACK_INCOMPLETE_MSG"
         systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE" || true
         die "rollback complete after failed verify"
     fi

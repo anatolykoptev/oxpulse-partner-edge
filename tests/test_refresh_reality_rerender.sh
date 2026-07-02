@@ -737,6 +737,266 @@ else
 	fail "$RF_LEFTOVER leftover .rotbak backup(s) after rollback"
 fi
 
+# ── Render-internal-die rollback (Finding 1, HIGH): a render that HARD-dies ────
+# re_render_xray has a hard `die "jq xmux strip failed — refusing to install
+# half-stripped config"` (channel-render-lib.sh:196). Called INLINE, that die
+# `exit 1`s the whole refresh process mid-rotation — leaving node-config.json
+# patched to the NEW pubkey while xray-client.json stays STALE, and SKIPPING both
+# the rollback and the VERSION_FILE-not-persisted guard (an inverted
+# epoch_apply_gap). The render is now run in a subshell so the die is CONTAINED
+# and control reaches the on-disk OUTCOME gate, which rolls back exactly like a
+# soft-fail render. This ships a channel-render-lib.sh whose re_render_xray
+# hard-dies, with opec ABSENT so the rotation branch falls through to it. RED
+# before the subshell fix: node-config.json stays on PubKeyB (process aborted).
+echo "==> Render-die: re_render_xray hard-dies ⇒ contained, rollback, version NOT advanced"
+D=$(mktemp -d)
+trap 'rm -rf "$T" "$F" "$N" "$I" "$R" "$D"' EXIT
+
+D_ETC="$D/etc"; D_LIB="$D/lib"; D_TEXT="$D/textfile"; D_BIN="$D/bin"
+mkdir -p "$D_ETC" "$D_LIB" "$D_BIN"
+
+# NO opec in D_BIN (absent) ⇒ render_channel_soft returns 1 ⇒ re_render_xray runs.
+# Ship a STUB channel-render-lib.sh where the rotation branch sources it
+# (${PREFIX_SBIN}/channel-render-lib.sh) whose re_render_xray HARD-dies, modelling
+# the real channel-render-lib.sh:196 `die "jq xmux strip failed..."`. `die`
+# resolves to the refresh script's die() (log + exit 1) at source time.
+cat > "$D_BIN/channel-render-lib.sh" <<'STUBLIB'
+#!/usr/bin/env bash
+# Test stub — re_render_xray hard-dies BEFORE writing xray-client.json.
+re_render_xray() {
+    die "STUB re_render_xray: jq xmux strip failed — refusing to install half-stripped config"
+}
+STUBLIB
+
+cat > "$D_ETC/node-config.json" <<JSON
+{
+  "node_id": "test-edge-t3-renderdie",
+  "backend_endpoint": "oxpulse.chat:443",
+  "reality_uuid": "11111111-2222-3333-4444-555555555555",
+  "reality_public_key": "$PUBKEY_A",
+  "reality_encryption": "mlkem768x25519",
+  "reality_short_id": "abcd",
+  "reality_server_names": ["www.samsung.com"]
+}
+JSON
+cat > "$D_ETC/xray-client.json" <<JSON
+{ "outbounds": [ { "streamSettings": { "realitySettings": { "publicKey": "$PUBKEY_A" } } } ] }
+JSON
+printf 'v1\n'  > "$D_LIB/keys-version"
+printf 'cv1\n' > "$D_LIB/channels-version"
+
+# curl: keys GET → v2/PubKeyB; heartbeat → 200. No tpl fetch is reached — the stub
+# re_render_xray dies before any curl self-fetch.
+cat > "$D_BIN/curl" <<CURL
+#!/usr/bin/env bash
+args="\$*"
+if [[ "\$args" == *"/api/partner/keys"* ]]; then
+  cat <<'RESP'
+{"version":"v2","channels_version":"cv1","reality_public_key":"$PUBKEY_B","reality_encryption":"mlkem768x25519","reality_server_names":["www.samsung.com"],"sfu_signing_public_key":"ZmFrZQ=="}
+RESP
+  exit 0
+fi
+if [[ "\$args" == *"/api/partner/heartbeat"* ]]; then printf 'ok\n200'; exit 0; fi
+exit 0
+CURL
+cat > "$D_BIN/systemctl" <<'SYSCTL'
+#!/usr/bin/env bash
+case "$*" in
+  "list-unit-files oxpulse-partner-edge.service --no-legend"*)
+    echo "oxpulse-partner-edge.service enabled enabled" ;;
+  "is-active --quiet oxpulse-partner-edge.service"*) exit 0 ;;
+  *) : ;;
+esac
+exit 0
+SYSCTL
+printf '#!/usr/bin/env bash\nexit 0\n' > "$D_BIN/docker"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$D_BIN/sleep"
+chmod +x "$D_BIN"/*
+
+set +e
+env -i \
+  PATH="$D_BIN:/usr/bin:/bin" \
+  HOME="$D" \
+  PARTNER_EDGE_PREFIX_ETC="$D_ETC" \
+  PARTNER_EDGE_PREFIX_LIB="$D_LIB" \
+  PARTNER_EDGE_TEXTFILE_DIR="$D_TEXT" \
+  OXPULSE_PREFIX_SBIN="$D_BIN" \
+  PREFIX_SBIN="$D_BIN" \
+  LOG_FILE="$D/refresh.log" \
+  OXPULSE_BACKEND_URL="https://oxpulse.chat" \
+  bash "$SCRIPT" > "$D/run.out" 2>&1
+DIE_EXIT=$?
+set -e
+
+if [[ $DIE_EXIT -ne 0 ]]; then
+	pass "refresh.sh exited non-zero ($DIE_EXIT) on render hard-die (die contained, not process-fatal mid-rotation)"
+else
+	fail "refresh.sh exited 0 despite a render hard-die — die not contained"
+	sed 's/^/    /' "$D/run.out" 2>/dev/null || true
+fi
+
+# THE FIX: node-config.json must roll back to PubKeyA. Without the subshell the
+# die aborts the process while node-config.json is still patched to PubKeyB.
+DIE_NODE=$(jq -r '.reality_public_key // "none"' "$D_ETC/node-config.json" 2>/dev/null || echo none)
+if [[ "$DIE_NODE" == "$PUBKEY_A" ]]; then
+	pass "node-config.json rolled back to PubKeyA after render die (die contained, rollback ran)"
+else
+	fail "node-config.json pubkey='$DIE_NODE' expected rollback to '$PUBKEY_A' (die aborted process mid-rotation — node-config left on new key)"
+fi
+
+DIE_XRAY=$(jq -r '.outbounds[0].streamSettings.realitySettings.publicKey // "none"' "$D_ETC/xray-client.json" 2>/dev/null || echo none)
+if [[ "$DIE_XRAY" == "$PUBKEY_A" ]]; then
+	pass "xray-client.json restored/unchanged (still PubKeyA) — no half-applied config after render die"
+else
+	fail "xray-client.json pubkey='$DIE_XRAY' expected '$PUBKEY_A'"
+fi
+
+DIE_VER=$(cat "$D_LIB/keys-version" 2>/dev/null || echo none)
+if [[ "$DIE_VER" == "v1" ]]; then
+	pass "keys-version NOT advanced (still v1) after render die — rotation retried next run"
+else
+	fail "keys-version='$DIE_VER' expected 'v1' (must not persist on render die)"
+fi
+
+DIE_LEFTOVER=$(find "$D_ETC" -maxdepth 1 -name 'xray-client.json.rotbak.*' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$DIE_LEFTOVER" == "0" ]]; then
+	pass "no leftover .rotbak backup after render-die rollback"
+else
+	fail "$DIE_LEFTOVER leftover .rotbak backup(s) after render-die rollback"
+fi
+
+# ── Rollback-mv failure is LOUD (Finding 2, MEDIUM): the rollback of a rollback ──
+# _rot_rollback_xray used to `mv ... || { XRAY_ROT_BACKUP=""; return 0; }` — a
+# failed restore mv (cross-device rename after a mount change, full disk, perms)
+# returned SUCCESS while xray-client.json was left on the NEW/half-rendered pubkey.
+# The fix emits partner_edge_reality_rollback_failure_total + an ERROR log and
+# returns non-zero so the caller dies with the honest "rollback INCOMPLETE"
+# message. This runs the prod reload-failure path (render writes PubKeyB, reload
+# FAILS ⇒ rollback with restart) with a selective `mv` stub that fails ONLY the
+# rotbak restore, and asserts the failure is visible. RED before the fix (no
+# metric, and a false "rollback complete" line).
+echo "==> Rollback-mv-fail: restore mv fails ⇒ metric + honest die, not a silent success"
+M=$(mktemp -d)
+trap 'rm -rf "$T" "$F" "$N" "$I" "$R" "$D" "$M"' EXIT
+
+M_ETC="$M/etc"; M_LIB="$M/lib"; M_TEXT="$M/textfile"; M_BIN="$M/bin"
+mkdir -p "$M_ETC" "$M_LIB" "$M_BIN"
+
+# opec present but NO local tpl ⇒ opec SrcMisses ⇒ re_render_xray fallback (writes
+# PubKeyB via curl self-fetch) — the prod path.
+cp "$BIN/opec" "$M_BIN/opec"
+cp "$REPO_ROOT/channel-render-lib.sh" "$M_BIN/channel-render-lib.sh"
+
+cat > "$M_ETC/node-config.json" <<JSON
+{
+  "node_id": "test-edge-t3-mvfail",
+  "backend_endpoint": "oxpulse.chat:443",
+  "reality_uuid": "11111111-2222-3333-4444-555555555555",
+  "reality_public_key": "$PUBKEY_A",
+  "reality_encryption": "mlkem768x25519",
+  "reality_short_id": "abcd",
+  "reality_server_names": ["www.samsung.com"]
+}
+JSON
+cat > "$M_ETC/xray-client.json" <<JSON
+{ "outbounds": [ { "streamSettings": { "security": "reality", "realitySettings": { "publicKey": "$PUBKEY_A" } } } ] }
+JSON
+printf 'v1\n'  > "$M_LIB/keys-version"
+printf 'cv1\n' > "$M_LIB/channels-version"
+
+# Selective mv stub: fail ONLY the rollback rotbak restore; pass every other mv
+# (node-config restore, emit_metric's atomic textfile write) through to the real
+# binary so the metric can still be written.
+cat > "$M_BIN/mv" <<'MV'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in *xray-client.json.rotbak.*)
+    echo "stub mv: refusing rotbak restore (simulated cross-device / disk-full)" >&2
+    exit 1 ;;
+  esac
+done
+if [[ -x /usr/bin/mv ]]; then exec /usr/bin/mv "$@"; else exec /bin/mv "$@"; fi
+MV
+
+cat > "$M_BIN/curl" <<CURL
+#!/usr/bin/env bash
+args="\$*"
+if [[ "\$args" == *"xray-client.json.tpl"* ]]; then
+  out=""
+  while [[ \$# -gt 0 ]]; do
+    if [[ "\$1" == "-o" ]]; then out="\$2"; shift 2; continue; fi
+    shift
+  done
+  [[ -n "\$out" ]] && cp "$REPO_ROOT/xray-client.json.tpl" "\$out"
+  exit 0
+fi
+if [[ "\$args" == *"/api/partner/keys"* ]]; then
+  cat <<'RESP'
+{"version":"v2","channels_version":"cv1","reality_public_key":"$PUBKEY_B","reality_encryption":"mlkem768x25519","reality_server_names":["www.samsung.com"],"sfu_signing_public_key":"ZmFrZQ=="}
+RESP
+  exit 0
+fi
+if [[ "\$args" == *"/api/partner/heartbeat"* ]]; then printf 'ok\n200'; exit 0; fi
+exit 0
+CURL
+# systemctl: service installed; reload FAILS ⇒ rollback path (with restart).
+cat > "$M_BIN/systemctl" <<'SYSCTL'
+#!/usr/bin/env bash
+case "$*" in
+  "list-unit-files oxpulse-partner-edge.service --no-legend"*)
+    echo "oxpulse-partner-edge.service enabled enabled" ;;
+  "reload oxpulse-partner-edge.service"*) exit 1 ;;
+  "is-active --quiet oxpulse-partner-edge.service"*) exit 0 ;;
+  *) : ;;
+esac
+exit 0
+SYSCTL
+printf '#!/usr/bin/env bash\nexit 0\n' > "$M_BIN/docker"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$M_BIN/sleep"
+chmod +x "$M_BIN"/*
+
+set +e
+env -i \
+  PATH="$M_BIN:/usr/bin:/bin" \
+  HOME="$M" \
+  PARTNER_EDGE_PREFIX_ETC="$M_ETC" \
+  PARTNER_EDGE_PREFIX_LIB="$M_LIB" \
+  PARTNER_EDGE_TEXTFILE_DIR="$M_TEXT" \
+  OXPULSE_PREFIX_SBIN="$M_BIN" \
+  PREFIX_SBIN="$M_BIN" \
+  LOG_FILE="$M/refresh.log" \
+  OXPULSE_BACKEND_URL="https://oxpulse.chat" \
+  bash "$SCRIPT" > "$M/run.out" 2>&1
+MV_EXIT=$?
+set -e
+
+if [[ $MV_EXIT -ne 0 ]]; then
+	pass "refresh.sh exited non-zero ($MV_EXIT) when the rollback restore mv failed"
+else
+	fail "refresh.sh exited 0 despite a failed rollback restore — swallowed failure"
+	sed 's/^/    /' "$M/run.out" 2>/dev/null || true
+fi
+
+MPROM="$M_TEXT/partner_edge.prom"
+if [[ -f "$MPROM" ]] && grep -qE 'partner_edge_reality_rollback_failure_total\{[^}]*\} 1' "$MPROM"; then
+	pass "partner_edge_reality_rollback_failure_total=1 emitted (rollback mv failure is visible)"
+else
+	fail "partner_edge_reality_rollback_failure_total=1 not found in $MPROM: $(cat "$MPROM" 2>/dev/null || echo '<absent>')"
+fi
+
+if grep -q 'rollback INCOMPLETE' "$M/run.out" 2>/dev/null; then
+	pass "honest 'rollback INCOMPLETE' message logged (no false 'rollback complete')"
+else
+	fail "expected 'rollback INCOMPLETE' in output; got:"; sed 's/^/    /' "$M/run.out" 2>/dev/null || true
+fi
+
+MV_VER=$(cat "$M_LIB/keys-version" 2>/dev/null || echo none)
+if [[ "$MV_VER" == "v1" ]]; then
+	pass "keys-version NOT advanced (still v1) when rollback mv failed"
+else
+	fail "keys-version='$MV_VER' expected 'v1'"
+fi
+
 # ── Result ───────────────────────────────────────────────────────────────────
 if [[ $FAIL -ne 0 ]]; then
 	echo "FAIL: T3 reality re-render regression test"
