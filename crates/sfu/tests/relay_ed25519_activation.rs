@@ -73,7 +73,10 @@ fn gen_ed25519_keypair() -> (String, String) {
     use pkcs8::LineEnding;
     let key = SigningKey::generate(&mut rand::rngs::OsRng);
     let priv_pem = key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
-    let pub_pem = key.verifying_key().to_public_key_pem(LineEnding::LF).unwrap();
+    let pub_pem = key
+        .verifying_key()
+        .to_public_key_pem(LineEnding::LF)
+        .unwrap();
     (priv_pem, pub_pem)
 }
 
@@ -101,7 +104,10 @@ fn allowlisted_jwt(jti: &str) -> RelayJwt {
 /// the empty secret + forced-off fallback come straight from `compute_relay_activation`.
 async fn start_ed25519_only_api(pubkey_pem: &str) -> (String, mpsc::Receiver<RelayTask>) {
     let activation = compute_relay_activation(None, Some(pubkey_pem), true).unwrap();
-    assert!(activation.enabled, "precondition: Ed25519-only must be enabled");
+    assert!(
+        activation.enabled,
+        "precondition: Ed25519-only must be enabled"
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -164,7 +170,9 @@ async fn ed25519_only_relay_connect_rejects_hs256_token_without_panic() {
     let forged = allowlisted_jwt("t8-hs-forge").sign(b"").unwrap();
     let status = Client::new()
         .post(format!("{base}/relay/connect"))
-        .json(&RelayConnectRequest { relay_token: forged })
+        .json(&RelayConnectRequest {
+            relay_token: forged,
+        })
         .send()
         .await
         .unwrap()
