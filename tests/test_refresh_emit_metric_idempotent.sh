@@ -34,8 +34,17 @@ fail() { echo "FAIL: $*"; exit 1; }
 # pattern used by test_refresh_heartbeat_decoupled.sh / test_refresh_heartbeat_resilience.sh).
 make_bin() {
     local dir="$1"
+    # dirname/mktemp/basename/sha256sum: required by #328's canonical emit_metric
+    # (cumulative state-file model, mktemp+mv atomic writes) and the render-lib /
+    # token-lib sourcing this script now does — matches test_refresh_metric_sink.sh's
+    # stub list. This test predates #328's rewrite (superseded emit_metric edit,
+    # T12 bug-hunt on the stale pre-rewrite base); the stub list is widened here to
+    # actually exercise the now-canonical implementation instead of degrading it
+    # into a silent no-op (mktemp missing -> emit_metric's `|| return 0` swallows
+    # the write).
     for cmd in bash sh date printf cat tee cp mv mkdir chmod install sleep \
-                sed grep head tail wc stat cut tr expr test; do
+                sed grep head tail wc stat cut tr expr test touch \
+                dirname mktemp basename sha256sum; do
         local loc
         loc=$(command -v "$cmd" 2>/dev/null || true)
         if [[ -n "$loc" ]]; then ln -sf "$loc" "$dir/$cmd"; fi
