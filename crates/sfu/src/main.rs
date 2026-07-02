@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::signal;
@@ -7,7 +8,7 @@ use oxpulse_sfu::{
     client_ws::{spawn_client_ws_api, ClientWsApiConfig, PendingClient},
     metrics::spawn_metrics_server,
     relay::{
-        client::connect_relay,
+        client::{connect_relay, PendingRelay},
         handler::{spawn_relay_api, RelayApiState, SeenJtis},
         task::RelayTask,
     },
@@ -26,6 +27,72 @@ const RELAY_CANDIDATE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration
 /// 16 is enough for realistic burst (typical deployment: 1–4 relay rooms active).
 /// Backpressure is observable via `relay_sem_full` warn logs.
 const RELAY_MAX_CONCURRENT: usize = 16;
+
+/// Attempt each candidate URL in `candidates`, in order, stopping at the
+/// first candidate that completes `connect_relay`'s WS+SDP handshake.
+/// Extracted out of the relay-task spawn below so tests can drive this
+/// retry loop through the real `connect_relay` network path instead of
+/// re-implementing it.
+///
+/// T13 (2026-07-01 bug-hunt, dependency_block/medium): increments
+/// `metrics.relay_connect_success_total` on the first successful candidate,
+/// or `metrics.relay_candidate_exhausted_total` once every candidate has
+/// failed or timed out — previously this branch only emitted a
+/// `tracing::warn!`, invisible to Grafana during a total upstream-hub
+/// outage.
+async fn relay_connect_failover(
+    candidates: &[String],
+    token: &str,
+    host_candidate_addr: SocketAddr,
+    room: String,
+    stats_interval_secs: u64,
+    metrics: &SfuMetrics,
+) -> Option<PendingRelay> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for candidate in candidates {
+        match tokio::time::timeout(
+            RELAY_CANDIDATE_CONNECT_TIMEOUT,
+            connect_relay(
+                candidate,
+                token,
+                host_candidate_addr,
+                room.clone(),
+                stats_interval_secs,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(pending)) => {
+                metrics.relay_connect_success_total.inc();
+                return Some(pending);
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    upstream = %candidate, room_id = %room, error = %e,
+                    "relay candidate failed, trying next"
+                );
+                last_err = Some(e);
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    upstream = %candidate, room_id = %room,
+                    timeout_s = RELAY_CANDIDATE_CONNECT_TIMEOUT.as_secs(),
+                    "relay candidate timed out, trying next"
+                );
+                last_err = Some(anyhow::anyhow!(
+                    "connect timed out after {:?}",
+                    RELAY_CANDIDATE_CONNECT_TIMEOUT
+                ));
+            }
+        }
+    }
+    // All candidates exhausted.
+    metrics.relay_candidate_exhausted_total.inc();
+    if let Some(e) = last_err {
+        tracing::warn!(error = %e, room_id = %room, "relay connection failed — all candidates exhausted");
+    }
+    None
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -276,12 +343,17 @@ async fn main() -> anyhow::Result<()> {
         // relay_inject_tx is moved into the spawn task and lives as long as it does;
         // serve() observes a runtime close (None on recv) only if the spawn panics.
         let stats_interval_secs = config.stats_interval_secs;
+        // T13: cloned once for the outer drain task; cloned again per-task
+        // below (relay_metrics.clone()) since `metrics` itself is moved into
+        // udp_loop::serve() further down main().
+        let relay_metrics = metrics.clone();
         tokio::spawn(async move {
             while let Some(task) = relay_rx.recv().await {
                 let candidates = task.upstream_candidates.clone();
                 let token = task.upstream_room_token.clone();
                 let room = task.room_id.clone();
                 let tx = relay_inject_tx.clone();
+                let task_metrics = relay_metrics.clone();
                 // Acquire semaphore permit before spawning — enforces the concurrency cap.
                 // acquire_owned() returns Err only if the semaphore is closed; closing
                 // happens only when relay_sem is dropped (i.e. this outer task exits),
@@ -304,54 +376,28 @@ async fn main() -> anyhow::Result<()> {
                         !candidates.is_empty(),
                         "relay task enqueued with no candidates"
                     );
-                    let mut last_err: Option<anyhow::Error> = None;
-                    for candidate in &candidates {
-                        match tokio::time::timeout(
-                            RELAY_CANDIDATE_CONNECT_TIMEOUT,
-                            connect_relay(
-                                candidate,
-                                &token,
-                                host_candidate_addr,
-                                room.clone(),
-                                stats_interval_secs,
-                            ),
-                        )
-                        .await
-                        {
-                            Ok(Ok(pending)) => {
-                                if let Err(e) = tx.send(pending).await {
-                                    tracing::warn!(
-                                        error = %e, room_id = %room,
-                                        "relay inject channel closed — relay Rtc dropped"
-                                    );
-                                } else {
-                                    tracing::info!(room_id = %room, upstream = %candidate, "relay handshake complete, PendingRelay sent to registry");
-                                }
-                                return;
-                            }
-                            Ok(Err(e)) => {
-                                tracing::warn!(
-                                    upstream = %candidate, room_id = %room, error = %e,
-                                    "relay candidate failed, trying next"
-                                );
-                                last_err = Some(e);
-                            }
-                            Err(_elapsed) => {
-                                tracing::warn!(
-                                    upstream = %candidate, room_id = %room,
-                                    timeout_s = RELAY_CANDIDATE_CONNECT_TIMEOUT.as_secs(),
-                                    "relay candidate timed out, trying next"
-                                );
-                                last_err = Some(anyhow::anyhow!(
-                                    "connect timed out after {:?}",
-                                    RELAY_CANDIDATE_CONNECT_TIMEOUT
-                                ));
-                            }
+                    // T13: relay_connect_failover increments
+                    // relay_connect_success_total / relay_candidate_exhausted_total
+                    // on the two respective outcomes.
+                    if let Some(pending) = relay_connect_failover(
+                        &candidates,
+                        &token,
+                        host_candidate_addr,
+                        room.clone(),
+                        stats_interval_secs,
+                        &task_metrics,
+                    )
+                    .await
+                    {
+                        let upstream = pending.upstream_url.clone();
+                        if let Err(e) = tx.send(pending).await {
+                            tracing::warn!(
+                                error = %e, room_id = %room,
+                                "relay inject channel closed — relay Rtc dropped"
+                            );
+                        } else {
+                            tracing::info!(room_id = %room, upstream = %upstream, "relay handshake complete, PendingRelay sent to registry");
                         }
-                    }
-                    // All candidates exhausted.
-                    if let Some(e) = last_err {
-                        tracing::warn!(error = %e, room_id = %room, "relay connection failed — all candidates exhausted");
                     }
                 });
             }
@@ -416,4 +462,176 @@ async fn main() -> anyhow::Result<()> {
     telemetry::shutdown(trace_provider);
 
     result
+}
+
+// T13 (2026-07-01 bug-hunt, dependency_block/medium): the cascade-relay
+// candidate-failover loop lived inline in the relay task spawn above with no
+// counter — a total upstream-hub outage (every candidate failing) produced
+// only a `tracing::warn!`, invisible to Grafana. These tests drive the real
+// `relay_connect_failover` helper (extracted from that loop, called by
+// main() above) through the real `connect_relay` network path — a refused
+// TCP port for the exhaustion case, and a real str0m answerer for the
+// success case — rather than re-implementing the retry logic in the test.
+#[cfg(test)]
+mod relay_connect_failover_tests {
+    use super::*;
+
+    use futures_util::{SinkExt, StreamExt};
+    use str0m::change::SdpOffer;
+    use tokio_tungstenite::tungstenite::Message;
+
+    /// Spins up a plain-WS (no TLS) fake upstream bound to the box's real
+    /// AWG mesh interface (`10.9.0.2`, mesh-allow-listed by
+    /// `relay::allowlist::is_allowed_upstream`) that completes the real
+    /// `connect_relay` join -> offer -> answer handshake using str0m as the
+    /// answerer (`accept_offer`, the same entry point
+    /// `client_ws/session.rs` uses server-side). Returns `Some(ws-url)` the
+    /// `RelayTask` candidate would carry, or `None` on a host without the AWG
+    /// mesh interface (see the bind below).
+    async fn spawn_fake_upstream_success() -> Option<String> {
+        // A plaintext `ws://` upstream is allow-listed ONLY inside the AWG mesh
+        // subnet (10.9.0.0/24): connect_relay's SSRF guard
+        // (`relay::allowlist::is_allowed_upstream`) rejects bare `ws://` to
+        // loopback, so exercising the success path genuinely requires a mesh
+        // bind (a loopback bind would be refused by the guard, not connect).
+        // Hosts without the mesh interface (e.g. GitHub-hosted CI runners) fail
+        // to bind 10.9.0.2 with EADDRNOTAVAIL — return `None` so the caller
+        // skips the mesh-only success assertion instead of panicking. The
+        // portable exhaustion case (wss://127.0.0.1 refused) still gates on
+        // every host.
+        let listener = match tokio::net::TcpListener::bind("10.9.0.2:0").await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "spawn_fake_upstream_success: cannot bind AWG mesh interface 10.9.0.2 \
+                     ({e}) — no mesh on this host; skipping the plaintext-ws success-counter \
+                     assertion (the exhaustion case still runs)"
+                );
+                return None;
+            }
+        };
+        let port = listener.local_addr().expect("local_addr").port();
+        tokio::spawn(async move {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let mut ws = match tokio_tungstenite::accept_async(stream).await {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let mut offer_sdp: Option<String> = None;
+            while let Some(Ok(msg)) = ws.next().await {
+                let Message::Text(text) = msg else {
+                    continue;
+                };
+                let v: serde_json::Value = match serde_json::from_str(text.as_str()) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v["type"] == "signal" {
+                    if let Some(payload) = v["payload"].as_object() {
+                        if payload.get("type").and_then(|t| t.as_str()) == Some("offer") {
+                            offer_sdp = payload
+                                .get("sdp")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+            let Some(offer_sdp) = offer_sdp else {
+                return;
+            };
+            let Ok(offer) = SdpOffer::from_sdp_string(&offer_sdp) else {
+                return;
+            };
+            let mut answerer = str0m::Rtc::new(std::time::Instant::now());
+            let Ok(answer) = answerer.sdp_api().accept_offer(offer) else {
+                return;
+            };
+            let answer_payload = serde_json::json!({
+                "type": "signal",
+                "payload": { "type": "answer", "sdp": answer.to_sdp_string() }
+            })
+            .to_string();
+            let _ = ws.send(Message::Text(answer_payload.into())).await;
+        });
+        Some(format!("ws://10.9.0.2:{port}/relay"))
+    }
+
+    #[tokio::test]
+    async fn increments_success_counter_on_first_working_candidate() {
+        let Some(upstream) = spawn_fake_upstream_success().await else {
+            // No AWG mesh interface on this host (see spawn_fake_upstream_success)
+            // — the mesh-only plaintext-ws success path can't run here. Its
+            // portable counterpart, increments_exhausted_counter_when_all_candidates_fail
+            // (wss://127.0.0.1 refused), still gates this module in CI.
+            return;
+        };
+        let metrics = Arc::new(SfuMetrics::default());
+        let candidates = vec![upstream];
+
+        let result = relay_connect_failover(
+            &candidates,
+            "test-token",
+            "127.0.0.1:0".parse().unwrap(),
+            "test-room".to_string(),
+            0,
+            &metrics,
+        )
+        .await;
+
+        assert!(
+            result.is_some(),
+            "relay_connect_failover must return Some(PendingRelay) when a candidate succeeds"
+        );
+        assert_eq!(
+            metrics.relay_connect_success_total.get(),
+            1,
+            "relay_connect_success_total must increment on a successful candidate"
+        );
+        assert_eq!(
+            metrics.relay_candidate_exhausted_total.get(),
+            0,
+            "exhausted counter must NOT fire when a candidate succeeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn increments_exhausted_counter_when_all_candidates_fail() {
+        let metrics = Arc::new(SfuMetrics::default());
+        // Refused ports on an allow-listed host -- same pattern as
+        // relay/client.rs's connect_relay_refused_port_returns_err_quickly.
+        let candidates = vec![
+            "wss://127.0.0.1:1/ws/call/r".to_string(),
+            "wss://127.0.0.1:2/ws/call/r".to_string(),
+        ];
+
+        let result = relay_connect_failover(
+            &candidates,
+            "test-token",
+            "127.0.0.1:0".parse().unwrap(),
+            "test-room".to_string(),
+            0,
+            &metrics,
+        )
+        .await;
+
+        assert!(
+            result.is_none(),
+            "relay_connect_failover must return None when every candidate fails"
+        );
+        assert_eq!(
+            metrics.relay_candidate_exhausted_total.get(),
+            1,
+            "relay_candidate_exhausted_total must increment once all candidates are exhausted"
+        );
+        assert_eq!(
+            metrics.relay_connect_success_total.get(),
+            0,
+            "success counter must NOT fire when every candidate failed"
+        );
+    }
 }
