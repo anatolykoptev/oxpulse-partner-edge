@@ -113,9 +113,27 @@ configure_amneziawg() {
 	# lib/telegram-alert-lib.sh:46). -w 10 matches the agent's OXPULSE_AWG_LOCK_TIMEOUT.
 	# We fd-open + flock + write + release around ONLY the conf write, so the slow
 	# systemctl/handshake steps below never hold the lock against the agent.
-	local lock_path="${AWG_CONF_LOCK_PATH:-${conf_path}.lock}"
+	# Prefer OXPULSE_AWG_CONF_LOCK_PATH — the agent's own env-var name (main.rs) —
+	# so an operator who redirects the agent's lock also redirects ours to the same
+	# byte-for-byte file; AWG_CONF_LOCK_PATH stays as a legacy alias. Both default
+	# to "<conf>.lock", identical to the agent's default_lock_path().
+	local lock_path="${OXPULSE_AWG_CONF_LOCK_PATH:-${AWG_CONF_LOCK_PATH:-${conf_path}.lock}}"
 	exec 9>"$lock_path"
-	flock -w 10 9 || die "configure_amneziawg: could not acquire $lock_path within 10s (awg-params-agent may be mid-write) — retry the install"
+	# Fail-soft, NOT die(): AWG is an optional mesh channel (install.sh Phase 5.7
+	# Item 2) and configure_amneziawg is called directly — NOT in a die-isolating
+	# subshell like install_amneziawg — so a die() here would `exit 1` the whole
+	# install under `set -e`, skipping firewall_apply (which closes the otherwise
+	# publicly-reachable :9317/:8912 per the 2026-05-21 audit) and every step after.
+	# On lock contention we warn, leave the existing awg0.conf untouched (never a
+	# partial unlocked write), and return so the install continues; the agent
+	# reconciles on its next poll or the operator re-runs. `return 0` (not 1)
+	# because the bare call site under `set -e` treats a non-zero return the same
+	# as die() would.
+	if ! flock -w 10 9; then
+		warn "configure_amneziawg: could not acquire $lock_path within 10s (awg-params-agent may be mid-write) — leaving awg0.conf untouched this pass; the agent reconciles on its next poll, or re-run the install"
+		exec 9>&-
+		return 0
+	fi
 	# Atomic write: stream into a temp file in the SAME dir, chmod, then rename(2)
 	# over awg0.conf. The agent's apply_to_kernel() reads the conf via awg-quick
 	# strip OUTSIDE this shared lock, so a plain in-place "cat >" truncate could be
