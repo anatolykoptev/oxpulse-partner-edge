@@ -38,14 +38,30 @@ BACKEND_URL="${BACKEND_URL%/}"
 ts()   { date -Iseconds; }
 log()  { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG_FILE"; }
 die()  { log "ERR $*"; exit 1; }
-# Append or create a Prometheus textfile metric (node_exporter textfile collector).
-# Idempotent: overwrites the file on every run so stale gauges do not accumulate.
+# Truncate the Prometheus textfile once per script run, before any
+# emit_metric call. Without this, each run's metric lines pile up on top of
+# every prior run's (duplicate `# TYPE` / duplicate-label lines after the
+# 2nd failing day) -> invalid Prometheus exposition -> node_exporter's
+# textfile collector errors on the whole file -> the central-unreachable /
+# heartbeat-stale failure counters this file exists to surface silently stop
+# being scraped. Skips silently when TEXTFILE_DIR is unwritable or absent
+# (non-fatal, matches emit_metric below).
+reset_metrics_file() {
+    [[ -d "$TEXTFILE_DIR" ]] || mkdir -p "$TEXTFILE_DIR" 2>/dev/null || return 0
+    : > "$TEXTFILE_DIR/partner_edge.prom" 2>/dev/null || true
+}
+reset_metrics_file
+# Append a Prometheus textfile metric (node_exporter textfile collector).
+# Idempotent per run: reset_metrics_file (above) truncates once at the top
+# of the run, so multiple emit_metric calls within THIS run correctly
+# accumulate (e.g. both a keys-fetch failure and a heartbeat failure on the
+# same day land in the same file), while stale metrics from a PRIOR run
+# never survive into today's file.
 # Skips silently when TEXTFILE_DIR is unwritable or absent (non-fatal).
 emit_metric() {
     local name="$1" labels="$2" value="$3"
     [[ -d "$TEXTFILE_DIR" ]] || mkdir -p "$TEXTFILE_DIR" 2>/dev/null || return 0
     local prom_file="$TEXTFILE_DIR/partner_edge.prom"
-    # Append metric line; node_exporter accumulates all lines per scrape.
     printf '# TYPE %s counter\n%s{%s} %s\n' \
         "$name" "$name" "$labels" "$value" >> "$prom_file" 2>/dev/null || true
 }
