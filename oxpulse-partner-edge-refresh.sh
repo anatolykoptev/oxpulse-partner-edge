@@ -823,9 +823,31 @@ if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/nul
     # epoch_apply_gap FIX (T3): re-render xray-client.json — the file the xray
     # container actually mounts — from the freshly patched node-config.json
     # BEFORE the reload/recreate. Without this the container remounts the STALE
-    # pubkey and every Reality handshake fails until a manual upgrade.sh. Reuses
-    # the SAME seam the channels_version re-render uses above: render_channel_soft
-    # (opec, reads reality_* from node-config) with the re_render_xray fallback.
+    # pubkey and every Reality handshake fails until a manual upgrade.sh.
+    #
+    # Renderer seam (reuse, per spec): render_channel_soft (opec, reads reality_*
+    # from node-config) with the re_render_xray fallback — the same chain the
+    # channels_version block above uses.
+    #
+    # Path resolution — which renderer actually runs on a live edge:
+    # a normally installed node carries NO on-disk *.tpl (install.sh renders from
+    # an ephemeral staging dir; upgrade.sh's sbin sync list _HOST_SCRIPT_SBIN_FILES
+    # ships no *.tpl — only defaults.conf + VERSION land under PREFIX_SHARE). So on
+    # a running node opec render SrcMisses and the OPERATIVE renderer is
+    # re_render_xray, which self-fetches the template from REPO_RAW. That fetch is
+    # BOUNDED (curl --max-time 15 in channel-render-lib.sh), so the added work
+    # stays well within the unit's TimeoutStartSec=120. opec only wins on a
+    # checkout / reconcile node that carries a template at the canonical
+    # PREFIX_SHARE location — which is why we resolve there (the way hydrate.sh and
+    # reconcile.sh do), NOT ${PREFIX_SBIN} (which never holds a *.tpl). Either path
+    # is gated on the on-disk OUTCOME below, never on the render's swallowed exit.
+    #
+    # Noted (adjacent, pre-existing — do NOT fix in this task): the
+    # channels_version block above still passes the never-populated
+    # ${PREFIX_SBIN}/xray-client.json.tpl path (~refresh.sh:295) and has the same
+    # dead-opec / curl-fallback behavior — track as a separate follow-up.
+    _rot_share="${OXPULSE_PREFIX_SHARE:-${PREFIX_SHARE:-/usr/local/share}}/oxpulse-partner-edge"
+    _rot_tpl="${_rot_share}/xray-client.json.tpl"
     _rot_lib="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
     # shellcheck source=/dev/null
     [[ -f "$_rot_lib" ]] && source "$_rot_lib"   # provides re_render_xray fallback
@@ -839,11 +861,10 @@ if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/nul
     # writing a new config, and the render_channel_soft "lib not found" fallback
     # returns re_render_xray's code too. So we ignore the exit status here and
     # verify the on-disk OUTCOME below instead.
-    render_channel_soft xray \
-            "${PREFIX_SBIN:-/usr/local/sbin}/xray-client.json.tpl" \
-            "$_rot_xray_cfg" 2>/dev/null \
+    render_channel_soft xray "$_rot_tpl" "$_rot_xray_cfg" 2>/dev/null \
         || { declare -f re_render_xray >/dev/null 2>&1 && re_render_xray; } \
         || true
+    unset _rot_tpl _rot_share
     # Outcome verification: the rotated pubkey MUST now be on disk in the file
     # the xray container mounts. This is the SAME comparison the applied-vs-written
     # detector performs — gating rollback on the outcome (not the render function's

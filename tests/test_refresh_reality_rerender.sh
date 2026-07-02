@@ -14,6 +14,13 @@
 # opec / docker / sleep) and a temp PREFIX. It goes RED when the render call is
 # removed from the rotation branch (falsification proof).
 #
+# Coverage spans BOTH render paths the rotation branch can take on a live edge:
+#   - opec-local: a template present at the canonical PREFIX_SHARE location
+#     (checkout / reconcile node) — opec renders with no network.
+#   - curl-fallback (prod default): NO local template — opec SrcMisses and
+#     re_render_xray self-fetches the template from REPO_RAW (bounded --max-time
+#     15). This is the OPERATIVE path on a normally installed node.
+#
 # Resource discipline: bash tests/test_refresh_reality_rerender.sh
 set -euo pipefail
 
@@ -49,11 +56,17 @@ PREFIX_ETC="$T/etc"
 PREFIX_LIB="$T/lib"
 TEXTFILE_DIR="$T/textfile"
 BIN="$T/bin"
-mkdir -p "$PREFIX_ETC" "$PREFIX_LIB" "$BIN"
+SHARE="$T/share"
+mkdir -p "$PREFIX_ETC" "$PREFIX_LIB" "$BIN" "$SHARE/oxpulse-partner-edge"
 
-# Co-locate the xray tpl where the script looks for it (${PREFIX_SBIN}/xray-client.json.tpl).
-# The script defaults PREFIX_SBIN to /usr/local/sbin; override it to our temp bin.
-cp "$REPO_ROOT/xray-client.json.tpl" "$BIN/xray-client.json.tpl"
+# Co-locate the xray tpl at the CANONICAL install location the rotation branch
+# resolves — ${PREFIX_SHARE}/oxpulse-partner-edge/xray-client.json.tpl — the way
+# hydrate.sh/reconcile.sh do, NOT ${PREFIX_SBIN} (which never holds a *.tpl on a
+# real node). This case models an edge that DOES carry a local template (checkout
+# / reconcile node), so opec renders locally with no network. The prod-default
+# case (no local template ⇒ re_render_xray curl self-fetch) is a separate case
+# below.
+cp "$REPO_ROOT/xray-client.json.tpl" "$SHARE/oxpulse-partner-edge/xray-client.json.tpl"
 
 # node-config.json pre-rotation (PubKeyA). opec reads reality fields from here.
 cat > "$PREFIX_ETC/node-config.json" <<JSON
@@ -181,6 +194,7 @@ env -i \
   PARTNER_EDGE_TEXTFILE_DIR="$TEXTFILE_DIR" \
   OXPULSE_PREFIX_SBIN="$BIN" \
   PREFIX_SBIN="$BIN" \
+  OXPULSE_PREFIX_SHARE="$SHARE" \
   LOG_FILE="$T/refresh.log" \
   OXPULSE_BACKEND_URL="https://oxpulse.chat" \
   bash "$SCRIPT" > "$T/run.out" 2>&1
@@ -223,6 +237,129 @@ else
 	fail "partner_edge_reality_pubkey_applied=1 not found in $PROM: $(cat "$PROM" 2>/dev/null || echo '<absent>')"
 fi
 
+# ── Prod-default path: NO local template ⇒ re_render_xray curl self-fetch ─────
+# Finding (high, review round 2): a normally installed edge carries NO on-disk
+# *.tpl — install renders from an ephemeral staging dir and upgrade.sh's sbin sync
+# list ships no template — so opec render SrcMisses and the OPERATIVE renderer is
+# re_render_xray, which self-fetches the template from REPO_RAW (bounded
+# --max-time 15). The happy-path case above stages a local template, which does
+# NOT happen in prod; this case models the real prod path (opec present but no
+# local template, REPO_RAW fetch succeeds) and proves the rotated pubkey still
+# lands on disk and the version advances.
+echo "==> Prod-default: opec present, no local tpl, REPO_RAW fetch OK ⇒ PubKeyB lands via fallback"
+F=$(mktemp -d)
+trap 'rm -rf "$T" "$F"' EXIT
+
+F_ETC="$F/etc"; F_LIB="$F/lib"; F_TEXT="$F/textfile"; F_BIN="$F/bin"; F_SHARE="$F/share"
+mkdir -p "$F_ETC" "$F_LIB" "$F_BIN" "$F_SHARE/oxpulse-partner-edge"
+
+# opec IS present (reuse the happy-path stub) — but there is NO template at the
+# canonical PREFIX_SHARE location, so opec render SrcMisses and the rotation
+# branch falls through to re_render_xray. Ship the real re_render_xray lib where
+# the branch sources it (${PREFIX_SBIN}/channel-render-lib.sh). Deliberately DO
+# NOT stage any *.tpl locally — that is the whole point of this case.
+cp "$BIN/opec" "$F_BIN/opec"
+cp "$REPO_ROOT/channel-render-lib.sh" "$F_BIN/channel-render-lib.sh"
+
+cat > "$F_ETC/node-config.json" <<JSON
+{
+  "node_id": "test-edge-t3-fallback",
+  "backend_endpoint": "oxpulse.chat:443",
+  "reality_uuid": "11111111-2222-3333-4444-555555555555",
+  "reality_public_key": "$PUBKEY_A",
+  "reality_encryption": "mlkem768x25519",
+  "reality_short_id": "abcd",
+  "reality_server_names": ["www.samsung.com"]
+}
+JSON
+cat > "$F_ETC/xray-client.json" <<JSON
+{ "outbounds": [ { "streamSettings": { "security": "reality", "realitySettings": { "publicKey": "$PUBKEY_A" } } } ] }
+JSON
+printf 'v1\n'  > "$F_LIB/keys-version"
+printf 'cv1\n' > "$F_LIB/channels-version"
+
+# curl: keys GET → v2/PubKeyB; heartbeat → 200; REPO_RAW xray tpl fetch → SUCCEEDS
+# (re_render_xray fetches with -o <file>; honor it by writing the real template).
+cat > "$F_BIN/curl" <<CURL
+#!/usr/bin/env bash
+args="\$*"
+if [[ "\$args" == *"xray-client.json.tpl"* ]]; then
+  out=""
+  while [[ \$# -gt 0 ]]; do
+    if [[ "\$1" == "-o" ]]; then out="\$2"; shift 2; continue; fi
+    shift
+  done
+  [[ -n "\$out" ]] && cp "$REPO_ROOT/xray-client.json.tpl" "\$out"
+  exit 0
+fi
+if [[ "\$args" == *"/api/partner/keys"* ]]; then
+  cat <<'RESP'
+{"version":"v2","channels_version":"cv1","reality_public_key":"$PUBKEY_B","reality_encryption":"mlkem768x25519","reality_server_names":["www.samsung.com"],"sfu_signing_public_key":"ZmFrZQ=="}
+RESP
+  exit 0
+fi
+if [[ "\$args" == *"/api/partner/heartbeat"* ]]; then printf 'ok\n200'; exit 0; fi
+exit 0
+CURL
+cat > "$F_BIN/systemctl" <<SYSCTL
+#!/usr/bin/env bash
+case "\$*" in
+  "list-unit-files oxpulse-partner-edge.service --no-legend"*)
+    echo "oxpulse-partner-edge.service enabled enabled" ;;
+  "reload oxpulse-partner-edge.service"*)
+    jq -r '.outbounds[0].streamSettings.realitySettings.publicKey // "none"' \
+      "$F_ETC/xray-client.json" > "$F/pubkey_at_reload.txt" 2>/dev/null || echo none > "$F/pubkey_at_reload.txt"
+    ;;
+  "is-active --quiet oxpulse-partner-edge.service"*) exit 0 ;;
+  *) : ;;
+esac
+exit 0
+SYSCTL
+printf '#!/usr/bin/env bash\nexit 0\n' > "$F_BIN/docker"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$F_BIN/sleep"
+chmod +x "$F_BIN"/*
+
+set +e
+env -i \
+  PATH="$F_BIN:/usr/bin:/bin" \
+  HOME="$F" \
+  PARTNER_EDGE_PREFIX_ETC="$F_ETC" \
+  PARTNER_EDGE_PREFIX_LIB="$F_LIB" \
+  PARTNER_EDGE_TEXTFILE_DIR="$F_TEXT" \
+  OXPULSE_PREFIX_SBIN="$F_BIN" \
+  PREFIX_SBIN="$F_BIN" \
+  OXPULSE_PREFIX_SHARE="$F_SHARE" \
+  LOG_FILE="$F/refresh.log" \
+  OXPULSE_BACKEND_URL="https://oxpulse.chat" \
+  bash "$SCRIPT" > "$F/run.out" 2>&1
+FB_EXIT=$?
+set -e
+
+if [[ $FB_EXIT -ne 0 ]]; then
+	fail "prod-default fallback run exited $FB_EXIT (expected 0); output:"; sed 's/^/    /' "$F/run.out" 2>/dev/null || true
+fi
+
+FB_PUB=$(jq -r '.outbounds[0].streamSettings.realitySettings.publicKey // "none"' "$F_ETC/xray-client.json" 2>/dev/null || echo none)
+if [[ "$FB_PUB" == "$PUBKEY_B" ]]; then
+	pass "fallback path re-rendered xray-client.json with PubKeyB (curl self-fetch, no local tpl)"
+else
+	fail "fallback xray pubkey='$FB_PUB' expected='$PUBKEY_B' (operative prod path did not land the key)"
+fi
+
+FB_RELOAD=$(cat "$F/pubkey_at_reload.txt" 2>/dev/null || echo "none")
+if [[ "$FB_RELOAD" == "$PUBKEY_B" ]]; then
+	pass "fallback held PubKeyB at reload time (render-before-reload via curl fallback)"
+else
+	fail "fallback at reload time pubkey='$FB_RELOAD' expected='$PUBKEY_B'"
+fi
+
+FB_VER=$(cat "$F_LIB/keys-version" 2>/dev/null || echo "none")
+if [[ "$FB_VER" == "v2" ]]; then
+	pass "fallback path persisted keys-version=v2 after successful curl re-render"
+else
+	fail "fallback keys-version='$FB_VER' expected='v2'"
+fi
+
 # ── Negative path: a failed render MUST roll back and NOT advance the version ──
 # Finding (critical, review round 1): the rotation gate treated the render
 # function's exit code as pass/fail, but re_render_xray's soft-fail paths
@@ -234,7 +371,7 @@ fi
 # "success" log line and never retried until a manual upgrade.sh.
 echo "==> Negative: opec absent + template fetch fails ⇒ rollback, exit!=0, version NOT advanced"
 N=$(mktemp -d)
-trap 'rm -rf "$T" "$N"' EXIT
+trap 'rm -rf "$T" "$F" "$N"' EXIT
 
 N_ETC="$N/etc"; N_LIB="$N/lib"; N_TEXT="$N/textfile"; N_BIN="$N/bin"
 mkdir -p "$N_ETC" "$N_LIB" "$N_BIN"
@@ -341,11 +478,12 @@ fi
 # the node. This runs a real double rotation and asserts a single sample survives.
 echo "==> Idempotency: two successive rotations emit a single metric sample"
 I=$(mktemp -d)
-trap 'rm -rf "$T" "$N" "$I"' EXIT
+trap 'rm -rf "$T" "$F" "$N" "$I"' EXIT
 
-I_ETC="$I/etc"; I_LIB="$I/lib"; I_TEXT="$I/textfile"; I_BIN="$I/bin"
-mkdir -p "$I_ETC" "$I_LIB" "$I_BIN"
-cp "$REPO_ROOT/xray-client.json.tpl" "$I_BIN/xray-client.json.tpl"
+I_ETC="$I/etc"; I_LIB="$I/lib"; I_TEXT="$I/textfile"; I_BIN="$I/bin"; I_SHARE="$I/share"
+mkdir -p "$I_ETC" "$I_LIB" "$I_BIN" "$I_SHARE/oxpulse-partner-edge"
+# Stage the template at the canonical share location (opec-local render path).
+cp "$REPO_ROOT/xray-client.json.tpl" "$I_SHARE/oxpulse-partner-edge/xray-client.json.tpl"
 cp "$BIN/opec" "$I_BIN/opec"    # reuse the happy-path opec stub (present ⇒ renders)
 
 cat > "$I_ETC/node-config.json" <<JSON
@@ -407,6 +545,7 @@ run_idem() {
 	  PARTNER_EDGE_TEXTFILE_DIR="$I_TEXT" \
 	  OXPULSE_PREFIX_SBIN="$I_BIN" \
 	  PREFIX_SBIN="$I_BIN" \
+	  OXPULSE_PREFIX_SHARE="$I_SHARE" \
 	  LOG_FILE="$I/refresh.log" \
 	  OXPULSE_BACKEND_URL="https://oxpulse.chat" \
 	  bash "$SCRIPT" > "$I/run.out" 2>&1
