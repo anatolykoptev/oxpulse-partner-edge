@@ -79,28 +79,30 @@ async fn main() -> anyhow::Result<()> {
     let metrics_handle = spawn_metrics_server(metrics_addr, metrics.clone())?;
 
     // Relay API -- JWT-authenticated POST /relay/connect for cascade relay setup.
-    // RELAY_JWT_SECRET is optional: if absent, the relay API is disabled and the
-    // SFU operates in standalone mode (no cascade relay). Set it to enable relay.
+    // T8: the relay API activates when EITHER RELAY_JWT_SECRET (legacy HS256) OR
+    // SFU_SIGNING_PUBLIC_KEY (the canonical Ed25519 federation path) is set — a
+    // pure-Ed25519 deployment emits no RELAY_JWT_SECRET, so gating on the secret
+    // alone left the federation activation path unreachable. When neither is set,
+    // the SFU runs in standalone mode (no cascade relay). See relay::activation.
     let relay_secret_opt = std::env::var("RELAY_JWT_SECRET").ok();
-    let relay_enabled = match &relay_secret_opt {
-        None => {
-            tracing::info!("RELAY_JWT_SECRET not set — relay API disabled (standalone mode)");
-            false
-        }
-        Some(s) if s == "change-me-in-production" => {
-            anyhow::bail!(
-                "RELAY_JWT_SECRET is the documented placeholder value — set a random secret of at least 32 bytes. \
-                 Generate one with: openssl rand -hex 32"
-            );
-        }
-        Some(s) if s.len() < 32 => {
-            anyhow::bail!(
-                "RELAY_JWT_SECRET is too short ({} bytes) — minimum 32 bytes required",
-                s.len()
-            );
-        }
-        Some(_) => true,
-    };
+    let activation = oxpulse_sfu::relay::activation::compute_relay_activation(
+        relay_secret_opt.as_deref(),
+        config.sfu_signing_public_key.as_deref(),
+        config.relay_hs256_fallback_enabled,
+    )?;
+    let relay_enabled = activation.enabled;
+
+    // T8: publish the activation mode once at boot so a pure-Ed25519
+    // mis-activation (relay silently disabled) is directly alertable.
+    if let Some(mode) = activation.auth_mode {
+        metrics.relay_api_enabled.with_label_values(&[mode]).set(1);
+    }
+    if !relay_enabled {
+        tracing::info!(
+            "relay API disabled (standalone mode): neither RELAY_JWT_SECRET nor \
+             SFU_SIGNING_PUBLIC_KEY is set"
+        );
+    }
 
     // Ed25519 public key for verifying relay JWTs (preferred over HS256).
     // Clone before spawn_relay_api consumes it — serve() needs it too.
@@ -110,7 +112,9 @@ async fn main() -> anyhow::Result<()> {
         .map(|s| Arc::new(s.clone()));
 
     let (mut relay_rx, relay_handle) = if relay_enabled {
-        let relay_secret = Arc::<[u8]>::from(relay_secret_opt.unwrap().into_bytes());
+        // T8: activation.secret is a real Arc<[u8]> even on a pure-Ed25519
+        // deployment (empty then) — no unwrap()/panic on a missing HS256 secret.
+        let relay_secret = activation.secret.clone();
         // Use relay_api_bind_addr() so SFU_RELAY_API_BIND can scope the relay
         // socket to the AWG mesh on partner-edge deployments (audit 2026-05-21).
         let relay_addr = format!("{}:{}", config.relay_api_bind_addr(), config.relay_api_port);
@@ -128,10 +132,16 @@ async fn main() -> anyhow::Result<()> {
                 task_tx: relay_tx,
                 seen_jtis,
                 metrics: metrics.clone(),
-                hs256_fallback_enabled: config.relay_hs256_fallback_enabled,
+                // T8: forced off on a pure-Ed25519 deployment (no HS256 secret)
+                // so an empty-secret HS256 verify can never fire.
+                hs256_fallback_enabled: activation.hs256_fallback_effective,
             },
         )?;
-        tracing::info!(addr = %relay_addr, "relay API listening");
+        tracing::info!(
+            addr = %relay_addr,
+            auth = activation.auth_mode.unwrap_or("none"),
+            "relay API listening"
+        );
         (relay_rx_inner, Some(handle))
     } else {
         // Create a permanently-closed channel so the drain task exits immediately.
