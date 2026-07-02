@@ -251,6 +251,29 @@ pub async fn client_ws_upgrade(
         }
     };
 
+    // T9 (2026-07-01 bug-hunt, resource_exhaustion/high): admission cap.
+    // The relay-dial path (`RELAY_MAX_CONCURRENT` semaphore in main.rs) was
+    // already bounded; `client_ws_active_sessions` (incremented by
+    // `ActiveSessionGuard` in `session::run`) was a pure gauge with no gate
+    // on this browser-facing path. Checked post-auth so an unauthenticated
+    // caller can't probe node capacity, and before `on_upgrade` so a
+    // rejection is a real HTTP 503 (no upgrade), matching the existing
+    // pre-upgrade 401 rejections above rather than an open-then-close.
+    let active_sessions = state.metrics.client_ws_active_sessions.get();
+    let max_participants = crate::config::max_participants();
+    if active_sessions >= i64::from(max_participants) {
+        warn!(
+            %room_id, active_sessions, max_participants,
+            "client_ws: at capacity, rejecting upgrade"
+        );
+        state
+            .metrics
+            .sfu_admission_rejected_total
+            .with_label_values(&["at_capacity"])
+            .inc();
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
     let peer_id = claims.sub;
     let inject_tx = state.client_inject_tx.clone();
     let local_udp_addr = state.local_udp_addr;
