@@ -130,7 +130,21 @@ configure_amneziawg() {
 	# because the bare call site under `set -e` treats a non-zero return the same
 	# as die() would.
 	if ! flock -w 10 9; then
-		warn "configure_amneziawg: could not acquire $lock_path within 10s (awg-params-agent may be mid-write) — leaving awg0.conf untouched this pass; the agent reconciles on its next poll, or re-run the install"
+		# The awg-params-agent reconciles ONLY the obfuscation params (Jc/Jmin/Jmax/
+		# S1-S4/H1-H4) — it preserves PrivateKey/Endpoint/Address verbatim (see
+		# crates/awg-params-agent/src/conf_merge.rs::merge_obfuscation_params). So it
+		# CANNOT self-heal a rotated identity: only re-running the install applies it.
+		# The message must not imply an agent recovery path that does not exist for
+		# identity fields.
+		warn "configure_amneziawg: could not acquire $lock_path within 10s (awg-params-agent may be mid-write) — leaving awg0.conf UNTOUCHED this pass. The agent reconciles only obfuscation params, NOT identity (PrivateKey/Endpoint/Address), so any rotated identity was NOT applied — re-run the install to apply it."
+		# Durable signal for non-interactive / scripted installs: warn() is a bare
+		# stderr printf and this function returns 0 (a non-zero return would exit 1
+		# the whole install under set -e and skip firewall_apply — see below), so the
+		# skip would otherwise leave no observable trace. Drop a marker file a
+		# post-install check (or the operator) can detect. Best-effort — the install
+		# never fails on the marker write itself.
+		printf '%s\n' "awg0.conf write SKIPPED $(date -u +%Y-%m-%dT%H:%M:%SZ): lock $lock_path held >10s by another writer; identity rotation NOT applied; re-run the install to apply it." \
+			> "${conf_path}.rotation-skipped" 2>/dev/null || true
 		exec 9>&-
 		return 0
 	fi
@@ -166,6 +180,9 @@ configure_amneziawg() {
 	AWGCONF
 	chmod 0600 "$conf_tmp"
 	mv -f "$conf_tmp" "$conf_path"
+	# This pass wrote a fresh conf under the lock — clear any stale skip marker a
+	# prior lock-contended run left behind so it cannot linger as a false signal.
+	rm -f "${conf_path}.rotation-skipped"
 	# Release the conf lock (close fd 9) before the slow systemctl/handshake
 	# steps so a waiting agent tick is unblocked as soon as the write is durable.
 	exec 9>&-
