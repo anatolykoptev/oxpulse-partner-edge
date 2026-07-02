@@ -169,7 +169,7 @@ impl AgentLoop {
                     lock = ?self.cfg.awg_conf_lock_path,
                     "awg0.conf lock held by another writer — skipping this tick, will retry next poll"
                 );
-                self.record_conf_write_conflict();
+                self.record_conf_write_conflict().await;
                 return Ok(());
             }
         };
@@ -197,7 +197,7 @@ impl AgentLoop {
                     "awg0.conf superseded by another writer after our locked write — \
                      skipping kernel apply this tick, will re-merge next poll"
                 );
-                self.record_conf_write_conflict();
+                self.record_conf_write_conflict().await;
                 return Ok(());
             }
             Err(e) => {
@@ -363,10 +363,21 @@ impl AgentLoop {
     /// Bump the interim conflict counter and best-effort mirror it to the
     /// node_exporter textfile collector. Non-fatal: a failed textfile write is
     /// logged at debug and does not affect the loop.
-    fn record_conf_write_conflict(&self) {
+    ///
+    /// The textfile mirror is blocking I/O (create_dir_all + temp write + fsync +
+    /// rename + dir-fsync), so it is offloaded to the blocking pool exactly like
+    /// [`write_conf_atomic`] — a fsync stalling under the ARM box's disk/PSI
+    /// pressure must not block a tokio worker thread. The atomic counter bump is
+    /// cheap and stays inline.
+    async fn record_conf_write_conflict(&self) {
         let value = self.conf_write_conflicts.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Err(e) = write_conflict_metric(&self.cfg.textfile_dir, value) {
-            debug!(error = %e, "conflict textfile metric write failed (non-fatal)");
+        let dir = self.cfg.textfile_dir.clone();
+        match tokio::task::spawn_blocking(move || write_conflict_metric(&dir, value)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => debug!(error = %e, "conflict textfile metric write failed (non-fatal)"),
+            Err(e) => {
+                debug!(error = %e, "conflict textfile metric spawn_blocking join failed (non-fatal)")
+            }
         }
     }
 
@@ -785,10 +796,24 @@ mod conf_lock_tests {
         seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
         let agent = AgentLoop::new(cfg).unwrap();
 
+        // Give the agent's merge DISTINCT obfuscation params (Jc + S1/S2/S4) from
+        // the installer's fixture so every identity field the spec names is
+        // independently discriminable post-race: the installer seeds jc=9 +
+        // S1=10/S2=20/S4=30 (seed_conf), the agent's losing merge would leave
+        // jc=7 + S1=111/S2=122/S4=133. params()'s S-values equal seed_conf's, so
+        // without this override S1-S4 could not tell winner from loser.
+        let agent_params = AwgParams {
+            s1: 111,
+            s2: 122,
+            s4: 133,
+            ..params(7)
+        };
+
         // Start the agent write; it acquires the lock, reads OLD, then holds the
         // lock through the 700ms delay.
-        let agent_task =
-            tokio::spawn(async move { agent.merge_and_write_conf_locked(&params(7)).await });
+        let agent_task = tokio::spawn(async move {
+            agent.merge_and_write_conf_locked(&agent_params).await
+        });
 
         // Give the agent a head start so it is provably mid-delay (holding the
         // lock, having already read OLD) before the installer attempts its write.
@@ -814,6 +839,27 @@ mod conf_lock_tests {
             final_conf.contains(&format!("Endpoint = {NEW_ENDPOINT}")),
             "installer's fresh Endpoint must survive the concurrent agent tick. \
              Final conf:\n{final_conf}"
+        );
+        // The spec names Jc/S1-S4 alongside PrivateKey/Endpoint: assert the FULL
+        // named identity set survives, not just the two key fields. The installer's
+        // jc=9 + S1=10/S2=20/S4=30 must win; the agent's stale-read merge (jc=7 +
+        // S1=111/S2=122/S4=133) must NOT.
+        assert!(
+            final_conf.contains("Jc = 9") && !final_conf.contains("Jc = 7"),
+            "installer's fresh Jc must survive the race, not the agent's stale merge. \
+             Final conf:\n{final_conf}"
+        );
+        assert!(
+            final_conf.contains("S1 = 10")
+                && final_conf.contains("S2 = 20")
+                && final_conf.contains("S4 = 30"),
+            "installer's fresh S1/S2/S4 must survive the race. Final conf:\n{final_conf}"
+        );
+        assert!(
+            !final_conf.contains("S1 = 111")
+                && !final_conf.contains("S2 = 122")
+                && !final_conf.contains("S4 = 133"),
+            "the agent's stale-merge S1/S2/S4 must NOT win the race. Final conf:\n{final_conf}"
         );
     }
 
@@ -859,7 +905,7 @@ mod conf_lock_tests {
         );
 
         // tick() calls record_conf_write_conflict on the skip path.
-        agent.record_conf_write_conflict();
+        agent.record_conf_write_conflict().await;
         let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
         assert!(
             prom.contains(&format!("{CONF_CONFLICT_METRIC} 1")),

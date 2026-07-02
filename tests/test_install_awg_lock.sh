@@ -104,7 +104,7 @@ _load_awg_globals() {
 		PrivateKey = OLD-private-key-base64==
 		Address = 192.168.100.42/32
 		ListenPort = 43842
-		Jc = 5
+		Jc = 99
 
 		[Peer]
 		PublicKey = MOTHERLY_PUBKEY_FIXTURE_AAAA1234=
@@ -151,8 +151,17 @@ _load_awg_globals() {
 	COMP_PID=""
 
 	# The installer's fresh identity must have survived the concurrent revert.
+	# Assert the FULL identity set the spec names (PrivateKey/Endpoint/Jc/S1-S4),
+	# each discriminating: the OLD snapshot the agent restores has Endpoint
+	# 9.9.9.9, Jc=99 and NO S* lines, so the installer's fresh values below can
+	# only be present if its flocked write won the race.
 	run cat "$conf_path"
 	[[ "$output" == *"Endpoint = 10.0.0.1:51820"* ]]
 	[[ "$output" != *"9.9.9.9:51820"* ]]
 	[[ "$output" == *"PrivateKey = FRESH-private-key-base64=="* ]]
+	[[ "$output" == *"Jc = 5"* ]]
+	[[ "$output" != *"Jc = 99"* ]]
+	[[ "$output" == *"S1 = 17"* ]]
+	[[ "$output" == *"S2 = 13"* ]]
+	[[ "$output" == *"S4 = 6"* ]]
 }
