@@ -28,5 +28,5 @@ mod handler;
 pub(crate) mod sdp_msid;
 pub mod session;
 
-pub use handler::{client_ws_upgrade, spawn_client_ws_api, ClientWsState};
+pub use handler::{client_ws_upgrade, spawn_client_ws_api, ClientWsApiConfig, ClientWsState};
 pub use session::{PendingClient, WsClientCtrl};
