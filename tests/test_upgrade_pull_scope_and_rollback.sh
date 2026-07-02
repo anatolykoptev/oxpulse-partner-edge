@@ -91,16 +91,116 @@ else
     fail "B1c: expected 2 scoped main-pull call sites, found $scoped_pull_count"
 fi
 
-# B1d: capture_running_digests and resolve_pulled_digests must source their
-# service list from list_partner_edge_services, not the raw
-# 'compose config --services' (which returns foreign services too).
-digest_fns_section=$(awk '/^capture_running_digests\(\)/{f=1} f{print} f && /^resolve_pulled_digests\(\)/{c++} c==1 && /^}$/{exit}' "$UPGRADE")
-scoped_calls=$(echo "$digest_fns_section" | grep -c 'services=\$(list_partner_edge_services)' || true)
-if [[ "$scoped_calls" -eq 2 ]]; then
-    pass "B1d: capture_running_digests + resolve_pulled_digests both scope via list_partner_edge_services"
+# B1d: capture_running_digests and resolve_pulled_digests must take an
+# EXPLICIT caller-supplied service-array parameter (nameref $1) rather than
+# deriving their own list internally — PR review round 2 MAJOR-1/MINOR: the
+# service list is resolved ONCE, early, by resolve_edge_service_scope, and
+# threaded through every caller instead of being recomputed per function.
+capture_sig=$(awk '/^capture_running_digests\(\)/{f=1} f{print} f && /^}$/{exit}' "$UPGRADE")
+resolve_sig=$(awk '/^resolve_pulled_digests\(\)/{f=1} f{print} f && /^}$/{exit}' "$UPGRADE")
+
+echo "$capture_sig" | grep -qE 'local -n _crd_svcs="\$1"' \
+    && pass "B1d-a: capture_running_digests takes an explicit service-array param (\$1), not a self-derived list" \
+    || fail "B1d-a: capture_running_digests does not take an explicit service-array param"
+
+echo "$resolve_sig" | grep -qE 'local -n _rpd_svcs="\$1"' \
+    && pass "B1d-b: resolve_pulled_digests takes an explicit service-array param (\$1), not a self-derived list" \
+    || fail "B1d-b: resolve_pulled_digests does not take an explicit service-array param"
+
+# B1e: both apply paths must call resolve_edge_service_scope() and pass THAT
+# same array into capture_running_digests / the pull / resolve_pulled_digests
+# — reused, not recomputed (PR review round 2 MINOR: one docker compose
+# config fetch per apply-path run, not one per caller).
+early_guard_calls=$(grep -cE '^\s*resolve_edge_service_scope _(wt_)?edge_svcs$' "$UPGRADE" || true)
+if [[ "$early_guard_calls" -eq 2 ]]; then
+    pass "B1e: resolve_edge_service_scope() called exactly once per apply path (plain + with-templates)"
 else
-    fail "B1d: expected 2 scoped digest-map service listings, found $scoped_calls"
+    fail "B1e: expected 2 resolve_edge_service_scope() call sites, found $early_guard_calls"
 fi
+
+capture_reuse=$(grep -cE '^\s*capture_running_digests _(wt_)?edge_svcs ' "$UPGRADE" || true)
+if [[ "$capture_reuse" -eq 2 ]]; then
+    pass "B1f: capture_running_digests is called with the early-resolved _edge_svcs / _wt_edge_svcs array in both apply paths"
+else
+    fail "B1f: expected 2 capture_running_digests(_edge_svcs, ...) call sites, found $capture_reuse"
+fi
+
+resolve_reuse=$(grep -cE '^\s*if ! resolve_pulled_digests _(wt_)?edge_svcs ' "$UPGRADE" || true)
+if [[ "$resolve_reuse" -eq 2 ]]; then
+    pass "B1g: resolve_pulled_digests is called with the early-resolved _edge_svcs / _wt_edge_svcs array in both apply paths"
+else
+    fail "B1g: expected 2 resolve_pulled_digests(_edge_svcs, ...) call sites, found $resolve_reuse"
+fi
+
+# ===========================================================================
+# Section C — structural: MAJOR-1 early-guard placement, MAJOR-2 distinct
+# die messages, MINOR single-fetch memoization, NIT quote-strip
+# ===========================================================================
+echo ""
+echo "=== Section C: PR review round 2 — early guard, distinct die messages, memoization, quote-strip ==="
+
+# C1: resolve_edge_service_scope() must appear BEFORE the tag-rewrite sed in
+# BOTH apply paths (the first irreversible mutation) — MAJOR-1.
+plain_guard_line=$(grep -n '^resolve_edge_service_scope _edge_svcs$' "$UPGRADE" | tail -1 | cut -d: -f1 || true)
+plain_sed_line=$(grep -n 'sed -i -E "s|(ghcr\\.io/anatolykoptev/partner-edge-\[a-z\]+):' "$UPGRADE" | tail -1 | cut -d: -f1 || true)
+if [[ -n "$plain_guard_line" && -n "$plain_sed_line" && "$plain_guard_line" -lt "$plain_sed_line" ]]; then
+    pass "C1a: plain-apply path resolves the service scope (line $plain_guard_line) BEFORE the tag-rewrite sed (line $plain_sed_line)"
+else
+    fail "C1a: plain-apply guard=$plain_guard_line sed=$plain_sed_line — guard does not precede the first mutation"
+fi
+
+wt_guard_line=$(grep -n '^\s*resolve_edge_service_scope _wt_edge_svcs$' "$UPGRADE" | head -1 | cut -d: -f1 || true)
+wt_sed_line=$(grep -n 'sed -i -E "s|(ghcr\\.io/anatolykoptev/partner-edge-\[a-z\]+):' "$UPGRADE" | head -1 | cut -d: -f1 || true)
+if [[ -n "$wt_guard_line" && -n "$wt_sed_line" && "$wt_guard_line" -lt "$wt_sed_line" ]]; then
+    pass "C1b: --with-templates path resolves the service scope (line $wt_guard_line) BEFORE the tag-rewrite sed (line $wt_sed_line)"
+else
+    fail "C1b: --with-templates guard=$wt_guard_line sed=$wt_sed_line — guard does not precede the first mutation"
+fi
+
+# C1c/d: the guard must also precede sync_host_scripts and (with-templates)
+# reconcile_all — the other irreversible mutations named in the review.
+plain_sync_line=$(grep -n '^sync_host_scripts "\$RELEASE_TAG"$' "$UPGRADE" | tail -1 | cut -d: -f1 || true)
+[[ -n "$plain_guard_line" && -n "$plain_sync_line" && "$plain_guard_line" -lt "$plain_sync_line" ]] \
+    && pass "C1c: plain-apply guard precedes sync_host_scripts" \
+    || fail "C1c: plain-apply guard does not precede sync_host_scripts (guard=$plain_guard_line sync=$plain_sync_line)"
+
+wt_reconcile_line=$(grep -n 'reconcile_all "\$_manifest_path_wt"' "$UPGRADE" | head -1 | cut -d: -f1 || true)
+[[ -n "$wt_guard_line" && -n "$wt_reconcile_line" && "$wt_guard_line" -lt "$wt_reconcile_line" ]] \
+    && pass "C1d: --with-templates guard precedes reconcile_all (caddy hot-reload)" \
+    || fail "C1d: --with-templates guard does not precede reconcile_all (guard=$wt_guard_line reconcile=$wt_reconcile_line)"
+
+# C2: MAJOR-2 — two DISTINCT die messages for the two failure modes.
+grep -qF 'docker compose config failed — check $COMPOSE_FILE for a broken service definition' "$UPGRADE" \
+    && pass "C2a: distinct die message for 'compose config itself failed' (broken foreign service)" \
+    || fail "C2a: missing distinct die message for a compose-config parse/validation failure"
+
+grep -qF 'compose config parsed but zero ghcr.io/anatolykoptev/partner-edge-* services found' "$UPGRADE" \
+    && pass "C2b: distinct die message for 'config parsed but zero partner-edge images'" \
+    || fail "C2b: missing distinct die message for zero partner-edge services"
+
+# C3: MINOR — one shared fetch_compose_config() helper; no leftover raw
+# `$DOCKER_BIN compose config` invocations scattered outside it (each one
+# is a redundant docker child process this fix was supposed to eliminate).
+grep -qE '^fetch_compose_config\(\)' "$UPGRADE" \
+    && pass "C3a: fetch_compose_config() helper defined" \
+    || fail "C3a: fetch_compose_config() helper not defined"
+
+raw_config_calls=$(grep -cE '\$DOCKER_BIN compose config( |$)' "$UPGRADE" || true)
+if [[ "$raw_config_calls" -eq 1 ]]; then
+    pass "C3b: exactly one raw '\$DOCKER_BIN compose config' invocation in the whole file (inside fetch_compose_config itself — every other caller goes through it)"
+else
+    fail "C3b: expected exactly 1 raw '\$DOCKER_BIN compose config' invocation (inside fetch_compose_config), found $raw_config_calls"
+fi
+
+grep -qE '^_parse_compose_config_images\(\)' "$UPGRADE" \
+    && pass "C3c: _parse_compose_config_images() single-pass parser defined (replaces per-service re-fetch loop)" \
+    || fail "C3c: _parse_compose_config_images() not defined"
+
+# C4: NIT — image-match strips quotes before the ghcr.io glob match.
+parse_fn_section=$(awk '/^_parse_compose_config_images\(\)/{f=1} f{print} f && /^}$/{exit}' "$UPGRADE")
+echo "$parse_fn_section" | grep -qE 'gsub\(/"/,"",img\)' \
+    && pass "C4: _parse_compose_config_images strips quotes from the image value before the ghcr.io glob match" \
+    || fail "C4: no quote-strip found in _parse_compose_config_images — a quoted image: value would miss the ghcr.io/anatolykoptev/partner-edge-* glob"
 
 # ===========================================================================
 # Section C — functional fixture helpers
@@ -309,6 +409,103 @@ else
 fi
 
 rm -rf "$E_TMPDIR"
+
+# ===========================================================================
+# Section F — functional: MAJOR-1, the guard fires BEFORE any mutation
+# ===========================================================================
+echo ""
+echo "=== Section F: zero-partner-edge-services guard fires BEFORE any mutation (compose + host-scripts untouched) ==="
+echo "    FALSIFICATION NOTE: this section must be RED against PR head bf806c4 — the guard used to run"
+echo "    AFTER the tag-rewrite sed + sync_host_scripts, so compose/host-scripts were already mutated by the time it fired."
+
+F_TMPDIR=$(mktemp -d)
+_make_fixture "$F_TMPDIR"
+F_LOG="$F_TMPDIR/docker_calls.log"
+
+F_CURRENT=v0.12.72
+F_TARGET=v0.13.0
+
+# SCHEMA_VERSION=1 pre-set so migrate_state (which runs unconditionally,
+# before MODE dispatch — unrelated to this fix) is a no-op and doesn't
+# perturb the install.env byte-identity check below.
+printf 'IMAGE_VERSION=%s\nSIGNALING_SFU_SECRET=testsecret\nSCHEMA_VERSION=1\n' "$F_CURRENT" > "$F_TMPDIR/var/install.env"
+# Compose file with ONLY a foreign service — zero ghcr.io/anatolykoptev/
+# partner-edge-* images. This is the "config parsed but zero partner-edge
+# images" failure mode (MAJOR-2), distinct from a compose-config parse
+# failure but exercising the SAME early-guard call site.
+printf 'services:\n  all-rvpn-gate:\n    image: local/all-rvpn-gate:latest\n    environment:\n      SIGNALING_SFU_SECRET: "testsecret"\n' \
+    > "$F_TMPDIR/etc/docker-compose.yml"
+
+F_FAKE_DOCKER="$F_TMPDIR/docker"
+cat > "$F_FAKE_DOCKER" << 'FFAKE'
+#!/bin/bash
+printf '%s\n' "$*" >> "${DOCKER_CALL_LOG}"
+if [[ "$*" == *"config --services"* ]]; then
+    printf 'all-rvpn-gate\n'
+    exit 0
+fi
+if [[ "$*" == *"compose config"* && "$*" != *"--services"* ]]; then
+    cat "${COMPOSE_FILE_PATH}"
+    exit 0
+fi
+# Any pull/up/ps/inspect call at this point is a MAJOR-1 regression — the
+# guard should have died before any of these could ever be reached.
+if [[ "$*" == *" pull"* || "$*" == *" up"* || "$*" == *"ps --quiet"* ]]; then
+    echo "REGRESSION: docker invoked after zero-partner-edge guard should have died: $*" >&2
+    exit 1
+fi
+exit 0
+FFAKE
+chmod +x "$F_FAKE_DOCKER"
+
+# Snapshot pre-run state to compare against post-run.
+F_COMPOSE_SHA_BEFORE=$(sha256sum "$F_TMPDIR/etc/docker-compose.yml" | awk '{print $1}')
+F_HOSTSCRIPT_SHA_BEFORE=$(sha256sum "$F_TMPDIR/sbin/ghcr-auth-lib.sh" | awk '{print $1}')
+F_STATE_SHA_BEFORE=$(sha256sum "$F_TMPDIR/var/install.env" | awk '{print $1}')
+
+F_OUT=$(_run_upgrade "$F_TMPDIR" "$F_FAKE_DOCKER" "$F_CURRENT" "$F_TARGET" "$F_LOG" "$F_TMPDIR/etc/docker-compose.yml") \
+    && F_RC=0 || F_RC=$?
+
+[[ "$F_RC" -ne 0 ]] \
+    && pass "F1: upgrade exits non-zero when the compose file has zero partner-edge services" \
+    || fail "F1: upgrade exited 0 despite zero partner-edge services — the guard did not fire"
+
+echo "$F_OUT" | grep -qF 'compose config parsed but zero ghcr.io/anatolykoptev/partner-edge-* services found' \
+    && pass "F2: the distinct zero-services die message fired" \
+    || fail "F2: expected die message not found; output: $F_OUT"
+
+F_COMPOSE_SHA_AFTER=$(sha256sum "$F_TMPDIR/etc/docker-compose.yml" | awk '{print $1}')
+if [[ "$F_COMPOSE_SHA_AFTER" == "$F_COMPOSE_SHA_BEFORE" ]]; then
+    pass "F3 (MAJOR-1): compose file is BYTE-IDENTICAL after the guard fired — the tag-rewrite sed never ran"
+else
+    fail "F3 (MAJOR-1): compose file CHANGED despite the guard firing — a mutation ran before the die (sha before=$F_COMPOSE_SHA_BEFORE after=$F_COMPOSE_SHA_AFTER)"
+fi
+
+F_STATE_SHA_AFTER=$(sha256sum "$F_TMPDIR/var/install.env" | awk '{print $1}')
+if [[ "$F_STATE_SHA_AFTER" == "$F_STATE_SHA_BEFORE" ]]; then
+    pass "F4 (MAJOR-1): install.env is BYTE-IDENTICAL after the guard fired — IMAGE_VERSION was never rewritten"
+else
+    fail "F4 (MAJOR-1): install.env CHANGED despite the guard firing (sha before=$F_STATE_SHA_BEFORE after=$F_STATE_SHA_AFTER)"
+fi
+
+F_HOSTSCRIPT_SHA_AFTER=$(sha256sum "$F_TMPDIR/sbin/ghcr-auth-lib.sh" | awk '{print $1}')
+if [[ "$F_HOSTSCRIPT_SHA_AFTER" == "$F_HOSTSCRIPT_SHA_BEFORE" ]]; then
+    pass "F5 (MAJOR-1): host-script is BYTE-IDENTICAL after the guard fired — sync_host_scripts never ran"
+else
+    fail "F5 (MAJOR-1): host-script CHANGED despite the guard firing — sync_host_scripts ran before the die (sha before=$F_HOSTSCRIPT_SHA_BEFORE after=$F_HOSTSCRIPT_SHA_AFTER)"
+fi
+
+if grep -qE ' pull| up|ps --quiet' "$F_LOG" 2>/dev/null; then
+    fail "F6 (MAJOR-1): docker was invoked for pull/up/ps despite the guard firing before any mutation; calls: $(cat "$F_LOG")"
+else
+    pass "F6 (MAJOR-1): docker was NEVER invoked for pull/up/ps — the guard died before reaching any of those steps"
+fi
+
+[[ -f "$F_TMPDIR/var/install.env.prev" ]] \
+    && fail "F7 (MAJOR-1): PREV_STATE_FILE (install.env.prev) exists — backup ran, meaning execution proceeded past where a die-before-mutation guard should have stopped it" \
+    || pass "F7 (MAJOR-1): no install.env.prev backup was created — confirms the guard fired at the very top, before even the backup step"
+
+rm -rf "$F_TMPDIR"
 
 # ===========================================================================
 echo ""
