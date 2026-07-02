@@ -169,7 +169,17 @@ firewall_apply() {
 			warn "           Apply the partner-edge whitelist manually:"
 			warn "           public: 22,80,443/tcp 443,${awg_port}/udp 18443,3478,5349/tcp+udp 7878/udp"
 			warn "           mesh-only (10.9.0.0/24): 9317,8912/tcp"
-			return 0
+			# Distinct non-zero (t14 fix): this branch applies NOTHING, so it must
+			# not report success. Previously `return 0` here made
+			# `firewall_apply || warn ...` in reconcile_firewall_surface a dead
+			# branch — the converge cycle logged green with
+			# _RECONCILE_FIREWALL_APPLIED=1 while SFU mesh-only ports (:9317,
+			# :8912) and the public whitelist stayed unenforced on any distro
+			# without ufw/firewalld. Callers MUST check the exit code; 2 mirrors
+			# the "could-not-apply" SKIP-signal convention already used by
+			# lib/reconcile.sh's _setup_coturn_render_env (return 2 there means
+			# "caller must not treat this as success").
+			return 2
 			;;
 	esac
 	log "[firewall] applied. SFU mesh-only sockets (:9317,:8912) and SFU WS (:8920) no longer publicly reachable."
