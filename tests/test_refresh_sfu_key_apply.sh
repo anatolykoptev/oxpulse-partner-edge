@@ -452,6 +452,137 @@ DOCK
 }
 c8
 
+# ---------------------------------------------------------------------------
+# C9: decoupling guard — the SFU key-apply must NOT be gated by channels-status.env.
+#     That file's status vocabulary is written by the channel-provisioning surface
+#     (xray/naive/hysteria2/…) and has no `sfu` notion; a stray/hand-edited
+#     `sfu=inactive` line there must NOT silently suppress a signing-key recreate.
+#     The production call site passes skip-channel-status (8th arg) to bypass the
+#     gate. This drives the REAL refresh with `sfu=inactive` present and asserts the
+#     recreate STILL fires. Removing the 8th arg re-couples SFU to the channel gate
+#     → the recreate would be skipped → this turns RED.
+# ---------------------------------------------------------------------------
+c9() {
+    local tmp; tmp=$(mktemp -d)
+    local docker_log="$tmp/docker.log"
+    local etc="$tmp/etc" lib="$tmp/lib"
+    mkdir -p "$tmp/shims" "$etc" "$lib"
+    : > "$docker_log"
+
+    # Wired compose (mirrors the real template) so the apply block reaches recreate.
+    cat > "$etc/docker-compose.yml" <<'YML'
+services:
+  sfu:
+    image: x
+    env_file:
+      - path: ./sfu-keys.env
+        required: false
+  hysteria2-client:
+    image: y
+YML
+    printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyA\n' > "$lib/sfu-keys.env"
+    sha256sum "$lib/sfu-keys.env" | awk '{print $1}' > "$lib/sfu-keys.sha"
+    # The trap: channels-status.env marks sfu inactive. The channel gate would skip
+    # here; the production call site's skip-channel-status must override it.
+    printf 'sfu=inactive\n' > "$lib/channels-status.env"
+
+    cat > "$tmp/shims/docker" <<DOCK
+#!/usr/bin/env bash
+echo "docker \$*" >> "$docker_log"
+if [[ "\$1" == "inspect" && "\$*" == *"{{.State.Running}}"* ]]; then echo "true"; exit 0; fi
+if [[ "\$1" == "ps" && "\$*" == *"{{.Names}}"* ]]; then echo "oxpulse-partner-sfu"; exit 0; fi
+if [[ "\$*" == *"printenv"* ]]; then echo "PubKeyB"; exit 0; fi
+exit 0
+DOCK
+    chmod +x "$tmp/shims/docker"
+
+    cat > "$tmp/shims/curl" <<'CURL'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"/api/partner/heartbeat"* ]]; then printf 'ok\n200'; exit 0; fi
+if [[ "$args" == *"/api/partner/keys"* ]]; then
+  printf '%s' '{"version":"v1","channels_version":"none","sfu_signing_public_key":"PubKeyB","reality_public_key":"rk","reality_encryption":"re","reality_server_names":["a"]}'
+  exit 0
+fi
+exit 0
+CURL
+    chmod +x "$tmp/shims/curl"
+
+    printf '{"node_id":"test-node"}\n' > "$etc/node-config.json"
+    printf 'v1\n' > "$lib/keys-version"
+
+    PATH="$tmp/shims:$PATH" \
+    PARTNER_EDGE_PREFIX_ETC="$etc" \
+    PARTNER_EDGE_PREFIX_LIB="$lib" \
+    PARTNER_EDGE_TEXTFILE_DIR="$tmp/textfile" \
+    LOG_FILE="$tmp/refresh.log" \
+    OXPULSE_BACKEND_URL="https://example.test" \
+        bash "$REFRESH" >/dev/null 2>&1
+
+    local ok=1
+    if ! grep -qE 'compose .*up -d --no-deps --force-recreate sfu' "$docker_log"; then
+        fail "C9: sfu recreate was suppressed by channels-status.env (sfu=inactive) — the key-apply is wrongly coupled to the channel gate"
+        ok=0
+    fi
+    # The channel-status skip line must NOT appear for the sfu apply.
+    if grep -qE '\[surgical\] channel sfu status=inactive' "$tmp/refresh.log"; then
+        fail "C9: sfu apply consulted channels-status.env and hit the inactive skip — skip-channel-status bypass missing"
+        ok=0
+    fi
+    [[ "$ok" -eq 1 ]] && pass "C9: sfu key-apply ignores channels-status.env (sfu=inactive) → recreate still fires"
+    rm -rf "$tmp"
+}
+c9
+
+# ---------------------------------------------------------------------------
+# C10: transient-exec guard — when the container is present but `docker exec
+#      printenv` returns non-zero (mid-startup after a force-recreate, daemon
+#      hiccup), the applied gauge must be SKIPPED, not emitted =0 with a false
+#      stale-key WARNING. Drives the REAL _emit_sfu_applied_gauge with a printenv
+#      that fails. Reverting to `_live=$(... || true)` emits a false 0 → RED.
+# ---------------------------------------------------------------------------
+c10() {
+    local tmp; tmp=$(mktemp -d)
+    local lib="$tmp/lib"
+    mkdir -p "$tmp/shims" "$lib" "$tmp/textfile"
+    printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyA\n' > "$lib/sfu-keys.env"
+
+    # docker spy: container present, but the exec/printenv FAILS (exit 1, no output).
+    cat > "$tmp/shims/docker" <<'DOCK'
+#!/usr/bin/env bash
+if [[ "$1" == "ps" && "$*" == *"{{.Names}}"* ]]; then echo "oxpulse-partner-sfu"; exit 0; fi
+if [[ "$*" == *"printenv"* ]]; then exit 1; fi
+exit 0
+DOCK
+    chmod +x "$tmp/shims/docker"
+
+    (
+        set +e
+        # shellcheck disable=SC2034
+        NODE_ID="test-node"
+        # shellcheck disable=SC2034
+        SFU_KEYS_ENV="$lib/sfu-keys.env"
+        # shellcheck disable=SC2034
+        TEXTFILE_DIR="$tmp/textfile"
+        log() { :; }
+        export PATH="$tmp/shims:$PATH"
+        # shellcheck disable=SC1090
+        source <(sed -n '/^emit_gauge()/,/^}/p' "$REFRESH")
+        # shellcheck disable=SC1090
+        source <(sed -n '/^_emit_sfu_applied_gauge()/,/^}/p' "$REFRESH")
+        _emit_sfu_applied_gauge
+    )
+
+    local g="$tmp/textfile/partner_edge_sfu_pubkey_applied.prom"
+    if [[ -f "$g" ]]; then
+        fail "C10: applied gauge emitted on a failed docker-exec read — a transient exec failure was misreported as a stale-key mismatch (gauge=$(grep -oE '[01]$' "$g" | tail -n1))"
+    else
+        pass "C10: failed docker-exec read → applied gauge SKIPPED (no false stale-key 0)"
+    fi
+    rm -rf "$tmp"
+}
+c10
+
 echo ""
 echo "=== SFU signing-pubkey apply: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]]

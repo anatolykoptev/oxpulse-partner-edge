@@ -473,10 +473,15 @@ unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTE
 # restarted. Healthy unchanged containers are left running. Failed channels
 # (from channels-status.env) are skipped entirely.
 
-# _restart_if_changed kind cfg_file sha_file compose_file container [apply_mode] [state_container]
+# _restart_if_changed kind cfg_file sha_file compose_file container [apply_mode] [state_container] [skip_channel_status]
 # Restarts a single docker compose service only when its config file hash
 # differs from the last persisted hash. Updates the sha file on success.
-# Consults channels-status.env: skips channels that are not active.
+# Consults channels-status.env: skips channels that are not active — UNLESS the
+# 8th arg (skip_channel_status) is set. channels-status.env is written by the
+# backend's channel-provisioning surface (xray/naive/hysteria2/…) and has no
+# `sfu` vocabulary, so the sfu key-apply caller sets that flag to decouple its
+# lifecycle from a status file that was never designed for it (a stray `sfu=`
+# line there must NOT silently suppress a signing-key recreate).
 #
 # MAJOR 6 review-fix note: uses `docker compose restart` (not `up --force-recreate`).
 # This is intentional: the channels_version path re-renders only channel config
@@ -510,16 +515,23 @@ _restart_if_changed() {
     local kind="$1" cfg_file="$2" sha_file="$3" compose_file="$4" container="$5"
     local apply_mode="${6:-restart}"
     local state_container="${7:-$container}"
+    # 8th arg (default off): when non-empty, bypass the channels-status.env gate.
+    # The sfu key-apply caller sets it because that file's status vocabulary
+    # (written by the channel-provisioning surface) has no notion of `sfu`; a
+    # stray `sfu=` line must not silently suppress a signing-key recreate.
+    local skip_channel_status="${8:-}"
 
-    # Consult channels-status.env: skip non-active channels
-    local _ch_status=""
-    local _chs_env="${PREFIX_LIB}/channels-status.env"
-    if [[ -f "$_chs_env" ]]; then
-        _ch_status=$(grep "^${kind}=" "$_chs_env" 2>/dev/null | cut -d= -f2 || true)
-    fi
-    if [[ -n "$_ch_status" && "$_ch_status" != "active" ]]; then
-        log "  [surgical] channel $kind status=$_ch_status — skipping restart"
-        return 0
+    # Consult channels-status.env: skip non-active channels (channel callers only)
+    if [[ -z "$skip_channel_status" ]]; then
+        local _ch_status=""
+        local _chs_env="${PREFIX_LIB}/channels-status.env"
+        if [[ -f "$_chs_env" ]]; then
+            _ch_status=$(grep "^${kind}=" "$_chs_env" 2>/dev/null | cut -d= -f2 || true)
+        fi
+        if [[ -n "$_ch_status" && "$_ch_status" != "active" ]]; then
+            log "  [surgical] channel $kind status=$_ch_status — skipping restart"
+            return 0
+        fi
     fi
 
     [[ -f "$cfg_file" ]] || return 0
@@ -578,17 +590,30 @@ _restart_if_changed() {
 # `env_file` reference exists anywhere in upgrade.sh), so an already-deployed node
 # can run this new refresh against an OLD compose that still bakes the key under
 # `environment:`. A `--force-recreate sfu` there would drop live WebRTC media for
-# ZERO benefit (the baked literal wins over the absent env_file). Isolates the
-# `sfu:` block — from the 2-space-indented service header up to the next sibling
-# service — so a match cannot leak from a different service's env_file stanza.
+# ZERO benefit (the baked literal wins over the absent env_file). The check
+# anchors the sfu-keys.env match to the actual `env_file:` directive INSIDE the
+# `sfu:` service block (scalar form on the directive line, or a list entry within
+# its sub-block), so neither a stray comment mentioning sfu-keys.env nor another
+# service's env_file stanza can produce a false wired=true.
 _sfu_env_file_wired() {
-    local compose_file="$1" _block
-    _block=$(awk '
-        /^  sfu:/               { inblk=1; next }
-        inblk && /^  [A-Za-z]/  { inblk=0 }
-        inblk                   { print }
-    ' "$compose_file" 2>/dev/null)
-    grep -qE 'env_file:' <<<"$_block" && grep -qE 'sfu-keys\.env' <<<"$_block"
+    local compose_file="$1"
+    awk '
+        /^  sfu:/               { insfu=1; next }   # enter sfu service block
+        insfu && /^  [A-Za-z]/  { insfu=0 }         # next 2-space sibling service ends it
+        insfu {
+            # env_file: is a 4-space key under the service. Anchor the sfu-keys.env
+            # match to it (scalar form on the same line, or a list entry inside its
+            # sub-block) so a stray comment or a different service cannot false-match.
+            if ($0 ~ /^    env_file:/) {
+                inenv=1
+                if ($0 ~ /sfu-keys\.env/) found=1
+                next
+            }
+            if (inenv && $0 ~ /^    [A-Za-z]/) inenv=0   # next 4-space key ends env_file:
+            if (inenv && $0 ~ /sfu-keys\.env/) found=1   # short/object list entry
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$compose_file" 2>/dev/null
 }
 
 # Detector: compare the SFU signing pubkey WRITTEN to sfu-keys.env (what should
@@ -596,8 +621,10 @@ _sfu_env_file_wired() {
 # partner_edge_sfu_pubkey_applied{partner_id} (1=applied, 0=mismatch). A 0 is the
 # epoch_apply_gap this task closes: the daily write landed but the container was
 # never recreated, so the running SFU still verifies relay JWTs with a stale key.
-# Skipped (no emit) when the container is not running / docker is unavailable, so
-# a stopped SFU cannot emit a misleading 0.
+# Skipped (no emit) when the container is not running / docker is unavailable, or
+# when the live read itself fails (docker exec non-zero, e.g. container mid-startup
+# right after a force-recreate), so neither a stopped SFU nor a transient exec
+# failure can emit a misleading 0.
 _emit_sfu_applied_gauge() {
     # $1 (default 1): whether the live compose has env_file wired for sfu. Drives
     # only the WARNING wording on a mismatch — the gauge value stays a pure
@@ -612,7 +639,16 @@ _emit_sfu_applied_gauge() {
     _written="${_written%\'}"; _written="${_written#\'}"
     [[ -n "$_written" ]] || return 0
     docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'oxpulse-partner-sfu' || return 0
-    _live=$(docker exec oxpulse-partner-sfu printenv SFU_SIGNING_PUBLIC_KEY 2>/dev/null || true)
+    # Read the running value via the exec's EXIT STATUS, not just its output. A
+    # non-zero exit means docker exec / printenv failed (container mid-startup after
+    # a force-recreate, daemon hiccup, or var unset). In every production compose
+    # shape the key is injected (env_file when wired, the baked literal otherwise),
+    # so a non-zero read here is a transient exec failure — skip emission rather than
+    # let an empty _live compare unequal and fire a false gauge=0 + stale-key WARNING.
+    if ! _live=$(docker exec oxpulse-partner-sfu printenv SFU_SIGNING_PUBLIC_KEY 2>/dev/null); then
+        log "  [sfu] could not read live SFU_SIGNING_PUBLIC_KEY from oxpulse-partner-sfu (docker exec returned non-zero) — skipping applied gauge this cycle"
+        return 0
+    fi
     if [[ "$_written" == "$_live" ]]; then
         emit_gauge partner_edge_sfu_pubkey_applied "partner_id=\"${NODE_ID}\"" "1"
     else
@@ -663,7 +699,8 @@ if [[ "$KEYS_OK" -eq 1 ]]; then
             "$_sfu_compose" \
             sfu \
             recreate \
-            oxpulse-partner-sfu
+            oxpulse-partner-sfu \
+            skip-channel-status
     fi
     _emit_sfu_applied_gauge "$_sfu_wired"
     unset _sfu_compose _sfu_wired
