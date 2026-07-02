@@ -30,6 +30,12 @@ NODE_CFG="$PREFIX_ETC/node-config.json"
 VERSION_FILE="$PREFIX_LIB/keys-version"
 CHANNELS_VERSION_FILE="$PREFIX_LIB/channels-version"
 SFU_KEYS_ENV="$PREFIX_LIB/sfu-keys.env"
+# Single source for the SFU container_name (docker-compose.yml.tpl `container_name:`).
+# Used by the applied-gauge detector (docker ps filter + docker exec target) and as
+# the `_restart_if_changed` state_container (docker inspect liveness). NOT the compose
+# SERVICE key — that is the literal `sfu` (docker compose targets services, not
+# container_names). Functions sourced in isolation by the tests set this themselves.
+SFU_CONTAINER_NAME="oxpulse-partner-sfu"
 TEXTFILE_DIR="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
 LOG_FILE="${LOG_FILE:-/var/log/oxpulse-partner-edge-refresh.log}"
 BACKEND_URL="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
@@ -638,15 +644,15 @@ _emit_sfu_applied_gauge() {
     _written="${_written%\"}"; _written="${_written#\"}"
     _written="${_written%\'}"; _written="${_written#\'}"
     [[ -n "$_written" ]] || return 0
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'oxpulse-partner-sfu' || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$SFU_CONTAINER_NAME" || return 0
     # Read the running value via the exec's EXIT STATUS, not just its output. A
     # non-zero exit means docker exec / printenv failed (container mid-startup after
     # a force-recreate, daemon hiccup, or var unset). In every production compose
     # shape the key is injected (env_file when wired, the baked literal otherwise),
     # so a non-zero read here is a transient exec failure — skip emission rather than
     # let an empty _live compare unequal and fire a false gauge=0 + stale-key WARNING.
-    if ! _live=$(docker exec oxpulse-partner-sfu printenv SFU_SIGNING_PUBLIC_KEY 2>/dev/null); then
-        log "  [sfu] could not read live SFU_SIGNING_PUBLIC_KEY from oxpulse-partner-sfu (docker exec returned non-zero) — skipping applied gauge this cycle"
+    if ! _live=$(docker exec "$SFU_CONTAINER_NAME" printenv SFU_SIGNING_PUBLIC_KEY 2>/dev/null); then
+        log "  [sfu] could not read live SFU_SIGNING_PUBLIC_KEY from $SFU_CONTAINER_NAME (docker exec returned non-zero) — skipping applied gauge this cycle"
         return 0
     fi
     if [[ "$_written" == "$_live" ]]; then
@@ -699,7 +705,7 @@ if [[ "$KEYS_OK" -eq 1 ]]; then
             "$_sfu_compose" \
             sfu \
             recreate \
-            oxpulse-partner-sfu \
+            "$SFU_CONTAINER_NAME" \
             skip-channel-status
     fi
     _emit_sfu_applied_gauge "$_sfu_wired"

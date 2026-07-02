@@ -183,14 +183,19 @@ YML
 
     # Rotate the key on disk, then drive the REAL apply helper from refresh.sh.
     printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyB\n' > "$etc/sfu-keys.env"
+    # Capture the apply's diagnostics (docker force-recreate stderr goes to
+    # `2>>"$LOG_FILE"` inside _restart_if_changed; the helper's WARNING lines go
+    # through log()). Route both to a real file so a FAILURE below can surface the
+    # underlying docker error instead of swallowing it to /dev/null.
+    local apply_log="$tmp/c4-apply.log"; : > "$apply_log"
     (
         set +e
-        log() { :; }
+        log() { printf '%s\n' "$*" >> "$apply_log"; }
         # Both are consumed by the sourced production _restart_if_changed.
         # shellcheck disable=SC2034
         PREFIX_LIB="$lib"
         # shellcheck disable=SC2034
-        LOG_FILE="/dev/null"
+        LOG_FILE="$apply_log"
         # shellcheck disable=SC1090
         source <(sed -n '/^_restart_if_changed()/,/^}/p' "$REFRESH")
         # 7th arg = the real container_name so the post-recreate `docker inspect
@@ -205,7 +210,8 @@ YML
     if [[ "$before" == "PubKeyA" && "$after" == "PubKeyB" && "$got_sha" == "$want_sha" ]]; then
         pass "C4: real recreate flipped the container env PubKeyA → PubKeyB and docker-inspect liveness advanced the sha"
     else
-        fail "C4: recreate/inspect path broken (before='$before' after='$after' sha_ok=$([[ "$got_sha" == "$want_sha" ]] && echo 1 || echo 0))"
+        local _diag; _diag=$(tr '\n' '|' < "$apply_log" 2>/dev/null)
+        fail "C4: recreate/inspect path broken (before='$before' after='$after' sha_ok=$([[ "$got_sha" == "$want_sha" ]] && echo 1 || echo 0)) — apply log: ${_diag:-<empty>}"
     fi
     rm -rf "$tmp"
 }
@@ -247,6 +253,11 @@ DOCK
         SFU_KEYS_ENV="$lib/sfu-keys.env"
         # shellcheck disable=SC2034
         TEXTFILE_DIR="$tmp/textfile"
+        # _emit_sfu_applied_gauge reads SFU_CONTAINER_NAME (top-level const in refresh.sh)
+        # for its `docker ps` filter + `docker exec` target; define it here because we
+        # source the function in isolation, without the script's top-level constants.
+        # shellcheck disable=SC2034
+        SFU_CONTAINER_NAME="oxpulse-partner-sfu"
         log() { :; }
         export PATH="$tmp/shims:$PATH"
         # Source the REAL gauge helpers from refresh.sh (not hand-copies).
@@ -564,6 +575,10 @@ DOCK
         SFU_KEYS_ENV="$lib/sfu-keys.env"
         # shellcheck disable=SC2034
         TEXTFILE_DIR="$tmp/textfile"
+        # _emit_sfu_applied_gauge reads SFU_CONTAINER_NAME (top-level const in refresh.sh);
+        # define it here because we source the function without the top-level constants.
+        # shellcheck disable=SC2034
+        SFU_CONTAINER_NAME="oxpulse-partner-sfu"
         log() { :; }
         export PATH="$tmp/shims:$PATH"
         # shellcheck disable=SC1090
@@ -582,6 +597,58 @@ DOCK
     rm -rf "$tmp"
 }
 c10
+
+# ---------------------------------------------------------------------------
+# C11: _sfu_env_file_wired robustness — the wiring detector must resolve wired=true
+#      when `sfu` is the LAST service in the compose file (its block is terminated
+#      by EOF, not a following 2-space sibling), AND must NOT false-match a
+#      sfu-keys.env reference that lives in a DIFFERENT (later) service's env_file.
+#      Drives the REAL _sfu_env_file_wired sourced from refresh.sh. An awk change
+#      that resets the found-latch on the wrong boundary turns this RED.
+# ---------------------------------------------------------------------------
+c11() {
+    local tmp; tmp=$(mktemp -d)
+    # shellcheck disable=SC1090
+    source <(sed -n '/^_sfu_env_file_wired()/,/^}/p' "$REFRESH")
+
+    # Case 1: sfu is the LAST service, env_file wired to sfu-keys.env.
+    cat > "$tmp/sfu_last.yml" <<'YML'
+services:
+  caddy:
+    image: c
+  sfu:
+    image: s
+    env_file:
+      - path: ./sfu-keys.env
+        required: false
+YML
+    local ok=1
+    if ! _sfu_env_file_wired "$tmp/sfu_last.yml"; then
+        fail "C11: sfu-last compose reported UNWIRED — env_file detector loses the sfu block at EOF (would skip a legitimate recreate)"
+        ok=0
+    fi
+
+    # Case 2: sfu has no env_file; a LATER service references sfu-keys.env. Must
+    # NOT false-match (the sfu service itself is unwired).
+    cat > "$tmp/sfu_mid_falsematch.yml" <<'YML'
+services:
+  sfu:
+    image: s
+  xray:
+    image: x
+    env_file:
+      - path: ./sfu-keys.env
+        required: false
+YML
+    if _sfu_env_file_wired "$tmp/sfu_mid_falsematch.yml"; then
+        fail "C11: another service's env_file referencing sfu-keys.env false-matched as sfu wired"
+        ok=0
+    fi
+
+    [[ "$ok" -eq 1 ]] && pass "C11: env_file wiring detector is robust to sfu-last (EOF-terminated) + rejects a sibling's sfu-keys.env reference"
+    rm -rf "$tmp"
+}
+c11
 
 echo ""
 echo "=== SFU signing-pubkey apply: $PASS passed, $FAIL failed ==="
