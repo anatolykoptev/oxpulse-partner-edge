@@ -536,13 +536,32 @@ if [[ "$*" == *"config --services"* ]]; then
     printf 'sfu\n'
     exit 0
 fi
+# compose config (full, no --services): partner-edge service scoping
+# (list_partner_edge_services / _compose_service_image) now needs this to
+# resolve each service's image and decide ownership — capture_running_digests
+# didn't need it before that fix; it does now. Return the same compose
+# content the test wrote to $T10_ETC/docker-compose.yml.
+if [[ "$*" == *"compose config"* && "$*" != *"--services"* ]]; then
+    cat "${T10_COMPOSE_FILE:-/dev/null}"
+    exit 0
+fi
 # compose ps --quiet sfu: return a fake container ID (simulates running container).
 if [[ "$*" == *"ps --quiet"* ]]; then
     printf 'fakectr1234567890\n'
     exit 0
 fi
-# docker inspect: return different digests pre/post-pull so recreate is triggered.
-# We use a state file to toggle between old and new digest.
+# _resolve_naive_socks_port's Tier 3 fallback (unrelated to this test) also
+# calls `docker inspect oxpulse-partner-naive --format {{range ...}}` early
+# in the run. It must NOT consume the digest state-file toggle below — that
+# would desync the pre/post-pull digest pairing this test depends on. Handle
+# it first, as a no-op naive-container-not-found response, untouched by the
+# toggle.
+if [[ "$*" == *"oxpulse-partner-naive"* ]]; then
+    exit 1
+fi
+# docker inspect (sfu digest resolution): return different digests
+# pre/post-pull so recreate is triggered. We use a state file to toggle
+# between old and new digest.
 if [[ "$*" == *"inspect"* ]]; then
     STATE_FILE="${DOCKER_STATE_FILE:-/tmp/docker_state_t10}"
     if [[ -f "$STATE_FILE" ]]; then
@@ -590,6 +609,7 @@ OUT10=$(
     OXPULSE_SYSTEMD_DIR="$T10_SYSTEMD" \
     OXPULSE_HEALTHCHECK="$T10_HEALTHCHECK" \
     OXPULSE_SKIP_ROOT_CHECK=1 \
+    T10_COMPOSE_FILE="$T10_ETC/docker-compose.yml" \
     DOCKER_BIN="$FAKE_DOCKER" \
     DOCKER_STATE_FILE="$T10_DOCKER_STATE" \
     SYSTEMCTL_BIN=true \
