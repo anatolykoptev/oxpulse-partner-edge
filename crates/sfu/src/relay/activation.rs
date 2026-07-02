@@ -65,7 +65,7 @@ pub fn compute_relay_activation(
 ) -> anyhow::Result<RelayActivation> {
     let has_hs256_secret = match relay_jwt_secret {
         None => false,
-        Some(s) if s == "change-me-in-production" => {
+        Some("change-me-in-production") => {
             anyhow::bail!(
                 "RELAY_JWT_SECRET is the documented placeholder value — set a random secret of at least 32 bytes. \
                  Generate one with: openssl rand -hex 32"
@@ -117,7 +117,8 @@ mod tests {
 
     // A syntactically-plausible Ed25519 public-key PEM. The gate only checks
     // presence (`Option::is_some`), so the bytes need not be a real key here.
-    const PUBKEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA\n-----END PUBLIC KEY-----\n";
+    const PUBKEY_PEM: &str =
+        "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA\n-----END PUBLIC KEY-----\n";
     const VALID_HS256: &str = "0123456789abcdef0123456789abcdef"; // 32 bytes
 
     /// The T8 fix: `SFU_SIGNING_PUBLIC_KEY` alone activates the relay API.
@@ -125,7 +126,10 @@ mod tests {
     #[test]
     fn eddsa_only_activates_relay() {
         let a = compute_relay_activation(None, Some(PUBKEY_PEM), true).unwrap();
-        assert!(a.enabled, "Ed25519-only deployment MUST activate the relay API");
+        assert!(
+            a.enabled,
+            "Ed25519-only deployment MUST activate the relay API"
+        );
         assert_eq!(a.auth_mode, Some(RELAY_AUTH_EDDSA));
     }
 
@@ -135,7 +139,10 @@ mod tests {
     #[test]
     fn eddsa_only_has_empty_secret_and_fallback_forced_off() {
         let a = compute_relay_activation(None, Some(PUBKEY_PEM), true).unwrap();
-        assert!(a.secret.is_empty(), "no RELAY_JWT_SECRET → empty secret, no panic");
+        assert!(
+            a.secret.is_empty(),
+            "no RELAY_JWT_SECRET → empty secret, no panic"
+        );
         assert!(
             !a.hs256_fallback_effective,
             "no HS256 secret → fallback MUST be forced off (empty-secret forgery guard)"
@@ -157,7 +164,10 @@ mod tests {
     #[test]
     fn hs256_only_respects_disabled_fallback_config() {
         let a = compute_relay_activation(Some(VALID_HS256), None, false).unwrap();
-        assert!(!a.hs256_fallback_effective, "config off must disable fallback");
+        assert!(
+            !a.hs256_fallback_effective,
+            "config off must disable fallback"
+        );
     }
 
     /// Both credentials → `auth=both`, real secret, config-driven fallback.
