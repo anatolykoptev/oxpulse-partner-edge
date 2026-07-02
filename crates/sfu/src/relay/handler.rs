@@ -106,6 +106,7 @@ pub(crate) fn select_candidates(jwt: &RelayJwt) -> Vec<String> {
 ///   - `InvalidSignature`   — an EdDSA signature check that failed, and
 ///   - `AlgorithmMismatch`  — the header alg is HS256, so `decode` rejects it
 ///     with `ErrorKind::InvalidAlgorithm` BEFORE the signature check.
+///
 /// Without the `AlgorithmMismatch` arm a genuine HS256-header token (the normal
 /// rollout case while `SFU_SIGNING_PUBLIC_KEY` is set) collapses to `Malformed`
 /// and the promised HS256 fallback never fires. The `Expired`/`Malformed` paths
