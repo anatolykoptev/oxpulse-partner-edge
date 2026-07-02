@@ -77,17 +77,25 @@ async fn relay_connect(
     State((secret, signing_public_key, task_tx, seen_jtis)): State<AppState>,
     Json(body): Json<RelayConnectRequest>,
 ) -> (StatusCode, Json<RelayConnectResponse>) {
-    // Prefer Ed25519 if public key is configured; fall back to HS256 shared secret
-    // ONLY when the EdDSA path returns InvalidSignature (i.e. the sender did not
-    // sign with EdDSA). This keeps both EdDSA-capable and HS256-only senders
-    // interoperable during rollout while preserving the strictness of the
-    // Expired/Malformed paths — an expired EdDSA token is rejected outright,
-    // not re-checked under HS256 (which could otherwise mask clock skew
-    // discrepancies between the two verifiers).
+    // Prefer Ed25519 if public key is configured; fall back to the HS256 shared
+    // secret when the EdDSA verifier reports the token was not signed with EdDSA.
+    // Two distinct outcomes both mean "this is an HS256 token, retry under HS256":
+    //   - InvalidSignature   — an EdDSA signature check that failed, and
+    //   - AlgorithmMismatch  — the header alg is HS256, so `decode` rejects it
+    //     with ErrorKind::InvalidAlgorithm BEFORE the signature check.
+    // Without the AlgorithmMismatch arm a genuine HS256-header token (the normal
+    // rollout case while SFU_SIGNING_PUBLIC_KEY is set) collapses to Malformed and
+    // the promised HS256 fallback never fires. This keeps EdDSA-capable and
+    // HS256-only senders interoperable during rollout while preserving the
+    // strictness of the Expired/Malformed paths — an expired EdDSA token is
+    // rejected outright, not re-checked under HS256 (which could otherwise mask
+    // clock skew discrepancies between the two verifiers).
     let verify_result = if let Some(pubkey) = &signing_public_key {
         match RelayJwt::verify_ed25519(&body.relay_token, pubkey) {
             Ok(j) => Ok(j),
-            Err(RelayJwtError::InvalidSignature) => RelayJwt::verify(&body.relay_token, &secret),
+            Err(RelayJwtError::InvalidSignature | RelayJwtError::AlgorithmMismatch) => {
+                RelayJwt::verify(&body.relay_token, &secret)
+            }
             Err(e) => Err(e),
         }
     } else {
@@ -109,7 +117,10 @@ async fn relay_connect(
                 }),
             );
         }
-        Err(RelayJwtError::Malformed) => {
+        // AlgorithmMismatch is consumed by the HS256 fallback above and `verify()`
+        // never produces it, so it cannot reach here — grouped with Malformed to
+        // keep the match exhaustive and fail closed (400) if that ever changes.
+        Err(RelayJwtError::Malformed) | Err(RelayJwtError::AlgorithmMismatch) => {
             tracing::warn!("relay_connect: malformed JWT");
             return error_response("malformed token");
         }
