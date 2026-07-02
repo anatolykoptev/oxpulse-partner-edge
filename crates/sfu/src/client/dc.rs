@@ -78,12 +78,21 @@ const CHAT_FRAME_MAX_BYTES: usize = 256 * 1024;
 /// `label` is pre-resolved by the caller (via `rtc.channel(id)`) because
 /// `Rtc::channel` requires `&mut self`, which can't be borrowed alongside
 /// the event data in a match arm. Label mismatch → `Noop`.
-/// `relay_auth_secret`: when `Some`, relay_source messages MUST carry a valid `roomToken`
-/// JWT signed with this HS256 secret. Pass `None` to allow unauthenticated relay (dev/test only).
+/// `relay_auth_secret` (HS256 room-token secret) and `relay_signing_pubkey`
+/// (EdDSA Ed25519 public key) together implement ONE dual-credential rollout
+/// policy, identical to `client_ws::handler::verify_token` and
+/// `relay::handler::relay_connect`:
+/// - when a pubkey is set, EdDSA is verified first, and an EdDSA
+///   `InvalidSignature` (the shape a legacy HS256-signed token takes) falls back
+///   to HS256 verification with the secret; `Expired` / `Malformed` /
+///   `RoomMismatch` are definitive and never fall back;
+/// - when only the secret is set, HS256 is used directly;
+/// - when neither is set, relay is unauthenticated (dev/test only) — production
+///   deployments MUST set `SFU_SIGNING_PUBLIC_KEY` and/or `SIGNALING_SFU_SECRET`.
 ///
-/// `relay_signing_pubkey`: when `Some`, EdDSA (Ed25519) room token verification is preferred
-/// over HS256. When both are set, EdDSA takes priority. When neither is set, relay is
-/// unauthenticated (dev/test only).
+/// During the EdDSA rollout, room-tokens are therefore no stricter than
+/// relay-connect: an HS256-signed `roomToken` stays acceptable even once the
+/// EdDSA pubkey is configured (the normal prod shape).
 pub(super) fn handle_channel_data(
     client_id: ClientId,
     label: &str,
@@ -131,13 +140,42 @@ pub(super) fn handle_channel_data(
                     );
                     return Propagated::Noop;
                 }
-                // Prefer EdDSA when the public key is available, fall back to HS256.
-                let verify_result = if let Some(pubkey) = relay_signing_pubkey {
-                    room_auth::verify_room_token_ed25519(token, room_id, pubkey)
-                } else if let Some(secret) = relay_auth_secret {
-                    room_auth::verify_room_token(token, room_id, secret)
-                } else {
-                    unreachable!("auth_required guarantees at least one credential");
+                // Reconciled dual-credential rollout policy — one source of truth
+                // shared with client_ws::handler::verify_token and
+                // relay::handler::relay_connect: when a signing pubkey is set,
+                // EdDSA is verified first; on an EdDSA InvalidSignature (the shape
+                // a legacy HS256-signed rollout token takes — wrong-algorithm is
+                // folded into InvalidSignature by room_auth::map_jwt_error) fall
+                // back to HS256 with the secret. Expired / Malformed / RoomMismatch
+                // are definitive verdicts and propagate immediately, so a forged or
+                // malformed token cannot be re-checked under HS256 to bypass exp
+                // validation. Room-tokens must therefore not be stricter than
+                // relay-connect mid-rollout: an HS256 token stays acceptable even
+                // once the EdDSA pubkey is configured (normal prod). (The
+                // cross-cutting kill-switch + relay_jwt_verify_total{algorithm}
+                // counter that gate this policy uniformly across all three sites are
+                // owned by Task 7 and wired in there.)
+                let verify_result = match (relay_signing_pubkey, relay_auth_secret) {
+                    (Some(pubkey), maybe_secret) => {
+                        match room_auth::verify_room_token_ed25519(token, room_id, pubkey) {
+                            Ok(claims) => Ok(claims),
+                            // Likely a legacy/rollout HS256 token — retry under
+                            // HS256 when a secret is configured; with no secret
+                            // there is nothing to fall back to.
+                            Err(room_auth::RoomAuthError::InvalidSignature) => match maybe_secret {
+                                Some(secret) => {
+                                    room_auth::verify_room_token(token, room_id, secret)
+                                }
+                                None => Err(room_auth::RoomAuthError::InvalidSignature),
+                            },
+                            // Expired / Malformed / RoomMismatch — definitive.
+                            Err(e) => Err(e),
+                        }
+                    }
+                    (None, Some(secret)) => room_auth::verify_room_token(token, room_id, secret),
+                    (None, None) => {
+                        unreachable!("auth_required guarantees at least one credential")
+                    }
                 };
                 if let Err(e) = verify_result {
                     tracing::warn!(
@@ -686,6 +724,38 @@ mod tests {
             Some(pub_pem.as_str()),
         );
         assert!(matches!(result, Propagated::MarkRelaySource(..)));
+    }
+
+    #[test]
+    fn relay_source_hs256_token_accepted_when_pubkey_also_set() {
+        // Reconciled dual-credential rollout policy (mirrors
+        // client_ws::handler::verify_token and relay::handler::relay_connect):
+        // during the EdDSA rollout an HS256-signed room token from a legacy
+        // signaling server must still be accepted even once the EdDSA signing
+        // pubkey is configured (the normal prod shape). Room-tokens must not be
+        // stricter than relay-connect mid-rollout. The pre-fix mutually-exclusive
+        // if/else rejected this because it only ever tried EdDSA once the pubkey
+        // was Some — a legacy HS256 token failed the EdDSA signature check and
+        // was dropped as Noop with no fallback.
+        let secret = b"test-secret-32-bytes-long-enough!";
+        let (_priv_pem, pub_pem) = generate_test_keypair_dc();
+        // Token is signed with the HS256 secret, NOT the EdDSA key.
+        let token = make_room_token("room-abc", 42, secret, 3600);
+        let payload = format!(
+            r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
+            token
+        );
+        let result = handle_channel_data(
+            ClientId(64),
+            "any",
+            payload.as_bytes(),
+            Some(secret),           // relay_auth_secret — HS256 fallback credential
+            Some(pub_pem.as_str()), // relay_signing_pubkey — EdDSA preferred (normal prod)
+        );
+        assert!(
+            matches!(result, Propagated::MarkRelaySource(..)),
+            "HS256 room token must be accepted via HS256 fallback when the EdDSA pubkey is also set (rollout interop)"
+        );
     }
 
     // ── Phase 2c: sfu-events DC browser-write guard ─────────────────────────
