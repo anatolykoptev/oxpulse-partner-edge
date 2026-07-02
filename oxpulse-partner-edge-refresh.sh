@@ -833,20 +833,34 @@ if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/nul
     _rot_xray_cfg="${PREFIX_ETC}/xray-client.json"
     # shellcheck disable=SC2034  # CHANNELS_FAILED consumed by render_channel_soft internals
     CHANNELS_FAILED=()
-    if render_channel_soft xray \
+    # Best-effort render. The render exit status is NOT a trustworthy success
+    # signal: re_render_xray's soft-fail paths (template fetch failure, missing
+    # node-config fields, missing node-config.json) warn and `return 0` WITHOUT
+    # writing a new config, and the render_channel_soft "lib not found" fallback
+    # returns re_render_xray's code too. So we ignore the exit status here and
+    # verify the on-disk OUTCOME below instead.
+    render_channel_soft xray \
             "${PREFIX_SBIN:-/usr/local/sbin}/xray-client.json.tpl" \
             "$_rot_xray_cfg" 2>/dev/null \
-        || { declare -f re_render_xray >/dev/null 2>&1 && re_render_xray; }; then
+        || { declare -f re_render_xray >/dev/null 2>&1 && re_render_xray; } \
+        || true
+    # Outcome verification: the rotated pubkey MUST now be on disk in the file
+    # the xray container mounts. This is the SAME comparison the applied-vs-written
+    # detector performs — gating rollback on the outcome (not the render function's
+    # exit code) closes the epoch_apply_gap even when the renderer swallows its
+    # own failure and returns 0.
+    _rot_applied_pub=$(jq -r '.outbounds[0].streamSettings.realitySettings.publicKey // empty' "$_rot_xray_cfg" 2>/dev/null || true)
+    if [[ -n "$_rot_applied_pub" && "$_rot_applied_pub" == "$NEW_PUB" ]]; then
         log "xray-client.json re-rendered with rotated Reality pubkey"
     else
         # Hard-fail: mirror the reload-failure rollback. Do NOT persist the new
         # version — else tomorrow's run sees version==NEW and never retries the
         # broken render, leaving handshakes down until a manual upgrade.sh.
-        log "xray re-render FAILED — restoring $BACKUP, version NOT persisted"
+        log "xray re-render did NOT apply rotated pubkey (on-disk=${_rot_applied_pub:0:16}... expected=${NEW_PUB:0:16}...) — restoring $BACKUP, version NOT persisted"
         mv "$BACKUP" "$NODE_CFG"
-        die "rollback complete; new keys NOT applied (xray render failed)"
+        die "rollback complete; new keys NOT applied (xray render did not land new pubkey)"
     fi
-    unset _rot_xray_cfg
+    unset _rot_applied_pub _rot_xray_cfg
 
     log "reloading oxpulse-partner-edge.service"
     if systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE"; then
@@ -868,27 +882,29 @@ if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/nul
         systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE" || true
         die "rollback complete after failed verify"
     fi
+
+    # Detector (T3 observability): applied-vs-written gauge. After the reload the
+    # live xray-client.json pubkey MUST equal node-config.json's. A mismatch means
+    # the container is (or will be) mounting a stale config — the epoch_apply_gap
+    # class this fix closes. Gated to managed nodes (inside the systemctl branch)
+    # so custom-stack nodes — which do NOT install this service and may keep an
+    # xray-client.json with a different schema — never emit a spurious gauge=0.
+    _det_xray="${PREFIX_ETC}/xray-client.json"
+    if [[ -f "$_det_xray" ]]; then
+        _live_pub=$(jq -r '.outbounds[0].streamSettings.realitySettings.publicKey // empty' "$_det_xray" 2>/dev/null || true)
+        _cfg_pub=$(jq -r '.reality_public_key // empty' "$NODE_CFG" 2>/dev/null || true)
+        if [[ -n "$_live_pub" && "$_live_pub" == "$_cfg_pub" ]]; then
+            emit_metric "partner_edge_reality_pubkey_applied" "partner_id=\"${NODE_ID}\"" "1"
+        else
+            emit_metric "partner_edge_reality_pubkey_applied" "partner_id=\"${NODE_ID}\"" "0"
+            log "WARNING: reality pubkey mismatch after rotation — xray-client.json=${_live_pub:0:16}... node-config=${_cfg_pub:0:16}... (stale mount / render regression)"
+        fi
+        unset _live_pub _cfg_pub
+    fi
+    unset _det_xray
 else
     log "rotation: oxpulse-partner-edge.service not installed — skipping reload (custom stack node)"
 fi
-
-# Detector (T3 observability): applied-vs-written gauge. After a rotation the
-# live xray-client.json pubkey MUST equal node-config.json's. A mismatch means
-# the container is (or will be) mounting a stale config — the epoch_apply_gap
-# class this fix closes. Skipped on custom-stack nodes with no xray-client.json.
-_det_xray="${PREFIX_ETC}/xray-client.json"
-if [[ -f "$_det_xray" ]]; then
-    _live_pub=$(jq -r '.outbounds[0].streamSettings.realitySettings.publicKey // empty' "$_det_xray" 2>/dev/null || true)
-    _cfg_pub=$(jq -r '.reality_public_key // empty' "$NODE_CFG" 2>/dev/null || true)
-    if [[ -n "$_live_pub" && "$_live_pub" == "$_cfg_pub" ]]; then
-        emit_metric "partner_edge_reality_pubkey_applied" "partner_id=\"${NODE_ID}\"" "1"
-    else
-        emit_metric "partner_edge_reality_pubkey_applied" "partner_id=\"${NODE_ID}\"" "0"
-        log "WARNING: reality pubkey mismatch after rotation — xray-client.json=${_live_pub:0:16}... node-config=${_cfg_pub:0:16}... (stale mount / render regression)"
-    fi
-    unset _live_pub _cfg_pub
-fi
-unset _det_xray
 
 # Persist new version
 echo "$NEW_VERSION" > "$VERSION_FILE"
