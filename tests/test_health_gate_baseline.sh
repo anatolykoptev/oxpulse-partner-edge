@@ -107,8 +107,22 @@ grep -q 'health_regressions\|_health_regressions' "$UPGRADE" \
 # of a legacy edge (old healthcheck lacks --snapshot; sync installs new one first).
 # Falsification: the OLD code captured baseline BEFORE sync_host_scripts (before Step 1),
 # so this line would be earlier than the sync line — making this assertion FAIL.
-wt_sync_line=$(grep -n 'sync_host_scripts "\$RELEASE_TAG"' "$UPGRADE" | awk -F: '$1 > 2000 && $1 < 2200 { print $1; exit }')
+#
+# Structural (not a hardcoded line-number window — PR review, cheburator
+# healthcheck-sync arc: upgrade.sh has MULTIPLE 'sync_host_scripts
+# "$RELEASE_TAG"' call sites (--host-scripts-only mode, an opec-probe
+# fallback inside the --with-templates block, and the actual --with-templates
+# Step 4 call) — a fixed numeric range silently breaks (empty match, not a
+# false pass) the moment earlier code grows past the window's upper bound,
+# which is exactly what happened when PR #333 added ~150 lines ahead of this
+# point. The Step 4 call is the LAST 'sync_host_scripts "$RELEASE_TAG"'
+# occurrence that appears BEFORE the with-templates baseline marker — that
+# relative ordering (opec-probe fallback, if any, always precedes Step 4,
+# which always precedes Step 5's baseline) is the actual invariant under
+# test, not any specific line number.
 wt_baseline_line=$(grep -n '_wt_baseline_snap=\$(mktemp)' "$UPGRADE" | head -1 | cut -d: -f1)
+wt_sync_line=$(grep -n 'sync_host_scripts "\$RELEASE_TAG"' "$UPGRADE" \
+    | awk -F: -v maxline="${wt_baseline_line:-0}" '$1 < maxline { line = $1 } END { if (line != "") print line }')
 wt_recreate_line=$(grep -n 'recreate_changed_services _wt_before' "$UPGRADE" | head -1 | cut -d: -f1)
 if [[ -z "$wt_sync_line" || -z "$wt_baseline_line" || -z "$wt_recreate_line" ]]; then
     fail "S10: could not locate --with-templates sync/baseline/recreate lines (sync=$wt_sync_line baseline=$wt_baseline_line recreate=$wt_recreate_line)"
