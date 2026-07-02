@@ -264,6 +264,47 @@ fn parse_public_ip_env() -> Option<IpAddr> {
     }
 }
 
+/// Default cap for [`max_participants`] when `SFU_MAX_PARTICIPANTS` is
+/// unset or unparseable.
+///
+/// T9 (2026-07-01 bug-hunt, resource_exhaustion/high): sized to the
+/// *current* single-task `udp_loop::serve` forwarding budget, not to a
+/// target scale. That loop demuxes every inbound UDP datagram against the
+/// registry with an O(N) linear scan on one CPU core (the O(1) redesign
+/// is tracked separately as Escalation #2 — out of scope here). At the
+/// existing per-room cap of 6 peers (`client_ws/session.rs`), 50
+/// participants is ~8 concurrent rooms on one node — enough headroom for a
+/// small self-hosted partner-edge node before the demux's quadratic term
+/// dominates loop latency. Raise only after Escalation #2 lands, or after
+/// load-testing the target node; this is a safety valve, not an SLA.
+pub const DEFAULT_MAX_PARTICIPANTS: u32 = 50;
+
+/// Global cap on concurrent browser (`client_ws`) sessions this SFU node
+/// will admit, independent of any per-room limit. Env: `SFU_MAX_PARTICIPANTS`.
+/// Default: [`DEFAULT_MAX_PARTICIPANTS`].
+///
+/// Read fresh on every call (no caching) rather than through `SfuConfig` —
+/// the admission check lives in `client_ws::handler`, which is constructed
+/// once at startup from individual params, not a held `SfuConfig`; a plain
+/// env re-read avoids threading a new field through `spawn_client_ws_api`
+/// and its `main.rs` call site for a value that only needs to change
+/// between test runs, not per-request. Mirrors this module's `env()`
+/// helper's error handling: malformed input degrades to the default with a
+/// warn, it never panics — this is a per-request path, not startup.
+pub fn max_participants() -> u32 {
+    match std::env::var("SFU_MAX_PARTICIPANTS") {
+        Ok(raw) if !raw.is_empty() => raw.parse().unwrap_or_else(|e| {
+            tracing::warn!(
+                value = %raw, error = %e,
+                "SFU_MAX_PARTICIPANTS failed to parse as u32 — falling back to default \
+                 ({DEFAULT_MAX_PARTICIPANTS})"
+            );
+            DEFAULT_MAX_PARTICIPANTS
+        }),
+        _ => DEFAULT_MAX_PARTICIPANTS,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +538,41 @@ mod tests {
             "garbage SFU_PUBLIC_IP must yield None, not panic"
         );
         std::env::remove_var("SFU_PUBLIC_IP");
+    }
+
+    #[test]
+    fn max_participants_default_when_unset() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::remove_var("SFU_MAX_PARTICIPANTS");
+        assert_eq!(max_participants(), DEFAULT_MAX_PARTICIPANTS);
+    }
+
+    #[test]
+    fn max_participants_env_overrides_default() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("SFU_MAX_PARTICIPANTS", "7");
+        assert_eq!(max_participants(), 7);
+        std::env::remove_var("SFU_MAX_PARTICIPANTS");
+    }
+
+    #[test]
+    fn max_participants_garbage_falls_back_to_default() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Non-fatal: this is read on the per-request admission-check path,
+        // not at startup — a malformed override must degrade, not panic
+        // and never take the whole handler down mid-traffic.
+        std::env::set_var("SFU_MAX_PARTICIPANTS", "not-a-number");
+        assert_eq!(max_participants(), DEFAULT_MAX_PARTICIPANTS);
+        std::env::remove_var("SFU_MAX_PARTICIPANTS");
+    }
+
+    #[test]
+    fn max_participants_empty_env_treated_as_unset() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Compose passes literal "" when an env block names a variable
+        // that is unset — same edge case as SFU_PUBLIC_IP / split-bind.
+        std::env::set_var("SFU_MAX_PARTICIPANTS", "");
+        assert_eq!(max_participants(), DEFAULT_MAX_PARTICIPANTS);
+        std::env::remove_var("SFU_MAX_PARTICIPANTS");
     }
 }
