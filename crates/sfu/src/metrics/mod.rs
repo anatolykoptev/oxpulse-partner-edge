@@ -27,8 +27,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use prometheus::{
-    Encoder, GaugeVec, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
-    TextEncoder,
+    Encoder, GaugeVec, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Opts, Registry, TextEncoder,
 };
 
 /// T4.3: `algorithm` label value for the Ed25519 (EdDSA) relay-JWT verify path.
@@ -142,6 +142,22 @@ pub struct SfuMetrics {
     /// select! arm spinning — typically a closed channel that wasn't
     /// `Option::None`'d out. Alert at >500/s sustained.
     pub udp_loop_iterations_total: IntCounter,
+    /// 2026-07 bug-hunt (T10): wall-clock duration of one complete
+    /// `udp_loop::serve` iteration — from the top of the `loop {}` through
+    /// the `select!` branch that resolved it. `udp_loop_iterations_total`'s
+    /// *rate* alone cannot see a saturated core: under contention the
+    /// iteration RATE DROPS (fewer completed wakeups/sec) rather than
+    /// rising, so the existing spin-detection alert (`rate > 500/s`) never
+    /// fires. This histogram closes that gap — p99 climbing while the
+    /// iteration rate stays flat or drops is the saturation signature.
+    /// Buckets span sub-ms scheduling noise up to a few multiples of
+    /// `MAX_SLEEP` (100ms) so the tail is visible without an overflow
+    /// bucket swallowing it. Note: a fully idle loop (no clients, no
+    /// packets) legitimately sits near the 100ms `MAX_SLEEP` ceiling every
+    /// iteration, so the suggested `p99 > 50ms` warning threshold assumes a
+    /// populated deployment — tune per-environment if idle-room alerting
+    /// noise shows up.
+    pub sfu_udp_loop_iteration_seconds: Histogram,
     /// One-shot counter for inject channels closing at runtime, label `kind`
     /// = `relay | client`. Should stay 0 in healthy operation; any non-zero
     /// reading means a producer task panicked or exited.
@@ -441,6 +457,42 @@ pub struct SfuMetrics {
     /// mobile-heavy rooms; spike above 100/s may indicate a peer advertising
     /// only bogon candidates (ICE failure scenario).
     pub udp_bogon_dest_dropped_total: IntCounterVec,
+
+    // ── T9 (2026-07-01 bug-hunt): browser client_ws admission cap ────────────
+    /// WS upgrades rejected at the `client_ws` admission gate, labelled by
+    /// `reason`. Only `at_capacity` is emitted today (active sessions ≥
+    /// [`crate::config::max_participants`]); the label stays open so a
+    /// future admission-gate reason (e.g. a per-room cap) doesn't need a
+    /// metric rename.
+    ///
+    /// Closes the gap the relay-dial path already closed with
+    /// `RELAY_MAX_CONCURRENT` (`main.rs`'s semaphore on cascade-relay
+    /// dials) — the browser-facing `client_ws_upgrade` path admitted every
+    /// valid-token upgrade unconditionally, so a burst of valid tokens had
+    /// no ceiling against the single-task `udp_loop`'s forwarding budget.
+    ///
+    /// Alert: `rate(sfu_sfu_admission_rejected_total[5m]) > 0` sustained →
+    /// this node is at its participant cap; shard/route load away rather
+    /// than raising the cap blindly (raising it revives the O(N) demux
+    /// quadratic-cost risk — that redesign is a separate escalation, not
+    /// this counter's job).
+    pub sfu_admission_rejected_total: IntCounterVec,
+
+    // ── T13 (2026-07-01 bug-hunt): cascade-relay connect outcome ─────────────
+    /// Successful `connect_relay` calls from the cascade-relay retry loop —
+    /// incremented on the first candidate in a `RelayTask`'s
+    /// `upstream_candidates` list that completes the WS+SDP handshake.
+    pub relay_connect_success_total: IntCounter,
+    /// Cascade-relay tasks where every candidate in `upstream_candidates`
+    /// failed or timed out (main.rs's `MAX_RELAY_CANDIDATES`-bounded retry
+    /// loop). Previously only a `tracing::warn!` on exhaustion — a total
+    /// upstream-hub outage dropped every room relay with zero Grafana
+    /// signal (T13 2026-07-01 bug-hunt, dependency_block/medium).
+    ///
+    /// Alert: compare the rate of this counter against
+    /// `relay_connect_success_total` per edge — a rising exhausted/success
+    /// ratio flags a degraded or unreachable upstream hub.
+    pub relay_candidate_exhausted_total: IntCounter,
 }
 
 impl SfuMetrics {
@@ -582,6 +634,21 @@ impl SfuMetrics {
             "UDP select! loop iteration count. Steady-state ~10/s (one wake per MAX_SLEEP=100ms). Sustained rate >>10/s = a select! arm is hot — typically a closed channel polled without an `if guard` or `Option::None` substitution. Alert: rate(sfu_udp_loop_iterations_total[1m]) > 500.",
         ))
         .context("udp_loop_iterations_total")?);
+
+        // T10 bug-hunt: per-iteration duration. See field doc on
+        // `SfuMetrics::sfu_udp_loop_iteration_seconds` for why this exists
+        // alongside `udp_loop_iterations_total` (rate alone misses
+        // saturation — the rate drops instead of rising).
+        let sfu_udp_loop_iteration_seconds = reg!(Histogram::with_opts(
+            HistogramOpts::new(
+                "sfu_udp_loop_iteration_seconds",
+                "Wall-clock duration of one udp_loop::serve select! loop iteration (processing + select wait). Suggested alert: warning on p99 > 0.05s.",
+            )
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+            ]),
+        )
+        .context("sfu_udp_loop_iteration_seconds")?);
 
         let inject_channel_closed_total = reg!(IntCounterVec::new(
             Opts::new(
@@ -1162,6 +1229,40 @@ impl SfuMetrics {
                 .get();
         }
 
+        // ── T9: browser client_ws admission cap ────────────────────────────────
+        let sfu_admission_rejected_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_admission_rejected_total",
+                "client_ws WS upgrades rejected by the admission gate, by reason. \
+                 reason=at_capacity: active_sessions >= SFU_MAX_PARTICIPANTS. \
+                 T9 2026-07-01 bug-hunt (resource_exhaustion/high) — mirrors the \
+                 relay-dial RELAY_MAX_CONCURRENT semaphore on the browser path.",
+            ),
+            &["reason"],
+        )
+        .context("sfu_admission_rejected_total")?);
+        // Pre-touch so the alert baseline is 0 at startup, not absent.
+        let _ = sfu_admission_rejected_total
+            .with_label_values(&["at_capacity"])
+            .get();
+
+        // ── T13 (2026-07-01 bug-hunt): cascade-relay connect outcome ───────────
+        let relay_connect_success_total = reg!(IntCounter::with_opts(Opts::new(
+            "relay_connect_success_total",
+            "Successful connect_relay calls from the cascade-relay retry loop \
+             (first candidate to complete the WS+SDP handshake).",
+        ))
+        .context("relay_connect_success_total")?);
+
+        let relay_candidate_exhausted_total = reg!(IntCounter::with_opts(Opts::new(
+            "relay_candidate_exhausted_total",
+            "Cascade-relay tasks where every upstream candidate failed or \
+             timed out. T13 2026-07-01 bug-hunt (dependency_block/medium) — \
+             previously only a tracing::warn! on exhaustion, invisible to \
+             Grafana during a total upstream-hub outage.",
+        ))
+        .context("relay_candidate_exhausted_total")?);
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1191,6 +1292,7 @@ impl SfuMetrics {
             udp_send_failed,
             client_delivered_media_count,
             udp_loop_iterations_total,
+            sfu_udp_loop_iteration_seconds,
             inject_channel_closed_total,
             chat_relay_tx_bytes_total,
             chat_relay_rx_bytes_total,
@@ -1231,6 +1333,9 @@ impl SfuMetrics {
             sfu_bwe_hint_registry_mutex_poisoned_total,
             sfu_bwe_hint_rate_limit_min_interval_ms,
             udp_bogon_dest_dropped_total,
+            sfu_admission_rejected_total,
+            relay_connect_success_total,
+            relay_candidate_exhausted_total,
         })
     }
 
