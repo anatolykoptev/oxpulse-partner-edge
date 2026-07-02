@@ -561,12 +561,34 @@ _restart_if_changed() {
             else
                 log "WARNING: [surgical] $state_container State.Running=$_running after restart — sha not updated, next refresh will retry"
             fi
+        elif [[ "$apply_mode" == "recreate" ]]; then
+            log "WARNING: [surgical] docker compose up -d --force-recreate $container failed — container may use stale config"
         else
-            log "WARNING: [surgical] docker restart $container failed — container may use stale config"
+            log "WARNING: [surgical] docker compose restart $container failed — container may use stale config"
         fi
     else
         log "  [surgical] channel $kind unchanged — no restart"
     fi
+}
+
+# _sfu_env_file_wired COMPOSE_FILE — true iff the live compose's `sfu` service
+# already reads the signing key via `env_file: … sfu-keys.env`. Guards the recreate
+# below: upgrade.sh syncs a NEW refresh.sh on every run but NEVER re-renders the
+# on-disk compose to add the env_file stanza (it only sed-patches image tags — no
+# `env_file` reference exists anywhere in upgrade.sh), so an already-deployed node
+# can run this new refresh against an OLD compose that still bakes the key under
+# `environment:`. A `--force-recreate sfu` there would drop live WebRTC media for
+# ZERO benefit (the baked literal wins over the absent env_file). Isolates the
+# `sfu:` block — from the 2-space-indented service header up to the next sibling
+# service — so a match cannot leak from a different service's env_file stanza.
+_sfu_env_file_wired() {
+    local compose_file="$1" _block
+    _block=$(awk '
+        /^  sfu:/               { inblk=1; next }
+        inblk && /^  [A-Za-z]/  { inblk=0 }
+        inblk                   { print }
+    ' "$compose_file" 2>/dev/null)
+    grep -qE 'env_file:' <<<"$_block" && grep -qE 'sfu-keys\.env' <<<"$_block"
 }
 
 # Detector: compare the SFU signing pubkey WRITTEN to sfu-keys.env (what should
@@ -577,6 +599,10 @@ _restart_if_changed() {
 # Skipped (no emit) when the container is not running / docker is unavailable, so
 # a stopped SFU cannot emit a misleading 0.
 _emit_sfu_applied_gauge() {
+    # $1 (default 1): whether the live compose has env_file wired for sfu. Drives
+    # only the WARNING wording on a mismatch — the gauge value stays a pure
+    # written-vs-live detector so an unwired node still reports the gap as 0.
+    local _wired="${1:-1}"
     [[ -f "$SFU_KEYS_ENV" ]] || return 0
     local _written _live
     # Strip one layer of surrounding quotes (opec writes single-quoted; refresh
@@ -591,7 +617,11 @@ _emit_sfu_applied_gauge() {
         emit_gauge partner_edge_sfu_pubkey_applied "partner_id=\"${NODE_ID}\"" "1"
     else
         emit_gauge partner_edge_sfu_pubkey_applied "partner_id=\"${NODE_ID}\"" "0"
-        log "WARNING: [sfu] signing-pubkey applied-vs-written MISMATCH — running SFU has a stale key (relay JWTs fall back to HS256)"
+        if [[ "$_wired" -eq 0 ]]; then
+            log "WARNING: [sfu] signing-pubkey NOT applied — live compose lacks env_file wiring for sfu-keys.env (run install.sh to re-render); running SFU verifies relay JWTs with the stale key (HS256 fallback)"
+        else
+            log "WARNING: [sfu] signing-pubkey applied-vs-written MISMATCH despite env_file wiring — running SFU has a stale key (relay JWTs fall back to HS256); check the last recreate"
+        fi
     fi
 }
 
@@ -606,7 +636,27 @@ _emit_sfu_applied_gauge() {
 # early-exit below: the SFU key rotates independently of the Reality key version.
 if [[ "$KEYS_OK" -eq 1 ]]; then
     _sfu_compose="${PREFIX_ETC}/docker-compose.yml"
-    if [[ -f "$_sfu_compose" && -f "$SFU_KEYS_ENV" ]]; then
+    _sfu_wired=0
+    if [[ -f "$_sfu_compose" ]] && _sfu_env_file_wired "$_sfu_compose"; then
+        _sfu_wired=1
+    fi
+    if [[ ! -f "$_sfu_compose" ]]; then
+        log "  [sfu] docker-compose.yml not found at $_sfu_compose — skipping SFU key apply (custom stack node)"
+    elif [[ ! -f "$SFU_KEYS_ENV" ]]; then
+        # Compose present but the key file was never written (opec install-time
+        # fetch failed, or no /api/partner/keys response has carried a key yet).
+        # Surface it — otherwise this node is invisible to both logs and the gauge.
+        log "WARNING: [sfu] sfu-keys.env not found at $SFU_KEYS_ENV — SFU signing key not yet provisioned; skipping apply (opec install / a /api/partner/keys response carrying the key must write it first)"
+    elif [[ "$_sfu_wired" -eq 0 ]]; then
+        # Review HIGH (epoch_apply_gap reachability): upgrade.sh ships THIS refresh
+        # script on every run but never re-renders the on-disk compose to add the
+        # env_file stanza, so an already-deployed node can pair the new refresh with
+        # an OLD compose that still bakes the key under `environment:`. A recreate
+        # there drops live WebRTC media for ZERO benefit. Skip until a full re-install
+        # (install.sh) renders env_file; the gauge below still reports 0 so the gap
+        # stays visible and alertable.
+        log "WARNING: [sfu] live docker-compose.yml has no env_file wiring for sfu-keys.env — SFU signing-key refresh cannot apply on this node; run install.sh to re-render compose. Skipping recreate to avoid dropping live media"
+    else
         _restart_if_changed sfu \
             "$SFU_KEYS_ENV" \
             "${PREFIX_LIB}/sfu-keys.sha" \
@@ -614,11 +664,9 @@ if [[ "$KEYS_OK" -eq 1 ]]; then
             sfu \
             recreate \
             oxpulse-partner-sfu
-    elif [[ ! -f "$_sfu_compose" ]]; then
-        log "  [sfu] docker-compose.yml not found at $_sfu_compose — skipping SFU key apply (custom stack node)"
     fi
-    _emit_sfu_applied_gauge
-    unset _sfu_compose
+    _emit_sfu_applied_gauge "$_sfu_wired"
+    unset _sfu_compose _sfu_wired
 fi
 
 if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" != "none" && \

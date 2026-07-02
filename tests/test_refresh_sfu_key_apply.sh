@@ -72,8 +72,19 @@ c3() {
     mkdir -p "$tmp/shims" "$etc" "$lib"
     : > "$docker_log"
 
-    # A compose file must exist for the SFU apply block to run.
-    printf 'services:\n  sfu:\n    image: x\n' > "$etc/docker-compose.yml"
+    # A compose file must exist AND be env_file-wired for the SFU apply block to
+    # recreate (Review HIGH gate: an unwired live compose is skipped, not recreated
+    # — see C6). Mirrors the real template's long-form env_file stanza.
+    cat > "$etc/docker-compose.yml" <<'YML'
+services:
+  sfu:
+    image: x
+    env_file:
+      - path: ./sfu-keys.env
+        required: false
+  hysteria2-client:
+    image: y
+YML
     # Simulate the PRIOR applied key: file=PubKeyA and a matching persisted sha.
     printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyA\n' > "$lib/sfu-keys.env"
     sha256sum "$lib/sfu-keys.env" | awk '{print $1}' > "$lib/sfu-keys.sha"
@@ -255,6 +266,191 @@ DOCK
     rm -rf "$tmp"
 }
 c5
+
+# ---------------------------------------------------------------------------
+# C6: Review HIGH regression guard — an already-deployed node whose LIVE compose
+#     has NO env_file wiring for sfu MUST NOT be force-recreated (that would drop
+#     live WebRTC media for zero benefit: upgrade.sh ships the new refresh.sh but
+#     never re-renders compose to add env_file, so this pairing is real). The
+#     refresh must SKIP + WARN, and the applied gauge must still report 0 so the
+#     epoch_apply_gap stays visible. Removing the wiring gate turns this RED.
+# ---------------------------------------------------------------------------
+c6() {
+    local tmp; tmp=$(mktemp -d)
+    local docker_log="$tmp/docker.log"
+    local etc="$tmp/etc" lib="$tmp/lib"
+    mkdir -p "$tmp/shims" "$etc" "$lib"
+    : > "$docker_log"
+
+    # UNWIRED compose: sfu service with NO env_file (an old on-disk compose that
+    # upgrade.sh left untouched — it only sed-patches image tags).
+    printf 'services:\n  sfu:\n    image: x\n  hysteria2-client:\n    image: y\n' > "$etc/docker-compose.yml"
+    # Prior applied key on disk = PubKeyA + matching sha.
+    printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyA\n' > "$lib/sfu-keys.env"
+    sha256sum "$lib/sfu-keys.env" | awk '{print $1}' > "$lib/sfu-keys.sha"
+
+    cat > "$tmp/shims/docker" <<DOCK
+#!/usr/bin/env bash
+echo "docker \$*" >> "$docker_log"
+if [[ "\$1" == "inspect" && "\$*" == *"{{.State.Running}}"* ]]; then echo "true"; exit 0; fi
+if [[ "\$1" == "ps" && "\$*" == *"{{.Names}}"* ]]; then echo "oxpulse-partner-sfu"; exit 0; fi
+# live container still carries the STALE key (unwired → env_file never took effect).
+if [[ "\$*" == *"printenv"* ]]; then echo "PubKeyA"; exit 0; fi
+exit 0
+DOCK
+    chmod +x "$tmp/shims/docker"
+
+    cat > "$tmp/shims/curl" <<'CURL'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"/api/partner/heartbeat"* ]]; then printf 'ok\n200'; exit 0; fi
+if [[ "$args" == *"/api/partner/keys"* ]]; then
+  printf '%s' '{"version":"v1","channels_version":"none","sfu_signing_public_key":"PubKeyB","reality_public_key":"rk","reality_encryption":"re","reality_server_names":["a"]}'
+  exit 0
+fi
+exit 0
+CURL
+    chmod +x "$tmp/shims/curl"
+
+    printf '{"node_id":"test-node"}\n' > "$etc/node-config.json"
+    printf 'v1\n' > "$lib/keys-version"
+
+    PATH="$tmp/shims:$PATH" \
+    PARTNER_EDGE_PREFIX_ETC="$etc" \
+    PARTNER_EDGE_PREFIX_LIB="$lib" \
+    PARTNER_EDGE_TEXTFILE_DIR="$tmp/textfile" \
+    LOG_FILE="$tmp/refresh.log" \
+    OXPULSE_BACKEND_URL="https://example.test" \
+        bash "$REFRESH" >/dev/null 2>&1
+
+    local ok=1
+    if grep -qE 'compose .*--force-recreate sfu' "$docker_log"; then
+        fail "C6: refresh force-recreated an UNWIRED sfu — would drop live media for zero benefit (wiring gate missing)"
+        ok=0
+    fi
+    if ! grep -qE 'no env_file wiring for sfu-keys.env' "$tmp/refresh.log"; then
+        fail "C6: refresh did not WARN about the unwired compose — silent skip"
+        ok=0
+    fi
+    local g="$tmp/textfile/partner_edge_sfu_pubkey_applied.prom"
+    if [[ ! -f "$g" ]] || ! grep -qE 'partner_edge_sfu_pubkey_applied\{[^}]*\} 0' "$g"; then
+        fail "C6: applied gauge not =0 on an unwired node — the epoch_apply_gap is invisible"
+        ok=0
+    fi
+    [[ "$ok" -eq 1 ]] && pass "C6: unwired live compose → recreate SKIPPED + WARN + gauge=0 (no live-media drop)"
+    rm -rf "$tmp"
+}
+c6
+
+# ---------------------------------------------------------------------------
+# C7: compose present but sfu-keys.env absent (opec key fetch failed / no key
+#     ever returned) MUST surface a WARNING — not a silent no-op invisible to
+#     both logs and metrics (review LOW findings 3 & 4).
+# ---------------------------------------------------------------------------
+c7() {
+    local tmp; tmp=$(mktemp -d)
+    local etc="$tmp/etc" lib="$tmp/lib"
+    mkdir -p "$tmp/shims" "$etc" "$lib"
+
+    # Wired compose present; sfu-keys.env deliberately ABSENT.
+    cat > "$etc/docker-compose.yml" <<'YML'
+services:
+  sfu:
+    image: x
+    env_file:
+      - path: ./sfu-keys.env
+        required: false
+YML
+
+    cat > "$tmp/shims/docker" <<'DOCK'
+#!/usr/bin/env bash
+if [[ "$1" == "ps" && "$*" == *"{{.Names}}"* ]]; then echo "oxpulse-partner-sfu"; exit 0; fi
+exit 0
+DOCK
+    chmod +x "$tmp/shims/docker"
+
+    # keys response WITHOUT sfu_signing_public_key → refresh writes no sfu-keys.env.
+    cat > "$tmp/shims/curl" <<'CURL'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"/api/partner/heartbeat"* ]]; then printf 'ok\n200'; exit 0; fi
+if [[ "$args" == *"/api/partner/keys"* ]]; then
+  printf '%s' '{"version":"v1","channels_version":"none","reality_public_key":"rk","reality_encryption":"re","reality_server_names":["a"]}'
+  exit 0
+fi
+exit 0
+CURL
+    chmod +x "$tmp/shims/curl"
+
+    printf '{"node_id":"test-node"}\n' > "$etc/node-config.json"
+    printf 'v1\n' > "$lib/keys-version"
+
+    PATH="$tmp/shims:$PATH" \
+    PARTNER_EDGE_PREFIX_ETC="$etc" \
+    PARTNER_EDGE_PREFIX_LIB="$lib" \
+    PARTNER_EDGE_TEXTFILE_DIR="$tmp/textfile" \
+    LOG_FILE="$tmp/refresh.log" \
+    OXPULSE_BACKEND_URL="https://example.test" \
+        bash "$REFRESH" >/dev/null 2>&1
+
+    if grep -qE 'sfu-keys.env not found' "$tmp/refresh.log"; then
+        pass "C7: compose present + sfu-keys.env absent → explicit WARNING (not a silent no-op)"
+    else
+        fail "C7: missing sfu-keys.env produced no log line — invisible to logs & metrics"
+    fi
+    rm -rf "$tmp"
+}
+c7
+
+# ---------------------------------------------------------------------------
+# C8: when the recreate command FAILS, the failure log must name the recreate
+#     path (up -d --force-recreate), NOT 'restart' — so on-call triage of an
+#     apply_mode=recreate failure is not misdirected (review LOW). Drives the
+#     REAL _restart_if_changed in recreate mode with a failing docker.
+# ---------------------------------------------------------------------------
+c8() {
+    local tmp; tmp=$(mktemp -d)
+    local etc="$tmp/etc" lib="$tmp/lib"
+    mkdir -p "$tmp/shims" "$etc" "$lib"
+    printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyB\n' > "$etc/sfu-keys.env"
+
+    # docker spy: FAIL the force-recreate, succeed everything else.
+    cat > "$tmp/shims/docker" <<'DOCK'
+#!/usr/bin/env bash
+if [[ "$*" == *"--force-recreate"* ]]; then echo "recreate boom" >&2; exit 1; fi
+exit 0
+DOCK
+    chmod +x "$tmp/shims/docker"
+
+    (
+        set +e
+        export PATH="$tmp/shims:$PATH"
+        # shellcheck disable=SC2034
+        PREFIX_LIB="$lib"          # sourced _restart_if_changed reads channels-status.env under it
+        LOG_FILE="$tmp/refresh.log"
+        log() { echo "$*" >> "$LOG_FILE"; }
+        # shellcheck disable=SC1090
+        source <(sed -n '/^_restart_if_changed()/,/^}/p' "$REFRESH")
+        _restart_if_changed sfu "$etc/sfu-keys.env" "$lib/sfu-keys.sha" "$etc/docker-compose.yml" sfu recreate oxpulse-partner-sfu
+    )
+
+    local ok=1
+    if ! grep -qE 'force-recreate sfu failed' "$tmp/refresh.log"; then
+        fail "C8: recreate-failure log did not name the force-recreate path"
+        ok=0
+    fi
+    if grep -qE 'compose restart sfu failed' "$tmp/refresh.log"; then
+        fail "C8: recreate failure misreported as a 'restart' failure — misleading triage"
+        ok=0
+    fi
+    if [[ -s "$lib/sfu-keys.sha" ]]; then
+        fail "C8: sha advanced despite a failed recreate — next cycle would skip the retry"
+        ok=0
+    fi
+    [[ "$ok" -eq 1 ]] && pass "C8: recreate failure logs the force-recreate path (not 'restart') + sha not advanced"
+    rm -rf "$tmp"
+}
+c8
 
 echo ""
 echo "=== SFU signing-pubkey apply: $PASS passed, $FAIL failed ==="
