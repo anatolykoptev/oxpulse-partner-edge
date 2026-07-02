@@ -38,6 +38,12 @@ pub enum RelayJwtError {
     Malformed,
     InvalidSignature,
     Expired,
+    /// The token's header algorithm does not match the verifier's expected
+    /// algorithm (jsonwebtoken `ErrorKind::InvalidAlgorithm`, raised by `decode`
+    /// BEFORE the signature check). Distinct from `InvalidSignature` so the
+    /// handler can fall back to HS256 verification for a genuine HS256-header
+    /// token submitted while the EdDSA verifier is active (rollout interop).
+    AlgorithmMismatch,
 }
 
 impl RelayJwt {
@@ -96,6 +102,15 @@ impl RelayJwt {
                 jsonwebtoken::errors::ErrorKind::ExpiredSignature => RelayJwtError::Expired,
                 jsonwebtoken::errors::ErrorKind::InvalidSignature => {
                     RelayJwtError::InvalidSignature
+                }
+                // HS256-header token submitted while EdDSA is the active verifier.
+                // `decode` raises InvalidAlgorithm from the alg-membership check
+                // BEFORE the signature check (header.alg not in [EdDSA]). Surface
+                // it as a distinct variant so the handler can retry HS256
+                // verification -- mirrors the InvalidAlgorithmName discrimination
+                // in the sibling `verify()` rather than collapsing to Malformed.
+                jsonwebtoken::errors::ErrorKind::InvalidAlgorithm => {
+                    RelayJwtError::AlgorithmMismatch
                 }
                 _ => RelayJwtError::Malformed,
             })?;
@@ -324,6 +339,32 @@ mod tests {
             RelayJwt::verify_ed25519(&token, &pub_pem),
             Err(RelayJwtError::Malformed)
         ));
+    }
+
+    /// t5 (synthetic_green regression guard): an HS256-signed token verified
+    /// through `verify_ed25519` (the EdDSA verifier) must map to the DISTINCT
+    /// `AlgorithmMismatch` variant, NOT the catch-all `Malformed`. jsonwebtoken
+    /// raises `ErrorKind::InvalidAlgorithm` from the alg-membership check BEFORE
+    /// the signature check when the header alg (HS256) is absent from the EdDSA
+    /// validation set. If this reverts to `Malformed`, the handler's HS256
+    /// fallback (which retries on InvalidSignature | AlgorithmMismatch) never
+    /// fires and a genuine HS256 token 400s while `SFU_SIGNING_PUBLIC_KEY` is set.
+    #[test]
+    fn verify_ed25519_maps_hs256_header_to_algorithm_mismatch_for_fallback() {
+        let (_priv_pem, pub_pem) = generate_test_keypair_relay();
+        // A well-formed token signed with HS256 (the pre-EdDSA / rollout sender).
+        let hs256_token = sample(now_unix_secs(), now_unix_secs() + 300)
+            .sign(b"shared-secret")
+            .unwrap();
+        // Verified against the EdDSA public key, the alg mismatch must surface as
+        // AlgorithmMismatch so `handler.rs` can retry HS256 verification.
+        assert!(
+            matches!(
+                RelayJwt::verify_ed25519(&hs256_token, &pub_pem),
+                Err(RelayJwtError::AlgorithmMismatch)
+            ),
+            "HS256-header token must map to AlgorithmMismatch (was Malformed before the fix)"
+        );
     }
 }
 
