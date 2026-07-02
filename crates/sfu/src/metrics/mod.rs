@@ -37,6 +37,17 @@ pub const RELAY_JWT_ALG_EDDSA: &str = "eddsa";
 /// (the symmetric fallback the kill-switch can cut once EdDSA rollout completes).
 pub const RELAY_JWT_ALG_HS256: &str = "hs256";
 
+/// T8: `auth` label — relay API activated on the Ed25519 signing key ONLY
+/// (`SFU_SIGNING_PUBLIC_KEY` set, no `RELAY_JWT_SECRET`). The canonical
+/// federation path; the HS256 fallback is forced off in this mode.
+pub const RELAY_AUTH_EDDSA: &str = "eddsa";
+/// T8: `auth` label — relay API activated on the HS256 shared secret ONLY
+/// (`RELAY_JWT_SECRET` set, no `SFU_SIGNING_PUBLIC_KEY`). Legacy symmetric path.
+pub const RELAY_AUTH_HS256: &str = "hs256";
+/// T8: `auth` label — relay API activated with BOTH credentials configured
+/// (EdDSA primary + HS256 fallback available). The normal rollout state.
+pub const RELAY_AUTH_BOTH: &str = "both";
+
 /// All Prometheus handles for the SFU. Cheap to clone (all fields are
 /// `Clone` — prometheus counters are reference-counted internally).
 #[derive(Clone, Debug)]
@@ -173,6 +184,19 @@ pub struct SfuMetrics {
     /// indicator. The `SFU_RELAY_HS256_FALLBACK` kill-switch turns a fleet-wide
     /// zero-`hs256` observation into an enforced cutover.
     pub relay_jwt_verify_total: IntCounterVec,
+
+    // ── T8: cascade-relay activation gate observability ──────────────────────
+    /// Startup gauge — which credential activated the cascade-relay API, set
+    /// once at boot. Label: `auth` ∈ `{eddsa, hs256, both}` = 1 for the active
+    /// mode, 0 for the others; all three stay 0 when the relay API is disabled
+    /// (standalone mode). Registered so a pure-Ed25519 mis-activation — the T8
+    /// finding where the gate ignored `SFU_SIGNING_PUBLIC_KEY` and the relay
+    /// never spawned — is directly alertable rather than silent.
+    ///
+    /// PromQL: `sfu_relay_api_enabled{auth="eddsa"} == 1` confirms the canonical
+    /// federation path is live; `sum(sfu_relay_api_enabled) == 0` while cascade
+    /// relay is expected fires the mis-activation alert.
+    pub relay_api_enabled: IntGaugeVec,
 
     // ── Phase 8 T10: voice DC relay metrics ──────────────────────────────────
     /// Phase 8 T10: bytes written to a subscriber's outbound voice DC.
@@ -629,6 +653,25 @@ impl SfuMetrics {
         // baseline of 0 rather than an absent {algorithm=hs256} series.
         for algorithm in [RELAY_JWT_ALG_EDDSA, RELAY_JWT_ALG_HS256] {
             let _ = relay_jwt_verify_total.with_label_values(&[algorithm]).get();
+        }
+
+        // T8: cascade-relay activation-mode gauge. main.rs sets the active
+        // mode's series to 1 once at boot after resolving the credentials.
+        let relay_api_enabled = reg!(IntGaugeVec::new(
+            Opts::new(
+                "relay_api_enabled",
+                "T8: cascade-relay API activation mode, set once at boot. \
+                 Label: auth ∈ {eddsa, hs256, both} = 1 for the active credential, \
+                 0 otherwise; all 0 = relay API disabled (standalone). A pure-Ed25519 \
+                 deployment (auth=eddsa) is the canonical federation path.",
+            ),
+            &["auth"],
+        )
+        .context("relay_api_enabled")?);
+        // Pre-touch all three modes so the mis-activation alert evaluates a
+        // baseline of 0 instead of an absent series before main.rs sets one.
+        for auth in [RELAY_AUTH_EDDSA, RELAY_AUTH_HS256, RELAY_AUTH_BOTH] {
+            let _ = relay_api_enabled.with_label_values(&[auth]).get();
         }
 
         let chat_relay_active_channels = reg!(IntGaugeVec::new(
@@ -1154,6 +1197,7 @@ impl SfuMetrics {
             chat_relay_dropped_total,
             chat_relay_active_channels,
             relay_jwt_verify_total,
+            relay_api_enabled,
             voice_relay_tx_bytes_total,
             voice_relay_rx_bytes_total,
             voice_relay_dropped,

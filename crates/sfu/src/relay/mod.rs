@@ -1,5 +1,6 @@
 //! Relay subsystem — JWT auth, HTTP handler, outbound WebRTC client.
 
+pub mod activation;
 pub mod allowlist;
 pub mod client;
 pub mod handler;
