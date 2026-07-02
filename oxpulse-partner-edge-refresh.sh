@@ -119,7 +119,18 @@ emit_metric() {
             printf '%s' "${_samples[$_name]}"
         done
     } > "$prom_tmp" 2>/dev/null
-    mv -f "$prom_tmp" "$prom_file" 2>/dev/null || rm -f "$prom_tmp" 2>/dev/null || true
+    # T3 review round 3: mktemp creates $prom_tmp at mode 0600 (mkstemp,
+    # umask-independent), and a bare mv carries that mode onto $prom_file — so
+    # after the first emit the file drops to 0600 root:root and node_exporter's
+    # textfile collector (an unprivileged system user) loses read access,
+    # blacking out EVERY partner_edge_* metric on the node exactly like the
+    # duplicate-TYPE-line bug this rewrite fixed. Restore the world-readable
+    # 0644 the prior `>>` append produced under root's default umask 022.
+    if mv -f "$prom_tmp" "$prom_file" 2>/dev/null; then
+        chmod 0644 "$prom_file" 2>/dev/null || true
+    else
+        rm -f "$prom_tmp" 2>/dev/null || true
+    fi
 }
 
 # Emit a current-state GAUGE to its own textfile, TRUNCATED each run so exactly
@@ -826,12 +837,148 @@ jq \
 # script exits 0 and rotation is still committed to VERSION_FILE.
 if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/null \
         | grep -q oxpulse-partner-edge; then
+    # epoch_apply_gap FIX (T3): re-render xray-client.json — the file the xray
+    # container actually mounts — from the freshly patched node-config.json
+    # BEFORE the reload/recreate. Without this the container remounts the STALE
+    # pubkey and every Reality handshake fails until a manual upgrade.sh.
+    #
+    # Renderer seam (reuse, per spec): render_channel_soft (opec, reads reality_*
+    # from node-config) with the re_render_xray fallback — the same chain the
+    # channels_version block above uses.
+    #
+    # Path resolution — which renderer actually runs on a live edge:
+    # a normally installed node carries NO on-disk *.tpl (install.sh renders from
+    # an ephemeral staging dir; upgrade.sh's sbin sync list _HOST_SCRIPT_SBIN_FILES
+    # ships no *.tpl — only defaults.conf + VERSION land under PREFIX_SHARE). So on
+    # a running node opec render SrcMisses and the OPERATIVE renderer is
+    # re_render_xray, which self-fetches the template from REPO_RAW. That fetch is
+    # BOUNDED (curl --max-time 15 in channel-render-lib.sh), so the added work
+    # stays well within the unit's TimeoutStartSec=120. opec only wins on a
+    # checkout / reconcile node that carries a template at the canonical
+    # PREFIX_SHARE location — which is why we resolve there (the way hydrate.sh and
+    # reconcile.sh do), NOT ${PREFIX_SBIN} (which never holds a *.tpl). Either path
+    # is gated on the on-disk OUTCOME below, never on the render's swallowed exit.
+    #
+    # Noted (adjacent, pre-existing — do NOT fix in this task): the
+    # channels_version block above still passes the never-populated
+    # ${PREFIX_SBIN}/xray-client.json.tpl path (~refresh.sh:295) and has the same
+    # dead-opec / curl-fallback behavior — track as a separate follow-up.
+    _rot_share="${OXPULSE_PREFIX_SHARE:-${PREFIX_SHARE:-/usr/local/share}}/oxpulse-partner-edge"
+    _rot_tpl="${_rot_share}/xray-client.json.tpl"
+    _rot_lib="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
+    # shellcheck source=/dev/null
+    [[ -f "$_rot_lib" ]] && source "$_rot_lib"   # provides re_render_xray fallback
+    unset _rot_lib
+    _rot_xray_cfg="${PREFIX_ETC}/xray-client.json"
+    # shellcheck disable=SC2034  # CHANNELS_FAILED consumed by render_channel_soft internals
+    CHANNELS_FAILED=()
+    # Pre-render backup of the live xray-client.json. re_render_xray (the OPERATIVE
+    # renderer on a normal node, per the path-resolution note above) OVERWRITES this
+    # file with the rotated pubkey AND `docker compose restart xray-client`s the live
+    # container (channel-render-lib.sh:206) — BEFORE the reload/verify gate below. If
+    # that gate then fails and we roll back node-config.json alone, the live container
+    # + xray-client.json are left on the NEW key while node-config.json (the source of
+    # truth) is back on OLD — an INVERTED epoch_apply_gap, and the "keys NOT applied"
+    # rollback log would be a lie. We capture our OWN deterministic backup here (not
+    # re_render_xray's timestamped .bak, whose exact name we cannot predict) so the
+    # rollback paths can restore both the file and the running container.
+    XRAY_ROT_BACKUP=""
+    if [[ -f "$_rot_xray_cfg" ]]; then
+        XRAY_ROT_BACKUP="${_rot_xray_cfg}.rotbak.$$.$(date +%s)"
+        cp -a "$_rot_xray_cfg" "$XRAY_ROT_BACKUP" 2>/dev/null || XRAY_ROT_BACKUP=""
+    fi
+    # Rollback helper — restore xray-client.json from the pre-render backup, and
+    # (arg "restart") re-restart the xray container so the LIVE container matches the
+    # restored OLD config, undoing re_render_xray's restart-with-the-new-key. Mirrors
+    # re_render_xray's own restart command exactly (cd "$PREFIX_ETC" && docker compose
+    # restart xray-client) so both renderers converge on the OLD config. Uses the
+    # literal path (not $_rot_xray_cfg, which is unset on the success path before these
+    # rollback sites run) and consumes XRAY_ROT_BACKUP once (single rollback per run).
+    # Honest message for a rollback whose OWN restore mv failed (the "rollback of a
+    # rollback" case). Repeated at all three rollback call sites — defined once.
+    _ROT_ROLLBACK_INCOMPLETE_MSG="rollback INCOMPLETE — could not restore xray-client.json from backup (see partner_edge_reality_rollback_failure_total); node left in inverted state, MANUAL upgrade.sh required; new keys NOT applied"
+    _rot_rollback_xray() {
+        local _do_restart="${1:-}"
+        local _xray="${PREFIX_ETC}/xray-client.json"
+        [[ -n "${XRAY_ROT_BACKUP:-}" && -f "$XRAY_ROT_BACKUP" ]] || return 0
+        # Finding 2 (MEDIUM): do NOT swallow an mv failure. A cross-device rename
+        # (mount change), full disk, or perms error here leaves xray-client.json on
+        # the BAD (new / half-rendered) pubkey while node-config.json is reverted to
+        # OLD — an inverted epoch_apply_gap. Returning 0 (as before) let the caller
+        # print "rollback complete" over a node that was NOT recovered. Emit a metric
+        # + ERROR log and return non-zero so the failure is LOUD and the caller dies
+        # with the honest message instead of a false success.
+        if ! mv -f "$XRAY_ROT_BACKUP" "$_xray" 2>/dev/null; then
+            log "ERROR: rollback FAILED to restore xray-client.json from $XRAY_ROT_BACKUP (mv failed — cross-device / disk-full / perms); xray-client.json left in BAD state"
+            emit_metric "partner_edge_reality_rollback_failure_total" \
+                "partner_id=\"${NODE_ID}\"" "1"
+            XRAY_ROT_BACKUP=""
+            return 1
+        fi
+        XRAY_ROT_BACKUP=""
+        log "  rollback: restored xray-client.json from pre-render backup"
+        if [[ "$_do_restart" == "restart" ]]; then
+            ( cd "$PREFIX_ETC" && docker compose restart xray-client 2>>"$LOG_FILE" || true )
+            log "  rollback: re-restarted xray container onto restored config"
+        fi
+        return 0
+    }
+    # Best-effort render, CONTAINED in a subshell. We neither trust nor propagate
+    # its exit status, for TWO distinct reasons:
+    #  1. Soft-fail: re_render_xray's soft paths (template fetch failure, missing
+    #     node-config fields/file) warn and `return 0` WITHOUT writing a new config,
+    #     and the render_channel_soft "lib not found" fallback returns that code too
+    #     — so a 0 exit does NOT prove the pubkey landed.
+    #  2. Hard die (Finding 1, HIGH): re_render_xray ALSO has a hard `die`
+    #     (channel-render-lib.sh:196, "jq xmux strip failed — refusing to install
+    #     half-stripped config") that `exit 1`s the CURRENT process. Called inline,
+    #     that die would abort mid-rotation — leaving node-config.json patched to the
+    #     NEW pubkey while xray-client.json stays STALE, and SKIPPING both the rollback
+    #     and the VERSION_FILE-not-persisted guard below (an inverted epoch_apply_gap,
+    #     the exact class this task closes). The subshell confines that exit to the
+    #     subshell, so control ALWAYS reaches the on-disk OUTCOME gate below — which
+    #     then drives the SAME rollback path (restore node-config.json + _rot_rollback_xray
+    #     + no VERSION_FILE) as a reload failure. Atomic: node-config.json and
+    #     xray-client.json both advance to the new pubkey, or NEITHER does.
+    (
+        render_channel_soft xray "$_rot_tpl" "$_rot_xray_cfg" 2>/dev/null \
+            || { declare -f re_render_xray >/dev/null 2>&1 && re_render_xray; }
+    ) || true
+    unset _rot_tpl _rot_share
+    # Outcome verification: the rotated pubkey MUST now be on disk in the file
+    # the xray container mounts. This is the SAME comparison the applied-vs-written
+    # detector performs — gating rollback on the outcome (not the render function's
+    # exit code) closes the epoch_apply_gap even when the renderer swallows its
+    # own failure and returns 0.
+    _rot_applied_pub=$(jq -r '.outbounds[0].streamSettings.realitySettings.publicKey // empty' "$_rot_xray_cfg" 2>/dev/null || true)
+    if [[ -n "$_rot_applied_pub" && "$_rot_applied_pub" == "$NEW_PUB" ]]; then
+        log "xray-client.json re-rendered with rotated Reality pubkey"
+    else
+        # Hard-fail: mirror the reload-failure rollback. Do NOT persist the new
+        # version — else tomorrow's run sees version==NEW and never retries the
+        # broken render, leaving handshakes down until a manual upgrade.sh.
+        log "xray re-render did NOT apply rotated pubkey (on-disk=${_rot_applied_pub:0:16}... expected=${NEW_PUB:0:16}...) — restoring $BACKUP, version NOT persisted"
+        mv "$BACKUP" "$NODE_CFG"
+        # Restore the file only — the render did not land the new pubkey, so on this
+        # path the container was never restarted with a new key (re_render_xray's
+        # restart is after its write; opec never restarts). No container restart needed.
+        _rot_rollback_xray || die "$_ROT_ROLLBACK_INCOMPLETE_MSG"
+        die "rollback complete; new keys NOT applied (xray render did not land new pubkey)"
+    fi
+    unset _rot_applied_pub _rot_xray_cfg
+
     log "reloading oxpulse-partner-edge.service"
     if systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE"; then
         log "reload OK"
     else
         log "reload FAILED — restoring $BACKUP"
         mv "$BACKUP" "$NODE_CFG"
+        # Render SUCCEEDED before this point (verified above), so re_render_xray has
+        # already written the new pubkey to xray-client.json and restarted the live
+        # container onto it. Restore the file AND re-restart so the container tracks
+        # the rolled-back node-config.json — otherwise the "keys NOT applied" claim
+        # below is false and the node runs an inverted epoch_apply_gap.
+        _rot_rollback_xray restart || die "$_ROT_ROLLBACK_INCOMPLETE_MSG"
         systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE" || true
         die "rollback complete; new keys NOT applied"
     fi
@@ -843,9 +990,36 @@ if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/nul
     else
         log "post-reload: service NOT active — restoring backup"
         mv "$BACKUP" "$NODE_CFG"
+        # Same as the reload-failure path: the render already landed the new pubkey and
+        # restarted the container. Restore the file AND re-restart onto the OLD config
+        # so on-disk + live state agree with the rolled-back node-config.json.
+        _rot_rollback_xray restart || die "$_ROT_ROLLBACK_INCOMPLETE_MSG"
         systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE" || true
         die "rollback complete after failed verify"
     fi
+
+    # Detector (T3 observability): applied-vs-written gauge. After the reload the
+    # live xray-client.json pubkey MUST equal node-config.json's. A mismatch means
+    # the container is (or will be) mounting a stale config — the epoch_apply_gap
+    # class this fix closes. Gated to managed nodes (inside the systemctl branch)
+    # so custom-stack nodes — which do NOT install this service and may keep an
+    # xray-client.json with a different schema — never emit a spurious gauge=0.
+    _det_xray="${PREFIX_ETC}/xray-client.json"
+    if [[ -f "$_det_xray" ]]; then
+        _live_pub=$(jq -r '.outbounds[0].streamSettings.realitySettings.publicKey // empty' "$_det_xray" 2>/dev/null || true)
+        _cfg_pub=$(jq -r '.reality_public_key // empty' "$NODE_CFG" 2>/dev/null || true)
+        if [[ -n "$_live_pub" && "$_live_pub" == "$_cfg_pub" ]]; then
+            emit_metric "partner_edge_reality_pubkey_applied" "partner_id=\"${NODE_ID}\"" "1"
+        else
+            emit_metric "partner_edge_reality_pubkey_applied" "partner_id=\"${NODE_ID}\"" "0"
+            log "WARNING: reality pubkey mismatch after rotation — xray-client.json=${_live_pub:0:16}... node-config=${_cfg_pub:0:16}... (stale mount / render regression)"
+        fi
+        unset _live_pub _cfg_pub
+    fi
+    unset _det_xray
+    # Rotation committed (render + reload + verify all passed) — drop the pre-render
+    # xray backup so we do not accumulate .rotbak files across quarterly rotations.
+    [[ -n "${XRAY_ROT_BACKUP:-}" ]] && { rm -f "$XRAY_ROT_BACKUP" 2>/dev/null || true; XRAY_ROT_BACKUP=""; }
 else
     log "rotation: oxpulse-partner-edge.service not installed — skipping reload (custom stack node)"
 fi
