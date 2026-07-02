@@ -59,10 +59,14 @@ const I1_FORBIDDEN_CHARS: &[char] = &['\n', '\r', '[', ']'];
 /// Reject an I1 (InitString) value that carries any conf-injection primitive.
 ///
 /// Public so the splice site (`conf_merge::merge_obfuscation_params`) shares this
-/// single grammar authority rather than re-deriving the charset. A rejection is a
-/// hostile-central / MITM signal — the caller SHOULD bump
-/// `awg_params_agent_param_rejected_total{field="i1"}` (Task 12 exporter) and
-/// alert critical.
+/// single grammar authority rather than re-deriving the charset.
+///
+/// A rejection is a hostile-central / MITM signal. This function's contract is to
+/// reject and to NAME the field in the returned error — the error carries the
+/// stable `field=i1` marker so a log/metrics detector can key on it. The dedicated
+/// `awg_params_agent_param_rejected_total{field="i1"}` counter and its critical
+/// alert are NOT wired by this crate; that exporter is Task 12 (which consumes the
+/// named-field error). No counter is bumped here.
 pub fn validate_i1(value: &str) -> Result<()> {
     if let Some(bad) = value.chars().find(|c| I1_FORBIDDEN_CHARS.contains(c)) {
         return Err(anyhow!(
@@ -147,7 +151,10 @@ mod tests {
     #[test]
     fn validate_accepts_none_and_empty_i1() {
         assert!(params_with_i1(None).validate().is_ok(), "None must pass");
-        assert!(params_with_i1(Some("")).validate().is_ok(), "empty must pass");
+        assert!(
+            params_with_i1(Some("")).validate().is_ok(),
+            "empty must pass"
+        );
         assert!(validate_i1("").is_ok());
     }
 
