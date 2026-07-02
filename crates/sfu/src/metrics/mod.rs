@@ -397,6 +397,26 @@ pub struct SfuMetrics {
     /// mobile-heavy rooms; spike above 100/s may indicate a peer advertising
     /// only bogon candidates (ICE failure scenario).
     pub udp_bogon_dest_dropped_total: IntCounterVec,
+
+    // ── T9 (2026-07-01 bug-hunt): browser client_ws admission cap ────────────
+    /// WS upgrades rejected at the `client_ws` admission gate, labelled by
+    /// `reason`. Only `at_capacity` is emitted today (active sessions ≥
+    /// [`crate::config::max_participants`]); the label stays open so a
+    /// future admission-gate reason (e.g. a per-room cap) doesn't need a
+    /// metric rename.
+    ///
+    /// Closes the gap the relay-dial path already closed with
+    /// `RELAY_MAX_CONCURRENT` (`main.rs`'s semaphore on cascade-relay
+    /// dials) — the browser-facing `client_ws_upgrade` path admitted every
+    /// valid-token upgrade unconditionally, so a burst of valid tokens had
+    /// no ceiling against the single-task `udp_loop`'s forwarding budget.
+    ///
+    /// Alert: `rate(sfu_sfu_admission_rejected_total[5m]) > 0` sustained →
+    /// this node is at its participant cap; shard/route load away rather
+    /// than raising the cap blindly (raising it revives the O(N) demux
+    /// quadratic-cost risk — that redesign is a separate escalation, not
+    /// this counter's job).
+    pub sfu_admission_rejected_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -1084,6 +1104,23 @@ impl SfuMetrics {
                 .get();
         }
 
+        // ── T9: browser client_ws admission cap ────────────────────────────────
+        let sfu_admission_rejected_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_admission_rejected_total",
+                "client_ws WS upgrades rejected by the admission gate, by reason. \
+                 reason=at_capacity: active_sessions >= SFU_MAX_PARTICIPANTS. \
+                 T9 2026-07-01 bug-hunt (resource_exhaustion/high) — mirrors the \
+                 relay-dial RELAY_MAX_CONCURRENT semaphore on the browser path.",
+            ),
+            &["reason"],
+        )
+        .context("sfu_admission_rejected_total")?);
+        // Pre-touch so the alert baseline is 0 at startup, not absent.
+        let _ = sfu_admission_rejected_total
+            .with_label_values(&["at_capacity"])
+            .get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1151,6 +1188,7 @@ impl SfuMetrics {
             sfu_bwe_hint_registry_mutex_poisoned_total,
             sfu_bwe_hint_rate_limit_min_interval_ms,
             udp_bogon_dest_dropped_total,
+            sfu_admission_rejected_total,
         })
     }
 
