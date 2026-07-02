@@ -5,7 +5,9 @@
 #   {{PARTNER_ID}} {{PARTNER_DOMAIN}} {{BACKEND_ENDPOINT}}
 #   {{TURN_SECRET}} {{REALITY_UUID}} {{REALITY_PUBLIC_KEY}} {{REALITY_SHORT_ID}}
 #   {{REALITY_SERVER_NAME}} {{PUBLIC_IP}} {{PRIVATE_IP}} {{IMAGE_VERSION}}
-#   {{SFU_UDP_PORT}} {{SFU_METRICS_PORT}} {{SFU_SIGNING_PUBLIC_KEY}}
+#   {{SFU_UDP_PORT}} {{SFU_METRICS_PORT}}
+# SFU_SIGNING_PUBLIC_KEY is NOT a template placeholder — the sfu service reads it
+# from env_file (sfu-keys.env), refreshed daily by oxpulse-partner-edge-refresh.sh.
 #   {{SIGNALING_SFU_SECRET}}
 
 name: oxpulse-partner-edge
@@ -113,6 +115,27 @@ services:
     network_mode: host
     depends_on:
       - caddy
+    # Phase 2: Ed25519 signing pubkey for asymmetric relay-JWT verification is
+    # supplied via env_file — NOT a baked `environment:` literal. A literal is
+    # fixed at container creation and can never track a central key rotation, so
+    # after any rotation the SFU would pin the stale pubkey forever and every
+    # relay JWT would silently fall back to HS256 (epoch_apply_gap). The compose
+    # CLI reads this file on the host at (re)creation; oxpulse-partner-edge-refresh.sh
+    # rewrites it daily from /api/partner/keys and recreates the sfu service on
+    # change, so a rotation propagates within one refresh cycle.
+    #   - Absolute /var/lib path: compose runs from /etc/oxpulse-partner-edge
+    #     (WorkingDirectory in oxpulse-partner-edge.service), but the file lives
+    #     in the runtime state dir written by install (opec secrets
+    #     sfu-signing-key) and by the daily refresh (PREFIX_LIB).
+    #   - required: false — the whole stack must still boot when the key has not
+    #     yet been provisioned (opec Ok-returns without writing an empty key).
+    #     The SFU then falls back to HS256 / SIGNALING_SFU_SECRET, matching the
+    #     previous empty-literal behaviour, until refresh writes the key + recreates.
+    #     (env_file object form requires Docker Compose v2.24+, shipped by
+    #     get.docker.com which install.sh uses.)
+    env_file:
+      - path: /var/lib/oxpulse-partner-edge/sfu-keys.env
+        required: false
     environment:
       # SFU_BIND_ADDRESS stays at 0.0.0.0 because the UDP media socket MUST
       # listen on the public NIC for WebRTC ICE host candidates to be routable.
@@ -144,10 +167,9 @@ services:
       RELAY_JWT_SECRET: "{{RELAY_JWT_SECRET}}"
       SFU_RELAY_API_PORT: "8912"
       PARTNER_ID: "{{PARTNER_ID}}"
-      # Phase 2: Ed25519 public key for asymmetric relay JWT verification.
-      # Fetched from /api/partner/keys at install time; refreshed daily by
-      # oxpulse-partner-edge-refresh.sh (written to sfu-keys.env).
-      SFU_SIGNING_PUBLIC_KEY: "{{SFU_SIGNING_PUBLIC_KEY}}"
+      # SFU_SIGNING_PUBLIC_KEY is injected from env_file (sfu-keys.env), NOT here.
+      # A value under `environment:` would override env_file (compose precedence)
+      # and re-introduce the stale-key bug, so it MUST NOT be listed in this block.
       # Phase 7 M4.A5 — client-facing WS endpoint /sfu/ws/{room_id}.
       # Caddy reverse_proxies to host.docker.internal:8920 (see Caddyfile).
       # The endpoint binds only when SIGNALING_SFU_SECRET is non-empty —
