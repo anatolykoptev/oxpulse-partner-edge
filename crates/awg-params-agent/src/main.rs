@@ -31,6 +31,7 @@ mod agent;
 mod client;
 mod conf_merge;
 mod error;
+mod metrics;
 mod params;
 mod state;
 

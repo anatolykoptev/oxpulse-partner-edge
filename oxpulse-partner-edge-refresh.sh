@@ -65,6 +65,12 @@ die()  { log "ERR $*"; exit 1; }
 # secret writes elsewhere in this script). This also makes the counters
 # real monotonic counters (increase()/rate() over the scrape window shows an
 # actual delta) instead of a flat "1" re-written every failing day.
+#
+# T12 independently proposed a per-run truncate-then-append fix for the same
+# duplicate-TYPE-line bug (reset_metrics_file() wiping partner_edge.prom once
+# at script start); superseded by #328's state-file model above, which is
+# strictly better — it also survives ACROSS runs as real monotonic counters,
+# where a per-run truncate would reset every counter to 0 on each invocation.
 emit_metric() {
     local name="$1" labels="$2" delta="$3"
     [[ -d "$TEXTFILE_DIR" ]] || mkdir -p "$TEXTFILE_DIR" 2>/dev/null || return 0
