@@ -1485,7 +1485,13 @@ for _chan in "${_PROVISIONED[@]}"; do
             # not be called bare (without ||) elsewhere in this script.
             _payload=$(probe_ch4 2>/dev/null || printf '{"channel_name":"coturn","channel_rtt_ms":0,"channel_handshake_ok":false,"channel_probe_mode":"error"}')
             ;;
-        ch5*|ch6*)
+        ch0*|naive*|ch5*|ch6*)
+            # ch0 = naive/socks fallback channel (install.sh PROTOCOL_ID_MAP
+            # defaults unmapped protocols, incl. naive, to ch0). No probe_ch0
+            # exists yet — this is a deployed-but-unprobed channel, not a
+            # misroute, so it gets the honest "not yet wired" skip rather
+            # than falling into the "unknown channel" catch-all below. The
+            # real naive health probe is tracked separately (Escalation #3).
             log "$_chan not yet wired on edge — skipping"
             continue
             ;;
