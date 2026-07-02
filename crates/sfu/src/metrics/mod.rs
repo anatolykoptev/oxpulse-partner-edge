@@ -453,6 +453,22 @@ pub struct SfuMetrics {
     /// quadratic-cost risk — that redesign is a separate escalation, not
     /// this counter's job).
     pub sfu_admission_rejected_total: IntCounterVec,
+
+    // ── T13 (2026-07-01 bug-hunt): cascade-relay connect outcome ─────────────
+    /// Successful `connect_relay` calls from the cascade-relay retry loop —
+    /// incremented on the first candidate in a `RelayTask`'s
+    /// `upstream_candidates` list that completes the WS+SDP handshake.
+    pub relay_connect_success_total: IntCounter,
+    /// Cascade-relay tasks where every candidate in `upstream_candidates`
+    /// failed or timed out (main.rs's `MAX_RELAY_CANDIDATES`-bounded retry
+    /// loop). Previously only a `tracing::warn!` on exhaustion — a total
+    /// upstream-hub outage dropped every room relay with zero Grafana
+    /// signal (T13 2026-07-01 bug-hunt, dependency_block/medium).
+    ///
+    /// Alert: compare the rate of this counter against
+    /// `relay_connect_success_total` per edge — a rising exhausted/success
+    /// ratio flags a degraded or unreachable upstream hub.
+    pub relay_candidate_exhausted_total: IntCounter,
 }
 
 impl SfuMetrics {
@@ -1187,6 +1203,23 @@ impl SfuMetrics {
             .with_label_values(&["at_capacity"])
             .get();
 
+        // ── T13 (2026-07-01 bug-hunt): cascade-relay connect outcome ───────────
+        let relay_connect_success_total = reg!(IntCounter::with_opts(Opts::new(
+            "relay_connect_success_total",
+            "Successful connect_relay calls from the cascade-relay retry loop \
+             (first candidate to complete the WS+SDP handshake).",
+        ))
+        .context("relay_connect_success_total")?);
+
+        let relay_candidate_exhausted_total = reg!(IntCounter::with_opts(Opts::new(
+            "relay_candidate_exhausted_total",
+            "Cascade-relay tasks where every upstream candidate failed or \
+             timed out. T13 2026-07-01 bug-hunt (dependency_block/medium) — \
+             previously only a tracing::warn! on exhaustion, invisible to \
+             Grafana during a total upstream-hub outage.",
+        ))
+        .context("relay_candidate_exhausted_total")?);
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1257,6 +1290,8 @@ impl SfuMetrics {
             sfu_bwe_hint_rate_limit_min_interval_ms,
             udp_bogon_dest_dropped_total,
             sfu_admission_rejected_total,
+            relay_connect_success_total,
+            relay_candidate_exhausted_total,
         })
     }
 
