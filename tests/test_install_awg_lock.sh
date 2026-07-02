@@ -165,3 +165,111 @@ _load_awg_globals() {
 	[[ "$output" == *"S2 = 13"* ]]
 	[[ "$output" == *"S4 = 6"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Test 4: LOCK-CONTENDED FAIL-SOFT — when the shared lock is held past the
+# installer's `flock -w 10`, configure_amneziawg must:
+#   (a) leave awg0.conf UNTOUCHED (never a partial unlocked write),
+#   (b) drop a durable `<conf>.rotation-skipped` marker so a scripted /
+#       non-interactive install has an observable trace of the dropped rotation,
+#   (c) NOT falsely claim the agent self-heals identity (the agent only
+#       reconciles obfuscation params, never PrivateKey/Endpoint/Address),
+#   (d) still return 0 so `set -e` does not abort the install and skip
+#       firewall_apply.
+# Reverting the marker/warn-text fix makes (b) or (c) go RED.
+# ---------------------------------------------------------------------------
+@test "lock-contended install skips write, drops a durable marker, and does not falsely claim agent self-heal" {
+	_load_awg_globals
+	local conf_path="$TMP/awg-conf/awg0.conf"
+	local lock_path="${conf_path}.lock"
+	local marker="${conf_path}.rotation-skipped"
+
+	# Pre-seed a DISTINCT OLD identity that must remain byte-untouched on the skip.
+	cat > "$conf_path" <<-OLDCONF
+		[Interface]
+		PrivateKey = OLD-private-key-base64==
+		Address = 192.168.100.42/32
+		Endpoint = 9.9.9.9:51820
+	OLDCONF
+
+	# Competitor holds the shared lock LONGER than the installer's flock -w 10.
+	bash -c 'exec 8>"'"$lock_path"'"; flock 8; sleep 12' &
+	COMP_PID=$!
+
+	# Head start so the competitor provably owns the lock before the installer tries.
+	sleep 0.5
+
+	# Real installer write. Under the fix it blocks ~10s on flock, times out, then
+	# fail-softs (warn + marker + return 0). warn() is stubbed to stdout so the
+	# emitted text is asserted below. Only sleep() is stubbed — flock -w uses its
+	# own internal timeout, so the 10s wait is the REAL contention path.
+	run bash -c "
+		source '$REPO_ROOT/lib/install-awg.sh'
+		log()       { :; }
+		warn()      { echo \"WARN: \$*\"; }
+		die()       { echo \"DIE: \$*\" >&2; exit 1; }
+		systemctl() { :; }
+		awg()       { :; }
+		sleep()     { :; }
+		$(declare -p AWG_PRIV_PATH AWG_PUB_PATH AWG_MOTHERLY_PUBKEY AWG_MOTHERLY_ENDPOINT \
+			AWG_MOTHERLY_AWG_IP AWG_ALLOCATED_IP AWG_JC AWG_JMIN AWG_JMAX \
+			AWG_S1 AWG_S2 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4 \
+			AWG_CONF_DIR AWG_LISTEN_PORT)
+		configure_amneziawg
+	"
+
+	# Competitor no longer needed; reap it now (don't wait its full 12s).
+	kill "$COMP_PID" 2>/dev/null
+	COMP_PID=""
+
+	# (d) Fail-soft: returns 0 so the install continues to firewall_apply.
+	[ "$status" -eq 0 ]
+
+	# (a) Conf untouched — OLD identity intact, no FRESH bytes written unlocked.
+	grep -q 'PrivateKey = OLD-private-key-base64==' "$conf_path"
+	! grep -q 'FRESH-private-key-base64==' "$conf_path"
+
+	# (b) Durable marker written and points the operator at the real recovery path.
+	[ -f "$marker" ]
+	grep -q 're-run' "$marker"
+
+	# (c) Warn text does NOT claim the agent reconciles (identity is NOT self-healing);
+	#     it DOES tell the operator to re-run.
+	[[ "$output" != *"reconciles on its next poll"* ]]
+	[[ "$output" == *"re-run the install"* ]]
+	[[ "$output" == *"NOT identity"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Test 5: the successful write path clears any stale skip marker so a prior
+# contended run's marker cannot linger as a false "rotation dropped" signal.
+# ---------------------------------------------------------------------------
+@test "successful configure_amneziawg clears a stale rotation-skipped marker" {
+	_load_awg_globals
+	local conf_path="$TMP/awg-conf/awg0.conf"
+	local marker="${conf_path}.rotation-skipped"
+
+	# Simulate a stale marker left by an earlier lock-contended run.
+	: > "$marker"
+	[ -f "$marker" ]
+
+	run bash -c "
+		source '$REPO_ROOT/lib/install-awg.sh'
+		log()       { :; }
+		warn()      { :; }
+		die()       { echo \"DIE: \$*\" >&2; exit 1; }
+		systemctl() { :; }
+		awg()       { :; }
+		sleep()     { :; }
+		$(declare -p AWG_PRIV_PATH AWG_PUB_PATH AWG_MOTHERLY_PUBKEY AWG_MOTHERLY_ENDPOINT \
+			AWG_MOTHERLY_AWG_IP AWG_ALLOCATED_IP AWG_JC AWG_JMIN AWG_JMAX \
+			AWG_S1 AWG_S2 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4 \
+			AWG_CONF_DIR AWG_LISTEN_PORT)
+		configure_amneziawg
+	"
+	[ "$status" -eq 0 ]
+
+	# Fresh write succeeded → conf has FRESH identity and the stale marker is gone.
+	grep -q 'PrivateKey = FRESH-private-key-base64==' "$conf_path"
+	[ ! -f "$marker" ]
+}

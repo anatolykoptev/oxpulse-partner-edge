@@ -85,10 +85,16 @@ pub struct AgentConfig {
 pub struct AgentLoop {
     cfg: AgentConfig,
     client: AgentClient,
-    /// Interim, process-lifetime conflict counter mirrored to the textfile
-    /// collector. Seeded from the existing `.prom` file at startup so the
-    /// exported value stays monotonic across daemon restarts.
-    conf_write_conflicts: AtomicU64,
+    /// Interim, process-lifetime conflict counters — one per [`ConflictReason`],
+    /// mirrored to the textfile collector as distinct labeled series. Seeded from
+    /// the existing `.prom` file at startup so the exported values stay monotonic
+    /// across daemon restarts. Split by reason so an operator (or an alert rule)
+    /// can tell a total write block (`lock_timeout`: the agent never touched
+    /// awg0.conf) from a routine one-poll apply deferral (`apply_superseded`: the
+    /// agent wrote fine, only the kernel apply slipped a poll) — the two are NOT
+    /// the same failure and must never share one series.
+    conf_write_conflicts_lock_timeout: AtomicU64,
+    conf_write_conflicts_apply_superseded: AtomicU64,
 }
 
 impl AgentLoop {
@@ -98,7 +104,8 @@ impl AgentLoop {
         Ok(Self {
             cfg,
             client,
-            conf_write_conflicts: AtomicU64::new(seed),
+            conf_write_conflicts_lock_timeout: AtomicU64::new(seed.lock_timeout),
+            conf_write_conflicts_apply_superseded: AtomicU64::new(seed.apply_superseded),
         })
     }
 
@@ -169,7 +176,8 @@ impl AgentLoop {
                     lock = ?self.cfg.awg_conf_lock_path,
                     "awg0.conf lock held by another writer — skipping this tick, will retry next poll"
                 );
-                self.record_conf_write_conflict().await;
+                self.record_conf_write_conflict(ConflictReason::LockTimeout)
+                    .await;
                 return Ok(());
             }
         };
@@ -197,7 +205,8 @@ impl AgentLoop {
                     "awg0.conf superseded by another writer after our locked write — \
                      skipping kernel apply this tick, will re-merge next poll"
                 );
-                self.record_conf_write_conflict().await;
+                self.record_conf_write_conflict(ConflictReason::ApplySuperseded)
+                    .await;
                 return Ok(());
             }
             Err(e) => {
@@ -360,19 +369,40 @@ impl AgentLoop {
             .context("spawn_blocking for conf lock acquire")?
     }
 
-    /// Bump the interim conflict counter and best-effort mirror it to the
-    /// node_exporter textfile collector. Non-fatal: a failed textfile write is
-    /// logged at debug and does not affect the loop.
+    /// Bump the interim conflict counter for `reason` and best-effort mirror the
+    /// full labeled series set to the node_exporter textfile collector. Non-fatal:
+    /// a failed textfile write is logged at debug and does not affect the loop.
+    ///
+    /// `reason` keeps the two skip mechanics on distinct Prometheus series
+    /// (`lock_timeout` vs `apply_superseded`) so they can never be conflated —
+    /// see [`ConflictReason`]. We snapshot BOTH atomics after the bump and always
+    /// re-emit the complete pair so the textfile stays self-consistent regardless
+    /// of which reason fired.
     ///
     /// The textfile mirror is blocking I/O (create_dir_all + temp write + fsync +
     /// rename + dir-fsync), so it is offloaded to the blocking pool exactly like
     /// [`write_conf_atomic`] — a fsync stalling under the ARM box's disk/PSI
-    /// pressure must not block a tokio worker thread. The atomic counter bump is
-    /// cheap and stays inline.
-    async fn record_conf_write_conflict(&self) {
-        let value = self.conf_write_conflicts.fetch_add(1, Ordering::Relaxed) + 1;
+    /// pressure must not block a tokio worker thread. The atomic counter bumps are
+    /// cheap and stay inline.
+    async fn record_conf_write_conflict(&self, reason: ConflictReason) {
+        match reason {
+            ConflictReason::LockTimeout => {
+                self.conf_write_conflicts_lock_timeout
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            ConflictReason::ApplySuperseded => {
+                self.conf_write_conflicts_apply_superseded
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let counts = ConflictCounts {
+            lock_timeout: self.conf_write_conflicts_lock_timeout.load(Ordering::Relaxed),
+            apply_superseded: self
+                .conf_write_conflicts_apply_superseded
+                .load(Ordering::Relaxed),
+        };
         let dir = self.cfg.textfile_dir.clone();
-        match tokio::task::spawn_blocking(move || write_conflict_metric(&dir, value)).await {
+        match tokio::task::spawn_blocking(move || write_conflict_metric(&dir, counts)).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => debug!(error = %e, "conflict textfile metric write failed (non-fatal)"),
             Err(e) => {
@@ -507,6 +537,14 @@ struct ConfIdentity {
 }
 
 /// Stat `path` into a `ConfIdentity`.
+///
+/// Deliberately a plain synchronous `stat(2)`, called directly from async code
+/// (`merge_and_write_conf_locked` and `conf_changed_since`) — unlike the write
+/// path (`write_conf_atomic` / `write_conflict_metric`), which is offloaded to
+/// `spawn_blocking`. That offload exists because an `fsync` can stall under the
+/// ARM box's disk/PSI pressure and must not block a tokio worker thread; a
+/// metadata read has no writeback and cannot stall that way, so the
+/// `spawn_blocking` hop is not warranted here.
 fn conf_identity(path: &Path) -> Result<ConfIdentity> {
     let m = std::fs::metadata(path).with_context(|| format!("stat {:?}", path))?;
     Ok(ConfIdentity {
@@ -562,17 +600,79 @@ fn acquire_conf_lock_blocking(lock_path: &Path, timeout: Duration) -> Result<Opt
     }
 }
 
-/// Best-effort write of the interim conflict counter as a node_exporter
-/// textfile-collector line. Atomic replace (temp + rename) so the collector
-/// never scrapes a partially written file.
-fn write_conflict_metric(dir: &Path, value: u64) -> Result<()> {
+/// Why the agent skipped an awg0.conf write/apply this tick. Each maps to its
+/// own `reason=` label on [`CONF_CONFLICT_METRIC`] so the two mechanics stay
+/// distinguishable — they represent very different operational states:
+///   * `LockTimeout` — the agent could not acquire the shared lock within the
+///     timeout and never touched awg0.conf at all. Sustained occurrence is
+///     escalation-worthy (a writer is monopolizing the lock).
+///   * `ApplySuperseded` — the agent DID write under the lock, but the installer
+///     superseded the file before the (deliberately unlocked) kernel apply, so
+///     only the apply was deferred one poll. Expected and self-healing during any
+///     install/rotation window; routine, not escalation-worthy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ConflictReason {
+    LockTimeout,
+    ApplySuperseded,
+}
+
+impl ConflictReason {
+    /// All reasons, so callers (seed + emit) enumerate the full label set.
+    const ALL: [ConflictReason; 2] = [ConflictReason::LockTimeout, ConflictReason::ApplySuperseded];
+
+    /// The `reason=` label value on the Prometheus series.
+    fn label(self) -> &'static str {
+        match self {
+            ConflictReason::LockTimeout => "lock_timeout",
+            ConflictReason::ApplySuperseded => "apply_superseded",
+        }
+    }
+
+    /// Fully-qualified series prefix, e.g.
+    /// `awg_params_agent_conf_write_conflicts_total{reason="lock_timeout"}`.
+    fn series_prefix(self) -> String {
+        format!("{CONF_CONFLICT_METRIC}{{reason=\"{}\"}}", self.label())
+    }
+}
+
+/// Snapshot of the per-reason conflict counters, emitted as one self-consistent
+/// pair of labeled series and re-seeded from disk on restart.
+#[derive(Clone, Copy, Default)]
+struct ConflictCounts {
+    lock_timeout: u64,
+    apply_superseded: u64,
+}
+
+impl ConflictCounts {
+    fn set(&mut self, reason: ConflictReason, value: u64) {
+        match reason {
+            ConflictReason::LockTimeout => self.lock_timeout = value,
+            ConflictReason::ApplySuperseded => self.apply_superseded = value,
+        }
+    }
+}
+
+/// Best-effort write of the interim conflict counters as node_exporter
+/// textfile-collector lines — one `reason=`-labeled series per [`ConflictReason`].
+/// Atomic replace (temp + rename) so the collector never scrapes a partially
+/// written file.
+fn write_conflict_metric(dir: &Path, counts: ConflictCounts) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("create textfile dir {:?}", dir))?;
+    // HELP stays a single physical line (the `\`-newline continuations strip the
+    // newline + leading whitespace) and describes BOTH reasons, so the emitted
+    // text never claims only one mechanic.
     let body = format!(
-        "# HELP {name} Ticks where the agent could not acquire the awg0.conf lock within the timeout and skipped.\n\
+        "# HELP {name} awg0.conf writes/applies the agent skipped due to a concurrent writer, by reason. \
+reason=\"lock_timeout\": could not acquire the shared lock within the timeout, so the agent never wrote awg0.conf (retries next poll). \
+reason=\"apply_superseded\": wrote under the lock, but the installer superseded the file before the unlocked kernel apply, so only the apply was deferred to the next poll (self-healing).\n\
          # TYPE {name} counter\n\
-         {name} {value}\n",
+         {lock_timeout_series} {lock_timeout}\n\
+         {apply_superseded_series} {apply_superseded}\n",
         name = CONF_CONFLICT_METRIC,
-        value = value,
+        lock_timeout_series = ConflictReason::LockTimeout.series_prefix(),
+        lock_timeout = counts.lock_timeout,
+        apply_superseded_series = ConflictReason::ApplySuperseded.series_prefix(),
+        apply_superseded = counts.apply_superseded,
     );
     let mut tmp =
         NamedTempFile::new_in(dir).with_context(|| format!("temp textfile in {:?}", dir))?;
@@ -582,35 +682,40 @@ fn write_conflict_metric(dir: &Path, value: u64) -> Result<()> {
     tmp.persist(dir.join(CONF_CONFLICT_PROM_FILE))
         .context("persist conflict textfile")?;
     // dir-fsync for parity with write_conf_atomic — best-effort durability of the
-    // rename across a crash. Non-fatal (the counter reseeds from disk on restart).
+    // rename across a crash. Non-fatal (the counters reseed from disk on restart).
     if let Ok(d) = std::fs::File::open(dir) {
         let _ = d.sync_all();
     }
     Ok(())
 }
 
-/// Seed the process-lifetime conflict counter from the existing textfile so the
-/// exported value stays monotonic across daemon restarts. Best-effort: any
-/// read/parse failure yields 0 (fresh start).
-fn seed_conflict_counter(dir: &Path) -> u64 {
+/// Seed the process-lifetime conflict counters from the existing textfile so the
+/// exported values stay monotonic across daemon restarts. Best-effort: any
+/// read/parse failure yields 0 for the affected reason (fresh start). Parses each
+/// `reason=`-labeled series independently so a restart can never fold one reason's
+/// history into another.
+fn seed_conflict_counter(dir: &Path) -> ConflictCounts {
+    let mut counts = ConflictCounts::default();
     let path = dir.join(CONF_CONFLICT_PROM_FILE);
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return 0;
+        return counts;
     };
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with('#') {
             continue;
         }
-        if let Some(rest) = line.strip_prefix(CONF_CONFLICT_METRIC) {
-            if let Some(tok) = rest.split_whitespace().next() {
-                if let Ok(n) = tok.parse::<u64>() {
-                    return n;
+        for reason in ConflictReason::ALL {
+            if let Some(rest) = line.strip_prefix(reason.series_prefix().as_str()) {
+                if let Some(tok) = rest.split_whitespace().next() {
+                    if let Ok(n) = tok.parse::<u64>() {
+                        counts.set(reason, n);
+                    }
                 }
             }
         }
     }
-    0
+    counts
 }
 
 /// Decide whether to fire the post-apply unit restart hook.
@@ -904,15 +1009,139 @@ mod conf_lock_tests {
             "conf must be untouched when the lock could not be acquired"
         );
 
-        // tick() calls record_conf_write_conflict on the skip path.
-        agent.record_conf_write_conflict().await;
+        // tick() calls record_conf_write_conflict(LockTimeout) on this skip path.
+        agent
+            .record_conf_write_conflict(ConflictReason::LockTimeout)
+            .await;
         let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
         assert!(
-            prom.contains(&format!("{CONF_CONFLICT_METRIC} 1")),
-            "conflict counter textfile must be emitted. Got:\n{prom}"
+            prom.contains(&format!(
+                "{CONF_CONFLICT_METRIC}{{reason=\"lock_timeout\"}} 1"
+            )),
+            "lock_timeout conflict series must be emitted with value 1. Got:\n{prom}"
+        );
+        // The other reason must exist as its own series, untouched (0) — a
+        // lock-timeout skip must NOT bump apply_superseded.
+        assert!(
+            prom.contains(&format!(
+                "{CONF_CONFLICT_METRIC}{{reason=\"apply_superseded\"}} 0"
+            )),
+            "apply_superseded series must be present and unbumped by a lock-timeout skip. Got:\n{prom}"
         );
 
         let _ = flock(&holder, FlockOperation::Unlock);
+    }
+
+    // Metric-conflation guard: the two skip mechanics keep DISTINCT reason-labeled
+    // series. Record two lock_timeout skips + one apply_superseded skip via the
+    // REAL record_conf_write_conflict path and assert each series carries only its
+    // own count. Collapsing both reasons into one series (the conflation bug) makes
+    // the 2-vs-1 assertions go RED — the falsification proof for the split.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conflict_counter_keeps_lock_timeout_and_apply_superseded_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let textfile_dir = cfg.textfile_dir.clone();
+        seed_conf(&cfg.awg_conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+        let agent = AgentLoop::new(cfg).unwrap();
+
+        agent
+            .record_conf_write_conflict(ConflictReason::LockTimeout)
+            .await;
+        agent
+            .record_conf_write_conflict(ConflictReason::ApplySuperseded)
+            .await;
+        agent
+            .record_conf_write_conflict(ConflictReason::LockTimeout)
+            .await;
+
+        let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
+        let lines: Vec<&str> = prom.lines().collect();
+        // Each series must appear as a WHOLE line (not a substring) so a stray
+        // newline in the multi-line HELP format string can never masquerade as a
+        // valid series to the node_exporter parser.
+        assert!(
+            lines
+                .contains(&format!("{CONF_CONFLICT_METRIC}{{reason=\"lock_timeout\"}} 2").as_str()),
+            "lock_timeout must count ONLY its own two skips, as its own line. Got:\n{prom}"
+        );
+        assert!(
+            lines.contains(
+                &format!("{CONF_CONFLICT_METRIC}{{reason=\"apply_superseded\"}} 1").as_str()
+            ),
+            "apply_superseded must count ONLY its own one skip, as its own line. Got:\n{prom}"
+        );
+        // Exactly one HELP and one TYPE line for the metric (single-line HELP — a
+        // raw newline in the HELP would produce a second, malformed line).
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with(&format!("# HELP {CONF_CONFLICT_METRIC} ")))
+                .count(),
+            1,
+            "exactly one single-line HELP for the metric. Got:\n{prom}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with(&format!("# TYPE {CONF_CONFLICT_METRIC} ")))
+                .count(),
+            1,
+            "exactly one TYPE line for the metric. Got:\n{prom}"
+        );
+        // HELP text must describe BOTH reasons (not just lock_timeout — the round-3
+        // conflation this split fixes).
+        assert!(
+            prom.contains("reason=\"apply_superseded\": wrote under the lock"),
+            "HELP must document the apply_superseded reason. Got:\n{prom}"
+        );
+    }
+
+    // Restart monotonicity per reason: a fresh AgentLoop seeded from an existing
+    // textfile must resume each reason's count independently, then bump only the
+    // recorded reason from its own seeded base.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conflict_counter_reseeds_each_reason_independently_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let textfile_dir = cfg.textfile_dir.clone();
+        seed_conf(&cfg.awg_conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+
+        // First process lifetime: 3 lock_timeout, 5 apply_superseded.
+        {
+            let agent = AgentLoop::new(base_cfg(dir.path())).unwrap();
+            for _ in 0..3 {
+                agent
+                    .record_conf_write_conflict(ConflictReason::LockTimeout)
+                    .await;
+            }
+            for _ in 0..5 {
+                agent
+                    .record_conf_write_conflict(ConflictReason::ApplySuperseded)
+                    .await;
+            }
+        }
+
+        // Second process lifetime: reseeds from the textfile, then one more
+        // apply_superseded → 3 / 6, proving per-reason seeds are not conflated.
+        let agent2 = AgentLoop::new(base_cfg(dir.path())).unwrap();
+        agent2
+            .record_conf_write_conflict(ConflictReason::ApplySuperseded)
+            .await;
+
+        let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
+        assert!(
+            prom.contains(&format!(
+                "{CONF_CONFLICT_METRIC}{{reason=\"lock_timeout\"}} 3"
+            )),
+            "lock_timeout must resume at its seeded 3 across restart. Got:\n{prom}"
+        );
+        assert!(
+            prom.contains(&format!(
+                "{CONF_CONFLICT_METRIC}{{reason=\"apply_superseded\"}} 6"
+            )),
+            "apply_superseded must resume at seeded 5 then +1 = 6. Got:\n{prom}"
+        );
     }
 
     // Positive control: with no competing writer, the agent acquires the lock,
