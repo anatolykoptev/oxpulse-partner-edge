@@ -84,9 +84,11 @@ pub fn merge_obfuscation_params(conf: &str, params: &AwgParams) -> Result<String
     // newline + `[Peer]` header injects an attacker peer (AllowedIPs=0.0.0.0/0,
     // Endpoint=attacker). TLS+bearer authenticates the connection, NOT the
     // field content — so the guard lives at this splice choke point, the single
-    // path every central-sourced param takes to the kernel. On `Err` the caller
-    // (tick) fails the apply and logs; the Task 12 exporter bumps
-    // `awg_params_agent_param_rejected_total{field="i1"}` (alert critical).
+    // path every central-sourced param takes to the kernel. On `Err` the merge
+    // aborts and the error propagates via `?` to the caller (tick), which logs
+    // it; the error string carries the stable `field=i1` marker. The dedicated
+    // `awg_params_agent_param_rejected_total{field="i1"}` counter + critical alert
+    // are NOT wired here — that exporter is Task 12, keyed on the named-field error.
     params.validate()?;
 
     let replacements: [(&'static str, i64); 10] = [
