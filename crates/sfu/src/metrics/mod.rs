@@ -31,6 +31,12 @@ use prometheus::{
     TextEncoder,
 };
 
+/// T4.3: `algorithm` label value for the Ed25519 (EdDSA) relay-JWT verify path.
+pub const RELAY_JWT_ALG_EDDSA: &str = "eddsa";
+/// T4.3: `algorithm` label value for the deprecated HS256 relay-JWT verify path
+/// (the symmetric fallback the kill-switch can cut once EdDSA rollout completes).
+pub const RELAY_JWT_ALG_HS256: &str = "hs256";
+
 /// All Prometheus handles for the SFU. Cheap to clone (all fields are
 /// `Clone` — prometheus counters are reference-counted internally).
 #[derive(Clone, Debug)]
@@ -153,6 +159,20 @@ pub struct SfuMetrics {
     /// on disconnect. Labels: `dc` only (no `client_id`) — no per-client
     /// scrub required.
     pub chat_relay_active_channels: IntGaugeVec,
+
+    // ── T4.3: relay-JWT verification path (silent_downgrade observability) ────
+    /// Successful relay-JWT verifications on the relay `/relay/connect` and
+    /// client-WS `/sfu/ws/{room_id}` handlers, split by which algorithm
+    /// authenticated the token. Label: `algorithm` ∈ `{eddsa, hs256}`.
+    ///
+    /// `eddsa` is the preferred asymmetric path; `hs256` is the deprecated
+    /// symmetric secret, reached either as the primary verifier (no EdDSA key
+    /// configured) or via the EdDSA→HS256 rollout fallback. A sustained
+    /// `{algorithm=hs256}` rate after EdDSA rollout is complete is the cutover
+    /// signal (alert `warning`) and doubles as an HS256-secret-compromise
+    /// indicator. The `SFU_RELAY_HS256_FALLBACK` kill-switch turns a fleet-wide
+    /// zero-`hs256` observation into an enforced cutover.
+    pub relay_jwt_verify_total: IntCounterVec,
 
     // ── Phase 8 T10: voice DC relay metrics ──────────────────────────────────
     /// Phase 8 T10: bytes written to a subscriber's outbound voice DC.
@@ -594,6 +614,21 @@ impl SfuMetrics {
                     .with_label_values(&[dc, reason])
                     .get();
             }
+        }
+
+        // T4.3: relay-JWT verify path, labeled by algorithm.
+        let relay_jwt_verify_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "relay_jwt_verify_total",
+                "T4.3: successful relay-JWT verifications on the relay-connect and client-WS handlers. Label: algorithm ∈ {eddsa, hs256}. A sustained hs256 rate after EdDSA rollout is the cutover / secret-compromise signal.",
+            ),
+            &["algorithm"],
+        )
+        .context("relay_jwt_verify_total")?);
+        // Pre-touch both algorithm series so the cutover alert evaluates a
+        // baseline of 0 rather than an absent {algorithm=hs256} series.
+        for algorithm in [RELAY_JWT_ALG_EDDSA, RELAY_JWT_ALG_HS256] {
+            let _ = relay_jwt_verify_total.with_label_values(&[algorithm]).get();
         }
 
         let chat_relay_active_channels = reg!(IntGaugeVec::new(
@@ -1118,6 +1153,7 @@ impl SfuMetrics {
             chat_relay_rx_bytes_total,
             chat_relay_dropped_total,
             chat_relay_active_channels,
+            relay_jwt_verify_total,
             voice_relay_tx_bytes_total,
             voice_relay_rx_bytes_total,
             voice_relay_dropped,
