@@ -4,6 +4,7 @@ use crate::{
     client::AgentClient,
     conf_merge::merge_obfuscation_params,
     error::{Context, Result},
+    metrics::{ConflictReason, Metrics},
     params::AwgParams,
     state::{load_state, save_state, AwgState},
 };
@@ -11,7 +12,7 @@ use chrono::Utc;
 use rustix::fs::{flock, FlockOperation};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use std::{
     path::{Path, PathBuf},
@@ -24,16 +25,6 @@ use tracing::{debug, error, info, warn};
 /// Poll interval while waiting for the shared awg0.conf lock (LOCK_EX|LOCK_NB
 /// retry cadence). Mirrors the sub-second granularity of `flock -w`.
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-/// Interim node_exporter textfile-collector metric name for lock-acquire
-/// conflicts. The durable counter lands in the Task 12 exporter; this textfile
-/// line keeps the signal observable until then.
-const CONF_CONFLICT_METRIC: &str = "awg_params_agent_conf_write_conflicts_total";
-
-/// Filename written under `textfile_dir` for the interim conflict counter.
-/// A dedicated file (not shared with partner_edge.prom) so the node_exporter
-/// textfile collector accumulates both without either clobbering the other.
-const CONF_CONFLICT_PROM_FILE: &str = "awg_params_agent.prom";
 
 /// All configuration for the agent loop, parsed from env at startup.
 pub struct AgentConfig {
@@ -69,10 +60,10 @@ pub struct AgentConfig {
     /// Matches the installer's `flock -w 10`. Set via `OXPULSE_AWG_LOCK_TIMEOUT`.
     pub lock_acquire_timeout: Duration,
 
-    /// node_exporter textfile-collector directory for the interim
-    /// `awg_params_agent_conf_write_conflicts_total` counter. Default matches
-    /// `oxpulse-partner-edge-refresh.sh`'s textfile dir; set via
-    /// `OXPULSE_TEXTFILE_DIR`.
+    /// node_exporter textfile-collector directory for every awg-params-agent
+    /// metric (poll failures/success, conf-write conflicts, param rejections
+    /// — see `metrics.rs`). Default matches `oxpulse-partner-edge-refresh.sh`'s
+    /// textfile dir; set via `OXPULSE_TEXTFILE_DIR`.
     pub textfile_dir: PathBuf,
 
     /// **Test hook only.** Injected delay between the locked conf read and the
@@ -85,27 +76,25 @@ pub struct AgentConfig {
 pub struct AgentLoop {
     cfg: AgentConfig,
     client: AgentClient,
-    /// Interim, process-lifetime conflict counters — one per [`ConflictReason`],
-    /// mirrored to the textfile collector as distinct labeled series. Seeded from
-    /// the existing `.prom` file at startup so the exported values stay monotonic
-    /// across daemon restarts. Split by reason so an operator (or an alert rule)
-    /// can tell a total write block (`lock_timeout`: the agent never touched
-    /// awg0.conf) from a routine one-poll apply deferral (`apply_superseded`: the
-    /// agent wrote fine, only the kernel apply slipped a poll) — the two are NOT
-    /// the same failure and must never share one series.
-    conf_write_conflicts_lock_timeout: AtomicU64,
-    conf_write_conflicts_apply_superseded: AtomicU64,
+    /// Task 12 shared metrics/textfile-writer state (poll failures/success,
+    /// conf-write conflicts, param rejections — see `metrics.rs`). `Arc`
+    /// because `AgentClient` also records into it (poll failures/success)
+    /// from its own async methods, independent of `AgentLoop`'s tick.
+    metrics: Arc<Metrics>,
 }
 
 impl AgentLoop {
     pub fn new(cfg: AgentConfig) -> Result<Self> {
-        let client = AgentClient::new(cfg.central_url.clone(), cfg.service_token_path.clone())?;
-        let seed = seed_conflict_counter(&cfg.textfile_dir);
+        let metrics = Arc::new(Metrics::load(&cfg.textfile_dir));
+        let client = AgentClient::new(
+            cfg.central_url.clone(),
+            cfg.service_token_path.clone(),
+            metrics.clone(),
+        )?;
         Ok(Self {
             cfg,
             client,
-            conf_write_conflicts_lock_timeout: AtomicU64::new(seed.lock_timeout),
-            conf_write_conflicts_apply_superseded: AtomicU64::new(seed.apply_superseded),
+            metrics,
         })
     }
 
@@ -329,8 +318,19 @@ impl AgentLoop {
             sleep(self.cfg.test_read_write_delay).await;
         }
 
-        let new_conf =
-            merge_obfuscation_params(&conf_text, params).context("merge obfuscation params")?;
+        let new_conf = match merge_obfuscation_params(&conf_text, params) {
+            Ok(c) => c,
+            Err(e) => {
+                // Task 12: a rejection here carries a `field=<name>` marker
+                // (params.rs's named-field contract for AwgParams::validate)
+                // — surface it as param_rejected_total{field=...} BEFORE
+                // propagating, so a hostile/MITM central is alert-visible,
+                // not just logged. `extract_rejected_field` is a no-op for
+                // any other error shape.
+                self.record_param_rejection(&e).await;
+                return Err(e).context("merge obfuscation params");
+            }
+        };
 
         self.write_conf_atomic(&new_conf)
             .await
@@ -369,46 +369,40 @@ impl AgentLoop {
             .context("spawn_blocking for conf lock acquire")?
     }
 
-    /// Bump the interim conflict counter for `reason` and best-effort mirror the
-    /// full labeled series set to the node_exporter textfile collector. Non-fatal:
-    /// a failed textfile write is logged at debug and does not affect the loop.
-    ///
-    /// `reason` keeps the two skip mechanics on distinct Prometheus series
-    /// (`lock_timeout` vs `apply_superseded`) so they can never be conflated —
-    /// see [`ConflictReason`]. We snapshot BOTH atomics after the bump and always
-    /// re-emit the complete pair so the textfile stays self-consistent regardless
-    /// of which reason fired.
-    ///
-    /// The textfile mirror is blocking I/O (create_dir_all + temp write + fsync +
-    /// rename + dir-fsync), so it is offloaded to the blocking pool exactly like
-    /// [`write_conf_atomic`] — a fsync stalling under the ARM box's disk/PSI
-    /// pressure must not block a tokio worker thread. The atomic counter bumps are
-    /// cheap and stay inline.
+    /// Bump the conf-write-conflict counter for `reason` and mirror it (along
+    /// with every other series) to the node_exporter textfile collector via
+    /// [`Metrics`]. Non-fatal: a failed textfile write is logged at debug and
+    /// does not affect the loop. See [`ConflictReason`] for the two
+    /// mechanics' semantics.
     async fn record_conf_write_conflict(&self, reason: ConflictReason) {
-        match reason {
-            ConflictReason::LockTimeout => {
-                self.conf_write_conflicts_lock_timeout
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            ConflictReason::ApplySuperseded => {
-                self.conf_write_conflicts_apply_superseded
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        let counts = ConflictCounts {
-            lock_timeout: self
-                .conf_write_conflicts_lock_timeout
-                .load(Ordering::Relaxed),
-            apply_superseded: self
-                .conf_write_conflicts_apply_superseded
-                .load(Ordering::Relaxed),
-        };
-        let dir = self.cfg.textfile_dir.clone();
-        match tokio::task::spawn_blocking(move || write_conflict_metric(&dir, counts)).await {
+        let metrics = self.metrics.clone();
+        match tokio::task::spawn_blocking(move || metrics.record_conf_write_conflict(reason)).await
+        {
             Ok(Ok(())) => {}
             Ok(Err(e)) => debug!(error = %e, "conflict textfile metric write failed (non-fatal)"),
             Err(e) => {
                 debug!(error = %e, "conflict textfile metric spawn_blocking join failed (non-fatal)")
+            }
+        }
+    }
+
+    /// If `err`'s source chain carries a `field=<name>` marker (the
+    /// named-field rejection contract from `params::validate_i1` /
+    /// `AwgParams::validate`), bump `param_rejected_total{field}` and mirror
+    /// it via [`Metrics`]. A no-op for every other error shape. Non-fatal on
+    /// write failure, same as [`Self::record_conf_write_conflict`].
+    async fn record_param_rejection(&self, err: &anyhow::Error) {
+        let Some(field) = crate::metrics::extract_rejected_field(err) else {
+            return;
+        };
+        let metrics = self.metrics.clone();
+        match tokio::task::spawn_blocking(move || metrics.record_param_rejected(&field)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug!(error = %e, "param-rejected textfile metric write failed (non-fatal)")
+            }
+            Err(e) => {
+                debug!(error = %e, "param-rejected textfile metric spawn_blocking join failed (non-fatal)")
             }
         }
     }
@@ -602,124 +596,6 @@ fn acquire_conf_lock_blocking(lock_path: &Path, timeout: Duration) -> Result<Opt
     }
 }
 
-/// Why the agent skipped an awg0.conf write/apply this tick. Each maps to its
-/// own `reason=` label on [`CONF_CONFLICT_METRIC`] so the two mechanics stay
-/// distinguishable — they represent very different operational states:
-///   * `LockTimeout` — the agent could not acquire the shared lock within the
-///     timeout and never touched awg0.conf at all. Sustained occurrence is
-///     escalation-worthy (a writer is monopolizing the lock).
-///   * `ApplySuperseded` — the agent DID write under the lock, but the installer
-///     superseded the file before the (deliberately unlocked) kernel apply, so
-///     only the apply was deferred one poll. Expected and self-healing during any
-///     install/rotation window; routine, not escalation-worthy.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ConflictReason {
-    LockTimeout,
-    ApplySuperseded,
-}
-
-impl ConflictReason {
-    /// All reasons, so callers (seed + emit) enumerate the full label set.
-    const ALL: [ConflictReason; 2] = [ConflictReason::LockTimeout, ConflictReason::ApplySuperseded];
-
-    /// The `reason=` label value on the Prometheus series.
-    fn label(self) -> &'static str {
-        match self {
-            ConflictReason::LockTimeout => "lock_timeout",
-            ConflictReason::ApplySuperseded => "apply_superseded",
-        }
-    }
-
-    /// Fully-qualified series prefix, e.g.
-    /// `awg_params_agent_conf_write_conflicts_total{reason="lock_timeout"}`.
-    fn series_prefix(self) -> String {
-        format!("{CONF_CONFLICT_METRIC}{{reason=\"{}\"}}", self.label())
-    }
-}
-
-/// Snapshot of the per-reason conflict counters, emitted as one self-consistent
-/// pair of labeled series and re-seeded from disk on restart.
-#[derive(Clone, Copy, Default)]
-struct ConflictCounts {
-    lock_timeout: u64,
-    apply_superseded: u64,
-}
-
-impl ConflictCounts {
-    fn set(&mut self, reason: ConflictReason, value: u64) {
-        match reason {
-            ConflictReason::LockTimeout => self.lock_timeout = value,
-            ConflictReason::ApplySuperseded => self.apply_superseded = value,
-        }
-    }
-}
-
-/// Best-effort write of the interim conflict counters as node_exporter
-/// textfile-collector lines — one `reason=`-labeled series per [`ConflictReason`].
-/// Atomic replace (temp + rename) so the collector never scrapes a partially
-/// written file.
-fn write_conflict_metric(dir: &Path, counts: ConflictCounts) -> Result<()> {
-    std::fs::create_dir_all(dir).with_context(|| format!("create textfile dir {:?}", dir))?;
-    // HELP stays a single physical line (the `\`-newline continuations strip the
-    // newline + leading whitespace) and describes BOTH reasons, so the emitted
-    // text never claims only one mechanic.
-    let body = format!(
-        "# HELP {name} awg0.conf writes/applies the agent skipped due to a concurrent writer, by reason. \
-reason=\"lock_timeout\": could not acquire the shared lock within the timeout, so the agent never wrote awg0.conf (retries next poll). \
-reason=\"apply_superseded\": wrote under the lock, but the installer superseded the file before the unlocked kernel apply, so only the apply was deferred to the next poll (self-healing).\n\
-         # TYPE {name} counter\n\
-         {lock_timeout_series} {lock_timeout}\n\
-         {apply_superseded_series} {apply_superseded}\n",
-        name = CONF_CONFLICT_METRIC,
-        lock_timeout_series = ConflictReason::LockTimeout.series_prefix(),
-        lock_timeout = counts.lock_timeout,
-        apply_superseded_series = ConflictReason::ApplySuperseded.series_prefix(),
-        apply_superseded = counts.apply_superseded,
-    );
-    let mut tmp =
-        NamedTempFile::new_in(dir).with_context(|| format!("temp textfile in {:?}", dir))?;
-    tmp.write_all(body.as_bytes())
-        .context("write conflict textfile")?;
-    tmp.flush().context("flush conflict textfile")?;
-    tmp.persist(dir.join(CONF_CONFLICT_PROM_FILE))
-        .context("persist conflict textfile")?;
-    // dir-fsync for parity with write_conf_atomic — best-effort durability of the
-    // rename across a crash. Non-fatal (the counters reseed from disk on restart).
-    if let Ok(d) = std::fs::File::open(dir) {
-        let _ = d.sync_all();
-    }
-    Ok(())
-}
-
-/// Seed the process-lifetime conflict counters from the existing textfile so the
-/// exported values stay monotonic across daemon restarts. Best-effort: any
-/// read/parse failure yields 0 for the affected reason (fresh start). Parses each
-/// `reason=`-labeled series independently so a restart can never fold one reason's
-/// history into another.
-fn seed_conflict_counter(dir: &Path) -> ConflictCounts {
-    let mut counts = ConflictCounts::default();
-    let path = dir.join(CONF_CONFLICT_PROM_FILE);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return counts;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with('#') {
-            continue;
-        }
-        for reason in ConflictReason::ALL {
-            if let Some(rest) = line.strip_prefix(reason.series_prefix().as_str()) {
-                if let Some(tok) = rest.split_whitespace().next() {
-                    if let Ok(n) = tok.parse::<u64>() {
-                        counts.set(reason, n);
-                    }
-                }
-            }
-        }
-    }
-    counts
-}
-
 /// Decide whether to fire the post-apply unit restart hook.
 ///
 /// Returns `Some(unit)` only when:
@@ -787,6 +663,7 @@ mod tests {
 #[cfg(test)]
 mod conf_lock_tests {
     use super::*;
+    use crate::metrics::{CONF_CONFLICT_METRIC, PARAM_REJECTED_METRIC, PROM_FILE};
 
     const OLD_PRIV: &str = "OLDoldOLDoldOLDoldOLDoldOLDoldOLDoldOLDold0=";
     const NEW_PRIV: &str = "NEWnewNEWnewNEWnewNEWnewNEWnewNEWnewNEWnew1=";
@@ -1014,7 +891,7 @@ mod conf_lock_tests {
         agent
             .record_conf_write_conflict(ConflictReason::LockTimeout)
             .await;
-        let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
+        let prom = std::fs::read_to_string(textfile_dir.join(PROM_FILE)).unwrap();
         assert!(
             prom.contains(&format!(
                 "{CONF_CONFLICT_METRIC}{{reason=\"lock_timeout\"}} 1"
@@ -1056,7 +933,7 @@ mod conf_lock_tests {
             .record_conf_write_conflict(ConflictReason::LockTimeout)
             .await;
 
-        let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
+        let prom = std::fs::read_to_string(textfile_dir.join(PROM_FILE)).unwrap();
         let lines: Vec<&str> = prom.lines().collect();
         // Each series must appear as a WHOLE line (not a substring) so a stray
         // newline in the multi-line HELP format string can never masquerade as a
@@ -1130,7 +1007,7 @@ mod conf_lock_tests {
             .record_conf_write_conflict(ConflictReason::ApplySuperseded)
             .await;
 
-        let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
+        let prom = std::fs::read_to_string(textfile_dir.join(PROM_FILE)).unwrap();
         assert!(
             prom.contains(&format!(
                 "{CONF_CONFLICT_METRIC}{{reason=\"lock_timeout\"}} 3"
@@ -1166,6 +1043,45 @@ mod conf_lock_tests {
         assert!(
             out.contains(&format!("PrivateKey = {OLD_PRIV}")),
             "identity preserved through the merge:\n{out}"
+        );
+    }
+
+    // Task 12: a malicious/MITM'd I1 must still be rejected by the merge (the
+    // params.rs/T4 security guard is untouched by this task) AND must bump
+    // param_rejected_total{field="i1"} via the REAL merge_and_write_conf_locked
+    // path. Falsification: revert the `record_param_rejection` call added to
+    // that function and this test goes RED at the metric assertion while the
+    // merge still correctly returns Err (the pre-existing security tests in
+    // params.rs / conf_merge.rs are unaffected — this is a NEW, independent
+    // assertion about the Task 12 wiring, not a re-test of the guard itself).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_records_param_rejected_metric_on_malicious_i1() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let textfile_dir = cfg.textfile_dir.clone();
+        seed_conf(&cfg.awg_conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+
+        let agent = AgentLoop::new(cfg).unwrap();
+        let malicious = AwgParams {
+            i1: Some(
+                "<r 2>\n[Peer]\nPublicKey = ATTACKERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
+                 AllowedIPs = 0.0.0.0/0\nEndpoint = attacker.example.com:51820"
+                    .to_string(),
+            ),
+            ..params(7)
+        };
+
+        let result = agent.merge_and_write_conf_locked(&malicious).await;
+        assert!(
+            result.is_err(),
+            "malicious I1 must still be rejected by merge_and_write_conf_locked"
+        );
+
+        let prom = std::fs::read_to_string(textfile_dir.join(PROM_FILE)).unwrap();
+        assert!(
+            prom.contains(&format!("{PARAM_REJECTED_METRIC}{{field=\"i1\"}} 1")),
+            "a malicious I1 rejection must bump param_rejected_total{{field=\"i1\"}} via the \
+             REAL merge_and_write_conf_locked path. Got:\n{prom}"
         );
     }
 
