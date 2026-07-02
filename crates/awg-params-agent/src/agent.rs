@@ -4,14 +4,36 @@ use crate::{
     client::AgentClient,
     conf_merge::merge_obfuscation_params,
     error::{Context, Result},
+    params::AwgParams,
     state::{load_state, save_state, AwgState},
 };
 use chrono::Utc;
+use rustix::fs::{flock, FlockOperation};
 use std::io::Write;
-use std::{path::PathBuf, time::Duration};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tempfile::NamedTempFile;
 use tokio::{process::Command, time::sleep};
 use tracing::{debug, error, info, warn};
+
+/// Poll interval while waiting for the shared awg0.conf lock (LOCK_EX|LOCK_NB
+/// retry cadence). Mirrors the sub-second granularity of `flock -w`.
+const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Interim node_exporter textfile-collector metric name for lock-acquire
+/// conflicts. The durable counter lands in the Task 12 exporter; this textfile
+/// line keeps the signal observable until then.
+const CONF_CONFLICT_METRIC: &str = "awg_params_agent_conf_write_conflicts_total";
+
+/// Filename written under `textfile_dir` for the interim conflict counter.
+/// A dedicated file (not shared with partner_edge.prom) so the node_exporter
+/// textfile collector accumulates both without either clobbering the other.
+const CONF_CONFLICT_PROM_FILE: &str = "awg_params_agent.prom";
 
 /// All configuration for the agent loop, parsed from env at startup.
 pub struct AgentConfig {
@@ -34,17 +56,57 @@ pub struct AgentConfig {
     ///
     /// Set via `OXPULSE_RESTART_UNIT_AFTER_APPLY` env var.  Empty string → disabled.
     pub restart_unit_after_apply: Option<String>,
+
+    /// Advisory lock file, shared **byte-for-byte** with the installer
+    /// (`lib/install-awg.sh` flocks the same path). Both writers of
+    /// `awg_conf_path` serialize on this file so a mid-install agent tick can no
+    /// longer revert just-rotated identity fields (PrivateKey/Endpoint/Jc/S1-S4/
+    /// H1-H4) — the awg0.conf lost-update race. Default `<awg_conf_path>.lock`,
+    /// overridable via `OXPULSE_AWG_CONF_LOCK_PATH`.
+    pub awg_conf_lock_path: PathBuf,
+
+    /// Max wall time to wait for the shared conf lock before skipping the tick.
+    /// Matches the installer's `flock -w 10`. Set via `OXPULSE_AWG_LOCK_TIMEOUT`.
+    pub lock_acquire_timeout: Duration,
+
+    /// node_exporter textfile-collector directory for the interim
+    /// `awg_params_agent_conf_write_conflicts_total` counter. Default matches
+    /// `oxpulse-partner-edge-refresh.sh`'s textfile dir; set via
+    /// `OXPULSE_TEXTFILE_DIR`.
+    pub textfile_dir: PathBuf,
+
+    /// **Test hook only.** Injected delay between the locked conf read and the
+    /// atomic rename, used to deterministically reproduce the lost-update race
+    /// in tests. Always `Duration::ZERO` in production (`load_config` never sets
+    /// it non-zero).
+    pub test_read_write_delay: Duration,
 }
 
 pub struct AgentLoop {
     cfg: AgentConfig,
     client: AgentClient,
+    /// Interim, process-lifetime conflict counters — one per [`ConflictReason`],
+    /// mirrored to the textfile collector as distinct labeled series. Seeded from
+    /// the existing `.prom` file at startup so the exported values stay monotonic
+    /// across daemon restarts. Split by reason so an operator (or an alert rule)
+    /// can tell a total write block (`lock_timeout`: the agent never touched
+    /// awg0.conf) from a routine one-poll apply deferral (`apply_superseded`: the
+    /// agent wrote fine, only the kernel apply slipped a poll) — the two are NOT
+    /// the same failure and must never share one series.
+    conf_write_conflicts_lock_timeout: AtomicU64,
+    conf_write_conflicts_apply_superseded: AtomicU64,
 }
 
 impl AgentLoop {
     pub fn new(cfg: AgentConfig) -> Result<Self> {
         let client = AgentClient::new(cfg.central_url.clone(), cfg.service_token_path.clone())?;
-        Ok(Self { cfg, client })
+        let seed = seed_conflict_counter(&cfg.textfile_dir);
+        Ok(Self {
+            cfg,
+            client,
+            conf_write_conflicts_lock_timeout: AtomicU64::new(seed.lock_timeout),
+            conf_write_conflicts_apply_superseded: AtomicU64::new(seed.apply_superseded),
+        })
     }
 
     /// Run forever. Each iteration: poll → compare → apply (if needed) → sleep.
@@ -93,18 +155,69 @@ impl AgentLoop {
             "new epoch — applying"
         );
 
-        // 3. Merge params into conf.
-        let conf_text = tokio::fs::read_to_string(&self.cfg.awg_conf_path)
+        // 3+4. Read → merge → atomic-write the conf, serialized against the
+        // installer (lib/install-awg.sh) via the shared advisory lock. Holding
+        // the lock across the whole read→rename span is what closes the
+        // lost-update race: without it, this tick could read a pre-install conf
+        // and rename its stale-identity merge over the installer's just-rotated
+        // PrivateKey/Endpoint. The lock is released BEFORE apply_to_kernel so the
+        // installer's `flock -w 10` never waits on the up-to-30s kernel apply.
+        let written = match self
+            .merge_and_write_conf_locked(&response.params)
             .await
-            .with_context(|| format!("read {:?}", self.cfg.awg_conf_path))?;
+            .context("merge+write conf under lock")?
+        {
+            Some(id) => id,
+            None => {
+                // Another writer (the installer, or an overlapping tick) held the
+                // lock past the timeout. Skip this tick WITHOUT saving state so the
+                // next poll re-applies the same epoch; never partial-write unlocked.
+                warn!(
+                    lock = ?self.cfg.awg_conf_lock_path,
+                    "awg0.conf lock held by another writer — skipping this tick, will retry next poll"
+                );
+                self.record_conf_write_conflict(ConflictReason::LockTimeout)
+                    .await;
+                return Ok(());
+            }
+        };
 
-        let new_conf = merge_obfuscation_params(&conf_text, &response.params)
-            .context("merge obfuscation params")?;
-
-        // 4. Atomic write of new conf.
-        self.write_conf_atomic(&new_conf)
-            .await
-            .context("atomic write conf")?;
+        // 4b. Supersede guard. The lock is released before apply_to_kernel so the
+        // installer's `flock -w 10` never waits on the up-to-30s kernel apply — but
+        // that opens a window where configure_amneziawg (which also takes the
+        // shared lock, so it can only land AFTER our release) rewrites awg0.conf
+        // between our locked write and this unlocked apply. Applying then would
+        // push the INSTALLER's params to the kernel while we record OUR epoch — a
+        // false "epoch live" state indistinguishable from a correct apply. Re-stat
+        // the conf against the identity captured under the lock; if it changed,
+        // skip the apply WITHOUT saving state — the next poll re-merges the central
+        // params onto the installer's fresh conf and applies cleanly. (The
+        // installer's write is atomic — temp+rename in lib/install-awg.sh — so
+        // awg-quick strip can never observe a torn file; the only residual is a
+        // microsecond-wide TOCTOU between this re-stat and awg-quick's open(),
+        // which leaves the kernel running the installer's own valid conf,
+        // self-healing on the next epoch bump.)
+        match self.conf_changed_since(&written) {
+            Ok(false) => {}
+            Ok(true) => {
+                warn!(
+                    conf = ?self.cfg.awg_conf_path,
+                    "awg0.conf superseded by another writer after our locked write — \
+                     skipping kernel apply this tick, will re-merge next poll"
+                );
+                self.record_conf_write_conflict(ConflictReason::ApplySuperseded)
+                    .await;
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    conf = ?self.cfg.awg_conf_path,
+                    "could not re-stat awg0.conf before apply — skipping this tick"
+                );
+                return Ok(());
+            }
+        }
 
         // 5. Apply to running kernel via awg-quick strip | awg syncconf.
         self.apply_to_kernel().await.context("apply to kernel")?;
@@ -175,6 +288,127 @@ impl AgentLoop {
             }
             Err(_) => {
                 warn!("unit restart timed out after 90s — unit may still be starting; systemd will continue the unit lifecycle");
+            }
+        }
+    }
+
+    /// Merge new obfuscation `params` into awg0.conf and atomically rewrite it,
+    /// holding the installer-shared advisory lock across the entire read→rename
+    /// span (the lost-update-critical section). The lock is released when `_lock`
+    /// drops at the end of this method — i.e. BEFORE the caller runs
+    /// `apply_to_kernel`, keeping the critical section sub-second so the
+    /// installer's `flock -w 10` never times out on a concurrent kernel apply.
+    ///
+    /// Returns `Ok(Some(identity))` with the filesystem identity of the conf we
+    /// just wrote (captured under the lock, for the caller's supersede guard); or
+    /// `Ok(None)` if the lock could not be acquired within `lock_acquire_timeout`
+    /// (caller skips this tick and retries on the next poll).
+    async fn merge_and_write_conf_locked(
+        &self,
+        params: &AwgParams,
+    ) -> Result<Option<ConfIdentity>> {
+        let _lock = match self
+            .acquire_conf_lock()
+            .await
+            .context("acquire conf lock")?
+        {
+            Some(lock) => lock,
+            None => return Ok(None),
+        };
+
+        // Read the current conf — identity fields (PrivateKey/Endpoint/Address)
+        // authored by the installer live here and are preserved verbatim by the
+        // merge below.
+        let conf_text = tokio::fs::read_to_string(&self.cfg.awg_conf_path)
+            .await
+            .with_context(|| format!("read {:?}", self.cfg.awg_conf_path))?;
+
+        // Test hook: deterministically widen the read→rename window so the
+        // lost-update race is reproducible in tests. Always ZERO in production.
+        if !self.cfg.test_read_write_delay.is_zero() {
+            sleep(self.cfg.test_read_write_delay).await;
+        }
+
+        let new_conf =
+            merge_obfuscation_params(&conf_text, params).context("merge obfuscation params")?;
+
+        self.write_conf_atomic(&new_conf)
+            .await
+            .context("atomic write conf")?;
+
+        // Snapshot the on-disk identity of the file we just wrote, STILL under the
+        // lock — no other writer can have touched it yet. The caller compares this
+        // against a re-stat right before the unlocked kernel apply to catch a
+        // concurrent installer supersede.
+        let identity =
+            conf_identity(&self.cfg.awg_conf_path).context("stat conf after atomic write")?;
+
+        // `_lock` drops here → flock released before apply_to_kernel.
+        Ok(Some(identity))
+    }
+
+    /// Re-stat `awg_conf_path` and report whether it differs from the identity
+    /// captured under the lock right after our atomic write. `true` means another
+    /// writer (the installer's `configure_amneziawg`, whose write also takes the
+    /// shared lock and therefore lands only AFTER our release) superseded our
+    /// merged conf in the window between the lock release and the kernel apply.
+    /// `Err` = the file could not be stat'd; the caller treats that as a skip
+    /// rather than pushing an unknown conf to the kernel.
+    fn conf_changed_since(&self, written: &ConfIdentity) -> Result<bool> {
+        Ok(conf_identity(&self.cfg.awg_conf_path)? != *written)
+    }
+
+    /// Acquire the shared conf advisory lock (LOCK_EX), polling until
+    /// `lock_acquire_timeout`. `Ok(None)` = timed out (another writer holds it).
+    /// Runs on the blocking pool because `flock(2)` and the retry sleeps block.
+    async fn acquire_conf_lock(&self) -> Result<Option<ConfLock>> {
+        let lock_path = self.cfg.awg_conf_lock_path.clone();
+        let timeout = self.cfg.lock_acquire_timeout;
+        tokio::task::spawn_blocking(move || acquire_conf_lock_blocking(&lock_path, timeout))
+            .await
+            .context("spawn_blocking for conf lock acquire")?
+    }
+
+    /// Bump the interim conflict counter for `reason` and best-effort mirror the
+    /// full labeled series set to the node_exporter textfile collector. Non-fatal:
+    /// a failed textfile write is logged at debug and does not affect the loop.
+    ///
+    /// `reason` keeps the two skip mechanics on distinct Prometheus series
+    /// (`lock_timeout` vs `apply_superseded`) so they can never be conflated —
+    /// see [`ConflictReason`]. We snapshot BOTH atomics after the bump and always
+    /// re-emit the complete pair so the textfile stays self-consistent regardless
+    /// of which reason fired.
+    ///
+    /// The textfile mirror is blocking I/O (create_dir_all + temp write + fsync +
+    /// rename + dir-fsync), so it is offloaded to the blocking pool exactly like
+    /// [`write_conf_atomic`] — a fsync stalling under the ARM box's disk/PSI
+    /// pressure must not block a tokio worker thread. The atomic counter bumps are
+    /// cheap and stay inline.
+    async fn record_conf_write_conflict(&self, reason: ConflictReason) {
+        match reason {
+            ConflictReason::LockTimeout => {
+                self.conf_write_conflicts_lock_timeout
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            ConflictReason::ApplySuperseded => {
+                self.conf_write_conflicts_apply_superseded
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let counts = ConflictCounts {
+            lock_timeout: self
+                .conf_write_conflicts_lock_timeout
+                .load(Ordering::Relaxed),
+            apply_superseded: self
+                .conf_write_conflicts_apply_superseded
+                .load(Ordering::Relaxed),
+        };
+        let dir = self.cfg.textfile_dir.clone();
+        match tokio::task::spawn_blocking(move || write_conflict_metric(&dir, counts)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => debug!(error = %e, "conflict textfile metric write failed (non-fatal)"),
+            Err(e) => {
+                debug!(error = %e, "conflict textfile metric spawn_blocking join failed (non-fatal)")
             }
         }
     }
@@ -290,6 +524,202 @@ impl AgentLoop {
     }
 }
 
+/// Filesystem identity of awg0.conf, captured under the shared lock immediately
+/// after the agent's atomic write. Compared against a re-stat before the unlocked
+/// kernel apply to detect a concurrent installer supersede: the inode changes when
+/// the other writer renames a fresh file over it (the installer's temp+rename and
+/// the agent's own `write_conf_atomic`), and size/mtime change on any in-place
+/// rewrite — so the tuple catches either shape.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ConfIdentity {
+    ino: u64,
+    size: u64,
+    mtime_sec: i64,
+    mtime_nsec: i64,
+}
+
+/// Stat `path` into a `ConfIdentity`.
+///
+/// Deliberately a plain synchronous `stat(2)`, called directly from async code
+/// (`merge_and_write_conf_locked` and `conf_changed_since`) — unlike the write
+/// path (`write_conf_atomic` / `write_conflict_metric`), which is offloaded to
+/// `spawn_blocking`. That offload exists because an `fsync` can stall under the
+/// ARM box's disk/PSI pressure and must not block a tokio worker thread; a
+/// metadata read has no writeback and cannot stall that way, so the
+/// `spawn_blocking` hop is not warranted here.
+fn conf_identity(path: &Path) -> Result<ConfIdentity> {
+    let m = std::fs::metadata(path).with_context(|| format!("stat {:?}", path))?;
+    Ok(ConfIdentity {
+        ino: m.ino(),
+        size: m.size(),
+        mtime_sec: m.mtime(),
+        mtime_nsec: m.mtime_nsec(),
+    })
+}
+
+/// RAII guard for the shared awg0.conf advisory lock. Holds the open lock-file
+/// descriptor; `flock(LOCK_UN)` on drop releases it deterministically (the
+/// kernel also releases on fd close, but the explicit unlock documents intent).
+struct ConfLock {
+    file: std::fs::File,
+}
+
+impl Drop for ConfLock {
+    fn drop(&mut self) {
+        let _ = flock(&self.file, FlockOperation::Unlock);
+    }
+}
+
+/// Blocking acquire of the shared conf lock. Opens (creating if absent) the lock
+/// file, then retries `LOCK_EX|LOCK_NB` on `LOCK_POLL_INTERVAL` until `timeout`.
+/// `Ok(None)` = another writer held the lock for the whole window.
+fn acquire_conf_lock_blocking(lock_path: &Path, timeout: Duration) -> Result<Option<ConfLock>> {
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create lock dir {:?}", parent))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(lock_path)
+        .with_context(|| format!("open lock file {:?}", lock_path))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(Some(ConfLock { file })),
+            Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::AGAIN => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                std::thread::sleep(LOCK_POLL_INTERVAL);
+            }
+            Err(e) => {
+                return Err(crate::error::anyhow!("flock {:?} failed: {}", lock_path, e));
+            }
+        }
+    }
+}
+
+/// Why the agent skipped an awg0.conf write/apply this tick. Each maps to its
+/// own `reason=` label on [`CONF_CONFLICT_METRIC`] so the two mechanics stay
+/// distinguishable — they represent very different operational states:
+///   * `LockTimeout` — the agent could not acquire the shared lock within the
+///     timeout and never touched awg0.conf at all. Sustained occurrence is
+///     escalation-worthy (a writer is monopolizing the lock).
+///   * `ApplySuperseded` — the agent DID write under the lock, but the installer
+///     superseded the file before the (deliberately unlocked) kernel apply, so
+///     only the apply was deferred one poll. Expected and self-healing during any
+///     install/rotation window; routine, not escalation-worthy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ConflictReason {
+    LockTimeout,
+    ApplySuperseded,
+}
+
+impl ConflictReason {
+    /// All reasons, so callers (seed + emit) enumerate the full label set.
+    const ALL: [ConflictReason; 2] = [ConflictReason::LockTimeout, ConflictReason::ApplySuperseded];
+
+    /// The `reason=` label value on the Prometheus series.
+    fn label(self) -> &'static str {
+        match self {
+            ConflictReason::LockTimeout => "lock_timeout",
+            ConflictReason::ApplySuperseded => "apply_superseded",
+        }
+    }
+
+    /// Fully-qualified series prefix, e.g.
+    /// `awg_params_agent_conf_write_conflicts_total{reason="lock_timeout"}`.
+    fn series_prefix(self) -> String {
+        format!("{CONF_CONFLICT_METRIC}{{reason=\"{}\"}}", self.label())
+    }
+}
+
+/// Snapshot of the per-reason conflict counters, emitted as one self-consistent
+/// pair of labeled series and re-seeded from disk on restart.
+#[derive(Clone, Copy, Default)]
+struct ConflictCounts {
+    lock_timeout: u64,
+    apply_superseded: u64,
+}
+
+impl ConflictCounts {
+    fn set(&mut self, reason: ConflictReason, value: u64) {
+        match reason {
+            ConflictReason::LockTimeout => self.lock_timeout = value,
+            ConflictReason::ApplySuperseded => self.apply_superseded = value,
+        }
+    }
+}
+
+/// Best-effort write of the interim conflict counters as node_exporter
+/// textfile-collector lines — one `reason=`-labeled series per [`ConflictReason`].
+/// Atomic replace (temp + rename) so the collector never scrapes a partially
+/// written file.
+fn write_conflict_metric(dir: &Path, counts: ConflictCounts) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create textfile dir {:?}", dir))?;
+    // HELP stays a single physical line (the `\`-newline continuations strip the
+    // newline + leading whitespace) and describes BOTH reasons, so the emitted
+    // text never claims only one mechanic.
+    let body = format!(
+        "# HELP {name} awg0.conf writes/applies the agent skipped due to a concurrent writer, by reason. \
+reason=\"lock_timeout\": could not acquire the shared lock within the timeout, so the agent never wrote awg0.conf (retries next poll). \
+reason=\"apply_superseded\": wrote under the lock, but the installer superseded the file before the unlocked kernel apply, so only the apply was deferred to the next poll (self-healing).\n\
+         # TYPE {name} counter\n\
+         {lock_timeout_series} {lock_timeout}\n\
+         {apply_superseded_series} {apply_superseded}\n",
+        name = CONF_CONFLICT_METRIC,
+        lock_timeout_series = ConflictReason::LockTimeout.series_prefix(),
+        lock_timeout = counts.lock_timeout,
+        apply_superseded_series = ConflictReason::ApplySuperseded.series_prefix(),
+        apply_superseded = counts.apply_superseded,
+    );
+    let mut tmp =
+        NamedTempFile::new_in(dir).with_context(|| format!("temp textfile in {:?}", dir))?;
+    tmp.write_all(body.as_bytes())
+        .context("write conflict textfile")?;
+    tmp.flush().context("flush conflict textfile")?;
+    tmp.persist(dir.join(CONF_CONFLICT_PROM_FILE))
+        .context("persist conflict textfile")?;
+    // dir-fsync for parity with write_conf_atomic — best-effort durability of the
+    // rename across a crash. Non-fatal (the counters reseed from disk on restart).
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+/// Seed the process-lifetime conflict counters from the existing textfile so the
+/// exported values stay monotonic across daemon restarts. Best-effort: any
+/// read/parse failure yields 0 for the affected reason (fresh start). Parses each
+/// `reason=`-labeled series independently so a restart can never fold one reason's
+/// history into another.
+fn seed_conflict_counter(dir: &Path) -> ConflictCounts {
+    let mut counts = ConflictCounts::default();
+    let path = dir.join(CONF_CONFLICT_PROM_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return counts;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        for reason in ConflictReason::ALL {
+            if let Some(rest) = line.strip_prefix(reason.series_prefix().as_str()) {
+                if let Some(tok) = rest.split_whitespace().next() {
+                    if let Ok(n) = tok.parse::<u64>() {
+                        counts.set(reason, n);
+                    }
+                }
+            }
+        }
+    }
+    counts
+}
+
 /// Decide whether to fire the post-apply unit restart hook.
 ///
 /// Returns `Some(unit)` only when:
@@ -345,5 +775,441 @@ mod tests {
         // Empty-string env var is converted to None in load_config (main.rs).
         // Verify should_restart also returns None for None regardless of epoch.
         assert_eq!(should_restart(None, true), None);
+    }
+}
+
+// ── awg0.conf lost-update race: shared flock coordination ────────────────────
+//
+// These tests exercise the REAL locked write path (`merge_and_write_conf_locked`
+// + `acquire_conf_lock`), not a hand-copy. Removing the flock from
+// `merge_and_write_conf_locked` makes `agent_lock_prevents_identity_revert...`
+// go RED — that is the falsification proof for the fix.
+#[cfg(test)]
+mod conf_lock_tests {
+    use super::*;
+
+    const OLD_PRIV: &str = "OLDoldOLDoldOLDoldOLDoldOLDoldOLDoldOLDold0=";
+    const NEW_PRIV: &str = "NEWnewNEWnewNEWnewNEWnewNEWnewNEWnewNEWnew1=";
+    const OLD_ENDPOINT: &str = "1.1.1.1:51820";
+    const NEW_ENDPOINT: &str = "2.2.2.2:51820";
+
+    fn params(jc: i64) -> AwgParams {
+        AwgParams {
+            jc,
+            jmin: 3,
+            jmax: 500,
+            s1: 10,
+            s2: 20,
+            s4: 30,
+            h1: 1,
+            h2: 2,
+            h3: 3,
+            h4: 4,
+            i1: None,
+        }
+    }
+
+    fn base_cfg(dir: &Path) -> AgentConfig {
+        let conf = dir.join("awg0.conf");
+        let mut lock = conf.clone().into_os_string();
+        lock.push(".lock");
+        AgentConfig {
+            central_url: "http://127.0.0.1:1/unused".into(),
+            service_token_path: dir.join("token"),
+            awg_conf_path: conf,
+            awg_iface: "awg0".into(),
+            state_path: dir.join("state.json"),
+            poll_interval: Duration::from_secs(30),
+            node_id: "test-node".into(),
+            restart_unit_after_apply: None,
+            awg_conf_lock_path: PathBuf::from(lock),
+            lock_acquire_timeout: Duration::from_secs(10),
+            textfile_dir: dir.join("textfile"),
+            test_read_write_delay: Duration::ZERO,
+        }
+    }
+
+    fn seed_conf(path: &Path, priv_key: &str, endpoint: &str, jc: i64) {
+        let body = format!(
+            "[Interface]\n\
+             PrivateKey = {priv_key}\n\
+             Address = 10.0.0.9/32\n\
+             ListenPort = 43811\n\
+             Jc = {jc}\n\
+             Jmin = 3\n\
+             Jmax = 500\n\
+             S1 = 10\n\
+             S2 = 20\n\
+             S4 = 30\n\
+             H1 = 1\n\
+             H2 = 2\n\
+             H3 = 3\n\
+             H4 = 4\n\
+             Table = off\n\
+             MTU = 1300\n\
+             \n\
+             [Peer]\n\
+             PublicKey = SOMEPUBKEYbase64000000000000000000000000000=\n\
+             Endpoint = {endpoint}\n\
+             AllowedIPs = 10.0.0.1/32\n\
+             PersistentKeepalive = 25\n"
+        );
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// The installer's write, done under the SAME shared flock the agent uses
+    /// (blocking `LOCK_EX`, mirroring `flock -w 10 9` in lib/install-awg.sh).
+    /// Represents `configure_amneziawg` writing fresh identity mid-flight.
+    fn installer_write_locked(
+        lock_path: &Path,
+        conf_path: &Path,
+        priv_key: &str,
+        endpoint: &str,
+        jc: i64,
+    ) {
+        let lf = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(lock_path)
+            .unwrap();
+        loop {
+            match flock(&lf, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => break,
+                Err(e) if e == rustix::io::Errno::WOULDBLOCK || e == rustix::io::Errno::AGAIN => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("installer flock failed: {e}"),
+            }
+        }
+        seed_conf(conf_path, priv_key, endpoint, jc);
+        let _ = flock(&lf, FlockOperation::Unlock);
+    }
+
+    // The agent reads OLD identity, then (mid its widened read→rename window) the
+    // installer writes fresh NEW identity. With the shared flock the installer
+    // blocks until the agent releases, so its NEW identity is the last write and
+    // survives. Without the flock (regression) the agent's stale-read merge
+    // renames OLD identity over NEW → this assertion fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_lock_prevents_identity_revert_under_concurrent_installer_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = base_cfg(dir.path());
+        cfg.test_read_write_delay = Duration::from_millis(700);
+        let conf_path = cfg.awg_conf_path.clone();
+        let lock_path = cfg.awg_conf_lock_path.clone();
+
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+        let agent = AgentLoop::new(cfg).unwrap();
+
+        // Give the agent's merge DISTINCT obfuscation params (Jc + S1/S2/S4) from
+        // the installer's fixture so every identity field the spec names is
+        // independently discriminable post-race: the installer seeds jc=9 +
+        // S1=10/S2=20/S4=30 (seed_conf), the agent's losing merge would leave
+        // jc=7 + S1=111/S2=122/S4=133. params()'s S-values equal seed_conf's, so
+        // without this override S1-S4 could not tell winner from loser.
+        let agent_params = AwgParams {
+            s1: 111,
+            s2: 122,
+            s4: 133,
+            ..params(7)
+        };
+
+        // Start the agent write; it acquires the lock, reads OLD, then holds the
+        // lock through the 700ms delay.
+        let agent_task =
+            tokio::spawn(async move { agent.merge_and_write_conf_locked(&agent_params).await });
+
+        // Give the agent a head start so it is provably mid-delay (holding the
+        // lock, having already read OLD) before the installer attempts its write.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let inst_lock = lock_path.clone();
+        let inst_conf = conf_path.clone();
+        let installer_task = tokio::task::spawn_blocking(move || {
+            installer_write_locked(&inst_lock, &inst_conf, NEW_PRIV, NEW_ENDPOINT, 9);
+        });
+
+        let wrote = agent_task.await.unwrap().expect("agent write ok");
+        installer_task.await.unwrap();
+        assert!(wrote.is_some(), "agent should have rewritten the conf");
+
+        let final_conf = std::fs::read_to_string(&conf_path).unwrap();
+        assert!(
+            final_conf.contains(&format!("PrivateKey = {NEW_PRIV}")),
+            "installer's fresh PrivateKey must survive the concurrent agent tick \
+             (lost-update race). Final conf:\n{final_conf}"
+        );
+        assert!(
+            final_conf.contains(&format!("Endpoint = {NEW_ENDPOINT}")),
+            "installer's fresh Endpoint must survive the concurrent agent tick. \
+             Final conf:\n{final_conf}"
+        );
+        // The spec names Jc/S1-S4 alongside PrivateKey/Endpoint: assert the FULL
+        // named identity set survives, not just the two key fields. The installer's
+        // jc=9 + S1=10/S2=20/S4=30 must win; the agent's stale-read merge (jc=7 +
+        // S1=111/S2=122/S4=133) must NOT.
+        assert!(
+            final_conf.contains("Jc = 9") && !final_conf.contains("Jc = 7"),
+            "installer's fresh Jc must survive the race, not the agent's stale merge. \
+             Final conf:\n{final_conf}"
+        );
+        assert!(
+            final_conf.contains("S1 = 10")
+                && final_conf.contains("S2 = 20")
+                && final_conf.contains("S4 = 30"),
+            "installer's fresh S1/S2/S4 must survive the race. Final conf:\n{final_conf}"
+        );
+        assert!(
+            !final_conf.contains("S1 = 111")
+                && !final_conf.contains("S2 = 122")
+                && !final_conf.contains("S4 = 133"),
+            "the agent's stale-merge S1/S2/S4 must NOT win the race. Final conf:\n{final_conf}"
+        );
+    }
+
+    // When the lock is held past the acquire timeout, the agent must NOT write
+    // (returns false) and the conflict counter textfile must be emitted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_skips_and_counts_when_lock_held_past_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = base_cfg(dir.path());
+        cfg.lock_acquire_timeout = Duration::from_millis(200);
+        let conf_path = cfg.awg_conf_path.clone();
+        let lock_path = cfg.awg_conf_lock_path.clone();
+        let textfile_dir = cfg.textfile_dir.clone();
+
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+
+        // A separate open-file-description holds LOCK_EX for the whole test.
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lock_path)
+            .unwrap();
+        flock(&holder, FlockOperation::LockExclusive).unwrap();
+
+        let agent = AgentLoop::new(cfg).unwrap();
+        let wrote = agent
+            .merge_and_write_conf_locked(&params(7))
+            .await
+            .expect("busy lock must not error");
+        assert!(
+            wrote.is_none(),
+            "agent must skip (return None) when the lock is held beyond the timeout"
+        );
+
+        // The conf must be untouched (still OLD) — no partial unlocked write.
+        let after = std::fs::read_to_string(&conf_path).unwrap();
+        assert!(
+            after.contains(&format!("PrivateKey = {OLD_PRIV}")),
+            "conf must be untouched when the lock could not be acquired"
+        );
+
+        // tick() calls record_conf_write_conflict(LockTimeout) on this skip path.
+        agent
+            .record_conf_write_conflict(ConflictReason::LockTimeout)
+            .await;
+        let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
+        assert!(
+            prom.contains(&format!(
+                "{CONF_CONFLICT_METRIC}{{reason=\"lock_timeout\"}} 1"
+            )),
+            "lock_timeout conflict series must be emitted with value 1. Got:\n{prom}"
+        );
+        // The other reason must exist as its own series, untouched (0) — a
+        // lock-timeout skip must NOT bump apply_superseded.
+        assert!(
+            prom.contains(&format!(
+                "{CONF_CONFLICT_METRIC}{{reason=\"apply_superseded\"}} 0"
+            )),
+            "apply_superseded series must be present and unbumped by a lock-timeout skip. Got:\n{prom}"
+        );
+
+        let _ = flock(&holder, FlockOperation::Unlock);
+    }
+
+    // Metric-conflation guard: the two skip mechanics keep DISTINCT reason-labeled
+    // series. Record two lock_timeout skips + one apply_superseded skip via the
+    // REAL record_conf_write_conflict path and assert each series carries only its
+    // own count. Collapsing both reasons into one series (the conflation bug) makes
+    // the 2-vs-1 assertions go RED — the falsification proof for the split.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conflict_counter_keeps_lock_timeout_and_apply_superseded_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let textfile_dir = cfg.textfile_dir.clone();
+        seed_conf(&cfg.awg_conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+        let agent = AgentLoop::new(cfg).unwrap();
+
+        agent
+            .record_conf_write_conflict(ConflictReason::LockTimeout)
+            .await;
+        agent
+            .record_conf_write_conflict(ConflictReason::ApplySuperseded)
+            .await;
+        agent
+            .record_conf_write_conflict(ConflictReason::LockTimeout)
+            .await;
+
+        let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
+        let lines: Vec<&str> = prom.lines().collect();
+        // Each series must appear as a WHOLE line (not a substring) so a stray
+        // newline in the multi-line HELP format string can never masquerade as a
+        // valid series to the node_exporter parser.
+        assert!(
+            lines
+                .contains(&format!("{CONF_CONFLICT_METRIC}{{reason=\"lock_timeout\"}} 2").as_str()),
+            "lock_timeout must count ONLY its own two skips, as its own line. Got:\n{prom}"
+        );
+        assert!(
+            lines.contains(
+                &format!("{CONF_CONFLICT_METRIC}{{reason=\"apply_superseded\"}} 1").as_str()
+            ),
+            "apply_superseded must count ONLY its own one skip, as its own line. Got:\n{prom}"
+        );
+        // Exactly one HELP and one TYPE line for the metric (single-line HELP — a
+        // raw newline in the HELP would produce a second, malformed line).
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with(&format!("# HELP {CONF_CONFLICT_METRIC} ")))
+                .count(),
+            1,
+            "exactly one single-line HELP for the metric. Got:\n{prom}"
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.starts_with(&format!("# TYPE {CONF_CONFLICT_METRIC} ")))
+                .count(),
+            1,
+            "exactly one TYPE line for the metric. Got:\n{prom}"
+        );
+        // HELP text must describe BOTH reasons (not just lock_timeout — the round-3
+        // conflation this split fixes).
+        assert!(
+            prom.contains("reason=\"apply_superseded\": wrote under the lock"),
+            "HELP must document the apply_superseded reason. Got:\n{prom}"
+        );
+    }
+
+    // Restart monotonicity per reason: a fresh AgentLoop seeded from an existing
+    // textfile must resume each reason's count independently, then bump only the
+    // recorded reason from its own seeded base.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conflict_counter_reseeds_each_reason_independently_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let textfile_dir = cfg.textfile_dir.clone();
+        seed_conf(&cfg.awg_conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+
+        // First process lifetime: 3 lock_timeout, 5 apply_superseded.
+        {
+            let agent = AgentLoop::new(base_cfg(dir.path())).unwrap();
+            for _ in 0..3 {
+                agent
+                    .record_conf_write_conflict(ConflictReason::LockTimeout)
+                    .await;
+            }
+            for _ in 0..5 {
+                agent
+                    .record_conf_write_conflict(ConflictReason::ApplySuperseded)
+                    .await;
+            }
+        }
+
+        // Second process lifetime: reseeds from the textfile, then one more
+        // apply_superseded → 3 / 6, proving per-reason seeds are not conflated.
+        let agent2 = AgentLoop::new(base_cfg(dir.path())).unwrap();
+        agent2
+            .record_conf_write_conflict(ConflictReason::ApplySuperseded)
+            .await;
+
+        let prom = std::fs::read_to_string(textfile_dir.join(CONF_CONFLICT_PROM_FILE)).unwrap();
+        assert!(
+            prom.contains(&format!(
+                "{CONF_CONFLICT_METRIC}{{reason=\"lock_timeout\"}} 3"
+            )),
+            "lock_timeout must resume at its seeded 3 across restart. Got:\n{prom}"
+        );
+        assert!(
+            prom.contains(&format!(
+                "{CONF_CONFLICT_METRIC}{{reason=\"apply_superseded\"}} 6"
+            )),
+            "apply_superseded must resume at seeded 5 then +1 = 6. Got:\n{prom}"
+        );
+    }
+
+    // Positive control: with no competing writer, the agent acquires the lock,
+    // merges the new obfuscation params, and rewrites the conf successfully.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_writes_merged_params_when_lock_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let conf_path = cfg.awg_conf_path.clone();
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+
+        let agent = AgentLoop::new(cfg).unwrap();
+        let wrote = agent
+            .merge_and_write_conf_locked(&params(42))
+            .await
+            .expect("write ok");
+        assert!(wrote.is_some());
+
+        let out = std::fs::read_to_string(&conf_path).unwrap();
+        assert!(out.contains("Jc = 42"), "merged Jc must be applied:\n{out}");
+        assert!(
+            out.contains(&format!("PrivateKey = {OLD_PRIV}")),
+            "identity preserved through the merge:\n{out}"
+        );
+    }
+
+    // Supersede guard (the exact residual apply_to_kernel race). After the agent's
+    // locked write, an installer write — also under the shared lock, so it lands
+    // only AFTER the agent's release — rewrites the conf before the kernel apply.
+    // The identity captured under the lock must no longer match the on-disk conf,
+    // so conf_changed_since() reports true and tick() skips the apply (which would
+    // otherwise push the installer's params to the kernel while recording the
+    // agent's epoch). Reverting the guard makes conf_changed_since always-false and
+    // this test goes RED at the second assert.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_detects_installer_supersede_between_write_and_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let conf_path = cfg.awg_conf_path.clone();
+        let lock_path = cfg.awg_conf_lock_path.clone();
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+
+        let agent = AgentLoop::new(cfg).unwrap();
+        let written = agent
+            .merge_and_write_conf_locked(&params(7))
+            .await
+            .expect("write ok")
+            .expect("agent should have written the conf");
+
+        // No supersede yet → the guard reads the conf as unchanged.
+        assert!(
+            !agent.conf_changed_since(&written).unwrap(),
+            "conf must read as unchanged immediately after the locked write"
+        );
+
+        // Ensure a mtime delta beyond any coarse filesystem granularity, then let
+        // the installer supersede the conf under the shared lock (its write lands
+        // after the agent's release, mirroring configure_amneziawg mid-flight).
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        installer_write_locked(&lock_path, &conf_path, NEW_PRIV, NEW_ENDPOINT, 9);
+
+        // The guard now detects the supersede → tick() will skip the kernel apply
+        // and re-merge next poll instead of applying the installer's params under
+        // the agent's epoch.
+        assert!(
+            agent.conf_changed_since(&written).unwrap(),
+            "conf_changed_since must detect the installer supersede so the apply is skipped"
+        );
     }
 }
