@@ -22,6 +22,13 @@
 # with NO LIB_DIR and survives WITH LIB_DIR pointing at a staging dir. Remove the
 # LIB_DIR export in upgrade.sh → the structural checks S3/S4 go RED; the die is
 # the pre-fix behaviour.
+#
+# Phase 6 naming reclassification: lib/install-firewall.sh was renamed to
+# lib/firewall-lib.sh; reconcile.sh's ${FIREWALL_LIB:-${LIB_DIR:-...}} default
+# now targets the new name (BUG/FIX subtests below), while upgrade.sh's real
+# _stage_lib/FIREWALL_LIB-export calls (unmodified this phase) still target the
+# old name via the frozen lib/install-firewall.sh back-compat duplicate
+# (SF1/T3-*/FIX2 subtests below, which exercise that real unmodified code).
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -114,8 +121,10 @@ FETCHED_DIR="$TMP/fetched"        # simulates upgrade.sh's /tmp fetch tmpdir
 mkdir -p "$FETCHED_DIR"
 cp "$RECONCILE_LIB" "$FETCHED_DIR/reconcile.sh"   # NO lib/install-firewall.sh here
 
-# Bug repro: NO LIB_DIR/FIREWALL_LIB → resolves to $FETCHED_DIR/install-firewall.sh
-# (absent) → die.
+# Bug repro: NO LIB_DIR/FIREWALL_LIB → resolves to $FETCHED_DIR/firewall-lib.sh
+# (absent) → die. (Phase 6: reconcile.sh's own default now resolves the
+# renamed lib/firewall-lib.sh; upgrade.sh's explicit FIREWALL_LIB export
+# below still targets the back-compat install-firewall.sh name — see FIX2.)
 BUG_OUT=$(bash -c "
 set -uo pipefail
 log()  { :; }
@@ -129,16 +138,19 @@ _RECONCILE_FIREWALL_APPLIED=0
 reconcile_firewall_surface
 echo SURVIVED
 " 2>&1) && BUG_RC=0 || BUG_RC=$?
-if [[ "$BUG_RC" -ne 0 ]] && echo "$BUG_OUT" | grep -qi 'install-firewall.sh not found'; then
+if [[ "$BUG_RC" -ne 0 ]] && echo "$BUG_OUT" | grep -qi 'firewall-lib.sh not found'; then
     pass "BUG: curl|bash tmpdir + no LIB_DIR => reconcile_firewall_surface die()s (repro confirmed)"
 else
-    fail "BUG: expected die on missing install-firewall.sh; rc=$BUG_RC out: $BUG_OUT"
+    fail "BUG: expected die on missing firewall-lib.sh; rc=$BUG_RC out: $BUG_OUT"
 fi
 
-# Fix: LIB_DIR points at a staging dir that HAS install-firewall.sh → no die.
+# Fix: LIB_DIR points at a staging dir that HAS firewall-lib.sh (the default's
+# new target name) → no die. Also stage the old install-firewall.sh name
+# alongside for FIX2 below (upgrade.sh's real _stage_lib call still uses it).
 FIX_STAGE="$TMP/fix_stage"
 mkdir -p "$FIX_STAGE"
 cp "$FW_LIB" "$FIX_STAGE/install-firewall.sh"
+cp "$FW_LIB" "$FIX_STAGE/firewall-lib.sh"
 FIX_OUT=$(bash -c "
 set -uo pipefail
 log()  { :; }
@@ -153,7 +165,7 @@ reconcile_firewall_surface
 echo \"SURVIVED APPLIED=\$_RECONCILE_FIREWALL_APPLIED\"
 " 2>&1) && FIX_RC=0 || FIX_RC=$?
 if [[ "$FIX_RC" -eq 0 ]] && echo "$FIX_OUT" | grep -q 'SURVIVED'; then
-    pass "FIX: LIB_DIR→staging dir with install-firewall.sh => no die, firewall surface proceeds"
+    pass "FIX: LIB_DIR→staging dir with firewall-lib.sh => no die, firewall surface proceeds"
 else
     fail "FIX: staging dir did not cure the die; rc=$FIX_RC out: $FIX_OUT"
 fi
