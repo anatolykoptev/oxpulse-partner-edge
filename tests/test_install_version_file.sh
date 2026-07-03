@@ -18,7 +18,11 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 INSTALL_SYSTEMD="$REPO_ROOT/lib/install-systemd.sh"
-UPGRADE_SH="$REPO_ROOT/upgrade.sh"
+# sync_host_scripts/snapshot_host_scripts/restore_host_scripts moved to
+# lib/host-scripts-lib.sh (Phase 4 strangler-harden, task p4) — upgrade.sh
+# now only holds thin forwarders, so Cases 4/5/6/8 below (which assert on the
+# real VERSION-handling logic) check the lib file instead of upgrade.sh.
+HOST_SCRIPTS_LIB="$REPO_ROOT/lib/host-scripts-lib.sh"
 RELEASE_YML="$REPO_ROOT/.github/workflows/release.yml"
 VERSION_FILE="$REPO_ROOT/VERSION"
 
@@ -54,29 +58,29 @@ else
 	fail "install-systemd.sh does not mkdir /usr/local/share/oxpulse-partner-edge before installing VERSION"
 fi
 
-# ── Case 4: upgrade.sh sync_host_scripts installs VERSION ─────────────────────
-echo "==> Case 4: upgrade.sh sync_host_scripts installs VERSION to canonical path"
+# ── Case 4: lib/host-scripts-lib.sh sync_host_scripts installs VERSION ────────
+echo "==> Case 4: lib/host-scripts-lib.sh sync_host_scripts installs VERSION to canonical path"
 # The path may be expressed as a literal or as $PREFIX_SHARE/oxpulse-partner-edge/VERSION.
 # Both forms are valid; the canonical segment is the suffix.
-if grep -q 'oxpulse-partner-edge/VERSION' "$UPGRADE_SH" 2>/dev/null; then
-	pass "upgrade.sh references oxpulse-partner-edge/VERSION path"
+if grep -q 'oxpulse-partner-edge/VERSION' "$HOST_SCRIPTS_LIB" 2>/dev/null; then
+	pass "lib/host-scripts-lib.sh references oxpulse-partner-edge/VERSION path"
 else
-	fail "upgrade.sh sync_host_scripts does not install VERSION to $CANONICAL_PATH"
+	fail "lib/host-scripts-lib.sh sync_host_scripts does not install VERSION to $CANONICAL_PATH"
 fi
 
-# ── Case 5: upgrade.sh snapshot_host_scripts saves VERSION ────────────────────
-echo "==> Case 5: upgrade.sh snapshot_host_scripts saves VERSION (rollback safety)"
+# ── Case 5: lib/host-scripts-lib.sh snapshot_host_scripts saves VERSION ───────
+echo "==> Case 5: lib/host-scripts-lib.sh snapshot_host_scripts saves VERSION (rollback safety)"
 # snapshot saves into snap_dir/share-config/; check that VERSION appears near
 # snapshot_host_scripts context.
-if awk '/snapshot_host_scripts\(\)/,/^}/' "$UPGRADE_SH" | grep -q "VERSION"; then
+if awk '/snapshot_host_scripts\(\)/,/^}/' "$HOST_SCRIPTS_LIB" | grep -q "VERSION"; then
 	pass "snapshot_host_scripts captures VERSION"
 else
 	fail "snapshot_host_scripts does not save VERSION — rollback will miss it"
 fi
 
-# ── Case 6: upgrade.sh restore_host_scripts restores VERSION ──────────────────
-echo "==> Case 6: upgrade.sh restore_host_scripts restores VERSION (rollback path)"
-if awk '/restore_host_scripts\(\)/,/^}/' "$UPGRADE_SH" | grep -q "VERSION"; then
+# ── Case 6: lib/host-scripts-lib.sh restore_host_scripts restores VERSION ─────
+echo "==> Case 6: lib/host-scripts-lib.sh restore_host_scripts restores VERSION (rollback path)"
+if awk '/restore_host_scripts\(\)/,/^}/' "$HOST_SCRIPTS_LIB" | grep -q "VERSION"; then
 	pass "restore_host_scripts restores VERSION"
 else
 	fail "restore_host_scripts does not restore VERSION — rollback leaves stale version on disk"
@@ -94,12 +98,12 @@ else
 	fail "release.yml does not stage VERSION — sync_host_scripts curl fetch will 404 on tagged releases"
 fi
 
-# ── Case 8: upgrade.sh dry-run logs VERSION install ───────────────────────────
-echo "==> Case 8: upgrade.sh dry-run branch of sync_host_scripts mentions VERSION"
-if grep -q 'dry-run.*VERSION\|VERSION.*dry-run' "$UPGRADE_SH" 2>/dev/null; then
-	pass "upgrade.sh dry-run branch mentions VERSION"
+# ── Case 8: lib/host-scripts-lib.sh dry-run logs VERSION install ──────────────
+echo "==> Case 8: lib/host-scripts-lib.sh dry-run branch of sync_host_scripts mentions VERSION"
+if grep -q 'dry-run.*VERSION\|VERSION.*dry-run' "$HOST_SCRIPTS_LIB" 2>/dev/null; then
+	pass "lib/host-scripts-lib.sh dry-run branch mentions VERSION"
 else
-	fail "upgrade.sh dry-run branch does not log VERSION install — operator dry-run output is incomplete"
+	fail "lib/host-scripts-lib.sh dry-run branch does not log VERSION install — operator dry-run output is incomplete"
 fi
 
 # ── Result ────────────────────────────────────────────────────────────────────

@@ -84,7 +84,10 @@ sync_line=$(grep -n 'sync_host_scripts "\$RELEASE_TAG"' "$UPGRADE" | head -1 | c
     || fail "A-4: normalize_target must appear before sync_host_scripts"
 
 # sha256sums_url must be built from local $tag var (not global TARGET/RELEASE_TAG).
-grep -q 'sha256sums_url="$RELEASES_BASE/$tag/SHA256SUMS"' "$UPGRADE" \
+# Lives inside sync_host_scripts, which moved to lib/host-scripts-lib.sh
+# (Phase 4 strangler-harden, task p4) — check there, not upgrade.sh (which
+# now only holds a thin forwarder).
+grep -q 'sha256sums_url="$RELEASES_BASE/$tag/SHA256SUMS"' "$REPO_ROOT/lib/host-scripts-lib.sh" \
     && pass "A-5: sha256sums_url built from local \$tag (not global TARGET)" \
     || fail "A-5: sha256sums_url pattern unexpected — check tag variable used in URL"
 
@@ -262,9 +265,17 @@ trap "rm -f '$PREAMBLE_TAG' '$PREAMBLE_SYNC'" EXIT
     awk '/^_host_script_install_dir\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^_host_script_mode\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^_HOST_SCRIPT_RESTART_UNITS=\(/{found=1} found{print} found && /^\)$/{exit}' "$UPGRADE"
+    # snapshot_host_scripts/restore_host_scripts/sync_host_scripts are now
+    # thin lazy-source forwarders in upgrade.sh (Phase 4 strangler-harden,
+    # task p4) — the awk-extracted stubs below can't resolve
+    # lib/host-scripts-lib.sh from inside this sourced-preamble harness
+    # (BASH_SOURCE[0] points at $PREAMBLE_SYNC, not the real upgrade.sh).
+    # Append the REAL lib content after them: its same-named definitions
+    # land LAST and overwrite the forwarder stubs (bash: later def wins).
     awk '/^snapshot_host_scripts\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^restore_host_scripts\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^sync_host_scripts\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
+    cat "$REPO_ROOT/lib/host-scripts-lib.sh"
 } > "$PREAMBLE_SYNC"
 bash -n "$PREAMBLE_SYNC" || { fail "C-0: sync preamble has syntax errors"; exit 1; }
 pass "C-0: sync preamble syntax clean"
