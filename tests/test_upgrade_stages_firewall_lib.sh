@@ -82,6 +82,10 @@ STAGE_FN="$TMP/stage_fn.sh"
     echo 'log()  { :; }'
     echo 'warn() { :; }'
     echo 'die()  { echo "DIED: $*" >&2; exit 1; }'
+    # _stage_lib now calls the shared _lookup_expected_hash helper (review HIGH #2 —
+    # extracted so _stage_lib and _source_lib cannot re-diverge on manifest matching);
+    # extract it too or the T3-* tier-3 tests below fail with "command not found".
+    awk '/^_lookup_expected_hash\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE"
     awk '/^_stage_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE"
 } > "$STAGE_FN"
 bash -n "$STAGE_FN" && pass "SF0: extracted _stage_lib parses" || { fail "SF0: _stage_lib syntax error"; }
@@ -250,12 +254,24 @@ else
     fail "T3-MISMATCH: expected checksum-mismatch die; got: $_out"
 fi
 
-# T3-NOENTRY: name absent from checksums → stages unverified (mirrors install.sh).
+# T3-NOENTRY: manifest resolved but OMITS this file + no override → fail-closed die.
+# Must MATCH _source_lib's AND install.sh:_install_lib_source's no-entry contract (review
+# HIGH — all three resolvers now agree on fail-closed here; install.sh's tier-4 used to
+# fail OPEN on this exact case, closed by the same review-HIGH fix). A truncated /
+# captive-portal / stale manifest must never silently stage a root-sourced lib.
 _out=$(_stage3 "$CK_NOENTRY" 0)
-if echo "$_out" | grep -q 'STAGED'; then
-    pass "T3-NOENTRY: no checksums entry => staged unverified (install.sh parity, entry pending P0)"
+if echo "$_out" | grep -qi 'without a verified checksum is unsafe'; then
+    pass "T3-NOENTRY: manifest omits entry + no override => fail-closed die (matches _source_lib)"
 else
-    fail "T3-NOENTRY: expected STAGED for unlisted lib; got: $_out"
+    fail "T3-NOENTRY: expected fail-closed die for unlisted lib; got: $_out"
+fi
+
+# T3-NOENTRY-OVERRIDE: manifest omits entry + OXPULSE_UPGRADE_NO_INTEGRITY=1 → stages (risk accepted).
+_out=$(_stage3 "$CK_NOENTRY" 1)
+if echo "$_out" | grep -q 'STAGED'; then
+    pass "T3-NOENTRY-OVERRIDE: OXPULSE_UPGRADE_NO_INTEGRITY=1 stages an unlisted lib (escape hatch)"
+else
+    fail "T3-NOENTRY-OVERRIDE: expected STAGED with override; got: $_out"
 fi
 
 # T3-NOCK-FAILCLOSED: no checksums anywhere + no override → fail-closed die.

@@ -25,6 +25,7 @@
 #   oxpulse-partner-edge-upgrade --dry-run             # print plan, skip docker and file writes
 #   oxpulse-partner-edge-upgrade --dry-run --skip-check=1,3  # skip specific conflict checks (1-8)
 #   oxpulse-partner-edge-upgrade --allow-unverified    # skip SHA256SUMS check (dev/test only, NEVER on relay)
+#   oxpulse-partner-edge-upgrade --no-integrity        # install.sh-parity alias for --allow-unverified
 #
 # Tag-form note: starting with v0.12.60, git tags, GitHub release tags, and GHCR
 # image tags ALL use the same vX.Y.Z form — no component prefix. release-please-config.json
@@ -147,16 +148,80 @@ log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
 
+# _lookup_expected_hash NAME MANIFEST_FILE — resolve NAME's expected sha256 from a
+# checksum manifest (lib-checksums.txt or a release SHA256SUMS), field-exact matching
+# column 2 (NOT a suffix grep — a suffix match would also hit an unrelated file whose
+# name happens to end in NAME, e.g. "foo-name.sh" matching a manifest line for
+# "name.sh"), and tolerating an optional "./" prefix in that column (the common
+# `find`-generated manifest form). Shared by _source_lib and _stage_lib below so the
+# "the two tier-3 resolvers must not diverge" contract is STRUCTURAL, not a comment
+# promise (review HIGH — they had already drifted: awk field-exact here vs. grep
+# suffix-anchored in _stage_lib, so a "./"-prefixed manifest line resolved in one and
+# fail-closed-died in the other for the identical file). Always returns 0 — a missing
+# manifest or no matching entry prints nothing, never a nonzero exit under `set -e`.
+_lookup_expected_hash() {
+    local name="$1" manifest="$2"
+    [[ -n "$manifest" && -r "$manifest" ]] || return 0
+    awk -v n="$name" '$2 == n || $2 == "./" n { print $1; exit }' "$manifest" 2>/dev/null
+    return 0
+}
+
 # _source_lib NAME LOCAL_PATH INSTALLED_PATH REPO_RAW_PATH — source a shared library.
 # Resolution order:
 #   1. Adjacent to upgrade.sh (local checkout / same-dir download)
 #   2. Installed sbin path (/usr/local/sbin/<name>)
 #   3. Fetch from REPO_RAW (standalone upgrade.sh downloaded without adjacent libs)
-# Tier 3 requires curl and a reachable REPO_RAW.  Fetched file is written to a
-# temp dir and sourced from there; it is NOT installed to disk (sync_host_scripts
-# handles the verified install later in the run).
+# Tiers 1-2 are trusted local files. Tier 3 is a ROOT-run fetch of security-relevant
+# code on a (frequently censored) edge, so it is TLS-pinned (--proto =https --tlsv1.2)
+# and the fetched bytes are sha256-verified FAIL-CLOSED against the file's HOME
+# MANIFEST before sourcing, mirroring install.sh:_install_lib_source and _stage_lib's
+# tamper-evident contract. Home manifest:
+#   • lib/*.sh  (fetched from $REPO_RAW/lib/) → lib-checksums.txt (committed at
+#     REPO_RAW/lib/, so the remote fallback can fetch it alongside the module)
+#   • repo-root *.sh                          → the per-tag release SHA256SUMS
+#     (not committed to REPO_RAW; the remote fallback fetches it from RELEASES_BASE)
+#
+# THREAT MODEL — what this does and does NOT defend (be precise, do not overclaim):
+#   • DEFENDED: a protocol-downgrade / plaintext-HTTP MITM (the TLS-pin refuses to
+#     fall back to http://), and accidental/passive corruption or a partial/stale
+#     tamper of the payload that leaves a LOCALLY-TRUSTED manifest intact.
+#   • DEFENDED (manifest omission): a manifest that RESOLVES (curl 200 / readable
+#     file) but has NO line for this file — what a truncated download, a captive
+#     portal, or a stale/wrong-version manifest produces — is treated IDENTICALLY to
+#     "no manifest at all": FAIL-CLOSED (die unless the escape hatch is set), NOT
+#     sourced-with-a-warn. Every file this resolver fetches is committed to its home
+#     manifest, so a missing entry is never the legit norm; closing it denies the
+#     free "omit one line and the check is skipped" bypass (review HIGH). _stage_lib
+#     and install.sh:_install_lib_source's tier-4 resolver now fail-closed on the
+#     identical no-entry case too (review HIGH fix) — all three tier-3/tier-4
+#     resolvers agree on this contract; _source_lib is not the odd one out anymore.
+#   • STRONG only when the manifest is resolved LOCALLY (tier-1 adjacent checkout, or
+#     tier-2 ${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/lib-checksums.txt IF an
+#     operator has staged it there): then it is an INDEPENDENT trust anchor and the
+#     sha256 is genuine tamper-evidence. Be precise about reachability: nothing in the
+#     current release pipeline (release.yml) writes lib-checksums.txt into
+#     INSTALL_LIB_DIR — the tier-2 anchor exists only if an operator manually copies it
+#     there, which is not the documented/automated path. Do not read "tier-2 installed
+#     tarball" as a common deployment shape.
+#   • WEAK in the remote-fallback sub-case (no local manifest → manifest curl'd from
+#     the SAME REPO_RAW/RELEASES_BASE origin as the payload): this is the NORMAL,
+#     near-universal path for a real reconcile.sh curl|bash run (reconcile.sh is not
+#     installed to disk, and tier-2 is unreachable absent manual staging per above).
+#     Here manifest and payload share an origin, so this does NOT authenticate a
+#     malicious REPO_RAW / OXPULSE_MIRROR_BASE or an active MITM presenting a cert the
+#     TLS-pin accepts — such an adversary can serve a matching checksum. It reduces to
+#     "TLS + transit-corruption detection", not origin authentication.
+#   • RESIDUAL: full supply-chain authentication of a hostile origin needs a signature
+#     rooted OUTSIDE that origin (a GPG-signed SHA256SUMS.asc, or refusing tier-3
+#     without a locally-staged manifest). That is a larger, separate change (signing
+#     infrastructure) not attempted here — this block deliberately does not claim to
+#     close it.
+# Fetched file is sourced from a temp dir, NOT installed to disk (sync_host_scripts
+# does the verified install later in the run). A fork/dev/restricted-network operator
+# who cannot supply a manifest passes --allow-unverified (or --no-integrity, or
+# OXPULSE_UPGRADE_NO_INTEGRITY=1) to acknowledge the risk instead of hard-failing.
 # Note: when OXPULSE_UPGRADE_TAG is the real tag (not the @RELEASE_TAG_UNSUBSTITUTED@ sentinel),
-# REPO_RAW already points at the pinned release ref — fetched bytes match the
+# REPO_RAW + SHA256SUMS are both pinned to that release — fetched bytes match the
 # tag snapshot, not main HEAD.
 _source_lib() {
     local name="$1" local_path="$2" installed_path="$3" raw_path="$4"
@@ -169,21 +234,66 @@ _source_lib() {
         source "$installed_path"
         return 0
     fi
-    # Tier 3: fetch from REPO_RAW for standalone operator-download runs.
-    local _fetch_tmp
-    _fetch_tmp=$(mktemp "/tmp/oxpulse-lib-${name}-XXXXXX.sh")
-    # shellcheck disable=SC2064
-    trap "rm -f '$_fetch_tmp'" RETURN
-    if curl -fsSL --max-time 30 "$raw_path" -o "$_fetch_tmp" 2>/dev/null; then
-        warn "$name not found locally; fetched from $raw_path (standalone run)"
-        warn "For verified install run 'oxpulse-partner-edge-upgrade' after the sync completes"
-        # shellcheck source=/dev/null
-        source "$_fetch_tmp"
-        return 0
-    fi
-    die "$name not found (tried: $local_path, $installed_path, $raw_path).
+    # Tier 3: TLS-pinned fetch + fail-closed sha256 verify for standalone runs.
+    local _fetch_tmp _man="" _man_tmp="" _expected="" _actual _sd _cand
+    _fetch_tmp=$(mktemp)
+    # Clean up via the single cumulative EXIT trap (set up before the first _source_lib
+    # call), NOT a function-local RETURN trap: die() calls exit, which does NOT fire a
+    # RETURN trap, so the tier-3 die paths (fetch-fail / no-verified-checksum /
+    # mismatch) + the manifest temp below would otherwise leak in /tmp on every failed
+    # run — the hostile-network case this hardening targets (review LOW).
+    _CLEANUP_PATHS+=("$_fetch_tmp")
+    if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "$raw_path" -o "$_fetch_tmp" 2>/dev/null; then
+        die "$name not found (tried: $local_path, $installed_path, $raw_path).
 On a standalone upgrade.sh download ensure network access to REPO_RAW or stage
 the lib files adjacent to upgrade.sh."
+    fi
+    # Resolve the file's home manifest (adjacent → installed → remote fallback).
+    _sd="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    if [[ "$raw_path" == "$REPO_RAW/lib/"* ]]; then
+        # lib/*.sh → lib-checksums.txt (committed, so remotely fetchable from REPO_RAW).
+        for _cand in "${_sd}/lib/lib-checksums.txt" \
+                     "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/lib-checksums.txt"; do
+            [[ -r "$_cand" ]] && { _man="$_cand"; break; }
+        done
+        if [[ -z "$_man" ]]; then
+            _man_tmp=$(mktemp); _CLEANUP_PATHS+=("$_man_tmp")
+            curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
+                "$REPO_RAW/lib/lib-checksums.txt" -o "$_man_tmp" 2>/dev/null && _man="$_man_tmp"
+        fi
+    else
+        # repo-root *.sh → the release SHA256SUMS. Not committed to REPO_RAW, so the
+        # remote fallback fetches the per-tag release asset. On a floating/dev tag
+        # (sentinel or non-vX.Y.Z) there is no SHA256SUMS → _man stays empty →
+        # fail-closed unless the operator set the escape hatch.
+        [[ -r "${_sd}/SHA256SUMS" ]] && _man="${_sd}/SHA256SUMS"
+        if [[ -z "$_man" && "${OXPULSE_UPGRADE_TAG}" =~ ^v[0-9]+\. ]]; then
+            _man_tmp=$(mktemp); _CLEANUP_PATHS+=("$_man_tmp")
+            curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
+                "$RELEASES_BASE/${OXPULSE_UPGRADE_TAG}/SHA256SUMS" -o "$_man_tmp" 2>/dev/null && _man="$_man_tmp"
+        fi
+    fi
+    # Verify FAIL-CLOSED. Resolve the expected checksum from whichever manifest we
+    # found; a manifest that resolved but OMITS this file's line leaves _expected empty
+    # and is handled the SAME as "no manifest at all" (see the manifest-omission bullet
+    # in the header) — both fail-closed unless the escape hatch is set. The three
+    # possible outcomes: (a) entry present + matches → source; (b) entry present +
+    # mismatch → die; (c) no entry (no manifest, or manifest omits it) → die unless
+    # OXPULSE_UPGRADE_NO_INTEGRITY.
+    _expected=$(_lookup_expected_hash "$name" "$_man")
+    if [[ -n "$_expected" ]]; then
+        _actual=$(sha256sum "$_fetch_tmp" | awk '{print $1}')
+        [[ "$_actual" != "$_expected" ]] && die "_source_lib: tier-3 checksum mismatch for $name — refusing to source untrusted code (expected ${_expected:0:16}… got ${_actual:0:16}…)"
+    elif [[ "${OXPULSE_UPGRADE_NO_INTEGRITY:-0}" -eq 1 ]]; then
+        warn "_source_lib: no verified checksum for $name (no manifest resolved, or the manifest that did has no entry for it) + OXPULSE_UPGRADE_NO_INTEGRITY set — sourcing UNVERIFIED (operator accepts risk)"
+    else
+        die "_source_lib: tier-3 fetch of $name without a verified checksum is unsafe — no manifest resolved, or the manifest that did resolve has no entry for it (a truncated / captive-portal / wrong-version manifest also produces this). Install from a release tarball or pass --allow-unverified (OXPULSE_UPGRADE_NO_INTEGRITY=1) to acknowledge the risk"
+    fi
+    warn "$name not found locally; fetched from $raw_path (standalone run)"
+    warn "For verified install run 'oxpulse-partner-edge-upgrade' after the sync completes"
+    # shellcheck source=/dev/null
+    source "$_fetch_tmp"
+    return 0
 }
 
 # _stage_lib NAME LOCAL_PATH INSTALLED_PATH REPO_RAW_PATH DEST_DIR — resolve a
@@ -208,13 +318,15 @@ _stage_lib() {
     # through it MORE often (the curl|bash-from-/tmp path succeeds instead of dying),
     # so it is TLS-pinned (--proto =https --tlsv1.2 — blocks a protocol-downgrade MITM)
     # and the fetched bytes are sha256-verified against lib-checksums.txt before
-    # staging, mirroring install.sh:146-207 (_install_lib_source)'s tamper-evident
-    # contract on this identical REPO_RAW pattern. (Hardening ALL of upgrade.sh's
-    # fetches — _source_lib too — is the separate P0 resolver task; this closes only
-    # the tier BUG1 newly widened.)
+    # staging, mirroring install.sh:_install_lib_source's tamper-evident contract on
+    # this identical REPO_RAW pattern. (_source_lib carries the same fail-closed verify
+    # as of the P0 resolver task — see its tier-3 block above.)
     local _fetch_tmp _ck _ck_tmp=""
     _fetch_tmp=$(mktemp)
-    trap 'rm -f "$_fetch_tmp" "${_ck_tmp:-}"' RETURN
+    # EXIT-trap cleanup (set up before the first _stage_lib call), NOT a RETURN trap:
+    # die() calls exit and never fires a RETURN trap, so the die paths below (fetch-fail
+    # / no-manifest / mismatch) + the checksum temp would otherwise leak in /tmp (review LOW).
+    _CLEANUP_PATHS+=("$_fetch_tmp")
     if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "$raw_path" -o "$_fetch_tmp" 2>/dev/null; then
         die "$name could not be staged (tried: $local_path, $installed_path, $raw_path).
 reconcile_firewall_surface needs it on-disk in LIB_DIR; ensure network access to
@@ -229,7 +341,7 @@ REPO_RAW or stage lib/ adjacent to upgrade.sh."
         [[ -r "$_cand" ]] && { _ck="$_cand"; break; }
     done
     if [[ -z "$_ck" ]]; then
-        _ck_tmp=$(mktemp)
+        _ck_tmp=$(mktemp); _CLEANUP_PATHS+=("$_ck_tmp")
         curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
             "$REPO_RAW/lib/lib-checksums.txt" -o "$_ck_tmp" 2>/dev/null && _ck="$_ck_tmp"
     fi
@@ -245,21 +357,69 @@ REPO_RAW or stage lib/ adjacent to upgrade.sh."
     else
         local _actual _expected
         _actual=$(sha256sum "$_fetch_tmp" | awk '{print $1}')
-        _expected=$(grep "[[:space:]]${name}$" "$_ck" 2>/dev/null | awk '{print $1}')
-        if [[ -n "$_expected" && "$_actual" != "$_expected" ]]; then
-            die "_stage_lib: tier-3 checksum mismatch for $name — refusing to stage untrusted code (expected ${_expected:0:16}… got ${_actual:0:16}…)"
+        _expected=$(_lookup_expected_hash "$name" "$_ck")
+        # Same fail-closed contract as _source_lib — both route through the shared
+        # _lookup_expected_hash (review HIGH: the two tier-3 resolvers had already
+        # DIVERGED on manifest-entry matching — awk field-exact here vs. grep
+        # suffix-anchored in this function — so extracting one shared helper makes the
+        # "must not diverge" invariant structural, not a comment promise): (a) entry
+        # present + matches → stage; (b) entry present + mismatch → die; (c) manifest
+        # resolved but OMITS this file → die unless the escape hatch is set. Case (c) is
+        # the truncated / captive-portal / stale-manifest attack: a manifest that
+        # resolves yet drops the entry would otherwise SILENTLY stage root-sourced code —
+        # install-firewall.sh and telegram-alert-lib.sh are both sourced-and-executed as
+        # ROOT by reconcile.sh's call-time resolvers, and the firewall lib's own t14
+        # contract says a missing/unverified copy must never leave the host unfirewalled.
+        # install.sh:_install_lib_source's tier-4 resolver now fails closed on the
+        # no-entry case too (review HIGH fix) — all three tier-3/tier-4 resolvers agree.
+        # Both staged libs HAVE lib-checksums.txt entries, so the legitimate tier-3 manifest
+        # carries them — case (c) fires only on a tampered/truncated manifest, never a real
+        # upgrade (tier-3 itself only runs on the standalone curl|bash path, not on an
+        # installed edge where the libs resolve at tier-1/2).
+        if [[ -n "$_expected" ]]; then
+            [[ "$_actual" != "$_expected" ]] && die "_stage_lib: tier-3 checksum mismatch for $name — refusing to stage untrusted code (expected ${_expected:0:16}… got ${_actual:0:16}…)"
+        elif [[ "${OXPULSE_UPGRADE_NO_INTEGRITY:-0}" -eq 1 ]]; then
+            warn "_stage_lib: lib-checksums.txt has no entry for $name + OXPULSE_UPGRADE_NO_INTEGRITY set — staging UNVERIFIED (operator accepts risk)"
+        else
+            die "_stage_lib: tier-3 fetch of $name without a verified checksum is unsafe — the resolved lib-checksums.txt has no entry for it (a truncated / captive-portal / stale manifest also produces this). Install from a release tarball or set OXPULSE_UPGRADE_NO_INTEGRITY=1 to acknowledge the risk"
         fi
-        # No entry (telegram-alert-lib.sh has none until the P0 lib-checksums.txt +
-        # release.yml coordination lands) → proceed unverified, EXACTLY as
-        # install.sh:_install_lib_source treats a file absent from the manifest
-        # (grep miss → empty _expected → no mismatch check). Verification starts
-        # automatically the moment P0 adds the entry — no code change here.
-        [[ -z "$_expected" ]] && warn "_stage_lib: no lib-checksums.txt entry for $name — staged unverified (entry pending P0 resolver task)"
     fi
     cp -f "$_fetch_tmp" "$dest"
     warn "$name staged from $raw_path (standalone run) for reconcile transitive-dep resolution"
     return 0
 }
+
+# --- Single cumulative cleanup registry, drained by ONE EXIT trap ---------------
+# bash EXIT traps are single-slot: a later `trap … EXIT` REPLACES an earlier one.
+# Register throwaway paths in an array drained by this one EXIT trap; every later site
+# (the _source_lib / _stage_lib tier-3 temp files, the lib-staging dir, the --dry-run
+# conflict tmpdir) APPENDS instead of re-trapping (review MEDIUM #3). Established HERE,
+# before the first _source_lib call, so the tier-3 die paths (fetch-fail /
+# no-verified-checksum / mismatch) do not leak /tmp files: die() calls exit, which does
+# NOT fire a function-local RETURN trap, so a RETURN trap could not have cleaned them
+# (review LOW — tier-3 temp-file leak on hostile-network upgrade retries).
+_CLEANUP_PATHS=()
+_run_cleanup() {
+    local _p
+    [[ ${#_CLEANUP_PATHS[@]} -eq 0 ]] && return 0
+    for _p in "${_CLEANUP_PATHS[@]}"; do [[ -n "$_p" ]] && rm -rf "$_p"; done
+}
+trap _run_cleanup EXIT
+
+# Integrity escape hatch for the tier-3 fetch verify in _source_lib (immediately below)
+# AND _stage_lib (further down). Args are parsed later (args_parse), so pre-scan $@ here
+# — BEFORE the first _source_lib call — and honor the env var. Mirrors install.sh's
+# --no-integrity contract so a fork/dev/restricted-network operator is warned+continued
+# instead of hard-failed. --allow-unverified is upgrade.sh's canonical flag; --no-integrity
+# is an install.sh-parity alias; OXPULSE_UPGRADE_NO_INTEGRITY=1 is the env-var form. All
+# three set this same flag, and ALLOW_UNVERIFIED (the SHA256SUMS host-script guard) is
+# seeded from it below — so all three gate BOTH the tier-3 lib verify here AND that guard.
+OXPULSE_UPGRADE_NO_INTEGRITY="${OXPULSE_UPGRADE_NO_INTEGRITY:-0}"
+for _arg in "$@"; do
+    case "$_arg" in
+        --allow-unverified|--no-integrity) OXPULSE_UPGRADE_NO_INTEGRITY=1 ;;
+    esac
+done
 
 # Source shared channel render functions (re_render_xray, future re_render_awg, etc.)
 # shellcheck source=channel-render-lib.sh
@@ -292,27 +452,10 @@ _source_lib "reconcile.sh" \
 # the deps into a stable dir and point LIB_DIR at it. t14's fail-loud firewall
 # contract is preserved: the die on a genuinely-missing file AFTER staging is still
 # correct — this only closes the missing co-location on the fetch path.
-# Cumulative EXIT cleanup: bash EXIT traps are single-slot, so a later
-# `trap ... EXIT` REPLACES an earlier one — the pre-existing conflict-tmpdir trap
-# (see the --dry-run conflict block) would otherwise silently orphan the staging
-# dir on that path. Register temp paths in an array drained by ONE EXIT trap set
-# here; every later site appends instead of re-trapping (review MEDIUM #3).
-_CLEANUP_PATHS=()
-_run_cleanup() {
-    local _p
-    [[ ${#_CLEANUP_PATHS[@]} -eq 0 ]] && return 0
-    for _p in "${_CLEANUP_PATHS[@]}"; do [[ -n "$_p" ]] && rm -rf "$_p"; done
-}
-trap _run_cleanup EXIT
-
-# Integrity escape hatch for _stage_lib's tier-3 verify. Args are parsed later, so
-# pre-scan $@ here and honor the env var (mirrors install.sh's --no-integrity so a
-# fork/dev/restricted-network operator is not hard-failed).
-OXPULSE_UPGRADE_NO_INTEGRITY="${OXPULSE_UPGRADE_NO_INTEGRITY:-0}"
-for _arg in "$@"; do
-    [[ "$_arg" == "--allow-unverified" ]] && OXPULSE_UPGRADE_NO_INTEGRITY=1
-done
-
+# _CLEANUP_PATHS + the single EXIT trap were established above (before the first
+# _source_lib call). The staging dir and every later temp site append to that array.
+# (OXPULSE_UPGRADE_NO_INTEGRITY was pre-scanned above too, and is honored here by
+# _stage_lib's tier-3 verify as well.)
 _LIB_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/oxpulse-lib-stage-XXXXXX")
 _CLEANUP_PATHS+=("$_LIB_STAGE_DIR")
 _UPGRADE_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
@@ -380,7 +523,14 @@ MODE=apply
 TARGET=""
 DRY_RUN=0
 SKIPPED_CHECKS=""
-ALLOW_UNVERIFIED=0
+# ALLOW_UNVERIFIED gates the SHA256SUMS host-script guard (further down). Seed it from
+# the integrity escape hatch pre-scanned above so that OXPULSE_UPGRADE_NO_INTEGRITY=1 —
+# set via the env var OR by the --allow-unverified / --no-integrity pre-scan — bypasses
+# BOTH the tier-3 lib-resolver verify (_source_lib/_stage_lib) AND this host-script
+# guard. That makes the env var and the two flags genuinely interchangeable, as the
+# usage/header comments promise (a restricted-network/dev/fork operator who cannot
+# verify libs cannot verify host scripts either). The CLI-flag case below re-affirms it.
+ALLOW_UNVERIFIED="${OXPULSE_UPGRADE_NO_INTEGRITY:-0}"
 # GHCR PAT supplied via --ghcr-token=ghp_xxx flag OR OXPULSE_GHCR_TOKEN env.
 # Flag wins over env. Empty string disables the auth path (anonymous pull).
 GHCR_TOKEN_ARG="${OXPULSE_GHCR_TOKEN:-}"
@@ -392,7 +542,7 @@ for arg in "$@"; do
 		--with-templates)     MODE=with_templates ;;
 		--host-scripts-only)  MODE=host_scripts_only ;;
 		--dry-run)            DRY_RUN=1 ;;
-		--allow-unverified)   ALLOW_UNVERIFIED=1 ;;
+		--allow-unverified|--no-integrity)   ALLOW_UNVERIFIED=1 ;;
 		--skip-check=*)
 			_sc=" ${arg#--skip-check=} "
 			SKIPPED_CHECKS="${_sc//,/ }"

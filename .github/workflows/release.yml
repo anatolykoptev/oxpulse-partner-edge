@@ -442,6 +442,13 @@ jobs:
           # upload steps below. (A `cp X X` here fails "same file" and aborts the
           # whole Stage step → 0 assets. Only subdir/renamed files need cp.)
           cp lib/telegram-alert-lib.sh         telegram-alert-lib.sh
+          # NOTE: reconcile.sh is intentionally NOT staged as a repo-root release
+          # asset. upgrade.sh's _source_lib fetches it from $REPO_RAW/lib/reconcile.sh
+          # and verifies it against lib-checksums.txt (the lib/*.sh home manifest,
+          # regenerated below and shipped as the lib-checksums.txt asset) — NOT against
+          # the repo-root SHA256SUMS. It is not in _HOST_SCRIPT_SBIN_FILES either, so
+          # nothing ever downloads a top-level reconcile.sh asset. A root cp+SHA256SUMS
+          # entry would be a dead, unverified-by-any-consumer asset (review MEDIUM).
           # Scripts exec'd by xray-update and geoip-refresh timers: staged so
           # SHA256SUMS covers them and sync_host_scripts can install + verify them.
           # oxpulse-xray-update.sh installs to /usr/local/bin/ (not sbin).
@@ -495,6 +502,8 @@ jobs:
             install-split-routing.sh \
             install-systemd.sh \
             render-channel-lib.sh \
+            reconcile.sh \
+            telegram-alert-lib.sh \
           ) > lib/lib-checksums.txt
           cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
