@@ -35,20 +35,26 @@ teardown() {
 # ---------------------------------------------------------------------------
 @test "lib/lib-checksums.txt contains entries for all release-pipeline lib/*.sh files" {
 	[ -f "$CHECKSUMS" ] || skip "lib-checksums.txt not yet created"
-	# Only check the files the release pipeline covers — not every lib/*.sh.
-	# install-firewall.sh and telegram-alert-lib.sh exist in lib/ but are
-	# intentionally absent from the checksums file (not in release.yml sha256sum block).
+	# The full set the release pipeline checksums — this list must match the
+	# release.yml `cd lib && sha256sum` block AND the Makefile `lib-checksums` target.
+	# reconcile.sh + telegram-alert-lib.sh were added by the P0 supply-chain resolver:
+	# both are fetched-as-root by upgrade.sh (_source_lib / _stage_lib) so both must be
+	# verified against a checksum. install-firewall.sh has been covered since its own
+	# bug-#5 fix — it is NOT absent.
 	for basename in \
 		install-args.sh \
 		install-awg.sh \
 		install-awg-params-agent.sh \
 		install-deps.sh \
+		install-firewall.sh \
 		install-healthcheck.sh \
 		install-network.sh \
 		install-preflight.sh \
 		install-split-routing.sh \
 		install-systemd.sh \
-		render-channel-lib.sh; do
+		render-channel-lib.sh \
+		reconcile.sh \
+		telegram-alert-lib.sh; do
 		grep -q "$basename" "$CHECKSUMS"
 	done
 }
@@ -252,4 +258,248 @@ teardown() {
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"CONTINUED"* ]]
 	[[ "$output" == *"no-integrity"* || "$output" == *"operator accepts"* ]]
+}
+
+# ===========================================================================
+# P0 supply-chain resolver — coverage + behavioral checks for upgrade.sh's
+# _source_lib tier-3 fetch (the ORIGINAL unverified resolver, hardened here).
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# FITNESS: every fetched-as-root lib is a staged release asset AND is listed in
+# its HOME checksum manifest (staged-asset ∩ home-manifest). Home manifest:
+#   lib/*.sh       → lib/lib-checksums.txt
+#   repo-root *.sh → the release SHA256SUMS block (== staged, for a root file)
+# Targets = every _install_lib_source / _source_lib / _stage_lib fetch target.
+# ---------------------------------------------------------------------------
+@test "fitness: every root-fetched lib is in (staged release assets ∩ home manifest)" {
+	local upgrade="$REPO_ROOT/upgrade.sh"
+	local install="$REPO_ROOT/install.sh"
+	[ -f "$upgrade" ] && [ -f "$install" ] || skip "upgrade.sh / install.sh missing"
+
+	# Discover fetch targets (dedup). _install_lib_source takes a bareword ending in
+	# .sh (the `# _install_lib_source indirection` comment has no .sh → excluded);
+	# _source_lib / _stage_lib take a quoted "NAME".
+	local targets
+	targets=$(
+		{
+			grep -oE '^[[:space:]]*_install_lib_source [a-z][a-zA-Z0-9._-]+\.sh' "$install" | awk '{print $2}'
+			grep -oE '_source_lib "[^"]+\.sh"' "$upgrade" | sed -E 's/.*"([^"]+)"/\1/'
+			grep -oE '_stage_lib "[^"]+\.sh"'  "$upgrade" | sed -E 's/.*"([^"]+)"/\1/'
+		} | sort -u
+	)
+	[ -n "$targets" ] || { echo "no fetch targets discovered — parser drift"; false; return; }
+
+	# The lib-checksums REGEN block ((cd lib && sha256sum … ) > lib/lib-checksums.txt):
+	# a lib/*.sh listed here has its checksum generated into the released
+	# lib-checksums.txt — that IS its staged-asset evidence (its home manifest).
+	local regen_block
+	regen_block=$(awk '/cd lib && sha256sum \\/{f=1} f{print} /> lib\/lib-checksums.txt/{f=0}' "$RELEASE_YML")
+	# The MAIN release SHA256SUMS block (the standalone `        sha256sum \` line —
+	# NOT the regen block — through `> SHA256SUMS`): a repo-root *.sh listed here is
+	# both staged AND covered by its home manifest (SHA256SUMS).
+	local sums_block
+	sums_block=$(awk '/^[[:space:]]*sha256sum \\/{f=1} f{print} /> SHA256SUMS/{f=0}' "$RELEASE_YML")
+
+	local missing=0 t
+	for t in $targets; do
+		if [ -f "$REPO_ROOT/lib/$t" ]; then
+			# lib/*.sh — home manifest = lib-checksums.txt; staged = the regen block
+			# generates its checksum. Require BOTH (catches committed↔pipeline drift).
+			printf '%s\n' "$regen_block" | grep -qE "^[[:space:]]+$t( |\\\\|\$)" \
+				|| { echo "lib NOT staged into lib-checksums.txt regen block: $t"; missing=1; }
+			grep -qE "[[:space:]]${t}\$" "$CHECKSUMS" \
+				|| { echo "lib MISSING from lib-checksums.txt home manifest: $t"; missing=1; }
+		else
+			# repo-root *.sh — home manifest = SHA256SUMS block (== staged evidence).
+			printf '%s\n' "$sums_block" | grep -qE "^[[:space:]]+$t( |\\\\|\$)" \
+				|| { echo "repo-root lib NOT in SHA256SUMS home manifest/staging: $t"; missing=1; }
+		fi
+	done
+	[ "$missing" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# BEHAVIORAL (real code): the REAL _source_lib extracted from upgrade.sh must
+# TLS-pin its tier-3 fetch and sha256-verify FAIL-CLOSED against the home
+# manifest. Extracts the shipped function (not a hand-copy) → goes RED if the
+# guard is reverted. Home manifest: lib/*.sh → lib-checksums.txt; repo-root →
+# release SHA256SUMS.
+# ---------------------------------------------------------------------------
+@test "_source_lib tier-3: TLS-pinned + fail-closed sha256 verify (real upgrade.sh code)" {
+	local UPGRADE="$REPO_ROOT/upgrade.sh"
+	[ -f "$UPGRADE" ] || skip "upgrade.sh missing"
+
+	# Extract the REAL _source_lib; stub log/warn/die so it is sourceable in isolation.
+	local SRCFN="$TMP/source_lib_fn.sh"
+	{
+		echo 'log()  { :; }'
+		echo 'warn() { echo "WARN: $*" >&2; }'
+		echo 'die()  { echo "DIED: $*" >&2; exit 9; }'
+		awk '/^_source_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE"
+	} > "$SRCFN"
+	bash -n "$SRCFN"   # extracted function must parse
+
+	# Fixture lib content that _source_lib will SOURCE on a successful verify.
+	local LIB_FIXTURE="$TMP/fixture-lib.sh"
+	printf 'echo SOURCED_OK\n' > "$LIB_FIXTURE"
+	local FIX_HASH
+	FIX_HASH=$(sha256sum "$LIB_FIXTURE" | awk '{print $1}')
+	local ZERO="0000000000000000000000000000000000000000000000000000000000000000"
+
+	# Manifest fixtures (lib-checksums.txt-shaped and SHA256SUMS-shaped: "hash  name").
+	local CK_MATCH="$TMP/ck_match.txt";     printf '%s  reconcile.sh\n' "$FIX_HASH" > "$CK_MATCH"
+	local CK_BAD="$TMP/ck_bad.txt";         printf '%s  reconcile.sh\n' "$ZERO" > "$CK_BAD"
+	local SUMS_MATCH="$TMP/sums_match.txt"; printf '%s  channel-render-lib.sh\n' "$FIX_HASH" > "$SUMS_MATCH"
+	local CURL_LOG="$TMP/curl.log"
+
+	# Harness: mock curl (manifest URL → serve $MANIFEST if a real file, else 404;
+	# any other URL → serve the fixture lib), source the extracted _source_lib, and
+	# invoke it with non-existent local/installed paths so it takes tier-3.
+	local HARNESS="$TMP/harness.sh"
+	cat > "$HARNESS" <<'HEOF'
+#!/usr/bin/env bash
+set -uo pipefail
+log()  { :; }
+warn() { echo "WARN: $*" >&2; }
+die()  { echo "DIED: $*" >&2; exit 9; }
+curl() {
+    echo "$*" >> "$CURL_LOG"
+    local _o="" _n="" a
+    for a in "$@"; do [[ "$_n" == o ]] && { _o="$a"; _n=""; }; [[ "$a" == "-o" ]] && _n=o; done
+    case "$*" in
+        *lib-checksums.txt*|*SHA256SUMS*)
+            { [[ -n "${MANIFEST:-}" && -f "${MANIFEST:-}" ]] && cp "$MANIFEST" "$_o"; } || return 1 ;;
+        *) cp "$LIB_FIXTURE" "$_o" ;;
+    esac
+    return 0
+}
+# shellcheck source=/dev/null
+source "$SRCFN"
+_source_lib "$NAME" "/nonexistent/local/$NAME" "/nonexistent/installed/$NAME" "$RAW"
+HEOF
+
+	_drive() {  # NAME RAW MANIFEST NOINT -> combined output (harness may exit non-zero)
+		: > "$CURL_LOG"
+		env SRCFN="$SRCFN" LIB_FIXTURE="$LIB_FIXTURE" CURL_LOG="$CURL_LOG" \
+			REPO_RAW="https://raw.example.test/oxpulse-partner-edge/main" \
+			RELEASES_BASE="https://rel.example.test/oxpulse-partner-edge/releases/download" \
+			OXPULSE_UPGRADE_TAG="v9.9.9" \
+			INSTALL_LIB_DIR="$TMP/nonexistent-installdir" \
+			NAME="$1" RAW="$2" MANIFEST="$3" OXPULSE_UPGRADE_NO_INTEGRITY="$4" \
+			bash "$HARNESS" 2>&1
+	}
+
+	local raw_lib="https://raw.example.test/oxpulse-partner-edge/main/lib/reconcile.sh"
+	local raw_root="https://raw.example.test/oxpulse-partner-edge/main/channel-render-lib.sh"
+	local out
+
+	# TLS + LIB-MATCH: lib/*.sh + matching lib-checksums entry → sources.
+	out=$(_drive "reconcile.sh" "$raw_lib" "$CK_MATCH" 0) || true
+	echo "$out" | grep -q 'SOURCED_OK' || { echo "LIB-MATCH: expected SOURCED_OK; got: $out"; false; return; }
+	grep -q -- '--proto =https' "$CURL_LOG" && grep -q -- '--tlsv1.2' "$CURL_LOG" \
+		|| { echo "TLS: tier-3 curl not TLS-pinned; log: $(cat "$CURL_LOG")"; false; return; }
+
+	# LIB-MISMATCH: tampered hash → die, NOT sourced.
+	out=$(_drive "reconcile.sh" "$raw_lib" "$CK_BAD" 0) || true
+	echo "$out" | grep -qi 'checksum mismatch' || { echo "LIB-MISMATCH: expected mismatch die; got: $out"; false; return; }
+	echo "$out" | grep -q 'SOURCED_OK' && { echo "LIB-MISMATCH: sourced despite mismatch!"; false; return; }
+
+	# ROOT-MATCH: repo-root file verified against SHA256SUMS (release fetch, real tag).
+	out=$(_drive "channel-render-lib.sh" "$raw_root" "$SUMS_MATCH" 0) || true
+	echo "$out" | grep -q 'SOURCED_OK' || { echo "ROOT-MATCH: expected SOURCED_OK via SHA256SUMS; got: $out"; false; return; }
+
+	# FAILCLOSED: no manifest + no override → die, NOT sourced.
+	out=$(_drive "reconcile.sh" "$raw_lib" "" 0) || true
+	echo "$out" | grep -qi 'unsafe' || { echo "FAILCLOSED: expected fail-closed die; got: $out"; false; return; }
+	echo "$out" | grep -q 'SOURCED_OK' && { echo "FAILCLOSED: sourced without a manifest!"; false; return; }
+
+	# OVERRIDE: no manifest + OXPULSE_UPGRADE_NO_INTEGRITY=1 → sources (escape hatch).
+	out=$(_drive "reconcile.sh" "$raw_lib" "" 1) || true
+	echo "$out" | grep -q 'SOURCED_OK' || { echo "OVERRIDE: expected SOURCED_OK with override; got: $out"; false; return; }
+
+	# NOENTRY: the manifest RESOLVES (curl 200) but has NO line for this file → the
+	# resolver must treat that as "no verified checksum" → FAIL-CLOSED, NOT sourced.
+	# This is the review-HIGH case: a truncated / captive-portal / wrong-version manifest
+	# that simply omits the one relevant line must not silently downgrade to unverified.
+	# Distinct from FAILCLOSED above (there NO manifest resolves at all). If the guard is
+	# reverted to the old install.sh grep-miss "proceed-with-warn", this sources → RED.
+	local CK_NOENTRY="$TMP/ck_noentry.txt"; printf '%s  some-other-file.sh\n' "$ZERO" > "$CK_NOENTRY"
+	out=$(_drive "reconcile.sh" "$raw_lib" "$CK_NOENTRY" 0) || true
+	echo "$out" | grep -q 'SOURCED_OK' && { echo "NOENTRY: sourced despite the manifest omitting the entry!"; false; return; }
+	echo "$out" | grep -qi 'unsafe' || { echo "NOENTRY: expected a fail-closed 'unsafe' die on a missing entry; got: $out"; false; return; }
+
+	# NOENTRY-OVERRIDE: same resolved-but-omitting manifest + escape hatch → sources.
+	out=$(_drive "reconcile.sh" "$raw_lib" "$CK_NOENTRY" 1) || true
+	echo "$out" | grep -q 'SOURCED_OK' || { echo "NOENTRY-OVERRIDE: expected SOURCED_OK with override; got: $out"; false; return; }
+}
+
+# ---------------------------------------------------------------------------
+# END-TO-END (real upgrade.sh) — pins the ORDERING fix: the --allow-unverified /
+# --no-integrity pre-scan MUST run BEFORE the first _source_lib call, so the flag
+# is honored by the tier-3 fail-closed verify. The per-branch behavioral test above
+# sets OXPULSE_UPGRADE_NO_INTEGRITY as an env var and never parses $@ through the
+# real pre-scan loop, so it would NOT catch a future edit that moves the pre-scan
+# block back after the _source_lib calls. This runs the SHIPPED upgrade.sh end to
+# end with only curl mocked, forcing tier-3 by isolating upgrade.sh from its
+# adjacent/installed libs, and asserts:
+#   A) `--allow-unverified` (parsed from $@ by the pre-scan) reaches the post-lib
+#      "no installed bundle" die — i.e. the flag propagated to the tier-3 verify.
+#   B) with NO flag, the tier-3 verify FAILS CLOSED on the first _source_lib.
+# If the pre-scan is reordered after the _source_lib calls, (A) flips to a tier-3
+# "unsafe" die → RED. Verified non-vacuous by mutating the pre-scan to drop the flag.
+# ---------------------------------------------------------------------------
+@test "e2e: --allow-unverified pre-scan runs before the first _source_lib (ordering)" {
+	local UPGRADE="$REPO_ROOT/upgrade.sh"
+	[ -f "$UPGRADE" ] || skip "upgrade.sh missing"
+
+	# Isolate upgrade.sh ALONE so tiers 1-2 (adjacent / installed) miss and tier-3 fires.
+	local ISO="$TMP/iso"; mkdir -p "$ISO"
+	cp "$UPGRADE" "$ISO/upgrade.sh"
+
+	# Mock curl: benign content for lib payloads; 404 for manifest fetches (so the
+	# manifest resolves empty → the flag alone decides fail-closed vs. proceed).
+	local BIN="$TMP/bin"; mkdir -p "$BIN"
+	cat > "$BIN/curl" <<'CEOF'
+#!/usr/bin/env bash
+_o=""; _n=""
+for a in "$@"; do [[ "$_n" == o ]] && { _o="$a"; _n=""; }; [[ "$a" == "-o" ]] && _n=o; done
+case "$*" in
+    *lib-checksums.txt*|*SHA256SUMS*) exit 22 ;;            # 404 the manifest
+    *) [[ -n "$_o" ]] && printf ': # stub lib\n' > "$_o"; exit 0 ;;
+esac
+CEOF
+	chmod +x "$BIN/curl"
+
+	_run_upgrade() {  # $@ → upgrade.sh args; prints combined output (may exit non-zero)
+		env PATH="$BIN:$PATH" \
+			OXPULSE_SKIP_ROOT_CHECK=1 \
+			OXPULSE_PREFIX_ETC="$TMP/nope-etc" \
+			OXPULSE_PREFIX_LIB="$TMP/nope-lib" \
+			OXPULSE_PREFIX_SBIN="$TMP/nope-sbin" \
+			OXPULSE_PREFIX_BIN="$TMP/nope-bin" \
+			INSTALL_LIB_DIR="$TMP/nope-libdir" \
+			OXPULSE_REPO_RAW="https://mock.test/repo" \
+			OXPULSE_RELEASES_BASE="https://mock.test/rel" \
+			OXPULSE_UPGRADE_TAG="v9.9.9" \
+			bash "$ISO/upgrade.sh" "$@" 2>&1
+	}
+
+	# NB: use [[ ]] string matches, not `grep && {…}`, for the negative assertions:
+	# a `grep -q X && {…}` as the FINAL command makes bats fail the test when grep
+	# (correctly) does NOT match, since the test's exit status = that non-zero grep.
+	local out
+	# (A) flag parsed from $@ must reach the POST-lib bundle check, no integrity die.
+	out=$(_run_upgrade --allow-unverified) || true
+	[[ "$out" == *"no installed bundle"* ]] \
+		|| { echo "A: --allow-unverified did not reach post-lib bundle check (pre-scan ordering?); got: $out"; return 1; }
+	[[ "$out" != *unsafe* && "$out" != *"checksum mismatch"* ]] \
+		|| { echo "A: integrity die despite --allow-unverified — flag not honored at tier-3; got: $out"; return 1; }
+
+	# (B) no flag → first _source_lib tier-3 FAILS CLOSED before the bundle check.
+	out=$(_run_upgrade) || true
+	[[ "$out" == *unsafe* ]] \
+		|| { echo "B: expected tier-3 fail-closed die without a flag; got: $out"; return 1; }
+	[[ "$out" != *"no installed bundle"* ]] \
+		|| { echo "B: reached bundle check without a manifest or flag — fail-closed bypassed; got: $out"; return 1; }
 }

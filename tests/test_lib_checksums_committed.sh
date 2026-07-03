@@ -34,6 +34,8 @@ setup() {
 		install-split-routing.sh
 		install-systemd.sh
 		render-channel-lib.sh
+		reconcile.sh
+		telegram-alert-lib.sh
 	)
 }
 
