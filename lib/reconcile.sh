@@ -504,21 +504,32 @@ apply_caddy_reloads() {
 # install-firewall.sh convention / _reconcile_firewall_escalate's
 # telegram-alert-lib.sh convention further down in this file — but with the
 # co-located-vs-LIB_DIR PRIORITY INVERTED (see _reconcile_resolve_healthcheck_lib):
-# upgrade.sh's BUG1-cure block unconditionally exports LIB_DIR to a staging dir
-# that stages ONLY install-firewall.sh/telegram-alert-lib.sh (never
-# healthcheck-lib.sh, which upgrade.sh does not know about). Preferring
-# LIB_DIR first — like install-firewall.sh does — would miss healthcheck-lib.sh
-# on EVERY real upgrade.sh run, not just the rare curl|bash-from-/tmp edge
-# case (caught by tests/test_upgrade_syncs_healthcheck.sh). Lazy (not eager at
-# reconcile.sh's own source time) so callers who source reconcile.sh but never
-# call health_snapshot/health_regressions (install.sh, reconcile_all) are not
-# forced to co-locate the lib.
+# co-located wins over LIB_DIR so a trusted local dev checkout is preferred
+# over the network-staged copy. lib/healthcheck-lib.sh IS now a _stage_lib
+# target (upgrade.sh's BUG1-cure block stages it alongside
+# install-firewall.sh/telegram-alert-lib.sh/compose-lib.sh/host-scripts-lib.sh)
+# — this closed a synthetic_green gap where LIB_DIR carried install-firewall.sh
+# and telegram-alert-lib.sh only, so the fallback below found nothing on EVERY
+# real upgrade.sh run (not just the rare curl|bash-from-/tmp edge case), while
+# every bats test masked it by running upgrade.sh from its checkout path.
+# Lazy (not eager at reconcile.sh's own source time) so callers who source
+# reconcile.sh but never call health_snapshot/health_regressions (install.sh,
+# reconcile_all) are not forced to co-locate the lib.
 #
 # On the first call, sourcing lib/healthcheck-lib.sh defines the REAL
 # health_snapshot/health_regressions under these same names, replacing the
 # forwarders below in the shell's function table — the trailing "$@" call
 # then runs that real implementation. Every later call resolves the name
 # straight to the real implementation; the forwarder body never runs again.
+#
+# Each forwarder `unset -f`s both names immediately before sourcing the lib:
+# lib/healthcheck-lib.sh has its own double-source guard
+# (_HEALTHCHECK_LIB_LOADED), so if it was ever sourced directly BEFORE these
+# forwarders run (not reachable in today's wiring, but a footgun any future
+# eager/re-source trips), the guard would otherwise short-circuit `. "$_hc_lib"`
+# WITHOUT redefining the functions — leaving the forwarder calling itself
+# forever ("maximum function nesting level exceeded"). Unsetting first turns
+# that into a clean "command not found" instead of an infinite recursion.
 # ---------------------------------------------------------------------------
 _reconcile_resolve_healthcheck_lib() {
     if [[ -n "${HEALTHCHECK_LIB:-}" ]]; then
@@ -541,6 +552,7 @@ health_snapshot() {
         warn "health_snapshot: lib/healthcheck-lib.sh not found at $_hc_lib"
         return 1
     fi
+    unset -f health_snapshot health_regressions
     # shellcheck source=lib/healthcheck-lib.sh
     . "$_hc_lib"
     health_snapshot "$@"
@@ -553,6 +565,7 @@ health_regressions() {
         warn "health_regressions: lib/healthcheck-lib.sh not found at $_hc_lib"
         return 1
     fi
+    unset -f health_snapshot health_regressions
     # shellcheck source=lib/healthcheck-lib.sh
     . "$_hc_lib"
     health_regressions "$@"

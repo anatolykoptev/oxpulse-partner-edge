@@ -449,6 +449,11 @@ jobs:
           # the repo-root SHA256SUMS. It is not in _HOST_SCRIPT_SBIN_FILES either, so
           # nothing ever downloads a top-level reconcile.sh asset. A root cp+SHA256SUMS
           # entry would be a dead, unverified-by-any-consumer asset (review MEDIUM).
+          # healthcheck-lib.sh / compose-lib.sh / host-scripts-lib.sh follow the SAME
+          # reconcile.sh precedent (synthetic_green fix, P4 strangler-harden
+          # follow-up): upgrade.sh's _stage_lib now fetches them from
+          # $REPO_RAW/lib/<name> and verifies against lib-checksums.txt — they are
+          # NOT repo-root release assets either, only entries in the regen block below.
           # Scripts exec'd by xray-update and geoip-refresh timers: staged so
           # SHA256SUMS covers them and sync_host_scripts can install + verify them.
           # oxpulse-xray-update.sh installs to /usr/local/bin/ (not sbin).
@@ -504,6 +509,9 @@ jobs:
             render-channel-lib.sh \
             reconcile.sh \
             telegram-alert-lib.sh \
+            compose-lib.sh \
+            healthcheck-lib.sh \
+            host-scripts-lib.sh \
           ) > lib/lib-checksums.txt
           cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
