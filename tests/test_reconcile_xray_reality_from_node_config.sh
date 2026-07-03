@@ -203,6 +203,85 @@ else
     fail "GAUGE2: expected partner_edge_xray_creds_unresolved=0 on render path; got: $(cat "$_prom2_dir/partner_edge_xray.prom" 2>/dev/null || echo '<no file>')"
 fi
 
+# ---------------------------------------------------------------------------
+# CRITICAL (review): the fail-closed guard must cover EVERY tunnel-critical var
+# without a safe default. A blank SNI / short_id / encryption swapped live kills
+# the uTLS anti-censorship handshake — the exact 'blank config swapped live' class.
+# Fixtures with a single tunnel-critical field emptied, all else valid.
+# ---------------------------------------------------------------------------
+_write_node_cfg_fields() {   # dir pubkey uuid short_id server_name encryption backend
+    local _d="$1"; mkdir -p "$_d"
+    cat > "$_d/node-config.json" << NC
+{
+  "node_id": "n1",
+  "backend_endpoint": "$7",
+  "reality_uuid": "$3",
+  "reality_public_key": "$2",
+  "reality_short_id": "$4",
+  "reality_server_name": "$5",
+  "reality_encryption": "$6",
+  "channels": [ { "protocol": "vless-reality", "xray": { "xhttp": { "mode": "stream-one", "path": "/xh" } } } ]
+}
+NC
+}
+
+# SERVERNAME-DEFAULT (unit): empty reality_server_name degrades to www.samsung.com
+# (mirrors install.sh:1006) — NEVER a blank SNI.
+ETC_SN="$TMP/etc_sn"
+_write_node_cfg_fields "$ETC_SN" "PUB_sn" "uuid-sn" "shortsn" "" "none" "192.0.2.9:5349"
+unset REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
+      REALITY_ENCRYPTION BACKEND_HOST BACKEND_PORT
+_setup_xray_client_render_env "$ETC_SN"
+if [[ "${REALITY_SERVER_NAME:-}" == "www.samsung.com" ]]; then
+    pass "SERVERNAME-DEFAULT: empty reality_server_name => www.samsung.com (known-good SNI, never blank)"
+else
+    fail "SERVERNAME-DEFAULT: REALITY_SERVER_NAME='${REALITY_SERVER_NAME:-<empty>}' (expected www.samsung.com default)"
+fi
+
+# SERVERNAME-RENDER (surface): empty server_name + all else valid => surface RENDERS
+# (does NOT skip) because server_name has a safe default. Proves BUG2 stays functional.
+_b_sn=$_SWAP_COUNT
+unset REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
+      REALITY_ENCRYPTION BACKEND_HOST BACKEND_PORT
+reconcile_xray_client_surface "$ETC_SN" "$TPL" >/dev/null 2>&1 || true
+if [[ "$((_SWAP_COUNT - _b_sn))" -ge 1 ]]; then
+    pass "SERVERNAME-RENDER: empty server_name (defaulted) => surface RENDERS (not skipped)"
+else
+    fail "SERVERNAME-RENDER: empty server_name caused a skip — default-fallback not applied"
+fi
+
+# FAILCLOSED-SHORTID (surface): empty reality_short_id (no safe default; install.sh:1005
+# dies on it) + all else valid => surface SKIPS (0 swaps). Reviewer's FAILCLOSED-partial.
+ETC_SID="$TMP/etc_sid"
+_write_node_cfg_fields "$ETC_SID" "PUB_sid" "uuid-sid" "" "www.samsung.com" "none" "192.0.2.9:5349"
+printf '{"reality":{"publicKey":"KEEP_SID"}}\n' > "$ETC_SID/xray-client.json"
+_keep_sid=$(cat "$ETC_SID/xray-client.json")
+_b_sid=$_SWAP_COUNT
+unset REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
+      REALITY_ENCRYPTION BACKEND_HOST BACKEND_PORT
+reconcile_xray_client_surface "$ETC_SID" "$TPL" >/dev/null 2>&1 || true
+if [[ "$((_SWAP_COUNT - _b_sid))" -eq 0 && "$(cat "$ETC_SID/xray-client.json")" == "$_keep_sid" ]]; then
+    pass "FAILCLOSED-SHORTID: empty reality_short_id => surface SKIPS (no blank short_id swapped live)"
+else
+    fail "FAILCLOSED-SHORTID: empty short_id rendered/swapped ($(($_SWAP_COUNT - _b_sid)) swap) — guard gap"
+fi
+
+# FAILCLOSED-ENCRYPTION (surface): empty reality_encryption (install.sh:682 refuses
+# empty+pubkey as a stale broken cred) + all else valid => surface SKIPS.
+ETC_ENC="$TMP/etc_enc"
+_write_node_cfg_fields "$ETC_ENC" "PUB_enc" "uuid-enc" "shortenc" "www.samsung.com" "" "192.0.2.9:5349"
+printf '{"reality":{"publicKey":"KEEP_ENC"}}\n' > "$ETC_ENC/xray-client.json"
+_keep_enc=$(cat "$ETC_ENC/xray-client.json")
+_b_enc=$_SWAP_COUNT
+unset REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
+      REALITY_ENCRYPTION BACKEND_HOST BACKEND_PORT
+reconcile_xray_client_surface "$ETC_ENC" "$TPL" >/dev/null 2>&1 || true
+if [[ "$((_SWAP_COUNT - _b_enc))" -eq 0 && "$(cat "$ETC_ENC/xray-client.json")" == "$_keep_enc" ]]; then
+    pass "FAILCLOSED-ENCRYPTION: empty reality_encryption => surface SKIPS (no blank encryption swapped live)"
+else
+    fail "FAILCLOSED-ENCRYPTION: empty encryption rendered/swapped ($(($_SWAP_COUNT - _b_enc)) swap) — guard gap"
+fi
+
 echo ""
 echo "=== BUG2 xray reality-from-node-config tests: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]

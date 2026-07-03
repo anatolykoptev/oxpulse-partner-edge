@@ -1197,6 +1197,15 @@ _setup_xray_client_render_env() {
     local _prefix_etc="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
     local _node_cfg="${_prefix_etc}/node-config.json"
 
+    # Clear any stale ambient reality/backend values FIRST so node-config.json is
+    # authoritative and the surface's fail-closed guard actually fires on a
+    # fallback branch. The except/else branches below only repopulate XRAY_XHTTP_*
+    # defaults — they never touch REALITY_*/BACKEND_*, so without this unset a
+    # stale ambient REALITY_PUBLIC_KEY from a prior call could sneak past the guard
+    # and render a mismatched/blank tunnel config (review MEDIUM #4).
+    unset REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
+          REALITY_ENCRYPTION BACKEND_HOST BACKEND_PORT
+
     if [[ -r "$_node_cfg" ]] && command -v python3 >/dev/null 2>&1; then
         local _py_tmp
         _py_tmp=$(mktemp /tmp/xray_env_XXXXXX.py)
@@ -1226,7 +1235,11 @@ try:
     print("REALITY_UUID="        + str(d.get("reality_uuid", "") or ""))
     print("REALITY_PUBLIC_KEY="  + str(d.get("reality_public_key", "") or ""))
     print("REALITY_SHORT_ID="    + str(d.get("reality_short_id", "") or ""))
-    print("REALITY_SERVER_NAME=" + str(d.get("reality_server_name", "") or ""))
+    # Empty server_name degrades to the SAME install-time default install.sh:1006
+    # applies ("www.samsung.com"), so an incomplete node-config renders a
+    # KNOWN-GOOD SNI, never a blank one — a blank uTLS destination-fingerprint SNI
+    # kills the anti-censorship handshake on ТСПУ relays (review CRITICAL).
+    print("REALITY_SERVER_NAME=" + (str(d.get("reality_server_name", "") or "") or "www.samsung.com"))
     print("REALITY_ENCRYPTION="  + str(d.get("reality_encryption", "") or ""))
     _be = str(d.get("backend_endpoint", "") or "")
     if ":" in _be:
@@ -1269,25 +1282,34 @@ PYEOF
 # resolve its Reality/backend creds from node-config.json and skipped the render
 # (the Reality re-render silently not happening — the exact class BUG2 cured).
 #
-# Deliberate parallel of _reconcile_firewall_emit_gauge below: OWN file
-# (partner_edge_xray.prom) distinct from partner_edge.prom / partner_edge_firewall.prom
-# so a differently-typed metric never races another writer's truncation and
-# corrupts node_exporter's textfile collector with duplicate `# TYPE` lines.
+# Delegates to the shared _reconcile_emit_prom_gauge (own file, avoids the
+# duplicate-`# TYPE` truncation race — see that helper's header).
 #
 # UNRESOLVED: "1" when creds were unresolvable this converge (surface skipped),
-# "0" when they resolved (render path reached). Atomic tmp+mv; skips silently
-# when the textfile dir is unwritable/absent (non-fatal).
+# "0" when they resolved (render path reached).
 # ---------------------------------------------------------------------------
-_reconcile_xray_emit_gauge() {
-    local _unresolved="$1"
+
+# _reconcile_emit_prom_gauge FILE_BASENAME METRIC VALUE — shared textfile-collector
+# gauge writer for the reconcile surfaces (firewall + xray). Each metric gets its
+# OWN .prom file (never partner_edge.prom, which oxpulse-partner-edge-refresh.sh
+# truncates once per its own run): appending a differently-typed metric into a file
+# another process truncates would race and risk duplicate `# TYPE` lines, which
+# corrupts the whole file for node_exporter's textfile collector. Atomic tmp+mv;
+# skips silently when the textfile dir is unwritable/absent (non-fatal).
+_reconcile_emit_prom_gauge() {
+    local _basename="$1" _metric="$2" _value="$3"
     local _dir="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
     [[ -d "$_dir" ]] || mkdir -p "$_dir" 2>/dev/null || return 0
-    local _f="$_dir/partner_edge_xray.prom"
+    local _f="$_dir/$_basename"
     local _tmp="${_f}.tmp.$$"
-    { printf '# TYPE partner_edge_xray_creds_unresolved gauge\n'
-      printf 'partner_edge_xray_creds_unresolved %s\n' "$_unresolved"
+    { printf '# TYPE %s gauge\n' "$_metric"
+      printf '%s %s\n' "$_metric" "$_value"
     } >"$_tmp" 2>/dev/null && mv -f "$_tmp" "$_f" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
     return 0
+}
+
+_reconcile_xray_emit_gauge() {
+    _reconcile_emit_prom_gauge "partner_edge_xray.prom" "partner_edge_xray_creds_unresolved" "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -1330,16 +1352,22 @@ reconcile_xray_client_surface() {
     # Set up XRAY_XHTTP_* + REALITY_*/BACKEND_* env vars from node-config.json.
     _setup_xray_client_render_env "$_prefix_etc"
 
-    # Fail-closed (coturn TURN_SECRET landmine class): if the Reality creds or the
-    # backend endpoint could not be resolved from node-config.json, SKIP the render
-    # entirely (fail_soft) — NEVER render a blank publicKey/backend and swap it
-    # live, which would zero the VLESS tunnel. opec substitutes an EMPTY value (not
-    # a {{placeholder}}), so the completeness guard below would NOT catch it; this
+    # Fail-closed (coturn TURN_SECRET landmine class): if ANY tunnel-critical field
+    # that has no safe default could not be resolved from node-config.json, SKIP the
+    # render entirely (fail_soft) — NEVER swap a config with a blank field live,
+    # which zeros the VLESS/uTLS tunnel. opec substitutes an EMPTY value (not a
+    # {{placeholder}}), so the completeness guard below would NOT catch it; this
     # guard must fire first, leaving the last-known-good config untouched.
+    # Covers every non-XHTTP template var WITHOUT a safe default: pubkey, uuid,
+    # short_id (install.sh:1005 die-on-empty), encryption (install.sh:682 refuses
+    # empty+pubkey as a stale broken cred), backend host/port. REALITY_SERVER_NAME
+    # is NOT here — it is defaulted to a known-good SNI in the resolver above
+    # (mirroring install.sh:1006), so it can never be blank.
     if [[ -z "${REALITY_PUBLIC_KEY:-}" || -z "${REALITY_UUID:-}" \
+          || -z "${REALITY_SHORT_ID:-}" || -z "${REALITY_ENCRYPTION:-}" \
           || -z "${BACKEND_HOST:-}" || -z "${BACKEND_PORT:-}" ]]; then
         rm -f "$_out_path"
-        warn "reconcile_xray_client: reality/backend creds unresolved from ${_prefix_etc}/node-config.json (REALITY_PUBLIC_KEY/UUID or BACKEND_HOST/PORT empty) — skipping xray-client render (fail_soft; live config left untouched, tunnel not zeroed)"
+        warn "reconcile_xray_client: tunnel-critical creds unresolved from ${_prefix_etc}/node-config.json (one of REALITY_PUBLIC_KEY/UUID/SHORT_ID/ENCRYPTION or BACKEND_HOST/PORT empty) — skipping xray-client render (fail_soft; live config left untouched, tunnel not zeroed)"
         _reconcile_xray_emit_gauge 1
         return 0
     fi
@@ -1413,27 +1441,14 @@ reconcile_xray_client_surface() {
 # firewall coverage even if the alert itself is missed or rate-limited.
 #
 # Owns its own file (partner_edge_firewall.prom) distinct from
-# oxpulse-partner-edge-refresh.sh's partner_edge.prom — that script resets
-# (truncates) its file once per ITS OWN run; appending a differently-typed
-# metric into the same file from this (separate systemd unit / process)
-# would race that truncation and risk duplicate `# TYPE` lines, which
-# corrupts the whole file for node_exporter's textfile collector.
+# oxpulse-partner-edge-refresh.sh's partner_edge.prom — see
+# _reconcile_emit_prom_gauge's header for the truncation-race rationale.
 #
 # UNMANAGED: "1" when firewall_apply could not enforce the whitelist this
-# converge, "0" when it succeeded. Atomic tmp+mv write (mirrors atomic_swap
-# above). Skips silently when the textfile dir is unwritable/absent
-# (non-fatal — matches the refresh script's emit_metric).
+# converge, "0" when it succeeded.
 # ---------------------------------------------------------------------------
 _reconcile_firewall_emit_gauge() {
-    local _unmanaged="$1"
-    local _dir="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
-    [[ -d "$_dir" ]] || mkdir -p "$_dir" 2>/dev/null || return 0
-    local _f="$_dir/partner_edge_firewall.prom"
-    local _tmp="${_f}.tmp.$$"
-    { printf '# TYPE partner_edge_firewall_unmanaged gauge\n'
-      printf 'partner_edge_firewall_unmanaged %s\n' "$_unmanaged"
-    } >"$_tmp" 2>/dev/null && mv -f "$_tmp" "$_f" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    return 0
+    _reconcile_emit_prom_gauge "partner_edge_firewall.prom" "partner_edge_firewall_unmanaged" "$1"
 }
 
 # ---------------------------------------------------------------------------

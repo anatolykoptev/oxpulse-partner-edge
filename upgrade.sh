@@ -203,13 +203,62 @@ _stage_lib() {
     elif [[ -f "$installed_path" ]]; then
         cp -f "$installed_path" "$dest" && return 0
     fi
-    if curl -fsSL --max-time 30 "$raw_path" -o "$dest" 2>/dev/null; then
-        warn "$name staged from $raw_path (standalone run) for reconcile transitive-dep resolution"
-        return 0
-    fi
-    die "$name could not be staged (tried: $local_path, $installed_path, $raw_path).
+    # Tier 3: fetch from REPO_RAW. This is a ROOT-run fetch of security-relevant code
+    # (host firewall + alert path) on a censorship box, and BUG1 now routes libs
+    # through it MORE often (the curl|bash-from-/tmp path succeeds instead of dying),
+    # so it is TLS-pinned (--proto =https --tlsv1.2 — blocks a protocol-downgrade MITM)
+    # and the fetched bytes are sha256-verified against lib-checksums.txt before
+    # staging, mirroring install.sh:146-207 (_install_lib_source)'s tamper-evident
+    # contract on this identical REPO_RAW pattern. (Hardening ALL of upgrade.sh's
+    # fetches — _source_lib too — is the separate P0 resolver task; this closes only
+    # the tier BUG1 newly widened.)
+    local _fetch_tmp _ck _ck_tmp=""
+    _fetch_tmp=$(mktemp)
+    trap 'rm -f "$_fetch_tmp" "${_ck_tmp:-}"' RETURN
+    if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "$raw_path" -o "$_fetch_tmp" 2>/dev/null; then
+        die "$name could not be staged (tried: $local_path, $installed_path, $raw_path).
 reconcile_firewall_surface needs it on-disk in LIB_DIR; ensure network access to
 REPO_RAW or stage lib/ adjacent to upgrade.sh."
+    fi
+    # Locate lib-checksums.txt: adjacent checkout → installed tarball → fetch alongside.
+    _ck=""
+    local _sd _cand
+    _sd="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    for _cand in "${_sd}/lib/lib-checksums.txt" \
+                 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/lib-checksums.txt"; do
+        [[ -r "$_cand" ]] && { _ck="$_cand"; break; }
+    done
+    if [[ -z "$_ck" ]]; then
+        _ck_tmp=$(mktemp)
+        curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
+            "$REPO_RAW/lib/lib-checksums.txt" -o "$_ck_tmp" 2>/dev/null && _ck="$_ck_tmp"
+    fi
+    if [[ -z "$_ck" ]]; then
+        # Fail-closed unless the operator acknowledged the risk (mirrors install.sh
+        # --no-integrity). The escape hatch is pre-scanned into OXPULSE_UPGRADE_NO_INTEGRITY
+        # before staging (args are not parsed yet at that point).
+        if [[ "${OXPULSE_UPGRADE_NO_INTEGRITY:-0}" -eq 1 ]]; then
+            warn "_stage_lib: no lib-checksums.txt (local or remote) + OXPULSE_UPGRADE_NO_INTEGRITY set — staging $name UNVERIFIED (operator accepts risk)"
+        else
+            die "_stage_lib: tier-3 fetch of $name without a lib-checksums.txt is unsafe — install from a release tarball or set OXPULSE_UPGRADE_NO_INTEGRITY=1 to acknowledge the risk"
+        fi
+    else
+        local _actual _expected
+        _actual=$(sha256sum "$_fetch_tmp" | awk '{print $1}')
+        _expected=$(grep "[[:space:]]${name}$" "$_ck" 2>/dev/null | awk '{print $1}')
+        if [[ -n "$_expected" && "$_actual" != "$_expected" ]]; then
+            die "_stage_lib: tier-3 checksum mismatch for $name — refusing to stage untrusted code (expected ${_expected:0:16}… got ${_actual:0:16}…)"
+        fi
+        # No entry (telegram-alert-lib.sh has none until the P0 lib-checksums.txt +
+        # release.yml coordination lands) → proceed unverified, EXACTLY as
+        # install.sh:_install_lib_source treats a file absent from the manifest
+        # (grep miss → empty _expected → no mismatch check). Verification starts
+        # automatically the moment P0 adds the entry — no code change here.
+        [[ -z "$_expected" ]] && warn "_stage_lib: no lib-checksums.txt entry for $name — staged unverified (entry pending P0 resolver task)"
+    fi
+    cp -f "$_fetch_tmp" "$dest"
+    warn "$name staged from $raw_path (standalone run) for reconcile transitive-dep resolution"
+    return 0
 }
 
 # Source shared channel render functions (re_render_xray, future re_render_awg, etc.)
@@ -243,9 +292,29 @@ _source_lib "reconcile.sh" \
 # the deps into a stable dir and point LIB_DIR at it. t14's fail-loud firewall
 # contract is preserved: the die on a genuinely-missing file AFTER staging is still
 # correct — this only closes the missing co-location on the fetch path.
+# Cumulative EXIT cleanup: bash EXIT traps are single-slot, so a later
+# `trap ... EXIT` REPLACES an earlier one — the pre-existing conflict-tmpdir trap
+# (see the --dry-run conflict block) would otherwise silently orphan the staging
+# dir on that path. Register temp paths in an array drained by ONE EXIT trap set
+# here; every later site appends instead of re-trapping (review MEDIUM #3).
+_CLEANUP_PATHS=()
+_run_cleanup() {
+    local _p
+    [[ ${#_CLEANUP_PATHS[@]} -eq 0 ]] && return 0
+    for _p in "${_CLEANUP_PATHS[@]}"; do [[ -n "$_p" ]] && rm -rf "$_p"; done
+}
+trap _run_cleanup EXIT
+
+# Integrity escape hatch for _stage_lib's tier-3 verify. Args are parsed later, so
+# pre-scan $@ here and honor the env var (mirrors install.sh's --no-integrity so a
+# fork/dev/restricted-network operator is not hard-failed).
+OXPULSE_UPGRADE_NO_INTEGRITY="${OXPULSE_UPGRADE_NO_INTEGRITY:-0}"
+for _arg in "$@"; do
+    [[ "$_arg" == "--allow-unverified" ]] && OXPULSE_UPGRADE_NO_INTEGRITY=1
+done
+
 _LIB_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/oxpulse-lib-stage-XXXXXX")
-# shellcheck disable=SC2064
-trap "rm -rf '$_LIB_STAGE_DIR'" EXIT
+_CLEANUP_PATHS+=("$_LIB_STAGE_DIR")
 _UPGRADE_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 _stage_lib "install-firewall.sh" \
     "${_UPGRADE_SH_DIR}/lib/install-firewall.sh" \
@@ -2232,8 +2301,9 @@ if [[ "$MODE" == with_templates ]]; then
 		# and logs "[dry-run] would write Caddyfile (sha256=...)". We need to capture the
 		# rendered file and sha separately for conflict checks.
 		_conflict_tmpdir=$(mktemp -d)
-		# shellcheck disable=SC2064
-		trap "rm -rf '$_conflict_tmpdir'" EXIT
+		# Append to the cumulative cleanup array instead of a single-slot EXIT trap,
+		# which would clobber the staging-dir cleanup registered earlier (MEDIUM #3).
+		_CLEANUP_PATHS+=("$_conflict_tmpdir")
 
 		# Fetch healthcheck for Check 4.
 		_proposed_hc="$_conflict_tmpdir/healthcheck.sh"

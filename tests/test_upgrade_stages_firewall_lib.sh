@@ -175,6 +175,105 @@ else
     fail "FIX2: FIREWALL_LIB override did not cure the die; rc=$FIX2_RC out: $FIX2_OUT"
 fi
 
+# ---------------------------------------------------------------------------
+# Tier-3 (REPO_RAW curl) hardening (review HIGH): the root-run fetch that BUG1
+# now routes libs through MORE often must be TLS-pinned and checksum-verified.
+# ---------------------------------------------------------------------------
+FW_FIXTURE="$TMP/fw_fixture.sh"
+printf '#!/usr/bin/env bash\nfirewall_apply() { return 0; }\n' > "$FW_FIXTURE"
+FW_HASH=$(sha256sum "$FW_FIXTURE" | awk '{print $1}')
+CURL_LOG="$TMP/curl.log"
+
+CK_MATCH="$TMP/ck_match.txt";    printf '%s  install-firewall.sh\n' "$FW_HASH" > "$CK_MATCH"
+CK_BAD="$TMP/ck_bad.txt";        printf '%s  install-firewall.sh\n' "0000000000000000000000000000000000000000000000000000000000000000" > "$CK_BAD"
+CK_NOENTRY="$TMP/ck_noentry.txt"; printf '%s  some-other-lib.sh\n' "$FW_HASH" > "$CK_NOENTRY"
+
+# Harness: extract self-contained _stage_lib, mock curl (writes the fixture lib,
+# and the checksums file only if CKFILE is a real file), drive the tier-3 path.
+HARNESS="$TMP/stage3_harness.sh"
+cat > "$HARNESS" << 'HEOF'
+#!/usr/bin/env bash
+set -uo pipefail
+log()  { :; }
+warn() { :; }
+die()  { echo "DIED: $*" >&2; exit 7; }
+curl() {
+    echo "$*" >> "$CURL_LOG"
+    local _o="" _n="" a
+    for a in "$@"; do [[ "$_n" == o ]] && { _o="$a"; _n=""; }; [[ "$a" == "-o" ]] && _n=o; done
+    case "$*" in
+        *lib-checksums.txt*) { [[ -n "${CKFILE:-}" && -f "${CKFILE:-}" ]] && cp "$CKFILE" "$_o"; } || return 1 ;;
+        *) cp "$FW_FIXTURE" "$_o" ;;
+    esac
+    return 0
+}
+# shellcheck source=/dev/null
+source "$STAGE_FN"
+if _stage_lib "install-firewall.sh" "/nonexistent/local" "/nonexistent/installed" \
+       "$REPO_RAW/lib/install-firewall.sh" "$DEST"; then
+    [[ -f "$DEST/install-firewall.sh" ]] && echo "STAGED" || echo "NOFILE"
+else
+    echo "FAILED"
+fi
+HEOF
+
+_stage3() {  # CKFILE(""=none) NI(0/1) -> RESULT text
+    local _dest; _dest=$(mktemp -d)
+    : > "$CURL_LOG"
+    env STAGE_FN="$STAGE_FN" FW_FIXTURE="$FW_FIXTURE" CURL_LOG="$CURL_LOG" \
+        REPO_RAW="https://raw.example.test/oxpulse-partner-edge/main" \
+        INSTALL_LIB_DIR="$TMP/nonexistent-installdir" \
+        CKFILE="$1" OXPULSE_UPGRADE_NO_INTEGRITY="$2" DEST="$_dest" \
+        bash "$HARNESS" 2>&1 || true   # die() exits non-zero by design; assert on RESULT text
+}
+
+# T3-TLS: the tier-3 curl must be TLS-pinned (--proto =https --tlsv1.2).
+_out=$(_stage3 "$CK_MATCH" 0)
+if grep -q -- '--proto =https' "$CURL_LOG" && grep -q -- '--tlsv1.2' "$CURL_LOG"; then
+    pass "T3-TLS: tier-3 fetch is TLS-pinned (--proto =https --tlsv1.2)"
+else
+    fail "T3-TLS: tier-3 curl missing TLS pin; log: $(cat "$CURL_LOG")"
+fi
+
+# T3-MATCH: correct checksum → stages.
+if echo "$_out" | grep -q 'STAGED'; then
+    pass "T3-MATCH: checksum match => lib staged"
+else
+    fail "T3-MATCH: expected STAGED with matching checksum; got: $_out"
+fi
+
+# T3-MISMATCH: tampered checksum → die (refuses to stage untrusted code).
+_out=$(_stage3 "$CK_BAD" 0)
+if echo "$_out" | grep -qi 'checksum mismatch'; then
+    pass "T3-MISMATCH: checksum mismatch => die (tamper refused, no stage)"
+else
+    fail "T3-MISMATCH: expected checksum-mismatch die; got: $_out"
+fi
+
+# T3-NOENTRY: name absent from checksums → stages unverified (mirrors install.sh).
+_out=$(_stage3 "$CK_NOENTRY" 0)
+if echo "$_out" | grep -q 'STAGED'; then
+    pass "T3-NOENTRY: no checksums entry => staged unverified (install.sh parity, entry pending P0)"
+else
+    fail "T3-NOENTRY: expected STAGED for unlisted lib; got: $_out"
+fi
+
+# T3-NOCK-FAILCLOSED: no checksums anywhere + no override → fail-closed die.
+_out=$(_stage3 "" 0)
+if echo "$_out" | grep -qi 'without a lib-checksums.txt is unsafe'; then
+    pass "T3-NOCK-FAILCLOSED: no checksums + no override => fail-closed die"
+else
+    fail "T3-NOCK-FAILCLOSED: expected fail-closed die; got: $_out"
+fi
+
+# T3-NOCK-OVERRIDE: no checksums + OXPULSE_UPGRADE_NO_INTEGRITY=1 → stages (risk accepted).
+_out=$(_stage3 "" 1)
+if echo "$_out" | grep -q 'STAGED'; then
+    pass "T3-NOCK-OVERRIDE: OXPULSE_UPGRADE_NO_INTEGRITY=1 bypasses verify (escape hatch)"
+else
+    fail "T3-NOCK-OVERRIDE: expected STAGED with override; got: $_out"
+fi
+
 echo ""
 echo "=== BUG1 transitive-stage tests: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
