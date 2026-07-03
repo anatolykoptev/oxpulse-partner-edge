@@ -1337,6 +1337,19 @@ settle_healthcheck_with_retry() {
 		return 0
 	}
 
+	# _settle_emit_rollback_metric KIND VALUE - record the settle outcome as a
+	# Prometheus textfile gauge so the fleet can tell a cold-start (transient)
+	# rollback CONDITION apart from a REAL one ("was the rollback real?" - the
+	# signal the fleet lacked when the v0.14.2 canary false-rolled-back). Reuses
+	# the shared reconcile textfile writer when it is in scope (own .prom file,
+	# atomic tmp+mv, world-readable, non-fatal); skipped silently otherwise (e.g.
+	# the awk-extracted unit harness that sources only this function).
+	_settle_emit_rollback_metric() {
+		declare -F _reconcile_emit_prom_gauge >/dev/null 2>&1 || return 0
+		_reconcile_emit_prom_gauge "partner_edge_settle.prom" \
+			"partner_edge_settle_rollback" "${2:-0}" "kind=\"${1:-unknown}\"" 2>/dev/null || true
+	}
+
 	# Absolute gate mode (legacy / escape hatch).
 	if [[ "${OXPULSE_ABSOLUTE_HEALTH_GATE:-0}" == "1" ]]; then
 		log "settle_healthcheck: using absolute gate (OXPULSE_ABSOLUTE_HEALTH_GATE=1)"
@@ -1386,22 +1399,38 @@ settle_healthcheck_with_retry() {
 		return 1
 	fi
 
-	# --snapshot supported: poll until stable post snapshot captured, then diff.
+	# --snapshot supported: poll until the post snapshot both PARSES and shows no
+	# regression vs the (warm, pre-reconcile) baseline. A container recreated by
+	# --with-templates (sfu + coturn image digests change on every upgrade; here
+	# also xray-client + caddy) is COLD at the first post-snapshot, so a transient
+	# GREEN->RED read (e.g. check_14_canary_upstream while xray warms) must NOT
+	# trigger rollback. We RE-POLL on a detected regression (same budget as the
+	# parse retry) until it CLEARS (transient -> pass) or the budget is exhausted
+	# (persistent -> REAL regression -> rollback). This makes the post measurement
+	# symmetric with the warm baseline and preserves the real rollback path.
 	local _post_snap
 	_post_snap=$(mktemp)
 	# shellcheck disable=SC2064
 	trap "rm -f '$_post_snap'" RETURN
 
 	local _attempt=1
-	local _stable=0
+	local _stable=0        # 1 once we captured >=1 parseable post snapshot
+	local _regressed=1     # 1 = a regression is currently present (until it clears)
+	local _saw_transient=0 # 1 if we tolerated a cold-start regression that later cleared
 	while [[ "$_attempt" -le "$max_attempts" ]]; do
-		log "healthcheck attempt $_attempt/$max_attempts (${label})…"
+		log "healthcheck attempt $_attempt/$max_attempts (${label})..."
 		if _settle_hc_snapshot "$HEALTHCHECK" "$_post_snap"; then
 			_stable=1
-			break
+			if _settle_hc_regressions "${_baseline_snap}" "$_post_snap"; then
+				_regressed=0
+				break
+			fi
+			# Parseable snapshot WITH a regression: treat as a cold-start
+			# transient and re-poll until the budget is exhausted.
+			_saw_transient=1
 		fi
 		if [[ "$_attempt" -lt "$max_attempts" ]]; then
-			log "healthcheck not yet passing — retrying in ${interval}s"
+			log "settle_healthcheck: not settled (snapshot unstable or transient regression) - retrying in ${interval}s"
 			sleep "$interval"
 		fi
 		_attempt=$(( _attempt + 1 ))
@@ -1409,13 +1438,112 @@ settle_healthcheck_with_retry() {
 
 	if [[ "$_stable" -eq 0 ]]; then
 		warn "settle_healthcheck: snapshot failed after $max_attempts attempt(s) (${label})"
+		_settle_emit_rollback_metric snapshot_fail 1
 		return 1
 	fi
 
-	log "settle_healthcheck: post snapshot captured on attempt $_attempt/$max_attempts (${label})"
+	if [[ "$_regressed" -ne 0 ]]; then
+		# Regression persisted through the ENTIRE poll budget -> real, roll back.
+		warn "settle_healthcheck: regression persisted after $max_attempts attempt(s) (budget=${budget}s) - rollback (${label})"
+		_settle_emit_rollback_metric real 1
+		return 1
+	fi
 
-	# Diff baseline vs post; rollback on regression.
-	_settle_hc_regressions "${_baseline_snap}" "$_post_snap"
+	if [[ "$_saw_transient" -eq 1 ]]; then
+		log "settle_healthcheck: cold-start regression cleared by attempt $_attempt/$max_attempts - tolerated, no rollback (${label})"
+		_settle_emit_rollback_metric transient_cleared 1
+	else
+		log "settle_healthcheck: post snapshot clean on attempt $_attempt/$max_attempts (${label})"
+		_settle_emit_rollback_metric none 0
+	fi
+	return 0
+}
+
+# _maybe_self_update_reexec ARGS... - self-update guard (canonical: Go GOTOOLCHAIN
+# counter, rustup --self-replace sentinel). The running process is the on-disk
+# upgrade.sh the operator launched; a fix that ships INSIDE upgrade.sh (e.g. the
+# settle cold-start gate above) would otherwise only take effect on the operator's
+# SECOND run, because Step 4's sync_host_scripts installs the new bytes to disk but
+# the current process keeps executing the OLD ones. Worse, a settle false-rollback
+# restores the old upgrade.sh too, so a box can loop forever on the buggy version.
+#
+# This fetches the NEW upgrade.sh for RELEASE_TAG to a SHA-verified temp file and,
+# if it differs from the running script, re-execs it exactly ONCE (sentinel-guarded)
+# so the fix lands in a SINGLE operator invocation.
+#
+# ROLLBACK SAFETY (hard requirement - RU relays): we exec a TEMP copy and touch
+# NOTHING on disk here. snapshot_host_scripts + the compose/state backup (Step 1 of
+# each apply path) therefore still run against the pristine OLD on-disk state in the
+# re-exec'd child, so the atomic-rollback path is fully preserved. The child's own
+# Step 4 sync_host_scripts installs the new code to disk for future runs.
+#
+# FAIL-SAFE: any fetch/verify miss SKIPS the re-exec - the current (old) process
+# proceeds (degraded to the historical two-run convergence), never a broken or an
+# unverified-code exec. Scope: real apply paths only (apply / with_templates), a
+# pinned tag (a floating 'latest' has no per-tag SHA256SUMS to verify against).
+_maybe_self_update_reexec() {
+	[[ "${OXPULSE_UPGRADE_REEXECED:-0}" == 1 ]] && return 0   # child of a prior re-exec
+	[[ "${DRY_RUN:-0}" -eq 1 ]] && return 0
+	[[ "${OXPULSE_UPGRADE_NO_SELF_UPDATE:-0}" == 1 ]] && return 0   # operator/CI opt-out
+	case "${MODE:-apply}" in apply|with_templates) ;; *) return 0 ;; esac
+	local _tag="${RELEASE_TAG:-}"
+	[[ -z "$_tag" || "$_tag" == latest ]] && return 0
+	local _running="${BASH_SOURCE[0]:-$0}"
+	[[ -r "$_running" ]] || return 0
+
+	# Only self-update when running the INSTALLED sbin copy - never silently
+	# replace a dev/CI/manual invocation (e.g. `bash ./upgrade.sh`) with the
+	# released version. This is also what keeps the integration suite (which runs
+	# the repo copy, not the installed path) off the network self-update path.
+	local _installed="${OXPULSE_INSTALLED_UPGRADE_PATH:-${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-partner-edge-upgrade}"
+	local _rp_run _rp_inst
+	_rp_run=$(realpath -m "$_running" 2>/dev/null || printf '%s' "$_running")
+	_rp_inst=$(realpath -m "$_installed" 2>/dev/null || printf '%s' "$_installed")
+	[[ "$_rp_run" == "$_rp_inst" ]] || return 0
+
+	local _tmpdir _new _sums _expected _actual _running_sha
+	_tmpdir=$(mktemp -d 2>/dev/null) || return 0
+	_new="$_tmpdir/partner-edge-upgrade.sh"
+
+	# Fetch the substituted upgrade.sh release asset for the pinned tag (TLS-pinned).
+	if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
+		"$RELEASES_BASE/$_tag/partner-edge-upgrade.sh" -o "$_new" 2>/dev/null; then
+		rm -rf "$_tmpdir"; return 0
+	fi
+
+	# Verify against the release SHA256SUMS unless integrity is explicitly waived.
+	if [[ "${ALLOW_UNVERIFIED:-0}" != 1 ]]; then
+		_sums="$_tmpdir/SHA256SUMS"
+		if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
+			"$RELEASES_BASE/$_tag/SHA256SUMS" -o "$_sums" 2>/dev/null; then
+			warn "self-update: no SHA256SUMS for $_tag - skipping re-exec (converges next run)"
+			rm -rf "$_tmpdir"; return 0
+		fi
+		_expected=$(awk '$2=="partner-edge-upgrade.sh"{print $1; exit}' "$_sums" 2>/dev/null || true)
+		_actual=$(sha256sum "$_new" 2>/dev/null | awk '{print $1}')
+		if [[ -z "$_expected" || "$_expected" != "$_actual" ]]; then
+			warn "self-update: SHA256 mismatch/absent for upgrade.sh@$_tag - refusing to re-exec unverified code"
+			rm -rf "$_tmpdir"; return 0
+		fi
+	else
+		_actual=$(sha256sum "$_new" 2>/dev/null | awk '{print $1}')
+	fi
+
+	# Already running the target bytes? Nothing to converge.
+	_running_sha=$(sha256sum "$_running" 2>/dev/null | awk '{print $1}')
+	if [[ -z "$_actual" || "$_actual" == "$_running_sha" ]]; then
+		rm -rf "$_tmpdir"; return 0
+	fi
+
+	chmod +x "$_new" 2>/dev/null || true
+	log "self-update: running upgrade.sh differs from the $_tag release - re-exec into the new version once so infra fixes apply this run"
+	export OXPULSE_UPGRADE_REEXECED=1
+	# Release the upgrade-lock fd (if held) so the re-exec'd child reacquires cleanly.
+	{ exec 9>&-; } 2>/dev/null || true
+	exec "$_new" "$@"
+	# exec returns only on failure:
+	warn "self-update: re-exec of $_new failed - continuing with the current process"
+	return 0
 }
 
 # sync_host_scripts TAG — forwarder; see snapshot_host_scripts/restore_host_scripts's
@@ -2068,6 +2196,12 @@ if [[ "$MODE" == with_templates ]]; then
 		exit "$_conflict_exit"
 	fi
 
+	# FIX 2: self-update - before ANY backup/mutation, re-exec into the freshly
+	# released upgrade.sh (once) if the running copy is stale, so an in-upgrade.sh
+	# fix (e.g. the settle cold-start gate) lands this run. Rollback-safe: execs a
+	# temp copy, disk untouched (see _maybe_self_update_reexec).
+	_maybe_self_update_reexec "$@"
+
 	# Phase 3 (Decision 4): baseline captured AFTER sync_host_scripts (Step 5) so the
 	# new --snapshot-capable healthcheck.sh is in place before the snapshot is taken.
 	# Declared here (empty) so Step 1–5 rollback paths can reference ${_wt_baseline_snap:-}
@@ -2296,6 +2430,11 @@ fi
 # resolve_edge_service_scope()'s docstring: dying here leaves nothing to
 # restore. _edge_svcs is reused below for the pull, digest capture, and
 # post-pull digest resolution — one compose-config fetch, not one per caller.
+# FIX 2: self-update - before ANY backup/mutation, re-exec into the freshly
+# released upgrade.sh (once) if the running copy is stale (see with-templates
+# path). Rollback-safe: temp-exec, disk untouched.
+_maybe_self_update_reexec "$@"
+
 declare -a _edge_svcs
 resolve_edge_service_scope _edge_svcs
 

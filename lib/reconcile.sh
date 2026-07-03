@@ -504,6 +504,25 @@ mark_caddy_reload() {
     _RECONCILE_CADDY_RELOAD=1
 }
 
+# _reconcile_persist_failed_caddyfile - on a caddy reload+recreate double-failure,
+# copy the just-rendered on-disk Caddyfile to a timestamped file under the log dir
+# so an operator can post-mortem the config that could not be loaded. Non-fatal:
+# skips silently if the source Caddyfile or the log dir is unavailable/unwritable.
+# Timestamp is read from the system clock (UTC), never hardcoded.
+_reconcile_persist_failed_caddyfile() {
+    local _src="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/Caddyfile"
+    [[ -f "$_src" ]] || return 0
+    local _logdir="${PARTNER_EDGE_LOG_DIR:-/var/log/oxpulse-partner-edge}"
+    mkdir -p "$_logdir" 2>/dev/null || return 0
+    local _ts _dst
+    _ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || printf 'unknown')
+    _dst="$_logdir/caddy-reload-fail-${_ts}.caddy"
+    if cp -f "$_src" "$_dst" 2>/dev/null; then
+        warn "reconcile: saved un-loadable Caddyfile for post-mortem -> $_dst"
+    fi
+    return 0
+}
+
 # apply_caddy_reloads — hot-reload caddy via admin API; no peer containers down.
 #
 # Caddy's global block configures `admin localhost:2019`.  The reload command
@@ -522,8 +541,9 @@ apply_caddy_reloads() {
 
     log "reconcile: caddy hot-reload via admin API (peers untouched)"
     # -T: non-TTY exec (required in scripts; safe with admin API).
-    if "$_docker" compose -f "$_compose_file" exec -T caddy \
-            caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null; then
+    local _reload_err
+    if _reload_err=$("$_docker" compose -f "$_compose_file" exec -T caddy \
+            caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1); then
         log "reconcile: caddy reload successful (SFU/coturn/xray/naive untouched)"
         return 0
     fi
@@ -531,13 +551,18 @@ apply_caddy_reloads() {
     warn "reconcile: caddy admin reload failed — falling back to force-recreate caddy only"
     # Recreate ONLY caddy. `--force-recreate caddy` with an explicit service name
     # does not recreate sibling services in the compose project.
-    if "$_docker" compose -f "$_compose_file" up -d --force-recreate caddy 2>/dev/null; then
+    [[ -n "${_reload_err:-}" ]] && warn "reconcile: caddy reload stderr: ${_reload_err}"
+    local _recreate_err
+    if _recreate_err=$("$_docker" compose -f "$_compose_file" up -d --force-recreate caddy 2>&1); then
         log "reconcile: caddy container recreated (peers untouched)"
         return 0
     fi
 
     warn "reconcile: caddy force-recreate also failed — check: $_docker compose -f $_compose_file logs caddy"
-    # Both reload paths failed: the new Caddyfile is NOT live.
+    [[ -n "${_recreate_err:-}" ]] && warn "reconcile: caddy force-recreate stderr: ${_recreate_err}"
+    # Both reload paths failed: the new Caddyfile is NOT live. Persist the rendered
+    # Caddyfile that could not be loaded for post-mortem (timestamped, non-fatal).
+    _reconcile_persist_failed_caddyfile
     # Return non-zero so reconcile_all (and callers like upgrade.sh) see a hard error
     # rather than a silent rc=0 while caddy continues serving the stale config.
     return 1
@@ -1300,13 +1325,19 @@ PYEOF
 # corrupts the whole file for node_exporter's textfile collector. Atomic tmp+mv;
 # skips silently when the textfile dir is unwritable/absent (non-fatal).
 _reconcile_emit_prom_gauge() {
-    local _basename="$1" _metric="$2" _value="$3"
+    local _basename="$1" _metric="$2" _value="$3" _labels="${4:-}"
     local _dir="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
     [[ -d "$_dir" ]] || mkdir -p "$_dir" 2>/dev/null || return 0
     local _f="$_dir/$_basename"
     local _tmp="${_f}.tmp.$$"
+    # Optional _labels (e.g. kind="real") - backward-compatible: 3-arg callers emit
+    # the identical unlabeled line they always did.
     { printf '# TYPE %s gauge\n' "$_metric"
-      printf '%s %s\n' "$_metric" "$_value"
+      if [[ -n "$_labels" ]]; then
+          printf '%s{%s} %s\n' "$_metric" "$_labels" "$_value"
+      else
+          printf '%s %s\n' "$_metric" "$_value"
+      fi
     } >"$_tmp" 2>/dev/null && mv -f "$_tmp" "$_f" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
     return 0
 }
