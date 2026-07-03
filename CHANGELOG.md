@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.14.1...v0.14.2) (2026-07-03)
+
+
+### Bug Fixes
+
+* **reconcile:** converge on-disk Caddyfile drift (P5 caddy strangler) ([#357](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/357)) ([ed9603b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ed9603b5623c72ce6c10d06090cbe0a63054442e))
+* **upgrade:** fail-closed sha256 + TLS-pin on _source_lib tier-3 fetch (P0 supply-chain) ([#353](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/353)) ([7fab7b2](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7fab7b2dc21f2906a1fd6a7c0114ea0de5d03702))
+
 ## [0.14.1](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.14.0...v0.14.1) (2026-07-03)
 
 
