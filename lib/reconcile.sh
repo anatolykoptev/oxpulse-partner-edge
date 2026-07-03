@@ -515,14 +515,26 @@ health_snapshot() {
         return 1
     fi
 
-    # Run --snapshot; always exits 0 per healthcheck.sh contract.
-    if ! "$_hc_bin" --snapshot > "$_snap_file" 2>/dev/null; then
-        warn "health_snapshot: healthcheck --snapshot exited non-zero (unexpected)"
-        return 1
-    fi
+    # Run --snapshot and KEEP the output regardless of the process exit code.
+    # A healthcheck whose --snapshot emits valid per-check lines but exits
+    # non-zero when a check is RED (an older deployed healthcheck, or the
+    # exit 1/exit 2 edge paths in healthcheck.sh) still produced a usable
+    # snapshot. The authoritative "did we get a snapshot" signal is the OUTPUT
+    # CONTENT (validated below), NOT the exit code — gating on the exit code
+    # treats a valid-but-red baseline as a failed/empty capture, which cascades
+    # into a FALSE rollback via the caller's absolute-gate fallback (BUG3).
+    "$_hc_bin" --snapshot > "$_snap_file" 2>/dev/null || true
 
+    # Content gate: a legacy binary with no --snapshot support writes nothing to
+    # stdout (its error goes to stderr) → empty file → genuinely no snapshot.
     if [[ ! -s "$_snap_file" ]]; then
         warn "health_snapshot: snapshot file is empty after run: $_snap_file"
+        return 1
+    fi
+    # Require at least one parseable name=GREEN|RED line so a legacy binary that
+    # prints a non-snapshot blob to stdout is still classified as "no snapshot".
+    if ! grep -qE '^[A-Za-z0-9_]+=GREEN$|^[A-Za-z0-9_]+=RED$' "$_snap_file" 2>/dev/null; then
+        warn "health_snapshot: no parseable name=GREEN|RED lines in snapshot: $_snap_file"
         return 1
     fi
 
@@ -1205,6 +1217,25 @@ try:
     print("XRAY_XHTTP_XMUX_C_MAX_REUSE_TIMES=" + str(xmux.get("cMaxReuseTimes", 64)))
     print("XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS=" + str(xmux.get("cMaxLifetimeMs", 15000)))
     print("XRAY_XHTTP_X_PADDING_BYTES=" + str(x.get("xhttp", {}).get("extra", {}).get("xPaddingBytes") or "100-1000"))
+    # Reality / backend render vars — the SAME flat register-response keys
+    # install.sh json_get's from node-config.json (install.sh:665-668,1058-1059).
+    # These are NOT in install.env; without them opec render xray emits
+    # {{REALITY_*}}/{{BACKEND_*}} placeholders and the completeness guard
+    # fail_soft-skips on every edge (BUG2). Always printed (even when empty) so a
+    # stale ambient value is cleared and the surface's fail-closed guard fires.
+    print("REALITY_UUID="        + str(d.get("reality_uuid", "") or ""))
+    print("REALITY_PUBLIC_KEY="  + str(d.get("reality_public_key", "") or ""))
+    print("REALITY_SHORT_ID="    + str(d.get("reality_short_id", "") or ""))
+    print("REALITY_SERVER_NAME=" + str(d.get("reality_server_name", "") or ""))
+    print("REALITY_ENCRYPTION="  + str(d.get("reality_encryption", "") or ""))
+    _be = str(d.get("backend_endpoint", "") or "")
+    if ":" in _be:
+        _h, _, _p = _be.rpartition(":")
+        print("BACKEND_HOST=" + _h)
+        print("BACKEND_PORT=" + _p)
+    else:
+        print("BACKEND_HOST=")
+        print("BACKEND_PORT=")
 except Exception:
     print("XRAY_XHTTP_MODE=stream-one")
     print("XRAY_XHTTP_PATH=/xh")
@@ -1228,6 +1259,35 @@ PYEOF
         export XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS="${XRAY_XHTTP_XMUX_C_MAX_LIFETIME_MS:-15000}"
         export XRAY_XHTTP_X_PADDING_BYTES="${XRAY_XHTTP_X_PADDING_BYTES:-100-1000}"
     fi
+}
+
+# ---------------------------------------------------------------------------
+# _reconcile_xray_emit_gauge UNRESOLVED
+#
+# Standing signal for the BUG2 fail-closed skip: a Prometheus textfile-collector
+# gauge so a probe/dashboard can tell when the xray_client surface could NOT
+# resolve its Reality/backend creds from node-config.json and skipped the render
+# (the Reality re-render silently not happening — the exact class BUG2 cured).
+#
+# Deliberate parallel of _reconcile_firewall_emit_gauge below: OWN file
+# (partner_edge_xray.prom) distinct from partner_edge.prom / partner_edge_firewall.prom
+# so a differently-typed metric never races another writer's truncation and
+# corrupts node_exporter's textfile collector with duplicate `# TYPE` lines.
+#
+# UNRESOLVED: "1" when creds were unresolvable this converge (surface skipped),
+# "0" when they resolved (render path reached). Atomic tmp+mv; skips silently
+# when the textfile dir is unwritable/absent (non-fatal).
+# ---------------------------------------------------------------------------
+_reconcile_xray_emit_gauge() {
+    local _unresolved="$1"
+    local _dir="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
+    [[ -d "$_dir" ]] || mkdir -p "$_dir" 2>/dev/null || return 0
+    local _f="$_dir/partner_edge_xray.prom"
+    local _tmp="${_f}.tmp.$$"
+    { printf '# TYPE partner_edge_xray_creds_unresolved gauge\n'
+      printf 'partner_edge_xray_creds_unresolved %s\n' "$_unresolved"
+    } >"$_tmp" 2>/dev/null && mv -f "$_tmp" "$_f" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1267,8 +1327,23 @@ reconcile_xray_client_surface() {
         return 0
     fi
 
-    # Set up XRAY_XHTTP_* env vars from node-config.json.
+    # Set up XRAY_XHTTP_* + REALITY_*/BACKEND_* env vars from node-config.json.
     _setup_xray_client_render_env "$_prefix_etc"
+
+    # Fail-closed (coturn TURN_SECRET landmine class): if the Reality creds or the
+    # backend endpoint could not be resolved from node-config.json, SKIP the render
+    # entirely (fail_soft) — NEVER render a blank publicKey/backend and swap it
+    # live, which would zero the VLESS tunnel. opec substitutes an EMPTY value (not
+    # a {{placeholder}}), so the completeness guard below would NOT catch it; this
+    # guard must fire first, leaving the last-known-good config untouched.
+    if [[ -z "${REALITY_PUBLIC_KEY:-}" || -z "${REALITY_UUID:-}" \
+          || -z "${BACKEND_HOST:-}" || -z "${BACKEND_PORT:-}" ]]; then
+        rm -f "$_out_path"
+        warn "reconcile_xray_client: reality/backend creds unresolved from ${_prefix_etc}/node-config.json (REALITY_PUBLIC_KEY/UUID or BACKEND_HOST/PORT empty) — skipping xray-client render (fail_soft; live config left untouched, tunnel not zeroed)"
+        _reconcile_xray_emit_gauge 1
+        return 0
+    fi
+    _reconcile_xray_emit_gauge 0
 
     # Render — fail_soft: warn on failure, do NOT die.
     if ! opec render xray --tpl "$_tpl_path" --out "$_out_path" 2>/dev/null; then

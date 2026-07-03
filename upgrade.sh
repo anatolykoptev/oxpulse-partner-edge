@@ -186,6 +186,32 @@ On a standalone upgrade.sh download ensure network access to REPO_RAW or stage
 the lib files adjacent to upgrade.sh."
 }
 
+# _stage_lib NAME LOCAL_PATH INSTALLED_PATH REPO_RAW_PATH DEST_DIR — resolve a
+# shared library FILE onto disk in DEST_DIR (does NOT source it). Sibling to
+# _source_lib with the SAME 3-tier resolution (adjacent → installed → REPO_RAW),
+# but PERSISTS the file so reconcile.sh's call-time transitive-dep resolvers
+# (reconcile_firewall_surface / _reconcile_firewall_escalate — they [[ -f ]]-check
+# then source ${LIB_DIR}/<name> at CALL time, not source time) find it even when
+# upgrade.sh itself was curl|bash'd from /tmp with no adjacent lib/ dir.
+# Fail-loud: die if the file cannot be resolved from any tier — a missing firewall
+# lib must abort the upgrade, never silently leave the host unfirewalled (t14).
+_stage_lib() {
+    local name="$1" local_path="$2" installed_path="$3" raw_path="$4" dest_dir="$5"
+    local dest="$dest_dir/$name"
+    if [[ -f "$local_path" ]]; then
+        cp -f "$local_path" "$dest" && return 0
+    elif [[ -f "$installed_path" ]]; then
+        cp -f "$installed_path" "$dest" && return 0
+    fi
+    if curl -fsSL --max-time 30 "$raw_path" -o "$dest" 2>/dev/null; then
+        warn "$name staged from $raw_path (standalone run) for reconcile transitive-dep resolution"
+        return 0
+    fi
+    die "$name could not be staged (tried: $local_path, $installed_path, $raw_path).
+reconcile_firewall_surface needs it on-disk in LIB_DIR; ensure network access to
+REPO_RAW or stage lib/ adjacent to upgrade.sh."
+}
+
 # Source shared channel render functions (re_render_xray, future re_render_awg, etc.)
 # shellcheck source=channel-render-lib.sh
 _source_lib "channel-render-lib.sh" \
@@ -206,6 +232,35 @@ _source_lib "reconcile.sh" \
     "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/reconcile.sh" \
     "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/reconcile.sh" \
     "$REPO_RAW/lib/reconcile.sh"
+
+# --- BUG1 cure: pre-stage reconcile.sh's transitive deps + export LIB_DIR -------
+# reconcile.sh resolves its CALL-time deps — install-firewall.sh (reconcile_firewall_surface)
+# and telegram-alert-lib.sh (_reconcile_firewall_escalate) — via
+# ${FIREWALL_LIB:-${LIB_DIR:-$(dirname BASH_SOURCE)}/<name>}. On a curl|bash edge
+# reconcile.sh was fetched into /tmp and sourced from there, so dirname BASH_SOURCE
+# = /tmp where install-firewall.sh is NOT co-located → reconcile_firewall_surface
+# die()s and ABORTS the whole upgrade before any image pull, fleet-wide. Pre-stage
+# the deps into a stable dir and point LIB_DIR at it. t14's fail-loud firewall
+# contract is preserved: the die on a genuinely-missing file AFTER staging is still
+# correct — this only closes the missing co-location on the fetch path.
+_LIB_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/oxpulse-lib-stage-XXXXXX")
+# shellcheck disable=SC2064
+trap "rm -rf '$_LIB_STAGE_DIR'" EXIT
+_UPGRADE_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+_stage_lib "install-firewall.sh" \
+    "${_UPGRADE_SH_DIR}/lib/install-firewall.sh" \
+    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/install-firewall.sh" \
+    "$REPO_RAW/lib/install-firewall.sh" \
+    "$_LIB_STAGE_DIR"
+_stage_lib "telegram-alert-lib.sh" \
+    "${_UPGRADE_SH_DIR}/lib/telegram-alert-lib.sh" \
+    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/telegram-alert-lib.sh" \
+    "$REPO_RAW/lib/telegram-alert-lib.sh" \
+    "$_LIB_STAGE_DIR"
+export LIB_DIR="$_LIB_STAGE_DIR"
+export FIREWALL_LIB="$_LIB_STAGE_DIR/install-firewall.sh"
+export TELEGRAM_ALERT_LIB="$_LIB_STAGE_DIR/telegram-alert-lib.sh"
+# ------------------------------------------------------------------------------
 
 [[ $EUID -eq 0 || "${OXPULSE_SKIP_ROOT_CHECK:-0}" == "1" ]] || die "must run as root"
 [[ -r "$COMPOSE_FILE" ]] || die "no installed bundle at $COMPOSE_FILE"
@@ -1109,7 +1164,14 @@ settle_healthcheck_with_retry() {
 	_settle_hc_snapshot() {
 		local _bin="$1" _out="$2"
 		[[ -x "$_bin" ]] || return 1
-		"$_bin" --snapshot > "$_out" 2>/dev/null || return 1
+		# Do NOT gate on the --snapshot exit code. A healthcheck that emits valid
+		# per-check lines but exits non-zero when a check is RED (older deployed
+		# versions / the exit 1/exit 2 edge paths in healthcheck.sh) still produced
+		# a usable snapshot. The grep below is the authoritative "did we get a
+		# parseable snapshot" signal. Gating on the exit code made a valid-but-red
+		# probe read as "no --snapshot support" → absolute-gate fallback → FALSE
+		# rollback on pre-existing reds (BUG3).
+		"$_bin" --snapshot > "$_out" 2>/dev/null || true
 		grep -qE '^[A-Za-z0-9_]+=GREEN$|^[A-Za-z0-9_]+=RED$' "$_out" 2>/dev/null || return 1
 		return 0
 	}
