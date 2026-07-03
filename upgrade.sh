@@ -332,15 +332,27 @@ REPO_RAW or stage lib/ adjacent to upgrade.sh."
         local _actual _expected
         _actual=$(sha256sum "$_fetch_tmp" | awk '{print $1}')
         _expected=$(grep "[[:space:]]${name}$" "$_ck" 2>/dev/null | awk '{print $1}')
-        if [[ -n "$_expected" && "$_actual" != "$_expected" ]]; then
-            die "_stage_lib: tier-3 checksum mismatch for $name — refusing to stage untrusted code (expected ${_expected:0:16}… got ${_actual:0:16}…)"
+        # Same fail-closed contract as _source_lib (review HIGH — the two tier-3 resolvers
+        # must not diverge): (a) entry present + matches → stage; (b) entry present +
+        # mismatch → die; (c) manifest resolved but OMITS this file → die unless the escape
+        # hatch is set. Case (c) is the truncated / captive-portal / stale-manifest attack:
+        # a manifest that resolves yet drops the entry would otherwise SILENTLY stage
+        # root-sourced code — install-firewall.sh and telegram-alert-lib.sh are both
+        # sourced-and-executed as ROOT by reconcile.sh's call-time resolvers, and the
+        # firewall lib's own t14 contract says a missing/unverified copy must never leave
+        # the host unfirewalled. DELIBERATELY stricter than install.sh:_install_lib_source,
+        # which fails OPEN on the no-entry case; upgrade.sh's resolvers fail closed on it.
+        # Both staged libs HAVE lib-checksums.txt entries, so the legitimate tier-3 manifest
+        # carries them — case (c) fires only on a tampered/truncated manifest, never a real
+        # upgrade (tier-3 itself only runs on the standalone curl|bash path, not on an
+        # installed edge where the libs resolve at tier-1/2).
+        if [[ -n "$_expected" ]]; then
+            [[ "$_actual" != "$_expected" ]] && die "_stage_lib: tier-3 checksum mismatch for $name — refusing to stage untrusted code (expected ${_expected:0:16}… got ${_actual:0:16}…)"
+        elif [[ "${OXPULSE_UPGRADE_NO_INTEGRITY:-0}" -eq 1 ]]; then
+            warn "_stage_lib: lib-checksums.txt has no entry for $name + OXPULSE_UPGRADE_NO_INTEGRITY set — staging UNVERIFIED (operator accepts risk)"
+        else
+            die "_stage_lib: tier-3 fetch of $name without a verified checksum is unsafe — the resolved lib-checksums.txt has no entry for it (a truncated / captive-portal / stale manifest also produces this). Install from a release tarball or set OXPULSE_UPGRADE_NO_INTEGRITY=1 to acknowledge the risk"
         fi
-        # No entry → proceed unverified, EXACTLY as install.sh:_install_lib_source
-        # treats a file absent from the manifest (grep miss → empty _expected → no
-        # mismatch check). Both staged libs (install-firewall.sh, telegram-alert-lib.sh)
-        # now HAVE lib-checksums.txt entries (P0 resolver), so this warn is a fallback
-        # only for a future lib staged before its manifest entry lands.
-        [[ -z "$_expected" ]] && warn "_stage_lib: no lib-checksums.txt entry for $name — staged unverified"
     fi
     cp -f "$_fetch_tmp" "$dest"
     warn "$name staged from $raw_path (standalone run) for reconcile transitive-dep resolution"
@@ -368,9 +380,10 @@ trap _run_cleanup EXIT
 # AND _stage_lib (further down). Args are parsed later (args_parse), so pre-scan $@ here
 # — BEFORE the first _source_lib call — and honor the env var. Mirrors install.sh's
 # --no-integrity contract so a fork/dev/restricted-network operator is warned+continued
-# instead of hard-failed. --allow-unverified is upgrade.sh's canonical flag (it also
-# gates the SHA256SUMS host-script guard); --no-integrity is accepted as an
-# install.sh-parity alias.
+# instead of hard-failed. --allow-unverified is upgrade.sh's canonical flag; --no-integrity
+# is an install.sh-parity alias; OXPULSE_UPGRADE_NO_INTEGRITY=1 is the env-var form. All
+# three set this same flag, and ALLOW_UNVERIFIED (the SHA256SUMS host-script guard) is
+# seeded from it below — so all three gate BOTH the tier-3 lib verify here AND that guard.
 OXPULSE_UPGRADE_NO_INTEGRITY="${OXPULSE_UPGRADE_NO_INTEGRITY:-0}"
 for _arg in "$@"; do
     case "$_arg" in
@@ -480,7 +493,14 @@ MODE=apply
 TARGET=""
 DRY_RUN=0
 SKIPPED_CHECKS=""
-ALLOW_UNVERIFIED=0
+# ALLOW_UNVERIFIED gates the SHA256SUMS host-script guard (further down). Seed it from
+# the integrity escape hatch pre-scanned above so that OXPULSE_UPGRADE_NO_INTEGRITY=1 —
+# set via the env var OR by the --allow-unverified / --no-integrity pre-scan — bypasses
+# BOTH the tier-3 lib-resolver verify (_source_lib/_stage_lib) AND this host-script
+# guard. That makes the env var and the two flags genuinely interchangeable, as the
+# usage/header comments promise (a restricted-network/dev/fork operator who cannot
+# verify libs cannot verify host scripts either). The CLI-flag case below re-affirms it.
+ALLOW_UNVERIFIED="${OXPULSE_UPGRADE_NO_INTEGRITY:-0}"
 # GHCR PAT supplied via --ghcr-token=ghp_xxx flag OR OXPULSE_GHCR_TOKEN env.
 # Flag wins over env. Empty string disables the auth path (anonymous pull).
 GHCR_TOKEN_ARG="${OXPULSE_GHCR_TOKEN:-}"

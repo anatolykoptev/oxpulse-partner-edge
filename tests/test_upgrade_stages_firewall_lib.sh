@@ -250,12 +250,23 @@ else
     fail "T3-MISMATCH: expected checksum-mismatch die; got: $_out"
 fi
 
-# T3-NOENTRY: name absent from checksums → stages unverified (mirrors install.sh).
+# T3-NOENTRY: manifest resolved but OMITS this file + no override → fail-closed die.
+# Deliberately stricter than install.sh (which fails OPEN here); must MATCH _source_lib's
+# no-entry contract (review HIGH — the two tier-3 resolvers must not diverge). A truncated
+# / captive-portal / stale manifest must never silently stage a root-sourced lib.
 _out=$(_stage3 "$CK_NOENTRY" 0)
-if echo "$_out" | grep -q 'STAGED'; then
-    pass "T3-NOENTRY: no checksums entry => staged unverified (install.sh parity, entry pending P0)"
+if echo "$_out" | grep -qi 'without a verified checksum is unsafe'; then
+    pass "T3-NOENTRY: manifest omits entry + no override => fail-closed die (matches _source_lib)"
 else
-    fail "T3-NOENTRY: expected STAGED for unlisted lib; got: $_out"
+    fail "T3-NOENTRY: expected fail-closed die for unlisted lib; got: $_out"
+fi
+
+# T3-NOENTRY-OVERRIDE: manifest omits entry + OXPULSE_UPGRADE_NO_INTEGRITY=1 → stages (risk accepted).
+_out=$(_stage3 "$CK_NOENTRY" 1)
+if echo "$_out" | grep -q 'STAGED'; then
+    pass "T3-NOENTRY-OVERRIDE: OXPULSE_UPGRADE_NO_INTEGRITY=1 stages an unlisted lib (escape hatch)"
+else
+    fail "T3-NOENTRY-OVERRIDE: expected STAGED with override; got: $_out"
 fi
 
 # T3-NOCK-FAILCLOSED: no checksums anywhere + no override → fail-closed die.

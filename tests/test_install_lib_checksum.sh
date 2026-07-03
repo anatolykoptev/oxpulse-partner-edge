@@ -503,3 +503,24 @@ CEOF
 	[[ "$out" != *"no installed bundle"* ]] \
 		|| { echo "B: reached bundle check without a manifest or flag — fail-closed bypassed; got: $out"; return 1; }
 }
+
+# ---------------------------------------------------------------------------
+# 17. MEDIUM regression: OXPULSE_UPGRADE_NO_INTEGRITY must seed ALLOW_UNVERIFIED,
+#     so the env-var escape hatch gates the SHA256SUMS *host-script* guard (read via
+#     ALLOW_UNVERIFIED, later in the run) too — not only the tier-3 lib verify. Before
+#     the fix the env var passed lib-fetch but ALLOW_UNVERIFIED stayed hard-0, so an
+#     operator who set only the env var hard-died at the host-script guard, contradicting
+#     the header comment that presents the env var and --allow-unverified/--no-integrity
+#     as interchangeable. A source-level guard (the host-script guard is ~1000 lines past
+#     a valid installed bundle, so an e2e run cannot reach it without a full docker mock —
+#     the repo's other structural invariants are grep-asserted the same way, e.g. #3/#10).
+#     Non-vacuous: reverting to `ALLOW_UNVERIFIED=0` reddens BOTH assertions.
+# ---------------------------------------------------------------------------
+@test "upgrade.sh seeds ALLOW_UNVERIFIED from OXPULSE_UPGRADE_NO_INTEGRITY (env var gates the SHA256SUMS host-script guard)" {
+	local UPGRADE="$REPO_ROOT/upgrade.sh"
+	[ -f "$UPGRADE" ] || skip "upgrade.sh not present"
+	grep -Eq 'ALLOW_UNVERIFIED="\$\{OXPULSE_UPGRADE_NO_INTEGRITY:-0\}"' "$UPGRADE" \
+		|| { echo "ALLOW_UNVERIFIED is not seeded from OXPULSE_UPGRADE_NO_INTEGRITY — env var will not reach the SHA256SUMS host-script guard"; return 1; }
+	! grep -Eq '^ALLOW_UNVERIFIED=0$' "$UPGRADE" \
+		|| { echo "stale 'ALLOW_UNVERIFIED=0' init present — env var stranded before the host-script guard"; return 1; }
+}
