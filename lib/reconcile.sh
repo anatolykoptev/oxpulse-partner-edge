@@ -1527,18 +1527,23 @@ _reconcile_firewall_escalate() {
 # escalates via a critical AM-webhook alert instead of a warn line nobody
 # reads. Supported-tool (ufw/firewalld) success path is unchanged.
 #
-# Requires: lib/install-firewall.sh sourced (provides firewall_apply).
+# Requires: lib/firewall-lib.sh sourced (provides firewall_apply). (Phase 6:
+# renamed from lib/install-firewall.sh — a frozen back-compat duplicate of
+# that old path still exists for one release; this default resolves the new
+# canonical name. upgrade.sh's BUG1-cure block still explicitly exports
+# FIREWALL_LIB pointing at the old-named staged copy, which wins over this
+# default via ${FIREWALL_LIB:-...} — see lib/install-firewall.sh's header.)
 # ---------------------------------------------------------------------------
 reconcile_firewall_surface() {
-    local _fw_lib="${FIREWALL_LIB:-${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)}/install-firewall.sh}"
+    local _fw_lib="${FIREWALL_LIB:-${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)}/firewall-lib.sh}"
 
     if [[ ! -f "$_fw_lib" ]]; then
-        die "reconcile_firewall: lib/install-firewall.sh not found at $_fw_lib — cannot apply firewall"
+        die "reconcile_firewall: lib/firewall-lib.sh not found at $_fw_lib — cannot apply firewall"
     fi
 
     # Source firewall lib if firewall_apply is not yet in scope.
     if ! declare -f firewall_apply >/dev/null 2>&1; then
-        # shellcheck source=lib/install-firewall.sh
+        # shellcheck source=lib/firewall-lib.sh
         . "$_fw_lib"
     fi
 

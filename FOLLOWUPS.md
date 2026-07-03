@@ -242,3 +242,44 @@ coordinated render-parity-suite change.
 **File:line:** `tests/fixtures/install-render/compose.tpl`,
 `tests/fixtures/install-render/expected/compose.txt`,
 `tests/test_install_render_identical.sh`, `tests/test_install_opec_parity.sh`.
+
+---
+
+## install.sh / upgrade.sh still fetch the OLD `install-firewall.sh` name (Phase 6 firewall-lib cutover, deferred)
+
+Phase 6's naming reclassification renamed `lib/install-firewall.sh` to
+`lib/firewall-lib.sh` (it is sourced by BOTH `install.sh` and `lib/reconcile.sh`'s
+converge loop, hence the `*-lib.sh` class) and left `lib/install-firewall.sh` in
+place as a FROZEN byte-identical back-compat duplicate. `lib/reconcile.sh`'s new
+`${FIREWALL_LIB:-.../firewall-lib.sh}` default is consequently unreachable in
+production today: `install.sh:319`'s `_install_lib_source install-firewall.sh`
+eagerly sources the OLD name first, so `declare -f firewall_apply` already
+succeeds before reconcile's default would ever fire; `upgrade.sh:432`'s
+`_stage_lib "install-firewall.sh" ...` (and its tier-3 `REPO_RAW` fetch) exports
+`FIREWALL_LIB` pointing at the OLD staged file too. Updating `install.sh` /
+`upgrade.sh` to reference `lib/firewall-lib.sh` directly was explicitly out of
+the renaming task's edit scope — this entry makes that deferral trackable instead
+of leaving it only in a code comment.
+
+**Followup:** update `install.sh`'s `_install_lib_source` call and `upgrade.sh`'s
+`_stage_lib` call + tier-3 `REPO_RAW` fetch to reference `lib/firewall-lib.sh`
+directly, dropping every remaining `install-firewall.sh` literal (including the
+`raw.githubusercontent.com` git-tree fetch tier, which serves a git SYMLINK's blob
+as literal target-path text rather than dereferenced content — a real symlink here
+would die-on-fetch on every fresh curl|bash install, per `lib/install-firewall.sh`'s
+header). Kill criteria (from that same header): delete `lib/install-firewall.sh` +
+its `lib/lib-checksums.txt` entry one release after `install.sh`/`upgrade.sh`
+reference `lib/firewall-lib.sh` directly and all pinned partner edges have upgraded
+past the Phase 6 rename tag; at that point the `.github/workflows/release.yml`
+Phase-6 grep-guard step and `tests/test_firewall_lib_frozen_dup.sh` (parity gate
+added alongside this entry) can also be deleted.
+
+**Severity:** MEDIUM — not user-facing today (the frozen duplicate is kept in
+lockstep by `tests/test_firewall_lib_frozen_dup.sh`), but every release this
+cutover is deferred is another release where a firewall-rule edit has to
+remember to touch two files by hand instead of one.
+
+**File:line:** `install.sh:319` (`_install_lib_source install-firewall.sh`),
+`upgrade.sh:432` (`_stage_lib "install-firewall.sh" ...`), `lib/reconcile.sh`
+(`${FIREWALL_LIB:-...}` default — currently unreachable), `lib/install-firewall.sh`
+(header — kill-criteria source of truth).

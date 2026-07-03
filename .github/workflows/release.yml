@@ -44,6 +44,27 @@ jobs:
             echo ">> $f"
             shellcheck -x -S warning "$f"
           done
+      - name: "Phase 6: no stray install-firewall.sh sourcing refs in lib/*.sh"
+        # Guards the naming reclassification (install-firewall.sh -> firewall-lib.sh):
+        # lib/install-firewall.sh itself stays as the frozen back-compat duplicate
+        # (excluded below); every OTHER lib/*.sh must source the new firewall-lib.sh
+        # name, not the old one. Two patterns: a quoted path ref ("...install-firewall.sh")
+        # and a shellcheck source= directive — both are how this repo's other lib
+        # files' lazy-source forwarders reference a sibling lib (see
+        # lib/reconcile.sh's healthcheck-lib.sh precedent). Plain prose comments that
+        # merely mention the old filename (e.g. describing upgrade.sh's own unmodified
+        # staging call) do not match either pattern and are not flagged.
+        run: |
+          set -euo pipefail
+          stray=0
+          for f in lib/*.sh; do
+            [[ "$f" == "lib/install-firewall.sh" ]] && continue
+            if grep -nE 'install-firewall\.sh"|shellcheck source=.*install-firewall\.sh$' "$f"; then
+              echo "::error file=$f::stray install-firewall.sh source reference — use lib/firewall-lib.sh"
+              stray=1
+            fi
+          done
+          exit "$stray"
 
   extract-version:
     needs: lint-scripts
@@ -429,6 +450,13 @@ jobs:
           cp lib/install-awg-params-agent.sh install-awg-params-agent.sh
           # Bug #5 fix: ship install-firewall.sh so _install_lib_source can
           # verify its sha256 against lib-checksums.txt on tier-4 installs.
+          # Phase 6: install.sh/upgrade.sh still fetch this OLD literal name
+          # this release (unmodified, out of scope) — lib/install-firewall.sh
+          # is now a frozen back-compat duplicate of the renamed
+          # lib/firewall-lib.sh (see that file's header); this cp continues
+          # to ship real byte content, not a symlink, so raw.githubusercontent.com
+          # tier-3/4 fetches keep working (a git symlink would serve the
+          # target-path TEXT over raw HTTP, not the script — die-on-fetch).
           cp lib/install-firewall.sh          install-firewall.sh
           # Phase 5.5 MAJOR 1: fail-soft render helpers (sourced by install/hydrate/update/refresh).
           cp lib/render-channel-lib.sh    render-channel-lib.sh
