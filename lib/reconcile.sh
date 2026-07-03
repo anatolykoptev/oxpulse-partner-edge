@@ -79,6 +79,25 @@ assert_no_unresolved_placeholders() {
 }
 
 # ---------------------------------------------------------------------------
+# _caddyfile_presub_sha INSTALLED_PATH
+#
+# sha256 of an installed Caddyfile normalised back to its PRE-substitution form.
+# The live Caddyfile has __CADDYFILE_SHA__ already replaced with the real 64-hex
+# config-hash (respond "<sha>" 200 at /canary/config-hash — Caddyfile.tpl:361).
+# This reverses that one substitution (respond "<64hex>" → respond "__CADDYFILE_SHA__")
+# and hashes, so the result equals the pre-sub hash reconcile_caddy_surface computes
+# for a freshly-rendered candidate with the SAME content. Used by BOTH
+# reconcile_caddy_surface (on-disk drift check) and migrate_state (deriving STATE
+# from the live file) — one normalisation so the two can never diverge. Prints the
+# hex sha on stdout.
+# ---------------------------------------------------------------------------
+_caddyfile_presub_sha() {
+    local _path="$1"
+    sed 's/respond "[0-9a-f]\{64\}"/respond "__CADDYFILE_SHA__"/g' "$_path" \
+        | sha256sum | awk '{print $1}'
+}
+
+# ---------------------------------------------------------------------------
 # _setup_caddy_render_env [TPL_FILE]
 #
 # Sets and exports all env vars needed for `opec render caddy`:
@@ -222,13 +241,39 @@ reconcile_caddy_surface() {
         _state_sha=$(grep '^CADDYFILE_SHA=' "$_state_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
     fi
 
-    # If hashes match — same template + same env vars — no-op (S2 idempotency).
+    # A "clean" converge requires BOTH: (a) the rendered candidate matches the
+    # STATE-recorded pre-sub hash AND (b) the ON-DISK Caddyfile actually matches
+    # that same hash. STATE alone can lie — the on-disk file may have DRIFTED from
+    # what STATE records (operator hand-edit, or a stale pre-#273 Caddyfile carrying
+    # the illegal `reverse_proxy xray-client:3080/health` upstream that Caddy v2.11.2
+    # rejects → check_13 canary/tunnel 502). A STATE-only skip would leave that
+    # broken file live forever and the template fix (afe18ff / #273) would never
+    # reach the edge — the exact v0.14.1 canary finding. So when STATE matches,
+    # verify the disk too; on drift (or a missing installed file) force the swap so
+    # disk converges to the template.
+    local _drift=0
     if [[ -n "$_state_sha" && "$_rendered_sha" == "$_state_sha" ]]; then
-        log "reconcile_caddy: Caddyfile unchanged (sha256=$_rendered_sha matches STATE CADDYFILE_SHA) — no swap needed"
-        return 0
+        local _ondisk_sha=""
+        # 2>/dev/null || true: a read/permission edge on the installed Caddyfile
+        # (hardening pass, SELinux/AppArmor denial) must not hard-abort under the
+        # inherited `set -euo pipefail`; an empty _ondisk_sha is treated as "on-disk
+        # missing/unreadable" below → forces the converging swap (fail-safe), matching
+        # the _state_sha defensive extraction above.
+        [[ -f "$_installed_path" ]] && _ondisk_sha=$(_caddyfile_presub_sha "$_installed_path" 2>/dev/null || true)
+        if [[ "$_ondisk_sha" == "$_rendered_sha" ]]; then
+            log "reconcile_caddy: Caddyfile unchanged (sha256=$_rendered_sha matches STATE CADDYFILE_SHA and on-disk) — no swap needed"
+            _reconcile_caddy_emit_drift_gauge 0
+            return 0
+        fi
+        _drift=1
+        if [[ -z "$_ondisk_sha" ]]; then
+            warn "reconcile_caddy: STATE CADDYFILE_SHA matches render but on-disk Caddyfile missing at $_installed_path — forcing re-render to converge"
+        else
+            warn "reconcile_caddy: on-disk Caddyfile DRIFTED from STATE (on-disk pre-sub sha256=$_ondisk_sha != rendered=$_rendered_sha) — forcing re-render so disk converges to template (#273 fix reaches edge)"
+        fi
     fi
 
-    # Hashes differ (or first install with no STATE sha): perform the update.
+    # Hashes differ (or first install with no STATE sha, or on-disk drift): update.
     # Substitute the self-referential config-hash into the rendered file NOW
     # (after change-detection so the substituted value does not affect comparison).
     sed -i "s|__CADDYFILE_SHA__|${_rendered_sha}|g" "$_out_path"
@@ -249,6 +294,13 @@ reconcile_caddy_surface() {
     # Collect caddy reload (targeted — does NOT restart peer containers).
     # apply_caddy_reloads (called from reconcile_all) hot-reloads caddy in-place.
     mark_caddy_reload
+
+    # Standing drift signal: 1 = this converge corrected an on-disk Caddyfile that
+    # had drifted from STATE (the silent-skip bug class the v0.14.1 canary caught);
+    # 0 = a normal render change or first install (disk is freshly written here,
+    # definitionally not drifted). Self-clearing: a later clean/normal converge
+    # re-emits 0, so the gauge never sticks at 1 after the drift is fixed.
+    _reconcile_caddy_emit_drift_gauge "$_drift"
 }
 
 # ---------------------------------------------------------------------------
@@ -317,8 +369,7 @@ migrate_state() {
             # Caddyfile content, so the first --with-templates run after migration
             # detects "unchanged" and produces zero swaps (Fix 2 invariant).
             local _live_sha
-            _live_sha=$(sed 's/respond "[0-9a-f]\{64\}"/respond "__CADDYFILE_SHA__"/g' "$_caddy_path" \
-                | sha256sum | awk '{print $1}')
+            _live_sha=$(_caddyfile_presub_sha "$_caddy_path")
             printf 'CADDYFILE_SHA=%s\n' "$_live_sha" >> "$_state_file"
             log "migrate_state: derived CADDYFILE_SHA=$_live_sha from live Caddyfile (pre-sub normalised)"
         else
@@ -1262,6 +1313,17 @@ _reconcile_emit_prom_gauge() {
 
 _reconcile_xray_emit_gauge() {
     _reconcile_emit_prom_gauge "partner_edge_xray.prom" "partner_edge_xray_creds_unresolved" "$1"
+}
+
+# _reconcile_caddy_emit_drift_gauge DRIFTED — standing signal (own .prom file) for
+# the on-disk-Caddyfile drift class: 1 when reconcile_caddy_surface found the live
+# Caddyfile drifted from STATE and force-converged it this run, 0 on a clean no-op
+# or a normal-change converge. A relay that keeps reporting 1 is being re-drifted
+# (hand-edits, or a stale pre-#273 file re-appearing) — the exact silent-skip
+# regression the v0.14.1 canary caught. Reuses _reconcile_emit_prom_gauge (atomic
+# tmp+mv, own file, silently non-fatal when the textfile dir is unwritable).
+_reconcile_caddy_emit_drift_gauge() {
+    _reconcile_emit_prom_gauge "partner_edge_caddy.prom" "partner_edge_caddy_disk_drift" "$1"
 }
 
 # ---------------------------------------------------------------------------

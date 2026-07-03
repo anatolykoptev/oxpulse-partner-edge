@@ -704,160 +704,6 @@ if [[ "$MODE" == templates ]]; then
 	exit 0
 fi
 
-# ---------------------------------------------------------------------------
-# _resolve_naive_socks_port TPL_FILE — shared helper used by re_render_caddy
-# AND the with_templates dry-run block so both paths resolve NAIVE_SOCKS_PORT
-# identically.  Resolution order:
-#   1. NAIVE_SOCKS_PORT env var (already set by caller)
-#   2. STATE_FILE / install.env persisted value
-#   3. Live docker inspect on oxpulse-partner-naive
-#   4. die — if {{NAIVE_SOCKS_PORT}} is present in TPL_FILE (arg $1) and
-#             no authoritative source is available.  NEVER silently defaults
-#             to 1080 when the template uses the placeholder; that would bake
-#             a wrong upstream into the live Caddyfile without warning.
-#
-# Prints the resolved port on stdout.  Exits non-zero (via die) on failure.
-# ---------------------------------------------------------------------------
-_resolve_naive_socks_port() {
-	local _tpl_file="${1:-}"
-	local _port="${NAIVE_SOCKS_PORT:-}"
-	# Tier 2: STATE_FILE
-	[[ -z "$_port" ]] && _port=$(
-		grep '^NAIVE_SOCKS_PORT=' "${STATE_FILE:-}" 2>/dev/null | cut -d= -f2 || true)
-	# Tier 3: live docker inspect.
-	# Use {{println .}} (Go's println emits a real newline per element) so that
-	# grep '^NAIVE_SOCKS_PORT=' matches even when NAIVE is not the first env var.
-	# The old '{{.}}\n' form emits a LITERAL backslash-n, joining all vars onto
-	# one physical line — grep only matched when NAIVE happened to be first.
-	[[ -z "$_port" ]] && _port=$(
-		${DOCKER_BIN:-docker} inspect oxpulse-partner-naive \
-			--format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
-			| grep '^NAIVE_SOCKS_PORT=' | cut -d= -f2 || true)
-	# Tier 4: die if template uses the placeholder and nothing resolved
-	if [[ -z "$_port" ]]; then
-		if [[ -n "$_tpl_file" ]] && grep -qF '{{NAIVE_SOCKS_PORT}}' "$_tpl_file" 2>/dev/null; then
-			die "NAIVE_SOCKS_PORT: not in STATE_FILE and naive container is down — cannot render Caddyfile safely. Bring up oxpulse-partner-naive or set NAIVE_SOCKS_PORT in the environment before re-running."
-		fi
-		_port="1080"
-	fi
-	printf '%s' "$_port"
-}
-
-# ---------------------------------------------------------------------------
-# re_render_caddy — fetch Caddyfile.tpl, render with install.env values,
-# compute and embed the sha256 (__CADDYFILE_SHA__ logic matching install.sh),
-# update CADDYFILE_SHA in install.env.
-#
-# Design constraint: docker-compose.yml has 20+ placeholders (TURN_SECRET,
-# REALITY_* secrets, SFU secrets, etc.) that live only in the baked-in live
-# compose file; install.env does NOT persist them. Re-rendering compose from
-# template would silently wipe those secrets. Therefore --with-templates
-# re-renders Caddyfile only and patch-updates image tags in compose (same as
-# the plain image-upgrade path). See PR body for full rationale.
-#
-# Piter node: caddy service absent — Caddyfile render is skipped gracefully.
-# ---------------------------------------------------------------------------
-re_render_caddy() {
-	local tmpdir out_tpl out_caddy rendered_sha
-
-	# Detect piter (SFU-only): no caddy service in live compose.
-	if ! grep -qE '^\s+caddy:' "$COMPOSE_FILE" 2>/dev/null; then
-		warn "caddy service not found in $COMPOSE_FILE — skipping Caddyfile re-render (SFU-only node?)"
-		return 0
-	fi
-
-	[[ -n "${PARTNER_DOMAIN:-}" ]]   || die "PARTNER_DOMAIN missing from $STATE_FILE — cannot render Caddyfile"
-	[[ -n "${TURNS_SUBDOMAIN:-}" ]]  || die "TURNS_SUBDOMAIN missing from $STATE_FILE — cannot render Caddyfile"
-
-	tmpdir=$(mktemp -d)
-	# shellcheck disable=SC2064
-	trap "rm -rf '$tmpdir'" RETURN
-
-	out_tpl="$tmpdir/Caddyfile.tpl"
-	out_caddy="$tmpdir/Caddyfile"
-
-	log "fetching Caddyfile.tpl from $REPO_RAW"
-	if ! curl -fsSL --max-time 30 "$REPO_RAW/Caddyfile.tpl" -o "$out_tpl" 2>/dev/null; then
-		die "could not fetch Caddyfile.tpl from $REPO_RAW — aborting (no changes applied)"
-	fi
-
-	# Escape sed replacement metacharacters (same helper as channel-render-lib.sh).
-	_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
-
-	# Resolve Caddyfile tunnel-upstream vars not persisted in install.env.
-	# AWG_MOTHERLY_IP / HY2_FALLBACK_HOST / HY2_FALLBACK_PORT come from
-	# defaults.conf (fleet-wide). NAIVE_SOCKS_PORT resolves via _resolve_naive_socks_port
-	# (env → STATE_FILE/install.env → live naive container → die if templated & unresolvable).
-	local _defaults_conf="${PREFIX_SHARE:-/usr/local/share}/oxpulse-partner-edge/config/defaults.conf"
-	local _awg_motherly_ip="${AWG_MOTHERLY_IP:-}"
-	local _hy2_fallback_host="${HY2_FALLBACK_HOST:-}"
-	local _hy2_fallback_port="${HY2_FALLBACK_PORT:-}"
-	local _naive_socks_port="${NAIVE_SOCKS_PORT:-}"
-	if [[ -r "$_defaults_conf" ]]; then
-		# shellcheck source=/dev/null
-		local _awg_d _hy2h_d _hy2p_d
-		_awg_d=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' _ "$_defaults_conf" || echo '10.9.0.2')
-		_hy2h_d=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' _ "$_defaults_conf" || echo 'host.docker.internal')
-		_hy2p_d=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_PORT:-18443}"' _ "$_defaults_conf" || echo '18443')
-		[[ -z "$_awg_motherly_ip"   ]] && _awg_motherly_ip="$_awg_d"
-		[[ -z "$_hy2_fallback_host" ]] && _hy2_fallback_host="$_hy2h_d"
-		[[ -z "$_hy2_fallback_port" ]] && _hy2_fallback_port="$_hy2p_d"
-	fi
-	# Hardcoded fallbacks match install.sh compile-time defaults.
-	_awg_motherly_ip="${_awg_motherly_ip:-10.9.0.2}"
-	_hy2_fallback_host="${_hy2_fallback_host:-host.docker.internal}"
-	_hy2_fallback_port="${_hy2_fallback_port:-18443}"
-	# NAIVE_SOCKS_PORT: use shared resolver (env → STATE_FILE → docker inspect → die).
-	# The resolver dies if {{NAIVE_SOCKS_PORT}} is in the template and unresolvable,
-	# matching the dry-run path — no silent 1080 fallback on a down naive container.
-	_naive_socks_port=$(_resolve_naive_socks_port "$out_tpl")
-
-	# Render ALL placeholders present in Caddyfile.tpl.
-	sed \
-		-e "s|{{PARTNER_DOMAIN}}|$(_esc "$PARTNER_DOMAIN")|g" \
-		-e "s|{{TURNS_SUBDOMAIN}}|$(_esc "$TURNS_SUBDOMAIN")|g" \
-		-e "s|{{AWG_MOTHERLY_IP}}|$(_esc "$_awg_motherly_ip")|g" \
-		-e "s|{{HY2_FALLBACK_HOST}}|$(_esc "$_hy2_fallback_host")|g" \
-		-e "s|{{HY2_FALLBACK_PORT}}|$(_esc "$_hy2_fallback_port")|g" \
-		-e "s|{{NAIVE_SOCKS_PORT}}|$(_esc "$_naive_socks_port")|g" \
-		"$out_tpl" > "$out_caddy"
-
-	# Render-completeness guard: abort before deploy if any placeholder survived.
-	# Catches future Caddyfile.tpl additions not yet wired in re_render_caddy.
-	local _leftover
-	_leftover=$(grep -oE '\{\{[A-Z0-9_]+\}\}' "$out_caddy" 2>/dev/null | sort -u || true)
-	if [[ -n "$_leftover" ]]; then
-		die "Caddyfile render incomplete — unsubstituted placeholders:\n$(printf '%s\n' "$_leftover" | sed 's/^/  /')\nAdd the missing variable to re_render_caddy() or re-run install.sh."
-	fi
-
-	# Phase 1: compute sha256 of the rendered file BEFORE substituting
-	# __CADDYFILE_SHA__ — this matches install.sh exactly so that
-	# /canary/config-hash returns the recorded hash and check 15 stays green.
-	rendered_sha=$(sha256sum "$out_caddy" | awk '{print $1}')
-	sed -i "s|__CADDYFILE_SHA__|${rendered_sha}|g" "$out_caddy"
-
-	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "[dry-run] would write Caddyfile (sha256=$rendered_sha) to $PREFIX_ETC/Caddyfile"
-		log "[dry-run] would update CADDYFILE_SHA=$rendered_sha in $STATE_FILE"
-		return 0
-	fi
-
-	# FIX 3: atomic install via sibling temp + mv (rename(2) on same filesystem).
-	# Direct install -m 0644 does O_WRONLY|O_TRUNC — caddy reading during the
-	# write window sees truncated content → crashloop (cheburator morning incident).
-	local tmp_caddy="$PREFIX_ETC/Caddyfile.new.$$"
-	install -m 0644 "$out_caddy" "$tmp_caddy"
-	mv -f "$tmp_caddy" "$PREFIX_ETC/Caddyfile"
-	log "Caddyfile rendered (sha256=$rendered_sha)"
-
-	# Update CADDYFILE_SHA in install.env (replace existing line or append).
-	if grep -q '^CADDYFILE_SHA=' "$STATE_FILE"; then
-		sed -i "s|^CADDYFILE_SHA=.*|CADDYFILE_SHA=${rendered_sha}|" "$STATE_FILE"
-	else
-		printf 'CADDYFILE_SHA=%s\n' "$rendered_sha" >> "$STATE_FILE"
-	fi
-}
-
 # re_render_healthcheck() was removed (cheburator chicken-and-egg incident
 # fix, 2026-07): it was the ONLY thing that ever updated healthcheck.sh, and
 # it only ran on --with-templates — the plain apply path never delivered
@@ -2046,10 +1892,10 @@ _conflict_check_8() {
 # appropriate code: 1=catastrophic, 2=warning-only, 0=clean.
 #
 # Arguments:
-#   $1 = rendered Caddyfile path (from re_render_caddy dry-run)
+#   $1 = rendered Caddyfile path (opec render caddy, DRY_RUN dry-render)
 #   $2 = proposed compose template path (fetched but not applied)
 #   $3 = proposed healthcheck path (fetched but not applied)
-#   $4 = proposed Caddyfile SHA (computed by re_render_caddy in dry-run)
+#   $4 = proposed Caddyfile SHA (pre-sub sha of the opec dry-render)
 #   $5 = proposed image tag (TARGET)
 # ---------------------------------------------------------------------------
 run_conflict_checks() {
@@ -2172,9 +2018,9 @@ if [[ "$MODE" == with_templates ]]; then
 
 		# ------ Conflict detection ------
 		# Fetch compose template and healthcheck into a temp dir for structural analysis.
-		# re_render_caddy in dry-run mode writes rendered Caddyfile to a tmpdir internally
-		# and logs "[dry-run] would write Caddyfile (sha256=...)". We need to capture the
-		# rendered file and sha separately for conflict checks.
+		# The Caddyfile is dry-rendered below via opec render caddy (the same single
+		# render authority reconcile_caddy_surface uses at apply time) into this tmpdir,
+		# so the conflict checks see exactly what a real converge would install.
 		_conflict_tmpdir=$(mktemp -d)
 		# Append to the cumulative cleanup array instead of a single-slot EXIT trap,
 		# which would clobber the staging-dir cleanup registered earlier (MEDIUM #3).
@@ -2312,7 +2158,9 @@ if [[ "$MODE" == with_templates ]]; then
 	# Step 6: reconcile all surfaces (Phase 4a engine).
 	# Phase 4a wires caddyfile only; apply_caddy_reloads fires a targeted caddy hot-reload
 	# (no peer containers down). Caddyfile.tpl is fetched inside reconcile_all via REPO_RAW.
-	# re_render_caddy remains for backward compat; Phase 6 deletes.
+	# reconcile_caddy_surface (opec render caddy) is the single Caddyfile render authority
+	# for both apply paths; the legacy re_render_caddy shell renderer was deleted (Phase 5
+	# strangler completion — it had 0 production callers once this became the live path).
 	#
 	# healthcheck.sh is NOT re-rendered here anymore (cheburator incident fix):
 	# sync_host_scripts (Step 4, above) now delivers it — that call already

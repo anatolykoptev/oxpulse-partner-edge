@@ -156,7 +156,12 @@ _ar2_result=$(
     warn() { echo "[W] $*" >&2; }
     die()  { echo "[D] $*" >&2; exit 1; }
 
-    _etc=$(_setup_sandbox ar2 "# STABLE Caddyfile" 2>/dev/null)
+    # On-disk Caddyfile MUST equal what the opec mock renders below — a genuine
+    # "unchanged" scenario requires on-disk == rendered == STATE. The new on-disk
+    # drift leg in reconcile_caddy_surface hashes the actual file, so a fixture whose
+    # on-disk content diverges from the render is real drift (correctly reloads), not
+    # "unchanged". Keep both strings identical to _ar2_stable_content.
+    _etc=$(_setup_sandbox ar2 "$_ar2_stable_content" 2>/dev/null)
     # Override STATE sha to match the pre-sub hash of what opec will render.
     sed -i "s|^CADDYFILE_SHA=.*|CADDYFILE_SHA=${_ar2_stable_sha}|" "$_tmpdir/ar2/install.env"
 

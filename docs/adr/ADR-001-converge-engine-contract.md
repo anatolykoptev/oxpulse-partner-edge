@@ -32,7 +32,7 @@ The core invariant this ADR enforces:
 - upgrade.sh `--with-templates` dry-run conflict-check path (previously re-implemented sed inline; now calls `_setup_caddy_render_env` + `opec render caddy`)
 - CI golden test `tests/test_caddyfile_golden.sh` (previously used sed; now uses opec — eliminating the CI-vs-runtime drift that allowed `{{NAIVE_SOCKS_PORT}}` to live in the golden JSON)
 
-The bash `sed` renderer in `re_render_caddy()` (upgrade.sh) is retained dormant (Strangler Fig). The function remains callable for backward compatibility (existing tests reference it). It is deleted in Phase 6 once all surfaces are manifest-declared and tests cover the lib path end-to-end.
+The bash `sed` renderer in `re_render_caddy()` (upgrade.sh) was retained dormant (Strangler Fig) while surfaces were manifest-declared and tests grew to cover the lib path end-to-end. It has since been **deleted** (in the caddy-strangler phase, ahead of the originally-planned Phase 6): reconcile.sh's opec-rendered caddy surface is now the sole Caddyfile renderer, so the dormant `sed` path has no remaining callers.
 
 ### Why opec as the authority
 
