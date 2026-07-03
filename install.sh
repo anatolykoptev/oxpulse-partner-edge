@@ -150,10 +150,10 @@ _install_lib_source() {
 		# What this provides: tamper-evident at rest — catches corruption in the
 		# operator's local asset-bucket cache (tier-1/2/3 paths) and accidental
 		# bit-rot. When both the lib and lib-checksums.txt are fetched from the same
-		# REPO_RAW origin (tier-4 curl path), a channel-level MITM can substitute
-		# both files simultaneously, so the checksum alone does NOT provide
-		# MITM-resistance during download. Use a release tarball (tier-1/2/3) for
-		# a stronger trust anchor.
+		# REPO_RAW origin (tier-4 curl path), a channel-level MITM can substitute both
+		# files simultaneously, so the checksum alone does NOT provide MITM-resistance
+		# during download. Use a release tarball (tier-1/2/3) for a stronger trust
+		# anchor.
 		#
 		# Lookup order for checksums file:
 		#   1. $(dirname "$0")/lib/lib-checksums.txt  (local checkout / staged operator dir)
@@ -163,7 +163,11 @@ _install_lib_source() {
 		# Fail-closed: if no checksums file found (local or remote) AND --no-integrity
 		# was NOT passed, die with a clear message. Operators who run curl|bash from
 		# an untrusted or restricted environment must pass --no-integrity to acknowledge
-		# the risk explicitly.
+		# the risk explicitly. The SAME fail-closed contract applies when a checksums
+		# file DOES resolve but has no line for $name (a truncated / captive-portal /
+		# stale-version manifest also produces this) — treated identically to "no
+		# checksums file at all", not silently skipped (review HIGH: closes the
+		# omit-one-manifest-line bypass on this root-exec tier-4 path).
 		#
 		# If available and hash mismatches → die immediately (tamper detected).
 		local _ck_file=""
@@ -200,9 +204,31 @@ _install_lib_source() {
 		if [[ -n "$_ck_file" && -f "$_ck_file" ]]; then
 			local _actual_hash _expected_hash
 			_actual_hash=$(sha256sum "$tmp" | awk '{print $1}')
-			_expected_hash=$(grep "[[:space:]]${name}$" "$_ck_file" 2>/dev/null | awk '{print $1}')
-			if [[ -n "$_expected_hash" && "$_actual_hash" != "$_expected_hash" ]]; then
-				die "tier-4 fetch checksum mismatch for $name — refusing to source untrusted code (expected: ${_expected_hash:0:16}… got: ${_actual_hash:0:16}…)"
+			# Field-exact match on column 2 (NOT a suffix grep), tolerating an optional
+			# "./" prefix (the common `find`-generated manifest form) — same form as
+			# upgrade.sh's shared _lookup_expected_hash, so all three tier-3/tier-4
+			# resolvers (this, upgrade.sh:_source_lib, upgrade.sh:_stage_lib) agree on
+			# manifest-entry matching (review HIGH: they had diverged — a grep suffix
+			# match here would also hit an unrelated file whose name happens to end in
+			# $name, and would NOT resolve a "./name" manifest line that awk does).
+			_expected_hash=$(awk -v n="$name" '$2 == n || $2 == "./" n { print $1; exit }' "$_ck_file" 2>/dev/null)
+			if [[ -n "$_expected_hash" ]]; then
+				# (a) entry present + matches → source; (b) entry present + mismatch → die.
+				[[ "$_actual_hash" != "$_expected_hash" ]] && die "tier-4 fetch checksum mismatch for $name — refusing to source untrusted code (expected: ${_expected_hash:0:16}… got: ${_actual_hash:0:16}…)"
+			elif [[ "${NO_INTEGRITY:-0}" -eq 1 ]]; then
+				# (c) checksums file resolved but has NO entry for $name + --no-integrity
+				# acknowledged → warn and proceed unverified (operator accepts risk).
+				warn "_install_lib_source: lib-checksums.txt has no entry for $name + --no-integrity acknowledged — sourcing UNVERIFIED (operator accepts risk)"
+			else
+				# (c) same case, no override → FAIL CLOSED. Before this fix, an omitted
+				# manifest line silently skipped verification and fell through to
+				# `. "$tmp"`, sourcing unverified code as root on tier-4 (review HIGH —
+				# the exact "omit one manifest line" bypass upgrade.sh's _source_lib /
+				# _stage_lib already close; this closes the identical gap here). A
+				# truncated download, captive portal, or stale/wrong-version manifest
+				# also produces a resolved-but-omitting manifest, so this is never the
+				# legitimate norm for a file this loader actually fetches.
+				die "tier-4 fetch of $name without a verified checksum is unsafe — a checksums file resolved (local or remote) but has no entry for it (a truncated / captive-portal / stale manifest also produces this). Pass --no-integrity to acknowledge the risk"
 			fi
 		fi
 		unset _ck_file _ck_src_local _ck_src_dir _actual_hash _expected_hash

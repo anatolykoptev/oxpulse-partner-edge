@@ -41,5 +41,7 @@ lib-checksums:
 	  install-split-routing.sh \
 	  install-systemd.sh \
 	  render-channel-lib.sh \
+	  reconcile.sh \
+	  telegram-alert-lib.sh \
 	) > lib/lib-checksums.txt
 	@echo "lib/lib-checksums.txt regenerated — commit the result"
