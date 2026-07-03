@@ -50,7 +50,7 @@ Optional channel (enable with `--naive-server=<host>`):
 | `8912` | tcp | **mesh-only** (`10.9.0.0/24`) | SFU relay API |
 | `8920` | tcp | loopback / bridge | SFU client WebSocket (Caddy reverse-proxies to it) |
 
-See [`lib/install-firewall.sh`](lib/install-firewall.sh) for the exact rules. SFU privileged sockets (`9317`, `8912`, `8920`) are NOT publicly reachable post-install.
+See [`lib/firewall-lib.sh`](lib/firewall-lib.sh) for the exact rules. SFU privileged sockets (`9317`, `8912`, `8920`) are NOT publicly reachable post-install.
 
 ## Install
 
@@ -237,7 +237,7 @@ sudo systemctl daemon-reload
 ## Security
 
 - **Dedicated host required.** See [`docs/HOSTING_REQUIREMENTS.md`](docs/HOSTING_REQUIREMENTS.md). Partner-edge carries cryptographic key material (AmneziaWG private key, Reality private key, signing keys); a shared host with a control panel (ISPmanager, cPanel, Plesk) exposes these via panel cron jobs and webhooks.
-- **Host firewall whitelist enforced at install time.** [`lib/install-firewall.sh`](lib/install-firewall.sh) applies a least-privilege rule set via `ufw` (Debian/Ubuntu) or `firewalld` (RHEL/CentOS). SFU privileged sockets (`:9317`, `:8912`) are mesh-only (`10.9.0.0/24`); `:8920` is loopback/bridge only.
+- **Host firewall whitelist enforced at install time.** [`lib/firewall-lib.sh`](lib/firewall-lib.sh) applies a least-privilege rule set via `ufw` (Debian/Ubuntu) or `firewalld` (RHEL/CentOS). SFU privileged sockets (`:9317`, `:8912`) are mesh-only (`10.9.0.0/24`); `:8920` is loopback/bridge only.
 - **Application-layer mesh-only bind.** Beyond the firewall, the SFU binary now scopes `/metrics` and relay-API sockets to the AWG mesh IP via `SFU_METRICS_BIND` / `SFU_RELAY_API_BIND` (defence-in-depth, ships with v0.13+).
 - Each partner node receives independent credentials — a single compromised node cannot affect others.
 - Coturn blocks SSRF into RFC 1918 / CGNAT / link-local ranges via `denied-peer-ip`.
