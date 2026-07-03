@@ -1582,8 +1582,8 @@ EOF
 	if [[ -n "${OXPULSE_MIRROR_BASE:-}" ]]; then
 		printf 'OXPULSE_MIRROR_BASE=%s\n' "${OXPULSE_MIRROR_BASE}" >> "$PREFIX_LIB/install.env"
 	fi
-	# Persist NAIVE_SOCKS_PORT so upgrade.sh _resolve_naive_socks_port can read it
-	# from STATE_FILE when the naive container is down during an upgrade.
+	# Persist NAIVE_SOCKS_PORT so reconcile.sh's NAIVE_SOCKS_PORT resolution can read
+	# it from STATE_FILE when the naive container is down during an upgrade.
 	# Value is authoritative at install time (env > node-config > default 1080).
 	printf 'NAIVE_SOCKS_PORT=%s\n' "${NAIVE_SOCKS_PORT:-1080}" >> "$PREFIX_LIB/install.env"
 	# Persist PUBLIC_IP/PRIVATE_IP so reconcile.sh _setup_coturn_render_env can read
