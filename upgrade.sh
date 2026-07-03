@@ -1200,6 +1200,52 @@ $_cfg"
 # ---------------------------------------------------------------------------
 # PER-CONTAINER DIGEST-SKIP — zero-downtime recreate
 #
+# capture_running_digests / resolve_pulled_digests are thin forwarders (Phase
+# 3 strangler-harden) — the real implementations moved to lib/compose-lib.sh
+# as compose_diff_recreate_capture_running_digests /
+# compose_diff_recreate_resolve_pulled_digests. Kept under these ORIGINAL
+# names + the same nameref-param signature so every existing call site in
+# this file, and tests/test_upgrade_pull_scope_and_rollback.sh's structural
+# checks (B1a/B1b/B1d/B1f/B1g), stay unmodified. See lib/compose-lib.sh's
+# header for the full rationale, including why fetch_compose_config (right
+# below) and _parse_compose_config_images stay here instead of moving too.
+#
+# _upgrade_resolve_compose_lib / _upgrade_source_compose_lib: lazy, call-time
+# resolve+source (in the spirit of lib/reconcile.sh's
+# _reconcile_resolve_healthcheck_lib for lib/healthcheck-lib.sh) rather than
+# an eager _source_lib call alongside reconcile.sh's — deliberately, so
+# lib/compose-lib.sh is NOT enrolled as a "root-fetched" _source_lib/
+# _stage_lib target: tests/test_install_lib_checksum.sh's fitness check
+# requires every such target to be staged in the release-pipeline regen
+# block + lib/lib-checksums.txt (Makefile / .github/workflows/release.yml —
+# both outside this task's edit scope). Co-located-with-upgrade.sh takes
+# priority over ${LIB_DIR:-...}: LIB_DIR is unconditionally exported by the
+# BUG1-cure block above to a staging dir that stages ONLY
+# install-firewall.sh/telegram-alert-lib.sh (never compose-lib.sh) — see
+# _reconcile_resolve_healthcheck_lib's header comment in lib/reconcile.sh for
+# the identical priority-inversion reasoning.
+_upgrade_resolve_compose_lib() {
+	if [[ -n "${COMPOSE_LIB:-}" ]]; then
+		printf '%s' "$COMPOSE_LIB"
+		return 0
+	fi
+	local _colocated
+	_colocated="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd)/lib/compose-lib.sh"
+	if [[ -f "$_colocated" ]]; then
+		printf '%s' "$_colocated"
+		return 0
+	fi
+	printf '%s' "${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/lib/compose-lib.sh"
+}
+
+_upgrade_source_compose_lib() {
+	local _cl
+	_cl="$(_upgrade_resolve_compose_lib)"
+	[[ -f "$_cl" ]] || die "lib/compose-lib.sh not found at $_cl — capture_running_digests/resolve_pulled_digests need it"
+	# shellcheck source=lib/compose-lib.sh
+	. "$_cl"
+}
+
 # capture_running_digests EDGE_SVCS_ARRAY_NAME MAP_NAME — snapshot the
 # imageID (sha256:...) of every currently-running container for the
 # CALLER-SUPPLIED service list (already scoped to partner-edge-* by
@@ -1216,17 +1262,8 @@ $_cfg"
 capture_running_digests() {
 	local -n _crd_svcs="$1"
 	local -n _crd_map="$2"
-	local svc container_name image_id
-	for svc in "${_crd_svcs[@]}"; do
-		# docker compose ps --quiet returns container IDs for the service.
-		container_name=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose ps --quiet "$svc" 2>/dev/null | head -1 || true)
-		if [[ -n "$container_name" ]]; then
-			image_id=$($DOCKER_BIN inspect --format '{{.Image}}' "$container_name" 2>/dev/null || true)
-		else
-			image_id=""
-		fi
-		_crd_map["$svc"]="$image_id"
-	done
+	_upgrade_source_compose_lib
+	compose_diff_recreate_capture_running_digests _crd_svcs _crd_map
 }
 
 # resolve_pulled_digests EDGE_SVCS_ARRAY_NAME MAP_NAME — after compose pull,
@@ -1249,24 +1286,8 @@ capture_running_digests() {
 resolve_pulled_digests() {
 	local -n _rpd_svcs="$1"
 	local -n _rpd_map="$2"
-	local _cfg
-	if ! _cfg=$(fetch_compose_config); then
-		printf '%s\n' "$_cfg" >&2
-		return 1
-	fi
-	local -A _images
-	_parse_compose_config_images "$_cfg" _images
-	local svc image_ref image_id
-	for svc in "${_rpd_svcs[@]}"; do
-		image_ref="${_images[$svc]:-}"
-		if [[ -n "$image_ref" ]]; then
-			image_id=$($DOCKER_BIN inspect --format '{{.Id}}' "$image_ref" 2>/dev/null || true)
-		else
-			image_id=""
-		fi
-		_rpd_map["$svc"]="$image_id"
-	done
-	return 0
+	_upgrade_source_compose_lib
+	compose_diff_recreate_resolve_pulled_digests _rpd_svcs _rpd_map
 }
 
 # recreate_changed_services BEFORE_MAP_NAME AFTER_MAP_NAME
