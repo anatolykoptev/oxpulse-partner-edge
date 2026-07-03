@@ -1185,6 +1185,119 @@ rm -rf "$F4_TMPDIR"
 rm -f "$F_PREAMBLE"
 
 # ===========================================================================
+# Section G — awk-extraction fitness guard (Phase 2 strangler-harden, #318)
+# ===========================================================================
+#
+# settle_healthcheck_with_retry is deliberately self-contained — its
+# _settle_hc_snapshot / _settle_hc_regressions are a documented, pinned 2-way
+# duplicate of lib/healthcheck-lib.sh's health_snapshot / health_regressions
+# (see the function's header comment in upgrade.sh) SPECIFICALLY so Section F
+# above can awk-extract it as ONE self-sufficient function and drive it with
+# only log()/warn() stubs — no lib/*.sh sourced. If a future edit "fixes" that
+# pinned duplication by making settle_healthcheck_with_retry call
+# health_snapshot/health_regressions directly, Section F's extraction would
+# silently produce a broken snippet (undefined-function at RUNTIME, not at the
+# bash -n syntax-check in F1e) — this guard catches that class of regression
+# STRUCTURALLY, generically, for every single-function awk-extraction idiom in
+# THIS file (the `/^NAME\(\)/{found=1} ... /^}$/{exit}` pattern Section F
+# uses), not just the one call site: it extracts NAME's body from upgrade.sh
+# and flags any call to a symbol defined in lib/*-lib.sh unless this file also
+# sources that lib.
+echo ""
+echo "=== Section G: awk-extraction fitness guard ==="
+
+G_LIB_DIR="$REPO_ROOT/lib"
+
+# _g_check_extraction SRC_FILE TEST_FILE LIB_DIR -> prints one violation line
+# per (extracted function, unsourced lib symbol) pair found; empty = clean.
+_g_check_extraction() {
+    local _src="$1" _test="$2" _libdir="$3"
+    local _lib_symbols
+    _lib_symbols=$(grep -hoE '^[A-Za-z_][A-Za-z0-9_]*\(\)' "$_libdir"/*-lib.sh 2>/dev/null \
+        | sed -E 's/\(\)$//' | sort -u || true)
+    [[ -z "$_lib_symbols" ]] && return 0
+
+    # Discover single-function awk-extraction targets: the literal
+    # /^NAME\(\)/ regex text Section F's awk invocations use.
+    local _names
+    _names=$(grep -oE '/\^[A-Za-z_][A-Za-z0-9_]*\\\(\\\)/' "$_test" 2>/dev/null \
+        | sed -E 's#^/\^##; s#\\\(\\\)/$##' | sort -u || true)
+    [[ -z "$_names" ]] && return 0
+
+    local _name
+    while IFS= read -r _name; do
+        [[ -z "$_name" ]] && continue
+        local _body
+        _body=$(awk -v n="$_name" '$0 ~ "^"n"\\(\\)"{found=1} found{print} found && /^}$/{exit}' "$_src")
+        [[ -z "$_body" ]] && continue
+
+        local _sym
+        while IFS= read -r _sym; do
+            [[ -z "$_sym" ]] && continue
+            # _sym must appear as a whole word (command position) in the body.
+            echo "$_body" | grep -qE "(^|[^A-Za-z0-9_])${_sym}([^A-Za-z0-9_]|\$)" || continue
+            local _home_lib
+            _home_lib=$(grep -lE "^${_sym}\(\)" "$_libdir"/*-lib.sh 2>/dev/null \
+                | xargs -n1 basename 2>/dev/null | head -1 || true)
+            [[ -z "$_home_lib" ]] && continue
+            # Compliant if this file references the symbol's home lib anywhere
+            # (source line, cat, comment pointing at the fixture — any of
+            # those mean the extraction's isolation assumption was reviewed).
+            grep -qE "(^|[^A-Za-z0-9_.-])${_home_lib}([^A-Za-z0-9_.-]|\$)" "$_test" && continue
+            echo "${_name} calls ${_sym} (lib/${_home_lib}) without sourcing lib/${_home_lib}"
+        done <<< "$_lib_symbols"
+    done <<< "$_names"
+    return 0
+}
+
+# G0: self-test the detector on synthetic fixtures BEFORE trusting it against
+# the real repo — anti-vacuous: prove it both catches a violation and clears
+# a compliant case.
+G0_TMPDIR=$(mktemp -d)
+mkdir -p "$G0_TMPDIR/lib"
+cat > "$G0_TMPDIR/lib/fake-lib.sh" << 'G0LIB'
+fake_lib_symbol() { :; }
+G0LIB
+cat > "$G0_TMPDIR/violating_source.sh" << 'G0SRC'
+violating_fn() {
+    fake_lib_symbol "$@"
+}
+G0SRC
+cat > "$G0_TMPDIR/violating_test.sh" << 'G0TEST_BAD'
+awk '/^violating_fn\(\)/{found=1} found{print} found && /^}$/{exit}' "$SRC"
+G0TEST_BAD
+cat > "$G0_TMPDIR/compliant_test.sh" << 'G0TEST_OK'
+source "lib/fake-lib.sh"
+awk '/^violating_fn\(\)/{found=1} found{print} found && /^}$/{exit}' "$SRC"
+G0TEST_OK
+
+G0_BAD_OUT=$(_g_check_extraction "$G0_TMPDIR/violating_source.sh" "$G0_TMPDIR/violating_test.sh" "$G0_TMPDIR/lib")
+if [[ -n "$G0_BAD_OUT" ]]; then
+    pass "G0a: detector flags an unsourced *-lib.sh symbol in a synthetic fixture"
+else
+    fail "G0a: detector did NOT flag a known violation (vacuous guard)"
+fi
+
+G0_OK_OUT=$(_g_check_extraction "$G0_TMPDIR/violating_source.sh" "$G0_TMPDIR/compliant_test.sh" "$G0_TMPDIR/lib")
+if [[ -z "$G0_OK_OUT" ]]; then
+    pass "G0b: detector clears the same extraction once the lib is sourced"
+else
+    fail "G0b: detector still flags a compliant extraction: $G0_OK_OUT"
+fi
+
+rm -rf "$G0_TMPDIR"
+
+# G1: run the falsification-proven detector against the REAL repo — every
+# single-function awk-extraction in THIS file, checked against upgrade.sh and
+# lib/*-lib.sh (includes lib/healthcheck-lib.sh).
+G1_OUT=$(_g_check_extraction "$UPGRADE" "$REPO_ROOT/tests/test_upgrade_zero_downtime.sh" "$G_LIB_DIR")
+if [[ -z "$G1_OUT" ]]; then
+    pass "G1: no awk-extracted function in this file references an unsourced *-lib.sh symbol"
+else
+    fail "G1: awk-extraction fitness violation(s): $G1_OUT"
+fi
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""
