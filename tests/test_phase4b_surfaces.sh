@@ -386,21 +386,24 @@ rm -rf "$_tmpdir3"
 # NDP1: xray_env no-double-provision: both reconcile and upgrade.sh touch-if-absent
 #       are idempotent. Structural check: upgrade.sh in-line provision uses [[ ! -f ]]
 # ---------------------------------------------------------------------------
-UPGRADE="$REPO_ROOT/upgrade.sh"
-if [[ -f "$UPGRADE" ]]; then
+# sync_host_scripts (incl. the xray.env provision block) moved to
+# lib/host-scripts-lib.sh (Phase 4 strangler-harden, task p4) — check there,
+# not upgrade.sh (which now only holds a thin forwarder).
+HOST_SCRIPTS_LIB="$REPO_ROOT/lib/host-scripts-lib.sh"
+if [[ -f "$HOST_SCRIPTS_LIB" ]]; then
     # Scan the xray.env provision block for the no-double-provision guard. The
     # block is "provision xray.env" -> "_xray_env_path=" -> "[[ ! -f ... ]]". A
     # wide grep -A window catches the guard a couple lines below the path assign.
-    _upg_xray_env=$(grep -A8 -E '_xray_env_path=|provision xray\.env' "$UPGRADE" 2>/dev/null || true)
+    _upg_xray_env=$(grep -A8 -E '_xray_env_path=|provision xray\.env' "$HOST_SCRIPTS_LIB" 2>/dev/null || true)
     if echo "$_upg_xray_env" | grep -qE '\[\[ ! -f.*xray_env_path|\[ ! -f.*xray_env_path|!\s*-f.*xray\.env|\[ ! -f.*xray\.env'; then
-        pass "NDP1: upgrade.sh xray.env provision is guarded touch-if-absent (idempotent with reconcile)"
+        pass "NDP1: lib/host-scripts-lib.sh xray.env provision is guarded touch-if-absent (idempotent with reconcile)"
     else
-        # Guard absent -> double-provision risk: upgrade.sh would clobber an
+        # Guard absent -> double-provision risk: sync_host_scripts would clobber an
         # operator env override on every run. This MUST go RED, not silently pass.
-        fail "NDP1: upgrade.sh xray.env provision MISSING the [[ ! -f ]] no-double-provision guard - would clobber operator env on every upgrade"
+        fail "NDP1: lib/host-scripts-lib.sh xray.env provision MISSING the [[ ! -f ]] no-double-provision guard - would clobber operator env on every upgrade"
     fi
 else
-    fail "NDP1: upgrade.sh not found - cannot verify xray.env no-double-provision guard"
+    fail "NDP1: lib/host-scripts-lib.sh not found - cannot verify xray.env no-double-provision guard"
 fi
 
 # ---------------------------------------------------------------------------

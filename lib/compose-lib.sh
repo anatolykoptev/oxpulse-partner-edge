@@ -43,16 +43,21 @@
 # _upgrade_resolve_compose_lib / _upgrade_source_compose_lib, in the spirit
 # of lib/reconcile.sh's _reconcile_resolve_healthcheck_lib for
 # lib/healthcheck-lib.sh, with the SAME co-located-vs-LIB_DIR priority
-# inversion (co-located with upgrade.sh wins over ${LIB_DIR:-...}: LIB_DIR is
-# unconditionally exported by upgrade.sh's BUG1-cure block to a staging dir
-# that stages ONLY install-firewall.sh/telegram-alert-lib.sh, never
-# compose-lib.sh). Deliberately NOT an eager `_source_lib "compose-lib.sh"`
-# call alongside reconcile.sh's: doing so would enrol this file as a
-# "root-fetched" _source_lib/_stage_lib target, which
-# tests/test_install_lib_checksum.sh's fitness check requires to be staged in
-# the release-pipeline regen block + lib/lib-checksums.txt (Makefile /
-# .github/workflows/release.yml — both outside this task's edit scope, same
-# as lib/healthcheck-lib.sh's own precedent of skipping that enrollment).
+# inversion (co-located with upgrade.sh wins over ${LIB_DIR:-...}: a trusted
+# local dev checkout is preferred over the network-staged copy). Sourcing
+# stays lazy rather than an eager `_source_lib "compose-lib.sh"` call
+# alongside reconcile.sh's, so callers who never call
+# capture_running_digests/resolve_pulled_digests are not forced to co-locate
+# the lib at source time. This file IS, however, a `_stage_lib` target now
+# (upgrade.sh's BUG1-cure block stages it — see that block's header comment):
+# the delivery half of the fitness check in tests/test_install_lib_checksum.sh
+# (every _stage_lib/_source_lib target must be in the release-pipeline regen
+# block + lib/lib-checksums.txt — Makefile / .github/workflows/release.yml)
+# is satisfied by that staging call, closing the synthetic_green gap where
+# this lib was never delivered to an installed/curl|bash box — previously
+# _upgrade_source_compose_lib's die() hard-aborted every such upgrade at the
+# digest-diff step (same fix applied to lib/healthcheck-lib.sh and
+# lib/host-scripts-lib.sh).
 #
 # Not executable on its own.
 

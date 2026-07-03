@@ -133,10 +133,21 @@ HELPERS
     # _HOST_SCRIPT_RESTART_UNITS array
     awk '/^_HOST_SCRIPT_RESTART_UNITS=\(/{found=1} found{print} found && /^\)$/{exit}' "$UPGRADE"
 
-    # main exported functions
+    # main exported functions — snapshot_host_scripts/restore_host_scripts/
+    # sync_host_scripts are now thin lazy-source forwarders in upgrade.sh
+    # (Phase 4 strangler-harden, task p4); the awk-extracted stubs above just
+    # resolve+source lib/host-scripts-lib.sh, which this preamble-extraction
+    # harness cannot do (BASH_SOURCE[0] inside a sourced-preamble function
+    # points at $PREAMBLE, not the real upgrade.sh, so the forwarders'
+    # co-located resolve can't find the lib). Append the REAL lib content —
+    # its same-named function definitions land LAST in this file and
+    # overwrite the forwarder stubs in the shell's function table (bash:
+    # later definition wins), so sync_host_scripts/etc below run the actual
+    # implementation directly, no lib-resolution needed in this harness.
     awk '/^snapshot_host_scripts\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^restore_host_scripts\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^sync_host_scripts\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
+    cat "$REPO_ROOT/lib/host-scripts-lib.sh"
 } > "$PREAMBLE"
 
 bash -n "$PREAMBLE" || { echo "FAIL: extracted preamble has syntax errors"; exit 1; }
