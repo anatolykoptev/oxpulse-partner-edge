@@ -1259,20 +1259,28 @@ _upgrade_resolve_compose_lib() {
 	printf '%s' "${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/compose-lib.sh"
 }
 
-# _upgrade_source_compose_lib: unsets capture_running_digests/resolve_pulled_digests
-# before sourcing purely as defensive parity with the healthcheck-lib.sh /
-# host-scripts-lib.sh self-overwrite forwarders (whose same-named real
-# implementations make them vulnerable to a lib-sourced-before-forwarder
-# infinite recursion — see their header comments). lib/compose-lib.sh's real
-# functions use DIFFERENT names (compose_diff_recreate_*), so that recursion
-# is not reachable here today; unsetting keeps all three lib-forwarder call
-# sites uniform and stays safe against a future rename that reintroduces
-# same-name aliasing.
+# _upgrade_source_compose_lib: deliberately does NOT `unset -f` capture_running_digests/
+# resolve_pulled_digests before sourcing, unlike the healthcheck-lib.sh /
+# host-scripts-lib.sh forwarders (see their header comments for the
+# lib-sourced-before-forwarder infinite-recursion footgun those unsets guard
+# against). Those two are SELF-overwriting forwarders — sourcing the lib
+# redefines a function under the SAME name the forwarder itself calls again,
+# so an `unset -f` only ever fires on the one (redundant) execution path that
+# would otherwise recurse. capture_running_digests/resolve_pulled_digests are
+# DIFFERENT: this file's forwarder is called from TWO separate call sites per
+# upgrade (before-digests, then after-digests), both routing through this
+# shared helper — an `unset -f` here would remove the CALLING forwarder's own
+# name from the function table after the first call, breaking the second
+# call with "command not found" (caught empirically: it broke
+# tests/test_upgrade_pull_scope_and_rollback.sh and 3 other suites during
+# this fix's own verification). lib/compose-lib.sh's real functions use
+# DIFFERENT names (compose_diff_recreate_*) than these forwarders, so the
+# self-overwrite recursion those two unsets guard against is not reachable
+# here regardless.
 _upgrade_source_compose_lib() {
 	local _cl
 	_cl="$(_upgrade_resolve_compose_lib)"
 	[[ -f "$_cl" ]] || die "lib/compose-lib.sh not found at $_cl — capture_running_digests/resolve_pulled_digests need it"
-	unset -f capture_running_digests resolve_pulled_digests
 	# shellcheck source=lib/compose-lib.sh
 	. "$_cl"
 }
