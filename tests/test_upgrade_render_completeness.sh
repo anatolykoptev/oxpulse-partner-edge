@@ -10,8 +10,16 @@
 # Coverage:
 #   Test 4: xray.env idempotent provisioning in sync_host_scripts / install.sh.
 #   Test 5: shellcheck -S error on install.sh + upgrade.sh.
-#   Test 6: the --with-templates dry-run conflict-check render path (no SC2168 abort,
-#           no leftover placeholders).
+#   Test 6: drives the REAL upgrade.sh --with-templates --dry-run Caddyfile render
+#           sub-block. The block is awk-extracted verbatim from upgrade.sh (no
+#           hand-copied logic) and run against the REAL lib/reconcile.sh
+#           _setup_caddy_render_env, with opec + curl stubbed. Asserts opec is
+#           invoked with the exact --tpl/--out flags the block passes, that
+#           _setup_caddy_render_env exports every Caddyfile.tpl placeholder var
+#           (no {{VAR}} survives an opec that reads only the process env), and that
+#           the __CADDYFILE_SHA__ self-hash substitution runs. FALSIFICATION: break
+#           the --tpl/--out flags in upgrade.sh, or drop an export from
+#           _setup_caddy_render_env, and this test goes RED.
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -51,182 +59,167 @@ else
     echo "SKIP: shellcheck not installed"
 fi
 
-# ---- Test 6: with_templates conflict-check render path runs without SC2168 abort ----
-echo "==> Test 6: with_templates dry-run conflict-check render path (no SC2168 abort)"
+# ---- Test 6: REAL --with-templates --dry-run opec render sub-block ----
+# Strategy (mirrors tests/test_reconcile_caddy_disk_drift.sh + the awk-extract
+# pattern in tests/test_upgrade_with_templates.sh): awk-extract the dry-run render
+# sub-block verbatim from upgrade.sh, source the REAL lib/reconcile.sh so the real
+# _setup_caddy_render_env runs, stub opec + curl, then assert the block wires the
+# real render authority correctly. No network, no docker, no opec binary required.
+echo "==> Test 6: real --with-templates --dry-run opec render sub-block (extracted from upgrade.sh)"
 
-# Strategy: spin up a local HTTP server, write a minimal fixture, then build a
-# small self-contained script that wraps the render block from upgrade.sh inside
-# a function (making `local` valid) and drive it end-to-end.  We detect SC2168
-# by grepping the output for the canonical bash error string.
-
-T6_PORT=18864
-python3 -m http.server "$T6_PORT" --directory "$REPO_ROOT" \
-    >/tmp/test-t6-httpd.log 2>&1 &
-T6_HTTP_PID=$!
 T6_TMPDIR=$(mktemp -d)
-T6_CLEANUP_DONE=0
-t6_cleanup() {
-    [[ $T6_CLEANUP_DONE -eq 1 ]] && return
-    T6_CLEANUP_DONE=1
-    kill "$T6_HTTP_PID" 2>/dev/null || true
-    rm -rf "$T6_TMPDIR"
-}
+T6_RUN="$T6_TMPDIR/run.sh"
+t6_cleanup() { rm -rf "$T6_TMPDIR"; }
 trap 't6_cleanup' EXIT
-sleep 1
-curl -fsSL --max-time 5 "http://127.0.0.1:$T6_PORT/Caddyfile.tpl" >/dev/null \
-    || { fail "local http server (T6) not ready"; t6_cleanup; }
 
-T6_ETC="$T6_TMPDIR/etc"
-T6_LIB="$T6_TMPDIR/lib"
-T6_SHARE="$T6_TMPDIR/share/oxpulse-partner-edge/config"
-mkdir -p "$T6_ETC" "$T6_LIB" "$T6_SHARE"
+# The runner uses a quoted heredoc (no interpolation); repo root + sandbox come
+# in as positional args so the extracted block and stubs stay byte-faithful.
+cat > "$T6_RUN" << 'RUNNER'
+#!/bin/bash
+set -uo pipefail
+REPO_ROOT="$1"; SANDBOX="$2"
+UPGRADE="$REPO_ROOT/upgrade.sh"
+RECONCILE_LIB="$REPO_ROOT/lib/reconcile.sh"
+CADDY_TPL_SRC="$REPO_ROOT/Caddyfile.tpl"
 
-cat > "$T6_ETC/docker-compose.yml" << 'COMPOSE6'
+mkdir -p "$SANDBOX"
+OPEC_ARGS_LOG="$SANDBOX/opec.args"
+: > "$OPEC_ARGS_LOG"
+
+log()  { echo "[LOG] $*"  >&2; }
+warn() { echo "[WARN] $*" >&2; }
+die()  { echo "[DIE] $*"  >&2; exit 7; }
+
+# --- sandbox env the extracted block references ---
+_conflict_tmpdir="$SANDBOX/conflict"; mkdir -p "$_conflict_tmpdir"
+REPO_RAW="stub://repo"                 # curl is stubbed; the value is irrelevant
+COMPOSE_FILE="$SANDBOX/docker-compose.yml"
+STATE_FILE="$SANDBOX/install.env"
+PREFIX_SHARE="$SANDBOX/share"          # no defaults.conf → _setup uses hardcoded fallbacks
+DOCKER_BIN="false"                     # NAIVE tier-3 docker inspect never fires
+TARGET="latest"
+PARTNER_DOMAIN="t6.example.com"
+TURNS_SUBDOMAIN="turns"
+export PARTNER_DOMAIN TURNS_SUBDOMAIN  # block guards on ${PARTNER_DOMAIN:-} / ${TURNS_SUBDOMAIN:-}
+
+# caddy service present → defeats the piter/SFU-only skip guard in the block.
+cat > "$COMPOSE_FILE" << 'COMPOSE'
 services:
   caddy:
     image: ghcr.io/anatolykoptev/partner-edge-caddy:latest
-  oxpulse-sfu:
-    environment:
-      SIGNALING_SFU_SECRET: "test-secret"
-COMPOSE6
+COMPOSE
 
-cat > "$T6_LIB/install.env" << 'ENV6'
+# NAIVE_SOCKS_PORT resolves via tier-2 (STATE_FILE) → no docker, no die.
+cat > "$STATE_FILE" << 'STATE'
 PARTNER_DOMAIN=t6.example.com
 TURNS_SUBDOMAIN=turns
-IMAGE_VERSION=latest
-CADDYFILE_SHA=old
 NAIVE_SOCKS_PORT=1080
-ENV6
-chmod 0600 "$T6_LIB/install.env"
+STATE
 
-cp "$REPO_ROOT/config/defaults.conf" "$T6_SHARE/defaults.conf" 2>/dev/null || \
-    printf ': "${OXPULSE_AWG_MOTHERLY_IP:=10.9.0.2}"\n: "${OXPULSE_HY2_FALLBACK_HOST:=host.docker.internal}"\n: "${OXPULSE_HY2_FALLBACK_PORT:=18443}"\n' \
-    > "$T6_SHARE/defaults.conf"
-
-# Write a harness script: extracts the Caddyfile render lines from the
-# with_templates block and invokes them inside a function (so local is valid).
-# We only test that the render runs without the SC2168 abort; the full
-# conflict-check path (run_conflict_checks) is stubbed to exit 0.
-T6_HARNESS="$T6_TMPDIR/harness.sh"
-cat > "$T6_HARNESS" << HARNESS_EOF
-#!/bin/bash
-set -euo pipefail
-log()  { printf "==> %s\n" "\$*" >&2; }
-warn() { printf "!! %s\n" "\$*" >&2; }
-die()  { printf "ERR %s\n" "\$*" >&2; exit 1; }
-run_conflict_checks() { return 0; }
-
-PREFIX_ETC="$T6_ETC"
-PREFIX_LIB="$T6_LIB"
-PREFIX_SHARE="${T6_TMPDIR}/share"
-STATE_FILE="$T6_LIB/install.env"
-COMPOSE_FILE="$T6_ETC/docker-compose.yml"
-REPO_RAW="http://127.0.0.1:$T6_PORT"
-PARTNER_DOMAIN="t6.example.com"
-TURNS_SUBDOMAIN="turns"
-DRY_RUN=1
-DOCKER_BIN="true"
-TARGET="latest"
-
-# Source install.env so NAIVE_SOCKS_PORT is available (matches upgrade.sh line 242).
+# --- REAL lib: the real _setup_caddy_render_env is the dependency under test ---
 # shellcheck source=/dev/null
-. "\$STATE_FILE"
+. "$RECONCILE_LIB"
 
-# Re-implement only the render sub-block from the with_templates DRY_RUN=1 branch.
-# This mirrors what upgrade.sh does at the conflict-check render step.
-_conflict_tmpdir=\$(mktemp -d)
-trap "rm -rf '\$_conflict_tmpdir'" EXIT
+# --- curl stub: serve the REAL Caddyfile.tpl to the -o target (hermetic, no net) ---
+curl() {
+    local _out="" _prev="" _a
+    for _a in "$@"; do
+        [[ "$_prev" == "-o" ]] && _out="$_a"
+        _prev="$_a"
+    done
+    case " $* " in
+        *Caddyfile.tpl*) [[ -n "$_out" ]] && cp "$CADDY_TPL_SRC" "$_out"; return 0 ;;
+        *)               [[ -n "$_out" ]] && : > "$_out"; return 0 ;;
+    esac
+}
 
-_proposed_hc="\$_conflict_tmpdir/healthcheck.sh"
-curl -fsSL --max-time 30 "\$REPO_RAW/healthcheck.sh" -o "\$_proposed_hc" 2>/dev/null || true
+# --- opec stub: record args + render like the real binary. It substitutes ONLY
+#     vars present in the PROCESS ENVIRONMENT (printenv), exactly like a separate
+#     opec binary — a placeholder var that _setup_caddy_render_env sets as a shell
+#     global but forgets to `export` stays unsubstituted (→ {{VAR}} leftover). ---
+opec() {
+    [[ "${1:-}" == "render" && "${2:-}" == "caddy" && "${3:-}" == "--help" ]] && return 0
+    printf '%s\n' "$*" >> "$OPEC_ARGS_LOG"
+    local _tpl="" _out="" _prev="" _a
+    for _a in "$@"; do
+        [[ "$_prev" == "--tpl" ]] && _tpl="$_a"
+        [[ "$_prev" == "--out" ]] && _out="$_a"
+        _prev="$_a"
+    done
+    [[ -n "$_tpl" && -n "$_out" ]] || return 3    # missing/renamed flags → no render
+    cp "$_tpl" "$_out"
+    local _v _val
+    for _v in PARTNER_DOMAIN TURNS_SUBDOMAIN AWG_MOTHERLY_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT NAIVE_SOCKS_PORT; do
+        _val="$(printenv "$_v" 2>/dev/null || true)"
+        [[ -n "$_val" ]] && sed -i "s|{{${_v}}}|${_val}|g" "$_out"
+    done
+    return 0
+}
 
-_proposed_compose="\$_conflict_tmpdir/docker-compose.yml.tpl"
-curl -fsSL --max-time 30 "\$REPO_RAW/docker-compose.yml.tpl" -o "\$_proposed_compose" 2>/dev/null || true
+# --- extract + run the REAL dry-run render sub-block from upgrade.sh verbatim ---
+_BLOCK=$(awk '/_rendered_caddy="\$_conflict_tmpdir\/Caddyfile"/{f=1} /# Run all conflict checks/{f=0} f{print}' "$UPGRADE")
+[[ -n "$_BLOCK" ]] || die "could not extract dry-run render sub-block from upgrade.sh"
+eval "$_BLOCK"
 
-_rendered_caddy="\$_conflict_tmpdir/Caddyfile"
-_proposed_sha="unknown"
-if grep -qE '^\s+caddy:' "\$COMPOSE_FILE" 2>/dev/null && \\
-   [[ -n "\${PARTNER_DOMAIN:-}" ]] && [[ -n "\${TURNS_SUBDOMAIN:-}" ]]; then
-    _caddyfile_tpl="\$_conflict_tmpdir/Caddyfile.tpl"
-    if curl -fsSL --max-time 30 "\$REPO_RAW/Caddyfile.tpl" -o "\$_caddyfile_tpl" 2>/dev/null; then
-        _esc() { printf '%s' "\$1" | sed -e 's/[\\\\&|]/\\\\&/g'; }
-        _defaults_conf="\${PREFIX_SHARE:-/usr/local/share}/oxpulse-partner-edge/config/defaults.conf"
-        _dr_awg="\${AWG_MOTHERLY_IP:-10.9.0.2}"
-        _dr_hy2h="\${HY2_FALLBACK_HOST:-host.docker.internal}"
-        _dr_hy2p="\${HY2_FALLBACK_PORT:-18443}"
-        _dr_naive="\${NAIVE_SOCKS_PORT:-}"
-        [[ -z "\$_dr_naive" ]] && _dr_naive=\$(
-            grep '^NAIVE_SOCKS_PORT=' "\${STATE_FILE:-}" 2>/dev/null | cut -d= -f2 || true)
-        [[ -z "\$_dr_naive" ]] && _dr_naive=\$(
-            \${DOCKER_BIN:-docker} inspect oxpulse-partner-naive \\
-                --format '{{range .Config.Env}}{{.}}\n{{end}}' 2>/dev/null \\
-                | grep '^NAIVE_SOCKS_PORT=' | cut -d= -f2 || true)
-        if [[ -z "\$_dr_naive" ]]; then
-            if grep -qF '{{NAIVE_SOCKS_PORT}}' "\$_caddyfile_tpl" 2>/dev/null; then
-                die "NAIVE_SOCKS_PORT not in STATE_FILE and naive container is down"
-            fi
-            _dr_naive="1080"
-        fi
-        if [[ -r "\$_defaults_conf" ]]; then
-            # Source defaults.conf in a subshell and print the derived values.
-            # Using a simple approach (no nested quote complexity): write a helper
-            # script and source it. This mirrors upgrade.sh's bash -c pattern but
-            # avoids re-creating the complex quoting inside a heredoc.
-            _cfg_out=\$(
-                set +u
-                # shellcheck source=/dev/null
-                . "\$_defaults_conf" 2>/dev/null || true
-                printf '%s\n%s\n%s\n' \\
-                    "\${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}" \\
-                    "\${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}" \\
-                    "\${OXPULSE_HY2_FALLBACK_PORT:-18443}"
-            )
-            _dr_awg=\$(printf '%s' "\$_cfg_out" | sed -n '1p')
-            _dr_hy2h=\$(printf '%s' "\$_cfg_out" | sed -n '2p')
-            _dr_hy2p=\$(printf '%s' "\$_cfg_out" | sed -n '3p')
-        fi
-        sed \\
-            -e "s|{{PARTNER_DOMAIN}}|\$(_esc "\$PARTNER_DOMAIN")|g" \\
-            -e "s|{{TURNS_SUBDOMAIN}}|\$(_esc "\$TURNS_SUBDOMAIN")|g" \\
-            -e "s|{{AWG_MOTHERLY_IP}}|\$(_esc "\$_dr_awg")|g" \\
-            -e "s|{{HY2_FALLBACK_HOST}}|\$(_esc "\$_dr_hy2h")|g" \\
-            -e "s|{{HY2_FALLBACK_PORT}}|\$(_esc "\$_dr_hy2p")|g" \\
-            -e "s|{{NAIVE_SOCKS_PORT}}|\$(_esc "\$_dr_naive")|g" \\
-            "\$_caddyfile_tpl" > "\$_rendered_caddy"
-        _proposed_sha=\$(sha256sum "\$_rendered_caddy" | awk '{print \$1}')
-        sed -i "s|__CADDYFILE_SHA__|\${_proposed_sha}|g" "\$_rendered_caddy"
-    fi
+# --- report (parsed by the harness caller) ---
+echo "OPEC_INVOCATIONS=$(wc -l < "$OPEC_ARGS_LOG" | tr -d ' ')"
+echo "TPL_PATH=${_caddyfile_tpl:-}"
+echo "OUT_PATH=${_rendered_caddy:-}"
+echo "RENDERED_EXISTS=$([[ -f "${_rendered_caddy:-/nonexistent}" ]] && echo yes || echo no)"
+if [[ -f "${_rendered_caddy:-/nonexistent}" ]]; then
+    _leftover=$(grep -oE '\{\{[A-Z0-9_]+\}\}' "$_rendered_caddy" | sort -u | tr '\n' ' ')
+    echo "LEFTOVER=${_leftover}"
+    if grep -q '__CADDYFILE_SHA__' "$_rendered_caddy"; then echo "SHA_SUBBED=no"; else echo "SHA_SUBBED=yes"; fi
 fi
-
-_conflict_exit=0
-run_conflict_checks \\
-    "\$_rendered_caddy" "\$_proposed_compose" "\$_proposed_hc" \\
-    "\$_proposed_sha" "\$TARGET" || _conflict_exit=\$?
-
-# Verify the rendered file has no unsubstituted placeholders.
-leftover=\$(grep -oE '\{\{[A-Z0-9_]+\}\}' "\$_rendered_caddy" 2>/dev/null | sort -u || true)
-[[ -z "\$leftover" ]] || { echo "LEFTOVER_PLACEHOLDERS: \$leftover"; exit 1; }
-echo "RENDER_OK"
-exit "\$_conflict_exit"
-HARNESS_EOF
-chmod +x "$T6_HARNESS"
+echo "OPEC_ARGS_BEGIN"
+cat "$OPEC_ARGS_LOG"
+echo "OPEC_ARGS_END"
+RUNNER
+chmod +x "$T6_RUN"
 
 T6_RC=0
-T6_OUT=$(bash "$T6_HARNESS" 2>&1) || T6_RC=$?
+T6_OUT=$(bash "$T6_RUN" "$REPO_ROOT" "$T6_TMPDIR/sbox" 2>/dev/null) || T6_RC=$?
 
-if echo "$T6_OUT" | grep -qi "local: can only be used in a function"; then
-    fail "with_templates render block hit SC2168 (local at top-level)"
-    echo "$T6_OUT" >&2
-elif echo "$T6_OUT" | grep -q "LEFTOVER_PLACEHOLDERS"; then
-    fail "with_templates render: leftover placeholders in Caddyfile"
-    echo "$T6_OUT" >&2
-elif [[ $T6_RC -ne 0 ]]; then
-    fail "with_templates render harness exited $T6_RC: $T6_OUT"
+t6_get() { echo "$T6_OUT" | sed -n "s/^$1=//p" | head -1; }
+T6_INVOCATIONS=$(t6_get OPEC_INVOCATIONS)
+T6_TPL=$(t6_get TPL_PATH)
+T6_OUTPATH=$(t6_get OUT_PATH)
+T6_RENDERED=$(t6_get RENDERED_EXISTS)
+T6_LEFTOVER=$(t6_get LEFTOVER)
+T6_SHA=$(t6_get SHA_SUBBED)
+T6_ARGS=$(echo "$T6_OUT" | awk '/^OPEC_ARGS_BEGIN$/{f=1;next} /^OPEC_ARGS_END$/{f=0} f')
+
+# 6a: opec was actually invoked by the real block (proves the block reached render).
+if [[ "${T6_INVOCATIONS:-0}" -ge 1 ]]; then
+    pass "6a: dry-run block invoked opec render caddy ($T6_INVOCATIONS call)"
 else
-    pass "with_templates conflict-check render path ran end-to-end (no SC2168 abort, no leftover placeholders)"
+    fail "6a: dry-run block did NOT invoke opec (rc=$T6_RC) — render authority not reached; out: $T6_OUT"
+fi
+
+# 6b: opec got the EXACT --tpl/--out flags the block passes (falsifies a flag typo).
+if echo "$T6_ARGS" | grep -qF -- "--tpl $T6_TPL --out $T6_OUTPATH" && [[ -n "$T6_TPL" && -n "$T6_OUTPATH" ]]; then
+    pass "6b: opec invoked with correct --tpl/--out flags"
+else
+    fail "6b: opec --tpl/--out flags wrong or missing — args='$T6_ARGS' tpl='$T6_TPL' out='$T6_OUTPATH'"
+fi
+
+# 6c: no {{VAR}} survived — _setup_caddy_render_env exported EVERY placeholder var
+#     (falsifies dropping any export from _setup_caddy_render_env).
+if [[ "$T6_RENDERED" == "yes" && -z "${T6_LEFTOVER// /}" ]]; then
+    pass "6c: rendered Caddyfile has no {{VAR}} leftover (all 6 placeholder vars exported)"
+else
+    fail "6c: rendered=$T6_RENDERED, leftover placeholders='$T6_LEFTOVER' — _setup_caddy_render_env missing an export"
+fi
+
+# 6d: the __CADDYFILE_SHA__ self-hash substitution step ran on the real output.
+if [[ "$T6_SHA" == "yes" ]]; then
+    pass "6d: __CADDYFILE_SHA__ self-hash substituted in rendered Caddyfile"
+else
+    fail "6d: __CADDYFILE_SHA__ not substituted (SHA_SUBBED=$T6_SHA) — sha step did not run"
 fi
 
 t6_cleanup
+trap - EXIT
 
 # ---- Summary ----
 echo ""
