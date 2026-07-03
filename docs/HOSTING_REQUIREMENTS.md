@@ -81,7 +81,7 @@ reachable from the open internet — they exposed room state and the
 internal control plane.
 
 The installer now applies a least-privilege whitelist (see
-`lib/install-firewall.sh`); this requires **either** `ufw` (Debian /
+`lib/firewall-lib.sh`); this requires **either** `ufw` (Debian /
 Ubuntu) **or** `firewalld` (RHEL / CentOS / Rocky / Alma). On other
 distros the installer warns and skips — the operator must apply the
 whitelist manually. Allowed ports:
@@ -104,5 +104,5 @@ caps below 1 TB/month bite at modest weekly active users.
 
 - `docs/AWG_PARAM_INVARIANT.md` — AmneziaWG obfuscation parameter constraint.
 - `docs/THREAT-MODEL.md` — adversary model the host requirements are derived from.
-- `lib/install-firewall.sh` — installer-time enforcement of the whitelist above.
+- `lib/firewall-lib.sh` — installer-time enforcement of the whitelist above.
 - `lib/install-preflight.sh` — installer-time RAM/swap warning (`_preflight_low_memory_swap`) + ghost-container cleanup pass.
