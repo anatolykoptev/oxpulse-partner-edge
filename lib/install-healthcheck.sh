@@ -13,6 +13,15 @@
 #   TURNS_SUBDOMAIN      string, e.g. api-test01
 #   DOMAIN               string, e.g. example.net
 #   log warn die         functions (install.sh provides)
+#
+# _healthcheck_poll delegates its poll loop to lib/healthcheck-lib.sh's
+# healthcheck_poll_until (Phase 2 strangler-harden — the 3rd instance of the
+# poll-until-predicate-or-deadline shape, alongside upgrade.sh's
+# settle_healthcheck_with_retry two internal loops, which stay inlined/pinned;
+# see that lib's header). Call-time lazy source, same convention as
+# lib/reconcile.sh's reconcile_firewall_surface: falls back to an inline copy
+# of the loop if the lib is not co-located, so a packaging gap never blocks
+# this install step on an otherwise-healthy host.
 
 # Install healthcheck.sh into $PREFIX_SBIN.
 # Prefers a local copy from $src_dir; falls back to fetching from $REPO_RAW.
@@ -56,23 +65,56 @@ _healthcheck_wait_turns_cert() {
 }
 
 # Poll healthcheck.sh --local until it returns 0 or the deadline is reached.
+# Uses lib/healthcheck-lib.sh's healthcheck_poll_until when available (lazy
+# call-time source, mirroring lib/reconcile.sh's install-firewall.sh /
+# telegram-alert-lib.sh convention); falls back to an inline loop of the exact
+# same shape otherwise — see the file header for why this must not hard-fail.
 _healthcheck_poll() {
 	local hc_script="$PREFIX_SBIN/oxpulse-partner-edge-healthcheck"
-	local deadline
-	deadline=$(( $(date +%s) + HEALTHCHECK_TIMEOUT ))
-	while :; do
-		if OXPULSE_EDGE_CONFIG_DIR="$PREFIX_ETC" "$hc_script" --local >/dev/null 2>&1; then
+
+	if ! declare -f healthcheck_poll_until >/dev/null 2>&1; then
+		# Co-located-with-this-file takes priority over ${LIB_DIR:-...}: see
+		# lib/reconcile.sh's _reconcile_resolve_healthcheck_lib for why (LIB_DIR,
+		# when installer tooling sets it, is not guaranteed to stage
+		# healthcheck-lib.sh).
+		local _hc_lib="${HEALTHCHECK_LIB:-}"
+		if [[ -z "$_hc_lib" ]]; then
+			local _hc_lib_colocated
+			_hc_lib_colocated="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)/healthcheck-lib.sh"
+			if [[ -f "$_hc_lib_colocated" ]]; then
+				_hc_lib="$_hc_lib_colocated"
+			else
+				_hc_lib="${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/healthcheck-lib.sh"
+			fi
+		fi
+		# shellcheck source=lib/healthcheck-lib.sh
+		[[ -f "$_hc_lib" ]] && . "$_hc_lib"
+	fi
+
+	if declare -f healthcheck_poll_until >/dev/null 2>&1; then
+		if healthcheck_poll_until "$HEALTHCHECK_TIMEOUT" 3 \
+			env OXPULSE_EDGE_CONFIG_DIR="$PREFIX_ETC" "$hc_script" --local; then
 			log "  healthcheck green"
-			break
+			return 0
 		fi
-		if (( $(date +%s) > deadline )); then
-			warn "  healthcheck still red after ${HEALTHCHECK_TIMEOUT}s — continuing, inspect with: $hc_script"
-			warn "  SFU containers commonly take 30-60s after first deploy; re-run '$hc_script' manually after 60s"
-			warn "  If your environment is consistently slow, re-install with --healthcheck-timeout=600"
-			break
-		fi
-		sleep 3
-	done
+	else
+		local deadline
+		deadline=$(( $(date +%s) + HEALTHCHECK_TIMEOUT ))
+		while :; do
+			if OXPULSE_EDGE_CONFIG_DIR="$PREFIX_ETC" "$hc_script" --local >/dev/null 2>&1; then
+				log "  healthcheck green"
+				return 0
+			fi
+			if (( $(date +%s) > deadline )); then
+				break
+			fi
+			sleep 3
+		done
+	fi
+
+	warn "  healthcheck still red after ${HEALTHCHECK_TIMEOUT}s — continuing, inspect with: $hc_script"
+	warn "  SFU containers commonly take 30-60s after first deploy; re-run '$hc_script' manually after 60s"
+	warn "  If your environment is consistently slow, re-install with --healthcheck-timeout=600"
 }
 
 healthcheck_run() {
