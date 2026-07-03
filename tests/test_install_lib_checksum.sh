@@ -11,6 +11,13 @@
 #   7. Behavioral: correct checksum → source succeeds
 #   8. lib-checksums.txt SHA256SUMS format valid (sha256sum --check compatible)
 
+# `run !` (used below to negate an assertion) requires bats >= 1.5.0 — a bare
+# `! command` as a bats statement does NOT propagate failure (SC2314: `!` disables
+# errexit for that one statement, so a later successful statement in the same test
+# masks the violation and the test silently reports "ok"). Declare the floor so a
+# too-old bats fails loudly instead of running the negation as an inert no-op.
+bats_require_minimum_version 1.5.0
+
 setup() {
 	REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
 	TMP="$(mktemp -d)"
@@ -192,13 +199,27 @@ teardown() {
 	(cd "$REPO_ROOT/lib" && sha256sum --check "$CHECKSUMS")
 }
 
+# _mitm_overclaim_lines FILE — print any line matching an MITM-resistance /
+# signature-verification / tier-4-secure CLAIM that is not paired with an explicit
+# negation on the same line (e.g. "does NOT provide MITM-resistance" is a correct
+# disclaimer, not an overclaim). Exits 0 (found) / 1 (none) so `run !` below can
+# assert "no overclaim lines exist" without a crude keyword match flagging the
+# disclaimer sentence itself as a violation.
+_mitm_overclaim_lines() {
+	grep -iE 'MITM.resist|signature.verif|tier.4.*secure' "$1" \
+		| grep -viE 'does[[:space:]]+not|is[[:space:]]+not|not[[:space:]]+provide|cannot|never'
+}
+
 # ---------------------------------------------------------------------------
 # BLOCKER 1 Part A: comment block explicitly says "tamper-evident at rest",
 # NOT "MITM-resistant" / "signature verification" / "tier-4 secure"
 # ---------------------------------------------------------------------------
 @test "install.sh _install_lib_source comment says tamper-evident (not MITM-resistant)" {
-	# Must NOT claim MITM resistance for the checksums validation block
-	! grep -iE 'MITM.resist|signature.verif|tier.4.*secure' "$INSTALL"
+	# Must NOT claim MITM resistance for the checksums validation block. `run !`
+	# (not a bare `! grep`, SC2314) — a bare `!` as a non-last statement does not
+	# propagate failure in bats: the second grep below would silently mask a
+	# violation and this assertion would become a permanent no-op.
+	run ! _mitm_overclaim_lines "$INSTALL"
 	# MUST acknowledge the same-channel limitation
 	grep -qiE 'tamper.evident|tamper.at.rest|asset.bucket|cache' "$INSTALL"
 }
@@ -330,12 +351,15 @@ teardown() {
 	local UPGRADE="$REPO_ROOT/upgrade.sh"
 	[ -f "$UPGRADE" ] || skip "upgrade.sh missing"
 
-	# Extract the REAL _source_lib; stub log/warn/die so it is sourceable in isolation.
+	# Extract the REAL _source_lib (+ the _lookup_expected_hash helper it now calls,
+	# review HIGH #2 shared-resolver extraction); stub log/warn/die so it is
+	# sourceable in isolation.
 	local SRCFN="$TMP/source_lib_fn.sh"
 	{
 		echo 'log()  { :; }'
 		echo 'warn() { echo "WARN: $*" >&2; }'
 		echo 'die()  { echo "DIED: $*" >&2; exit 9; }'
+		awk '/^_lookup_expected_hash\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE"
 		awk '/^_source_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE"
 	} > "$SRCFN"
 	bash -n "$SRCFN"   # extracted function must parse
@@ -502,6 +526,18 @@ CEOF
 		|| { echo "B: expected tier-3 fail-closed die without a flag; got: $out"; return 1; }
 	[[ "$out" != *"no installed bundle"* ]] \
 		|| { echo "B: reached bundle check without a manifest or flag — fail-closed bypassed; got: $out"; return 1; }
+
+	# (C) LOW follow-up: the literal --no-integrity token (install.sh-parity alias,
+	# distinct code path in BOTH case-arms — the pre-scan loop above upgrade.sh's
+	# first _source_lib call, and the real args_parse case block) must be honored
+	# identically to --allow-unverified. Before this test, only the env var
+	# (OXPULSE_UPGRADE_NO_INTEGRITY) and --allow-unverified were driven through the
+	# ARGV path — --no-integrity's own case-arm branch was never exercised end to end.
+	out=$(_run_upgrade --no-integrity) || true
+	[[ "$out" == *"no installed bundle"* ]] \
+		|| { echo "C: --no-integrity did not reach post-lib bundle check (case-arm broken?); got: $out"; return 1; }
+	[[ "$out" != *unsafe* && "$out" != *"checksum mismatch"* ]] \
+		|| { echo "C: integrity die despite --no-integrity — flag not honored at tier-3; got: $out"; return 1; }
 }
 
 # ---------------------------------------------------------------------------
@@ -521,6 +557,237 @@ CEOF
 	[ -f "$UPGRADE" ] || skip "upgrade.sh not present"
 	grep -Eq 'ALLOW_UNVERIFIED="\$\{OXPULSE_UPGRADE_NO_INTEGRITY:-0\}"' "$UPGRADE" \
 		|| { echo "ALLOW_UNVERIFIED is not seeded from OXPULSE_UPGRADE_NO_INTEGRITY — env var will not reach the SHA256SUMS host-script guard"; return 1; }
-	! grep -Eq '^ALLOW_UNVERIFIED=0$' "$UPGRADE" \
-		|| { echo "stale 'ALLOW_UNVERIFIED=0' init present — env var stranded before the host-script guard"; return 1; }
+	# `run !` (not a bare `! grep … || { …; return 1; }`, SC2314-adjacent) — this is
+	# currently the LAST statement so the explicit `|| return 1` was already correct,
+	# but `run !` makes it immune to a future statement being appended after it
+	# (which would silently mask a violation, per the same bare-`!` hazard fixed above).
+	# A stale 'ALLOW_UNVERIFIED=0' init would strand the env-var escape hatch before
+	# the host-script guard — must NOT be present.
+	run ! grep -Eq '^ALLOW_UNVERIFIED=0$' "$UPGRADE"
+}
+
+# ===========================================================================
+# P0 supply-chain review-fix follow-up (2 HIGH from the PR #353 council):
+#   HIGH #1 — install.sh's tier-4 _install_lib_source failed OPEN when a
+#     checksums file resolved but had no line for $name: the guard short-
+#     circuited and execution fell through to `. "$tmp"`, sourcing unverified
+#     code as root. install.sh now dies on that case unless --no-integrity.
+#   HIGH #2 — _source_lib (awk field-exact, "./"-tolerant) and _stage_lib (grep
+#     suffix-anchored) had already DIVERGED on manifest-entry matching. Both
+#     now route through the shared _lookup_expected_hash; install.sh's inline
+#     lookup was switched to the same awk form so all three agree.
+# Both tests below extract the REAL shipped function (not a hand-rolled bash -c
+# reimplementation, unlike tests #5-#7 above) so a revert of either fix goes RED.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# HIGH #1 regression: install.sh's real _install_lib_source, manifest resolves
+# but omits the target's entry -> fail-closed die; --no-integrity overrides.
+# ---------------------------------------------------------------------------
+@test "_install_lib_source tier-4 (real install.sh code): manifest resolves but omits entry -> fail-closed die; --no-integrity overrides" {
+	[ -f "$INSTALL" ] || skip "install.sh missing"
+
+	# Extract the REAL _install_lib_source function into its own sourceable file,
+	# stubbing log/warn/die so it runs standalone. BASH_SOURCE[0] inside a function
+	# resolves to the file where the function was DEFINED (verified empirically),
+	# so placing this extracted file at $SRCDIR/install.sh with a sibling
+	# $SRCDIR/lib/lib-checksums.txt makes the function's own local-checksums-file
+	# lookup (tier "${_ck_src_dir:-.}/lib/lib-checksums.txt") resolve it locally —
+	# no need to mock the remote checksums fallback fetch.
+	local SRCDIR="$TMP/install_srcdir"
+	mkdir -p "$SRCDIR/lib"
+	local SRCFN="$SRCDIR/install.sh"
+	{
+		echo 'log()  { :; }'
+		echo 'warn() { echo "WARN: $*" >&2; }'
+		echo 'die()  { echo "DIED: $*" >&2; exit 9; }'
+		awk '/^_install_lib_source\(\)/{f=1} f{print} /^}$/ && f{exit}' "$INSTALL"
+	} > "$SRCFN"
+	bash -n "$SRCFN" || { echo "extracted _install_lib_source: syntax error"; false; }
+
+	local FIXTURE_NAME="install-preflight.sh"
+	local FETCHED_SRC="$SRCDIR/fetched-module-src.sh"
+	printf 'echo FETCHED_OK\n' > "$FETCHED_SRC"
+	local ZERO="0000000000000000000000000000000000000000000000000000000000000000"
+	# Manifest RESOLVES (real, readable file) but has a line for a DIFFERENT file
+	# only — the exact review-HIGH bypass: some other entry present, target's absent.
+	printf '%s  some-other-file.sh\n' "$ZERO" > "$SRCDIR/lib/lib-checksums.txt"
+
+	local HARNESS="$TMP/install_harness.sh"
+	cat > "$HARNESS" <<'HEOF'
+#!/usr/bin/env bash
+set -uo pipefail
+log()  { :; }
+warn() { echo "WARN: $*" >&2; }
+die()  { echo "DIED: $*" >&2; exit 9; }
+curl() {
+    local _o="" _n="" a
+    for a in "$@"; do [[ "$_n" == o ]] && { _o="$a"; _n=""; }; [[ "$a" == "-o" ]] && _n=o; done
+    cp "$FETCHED_SRC" "$_o"
+    return 0
+}
+# shellcheck source=/dev/null
+source "$SRCFN"
+_install_lib_source "$NAME"
+HEOF
+
+	_drive() {  # NO_INTEGRITY(0/1) -> combined output
+		env SRCFN="$SRCFN" FETCHED_SRC="$FETCHED_SRC" \
+			REPO_RAW="https://raw.example.test/oxpulse-partner-edge/main" \
+			INSTALL_LIB_DIR="$SRCDIR/nonexistent-installdir" \
+			NAME="$FIXTURE_NAME" NO_INTEGRITY="$1" \
+			bash "$HARNESS" 2>&1
+	}
+
+	# NOENTRY, no override: fail-closed die, module NOT sourced.
+	local out
+	out=$(_drive 0) || true
+	echo "$out" | grep -q 'FETCHED_OK' \
+		&& { echo "NOENTRY: sourced despite the manifest omitting the entry! out: $out"; false; }
+	echo "$out" | grep -qi 'without a verified checksum is unsafe' \
+		|| { echo "NOENTRY: expected fail-closed die; got: $out"; false; }
+
+	# NOENTRY + --no-integrity (NO_INTEGRITY=1): warns and proceeds (sources).
+	out=$(_drive 1) || true
+	echo "$out" | grep -q 'FETCHED_OK' \
+		|| { echo "NOENTRY-OVERRIDE: expected FETCHED_OK with --no-integrity; got: $out"; false; }
+	echo "$out" | grep -qi 'no-integrity acknowledged' \
+		|| { echo "NOENTRY-OVERRIDE: expected an operator-accepts-risk warn; got: $out"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# HIGH #2 regression: a manifest line with a "./" prefix (the common
+# `find`-generated form, e.g. `<hash>  ./reconcile.sh`) must resolve IDENTICALLY
+# across all three tier-3/tier-4 resolvers — _source_lib, _stage_lib (both via
+# the shared _lookup_expected_hash), and install.sh:_install_lib_source (its own
+# inline awk, switched to the same field-exact form). Before the fix, _source_lib
+# (awk) resolved a "./"-prefixed line while _stage_lib and install.sh (grep
+# suffix-anchored) did not — a security-control divergence for the identical file.
+# ---------------------------------------------------------------------------
+@test "manifest entry with './' prefix resolves identically in _source_lib, _stage_lib, and _install_lib_source (real code)" {
+	local UPGRADE="$REPO_ROOT/upgrade.sh"
+	[ -f "$UPGRADE" ] && [ -f "$INSTALL" ] || skip "upgrade.sh / install.sh missing"
+
+	local FIXTURE="$TMP/dotfixture.sh"
+	printf 'echo SOURCED_OK\n' > "$FIXTURE"
+	local HASH
+	HASH=$(sha256sum "$FIXTURE" | awk '{print $1}')
+	# The dot-prefixed manifest form under test.
+	local CK_DOT="$TMP/ck_dot.txt"; printf '%s  ./reconcile.sh\n' "$HASH" > "$CK_DOT"
+
+	# --- _source_lib (upgrade.sh) ---------------------------------------------
+	local SRC_FN="$TMP/source_lib_fn.sh"
+	{
+		echo 'log()  { :; }'; echo 'warn() { echo "WARN: $*" >&2; }'
+		echo 'die()  { echo "DIED: $*" >&2; exit 9; }'
+		awk '/^_lookup_expected_hash\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE"
+		awk '/^_source_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE"
+	} > "$SRC_FN"
+	bash -n "$SRC_FN" || { echo "extracted _source_lib: syntax error"; false; }
+	local SRC_HARNESS="$TMP/source_lib_harness.sh"
+	cat > "$SRC_HARNESS" <<'HEOF'
+#!/usr/bin/env bash
+set -uo pipefail
+log()  { :; }
+warn() { echo "WARN: $*" >&2; }
+die()  { echo "DIED: $*" >&2; exit 9; }
+curl() {
+    local _o="" _n="" a
+    for a in "$@"; do [[ "$_n" == o ]] && { _o="$a"; _n=""; }; [[ "$a" == "-o" ]] && _n=o; done
+    case "$*" in
+        *lib-checksums.txt*|*SHA256SUMS*) cp "$MANIFEST" "$_o" ;;
+        *) cp "$FIXTURE" "$_o" ;;
+    esac
+    return 0
+}
+# shellcheck source=/dev/null
+source "$SRC_FN"
+_source_lib "reconcile.sh" "/nonexistent/local" "/nonexistent/installed" \
+    "https://raw.example.test/oxpulse-partner-edge/main/lib/reconcile.sh"
+HEOF
+	local src_out
+	src_out=$(env SRC_FN="$SRC_FN" FIXTURE="$FIXTURE" MANIFEST="$CK_DOT" \
+		REPO_RAW="https://raw.example.test/oxpulse-partner-edge/main" \
+		INSTALL_LIB_DIR="$TMP/nonexistent-installdir" \
+		bash "$SRC_HARNESS" 2>&1) || true
+	echo "$src_out" | grep -q 'SOURCED_OK' \
+		|| { echo "_source_lib: './'-prefixed entry did not resolve; got: $src_out"; false; }
+
+	# --- _stage_lib (upgrade.sh) ----------------------------------------------
+	local STAGE_FN="$TMP/stage_lib_fn.sh"
+	{
+		echo 'log()  { :; }'; echo 'warn() { echo "WARN: $*" >&2; }'
+		echo 'die()  { echo "DIED: $*" >&2; exit 9; }'
+		awk '/^_lookup_expected_hash\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE"
+		awk '/^_stage_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE"
+	} > "$STAGE_FN"
+	bash -n "$STAGE_FN" || { echo "extracted _stage_lib: syntax error"; false; }
+	local STAGE_DEST="$TMP/stage_dest"; mkdir -p "$STAGE_DEST"
+	local STAGE_HARNESS="$TMP/stage_lib_harness.sh"
+	cat > "$STAGE_HARNESS" <<'HEOF'
+#!/usr/bin/env bash
+set -uo pipefail
+log()  { :; }
+warn() { echo "WARN: $*" >&2; }
+die()  { echo "DIED: $*" >&2; exit 9; }
+curl() {
+    local _o="" _n="" a
+    for a in "$@"; do [[ "$_n" == o ]] && { _o="$a"; _n=""; }; [[ "$a" == "-o" ]] && _n=o; done
+    case "$*" in
+        *lib-checksums.txt*) cp "$MANIFEST" "$_o" ;;
+        *) cp "$FIXTURE" "$_o" ;;
+    esac
+    return 0
+}
+# shellcheck source=/dev/null
+source "$STAGE_FN"
+_stage_lib "reconcile.sh" "/nonexistent/local" "/nonexistent/installed" \
+    "https://raw.example.test/oxpulse-partner-edge/main/lib/reconcile.sh" "$DEST"
+echo "$?"
+HEOF
+	local stage_out
+	stage_out=$(env STAGE_FN="$STAGE_FN" FIXTURE="$FIXTURE" MANIFEST="$CK_DOT" \
+		REPO_RAW="https://raw.example.test/oxpulse-partner-edge/main" \
+		INSTALL_LIB_DIR="$TMP/nonexistent-installdir" DEST="$STAGE_DEST" \
+		bash "$STAGE_HARNESS" 2>&1) || true
+	[[ -f "$STAGE_DEST/reconcile.sh" ]] \
+		|| { echo "_stage_lib: './'-prefixed entry did not resolve; got: $stage_out"; false; }
+
+	# --- _install_lib_source (install.sh) -------------------------------------
+	local INST_SRCDIR="$TMP/install_dot_srcdir"; mkdir -p "$INST_SRCDIR/lib"
+	local INST_FN="$INST_SRCDIR/install.sh"
+	{
+		echo 'log()  { :; }'; echo 'warn() { echo "WARN: $*" >&2; }'
+		echo 'die()  { echo "DIED: $*" >&2; exit 9; }'
+		awk '/^_install_lib_source\(\)/{f=1} f{print} /^}$/ && f{exit}' "$INSTALL"
+	} > "$INST_FN"
+	bash -n "$INST_FN" || { echo "extracted _install_lib_source: syntax error"; false; }
+	# install.sh's manifest column matches on the fetched module's OWN basename
+	# ($name), not "reconcile.sh" — reuse the same "./"-prefixed shape for a lib
+	# install.sh actually resolves via this loader.
+	printf '%s  ./install-preflight.sh\n' "$HASH" > "$INST_SRCDIR/lib/lib-checksums.txt"
+	local INST_HARNESS="$TMP/install_dot_harness.sh"
+	cat > "$INST_HARNESS" <<'HEOF'
+#!/usr/bin/env bash
+set -uo pipefail
+log()  { :; }
+warn() { echo "WARN: $*" >&2; }
+die()  { echo "DIED: $*" >&2; exit 9; }
+curl() {
+    local _o="" _n="" a
+    for a in "$@"; do [[ "$_n" == o ]] && { _o="$a"; _n=""; }; [[ "$a" == "-o" ]] && _n=o; done
+    cp "$FIXTURE" "$_o"
+    return 0
+}
+# shellcheck source=/dev/null
+source "$INST_FN"
+_install_lib_source "install-preflight.sh"
+HEOF
+	local inst_out
+	inst_out=$(env INST_FN="$INST_FN" FIXTURE="$FIXTURE" \
+		REPO_RAW="https://raw.example.test/oxpulse-partner-edge/main" \
+		INSTALL_LIB_DIR="$INST_SRCDIR/nonexistent-installdir" NO_INTEGRITY=0 \
+		bash "$INST_HARNESS" 2>&1) || true
+	echo "$inst_out" | grep -q 'SOURCED_OK' \
+		|| { echo "_install_lib_source: './'-prefixed entry did not resolve; got: $inst_out"; false; }
 }

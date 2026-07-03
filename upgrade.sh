@@ -25,6 +25,7 @@
 #   oxpulse-partner-edge-upgrade --dry-run             # print plan, skip docker and file writes
 #   oxpulse-partner-edge-upgrade --dry-run --skip-check=1,3  # skip specific conflict checks (1-8)
 #   oxpulse-partner-edge-upgrade --allow-unverified    # skip SHA256SUMS check (dev/test only, NEVER on relay)
+#   oxpulse-partner-edge-upgrade --no-integrity        # install.sh-parity alias for --allow-unverified
 #
 # Tag-form note: starting with v0.12.60, git tags, GitHub release tags, and GHCR
 # image tags ALL use the same vX.Y.Z form — no component prefix. release-please-config.json
@@ -147,6 +148,24 @@ log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
 
+# _lookup_expected_hash NAME MANIFEST_FILE — resolve NAME's expected sha256 from a
+# checksum manifest (lib-checksums.txt or a release SHA256SUMS), field-exact matching
+# column 2 (NOT a suffix grep — a suffix match would also hit an unrelated file whose
+# name happens to end in NAME, e.g. "foo-name.sh" matching a manifest line for
+# "name.sh"), and tolerating an optional "./" prefix in that column (the common
+# `find`-generated manifest form). Shared by _source_lib and _stage_lib below so the
+# "the two tier-3 resolvers must not diverge" contract is STRUCTURAL, not a comment
+# promise (review HIGH — they had already drifted: awk field-exact here vs. grep
+# suffix-anchored in _stage_lib, so a "./"-prefixed manifest line resolved in one and
+# fail-closed-died in the other for the identical file). Always returns 0 — a missing
+# manifest or no matching entry prints nothing, never a nonzero exit under `set -e`.
+_lookup_expected_hash() {
+    local name="$1" manifest="$2"
+    [[ -n "$manifest" && -r "$manifest" ]] || return 0
+    awk -v n="$name" '$2 == n || $2 == "./" n { print $1; exit }' "$manifest" 2>/dev/null
+    return 0
+}
+
 # _source_lib NAME LOCAL_PATH INSTALLED_PATH REPO_RAW_PATH — source a shared library.
 # Resolution order:
 #   1. Adjacent to upgrade.sh (local checkout / same-dir download)
@@ -172,19 +191,26 @@ die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" 
 #     "no manifest at all": FAIL-CLOSED (die unless the escape hatch is set), NOT
 #     sourced-with-a-warn. Every file this resolver fetches is committed to its home
 #     manifest, so a missing entry is never the legit norm; closing it denies the
-#     free "omit one line and the check is skipped" bypass (review HIGH). This is
-#     deliberately STRICTER than _stage_lib / install.sh:_install_lib_source's
-#     grep-miss "proceed-with-warn", because _source_lib EXECUTES the bytes as root
-#     the moment it returns.
-#   • STRONG only when the manifest is resolved LOCALLY (tier-1 adjacent checkout or
-#     tier-2 installed tarball): then it is an INDEPENDENT trust anchor and the sha256
-#     is genuine tamper-evidence.
+#     free "omit one line and the check is skipped" bypass (review HIGH). _stage_lib
+#     and install.sh:_install_lib_source's tier-4 resolver now fail-closed on the
+#     identical no-entry case too (review HIGH fix) — all three tier-3/tier-4
+#     resolvers agree on this contract; _source_lib is not the odd one out anymore.
+#   • STRONG only when the manifest is resolved LOCALLY (tier-1 adjacent checkout, or
+#     tier-2 ${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/lib-checksums.txt IF an
+#     operator has staged it there): then it is an INDEPENDENT trust anchor and the
+#     sha256 is genuine tamper-evidence. Be precise about reachability: nothing in the
+#     current release pipeline (release.yml) writes lib-checksums.txt into
+#     INSTALL_LIB_DIR — the tier-2 anchor exists only if an operator manually copies it
+#     there, which is not the documented/automated path. Do not read "tier-2 installed
+#     tarball" as a common deployment shape.
 #   • WEAK in the remote-fallback sub-case (no local manifest → manifest curl'd from
-#     the SAME REPO_RAW/RELEASES_BASE origin as the payload — the NORMAL path for
-#     reconcile.sh, which is not installed to disk): here manifest and payload share an
-#     origin, so this does NOT authenticate a malicious REPO_RAW / OXPULSE_MIRROR_BASE
-#     or an active MITM presenting a cert the TLS-pin accepts — such an adversary can
-#     serve a matching checksum. It reduces to "TLS + transit-corruption detection".
+#     the SAME REPO_RAW/RELEASES_BASE origin as the payload): this is the NORMAL,
+#     near-universal path for a real reconcile.sh curl|bash run (reconcile.sh is not
+#     installed to disk, and tier-2 is unreachable absent manual staging per above).
+#     Here manifest and payload share an origin, so this does NOT authenticate a
+#     malicious REPO_RAW / OXPULSE_MIRROR_BASE or an active MITM presenting a cert the
+#     TLS-pin accepts — such an adversary can serve a matching checksum. It reduces to
+#     "TLS + transit-corruption detection", not origin authentication.
 #   • RESIDUAL: full supply-chain authentication of a hostile origin needs a signature
 #     rooted OUTSIDE that origin (a GPG-signed SHA256SUMS.asc, or refusing tier-3
 #     without a locally-staged manifest). That is a larger, separate change (signing
@@ -210,7 +236,7 @@ _source_lib() {
     fi
     # Tier 3: TLS-pinned fetch + fail-closed sha256 verify for standalone runs.
     local _fetch_tmp _man="" _man_tmp="" _expected="" _actual _sd _cand
-    _fetch_tmp=$(mktemp "/tmp/oxpulse-lib-${name}-XXXXXX.sh")
+    _fetch_tmp=$(mktemp)
     # Clean up via the single cumulative EXIT trap (set up before the first _source_lib
     # call), NOT a function-local RETURN trap: die() calls exit, which does NOT fire a
     # RETURN trap, so the tier-3 die paths (fetch-fail / no-verified-checksum /
@@ -254,7 +280,7 @@ the lib files adjacent to upgrade.sh."
     # possible outcomes: (a) entry present + matches → source; (b) entry present +
     # mismatch → die; (c) no entry (no manifest, or manifest omits it) → die unless
     # OXPULSE_UPGRADE_NO_INTEGRITY.
-    [[ -n "$_man" ]] && _expected=$(awk -v n="$name" '$2 == n || $2 == "./" n { print $1; exit }' "$_man" 2>/dev/null)
+    _expected=$(_lookup_expected_hash "$name" "$_man")
     if [[ -n "$_expected" ]]; then
         _actual=$(sha256sum "$_fetch_tmp" | awk '{print $1}')
         [[ "$_actual" != "$_expected" ]] && die "_source_lib: tier-3 checksum mismatch for $name — refusing to source untrusted code (expected ${_expected:0:16}… got ${_actual:0:16}…)"
@@ -331,17 +357,21 @@ REPO_RAW or stage lib/ adjacent to upgrade.sh."
     else
         local _actual _expected
         _actual=$(sha256sum "$_fetch_tmp" | awk '{print $1}')
-        _expected=$(grep "[[:space:]]${name}$" "$_ck" 2>/dev/null | awk '{print $1}')
-        # Same fail-closed contract as _source_lib (review HIGH — the two tier-3 resolvers
-        # must not diverge): (a) entry present + matches → stage; (b) entry present +
-        # mismatch → die; (c) manifest resolved but OMITS this file → die unless the escape
-        # hatch is set. Case (c) is the truncated / captive-portal / stale-manifest attack:
-        # a manifest that resolves yet drops the entry would otherwise SILENTLY stage
-        # root-sourced code — install-firewall.sh and telegram-alert-lib.sh are both
-        # sourced-and-executed as ROOT by reconcile.sh's call-time resolvers, and the
-        # firewall lib's own t14 contract says a missing/unverified copy must never leave
-        # the host unfirewalled. DELIBERATELY stricter than install.sh:_install_lib_source,
-        # which fails OPEN on the no-entry case; upgrade.sh's resolvers fail closed on it.
+        _expected=$(_lookup_expected_hash "$name" "$_ck")
+        # Same fail-closed contract as _source_lib — both route through the shared
+        # _lookup_expected_hash (review HIGH: the two tier-3 resolvers had already
+        # DIVERGED on manifest-entry matching — awk field-exact here vs. grep
+        # suffix-anchored in this function — so extracting one shared helper makes the
+        # "must not diverge" invariant structural, not a comment promise): (a) entry
+        # present + matches → stage; (b) entry present + mismatch → die; (c) manifest
+        # resolved but OMITS this file → die unless the escape hatch is set. Case (c) is
+        # the truncated / captive-portal / stale-manifest attack: a manifest that
+        # resolves yet drops the entry would otherwise SILENTLY stage root-sourced code —
+        # install-firewall.sh and telegram-alert-lib.sh are both sourced-and-executed as
+        # ROOT by reconcile.sh's call-time resolvers, and the firewall lib's own t14
+        # contract says a missing/unverified copy must never leave the host unfirewalled.
+        # install.sh:_install_lib_source's tier-4 resolver now fails closed on the
+        # no-entry case too (review HIGH fix) — all three tier-3/tier-4 resolvers agree.
         # Both staged libs HAVE lib-checksums.txt entries, so the legitimate tier-3 manifest
         # carries them — case (c) fires only on a tampered/truncated manifest, never a real
         # upgrade (tier-3 itself only runs on the standalone curl|bash path, not on an
