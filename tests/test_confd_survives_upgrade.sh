@@ -1,98 +1,120 @@
 #!/bin/bash
 # tests/test_confd_survives_upgrade.sh
-# Verifies that upgrade.sh --with-templates preserves conf.d/ content.
-# Strategy: pre-populate conf.d/ with a sentinel file, run re_render_caddy
-# (extracted from upgrade.sh), assert sentinel unchanged (sha256 match).
-set -euo pipefail
+#
+# Verifies that a Caddyfile converge preserves conf.d/ content.
+#
+# The Caddyfile render authority is reconcile_caddy_surface (opec render caddy +
+# single-file atomic_swap), driven by upgrade.sh via reconcile_all. The legacy
+# re_render_caddy shell renderer this test used to exercise was deleted in the
+# Phase 5 strangler completion (0 production callers); this test was retargeted to
+# the live path so the conf.d-survival invariant is guarded against the real code.
+#
+# Strategy: source the REAL lib/reconcile.sh, stub ONLY opec (the Rust binary is
+# absent in CI) to emit a deterministic candidate, and use the REAL atomic_swap.
+# STATE records a DIFFERENT CADDYFILE_SHA than the render → a real converge (swap)
+# fires. Pre-seed conf.d/ with a sentinel and assert it is byte-identical after the
+# converge. FALSIFICATION: if reconcile_caddy_surface ever wrote outside the single
+# Caddyfile (e.g. rewrote or cleared $PREFIX_ETC), the sentinel sha would change and
+# this test would FAIL.
+set -uo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-UPGRADE="$REPO_ROOT/upgrade.sh"
+LIB="$REPO_ROOT/lib/reconcile.sh"
 
-[[ -f "$UPGRADE" ]] || { echo "FAIL: upgrade.sh not found"; exit 1; }
-bash -n "$UPGRADE" || { echo "FAIL: upgrade.sh syntax errors"; exit 1; }
+[[ -f "$LIB" ]] || { echo "FAIL: lib/reconcile.sh not found at $LIB"; exit 1; }
+bash -n "$LIB" || { echo "FAIL: lib/reconcile.sh syntax errors"; exit 1; }
 echo "OK: syntax clean"
 
-SERVE_PORT=18758
-python3 -m http.server "$SERVE_PORT" --directory "$REPO_ROOT" \
-    >/tmp/test-confd-httpd.log 2>&1 &
-HTTP_PID=$!
+TMP=$(mktemp -d)
+# shellcheck disable=SC2064
+trap "rm -rf '${TMP}'" EXIT
 
-TMPDIR_ROOT=$(mktemp -d)
-cleanup() { kill "$HTTP_PID" 2>/dev/null || true; rm -rf "$TMPDIR_ROOT"; }
-trap cleanup EXIT
+ETC="$TMP/etc"
+CONFD="$ETC/conf.d"
+mkdir -p "$CONFD"
 
-sleep 1
-curl -fsSL --max-time 5 "http://127.0.0.1:$SERVE_PORT/Caddyfile.tpl" >/dev/null \
-    || { echo "FAIL: http server not serving Caddyfile.tpl"; exit 1; }
-
-T_ETC="$TMPDIR_ROOT/etc"
-T_LIB="$TMPDIR_ROOT/lib"
-T_CONFD="$T_ETC/conf.d"
-mkdir -p "$T_ETC" "$T_LIB" "$T_CONFD"
-
-# Pre-populate conf.d/ with sentinel file
-SENTINEL_CONTENT='cheburator.bot { respond "sentinel" }'
-SENTINEL_PATH="$T_CONFD/cheburator-vhosts.caddy"
-printf '%s\n' "$SENTINEL_CONTENT" > "$SENTINEL_PATH"
+# Pre-populate conf.d/ with a sentinel vhost file (mirrors the real
+# cheburator-vhosts.caddy on a production edge).
+SENTINEL_PATH="$CONFD/cheburator-vhosts.caddy"
+printf '%s\n' 'cheburator.bot { respond "sentinel" }' > "$SENTINEL_PATH"
 SENTINEL_SHA=$(sha256sum "$SENTINEL_PATH" | awk '{print $1}')
 
-# Compose (minimal — re_render_caddy checks for caddy service)
-cat > "$T_ETC/docker-compose.yml" << 'COMPOSE'
+# Old Caddyfile on disk (will be swapped out by the converge).
+printf '# old Caddyfile\n' > "$ETC/Caddyfile"
+
+# compose with caddy service present → defeats the piter/SFU-only skip guard.
+cat > "$ETC/docker-compose.yml" << 'COMPOSE'
 services:
   caddy:
     image: ghcr.io/anatolykoptev/partner-edge-caddy:latest
-  oxpulse-sfu:
-    environment:
-      SIGNALING_SFU_SECRET: "test-secret-nonzero"
 COMPOSE
-echo "# old Caddyfile" > "$T_ETC/Caddyfile"
 
-# install.env
-cat > "$T_LIB/install.env" << 'ENVEOF'
-PARTNER_ID=testpartner
+# STATE with a CADDYFILE_SHA that does NOT match the render → forces a swap.
+cat > "$TMP/install.env" << 'STATE'
 PARTNER_DOMAIN=test.example.com
-NODE_ID=test-node
-TUNNEL=vless
-IMAGE_VERSION=latest
-TURNS_SUBDOMAIN=turns
-INSTALLED_AT=2026-01-01T00:00:00Z
-CADDYFILE_SHA=oldhash
+TURNS_SUBDOMAIN=turns.test.example.com
 NAIVE_SOCKS_PORT=1080
-ENVEOF
-chmod 0600 "$T_LIB/install.env"
+CADDYFILE_SHA=deadbeef-does-not-match
+STATE
 
-echo "==> Test 1: re_render_caddy does not touch conf.d/"
-bash -c '
-    set -euo pipefail
-    log()  { printf "==> %s\n" "$*" >&2; }
-    warn() { printf "!! %s\n" "$*" >&2; }
-    die()  { printf "ERR %s\n" "$*" >&2; exit 1; }
+# Deterministic rendered candidate the opec stub will emit (pre-sub form).
+MOCK="$TMP/mock_render.caddy"
+printf '# rendered Caddyfile for test.example.com\nrespond "__CADDYFILE_SHA__" 200\n' > "$MOCK"
 
-    PREFIX_ETC="'"$T_ETC"'"
-    PREFIX_LIB="'"$T_LIB"'"
-    STATE_FILE="'"$T_LIB"'/install.env"
-    COMPOSE_FILE="'"$T_ETC"'/docker-compose.yml"
-    REPO_RAW="http://127.0.0.1:'"$SERVE_PORT"'"
-    PARTNER_DOMAIN="test.example.com"
-    TURNS_SUBDOMAIN="turns"
-    DRY_RUN=0
+# Dummy template (opec stub ignores content; must exist for the -f checks and the
+# NAIVE die-guard grep — carries no {{NAIVE_SOCKS_PORT}}).
+TPL="$TMP/Caddyfile.tpl"
+printf '# tpl\nrespond "__CADDYFILE_SHA__" 200\n' > "$TPL"
 
-    eval "$(awk "/^_resolve_naive_socks_port\(\)/,/^\}$/" "'"$UPGRADE"'")"
-    eval "$(awk "/^re_render_caddy\(\)/,/^\}$/" "'"$UPGRADE"'")"
-    re_render_caddy
-' 2>/tmp/confd-upgrade-test.log || { echo "FAIL: re_render_caddy returned non-zero"; cat /tmp/confd-upgrade-test.log >&2; exit 1; }
+echo "==> Test 1: reconcile_caddy_surface converge does not touch conf.d/"
+OUT=$(bash -c '
+    set -uo pipefail
+    ETC="'"$ETC"'"; TMP="'"$TMP"'"; LIB="'"$LIB"'"; MOCK="'"$MOCK"'"; TPL="'"$TPL"'"
 
-# Verify sentinel still exists and unchanged
-[[ -f "$SENTINEL_PATH" ]] || { echo "FAIL: sentinel file deleted by re_render_caddy"; exit 1; }
+    export PREFIX_ETC="$ETC"
+    export STATE_FILE="$TMP/install.env"
+    export COMPOSE_FILE="$ETC/docker-compose.yml"
+    export DOCKER_BIN="false"
+    export DRY_RUN=0
+    export PARTNER_DOMAIN="test.example.com"
+    export TURNS_SUBDOMAIN="turns.test.example.com"
+    export NAIVE_SOCKS_PORT="1080"
+    export PARTNER_EDGE_TEXTFILE_DIR="$TMP/textfile"
+
+    # shellcheck disable=SC1090
+    . "$LIB"
+
+    # opec stub: emit the deterministic candidate to --out (real atomic_swap installs it).
+    opec() {
+        if [[ "${1:-}" == "render" && "${2:-}" == "caddy" ]]; then
+            [[ "${3:-}" == "--help" ]] && return 0
+            local _out="" _next=0 _a
+            for _a in "$@"; do
+                [[ "$_next" -eq 1 ]] && { _out="$_a"; _next=0; }
+                [[ "$_a" == "--out" ]] && _next=1
+            done
+            [[ -n "$_out" ]] && cp "$MOCK" "$_out"
+            return 0
+        fi
+        return 0
+    }
+
+    CAND="$TMP/cand"; mkdir -p "$CAND"
+    reconcile_caddy_surface "$CAND" "$TPL"
+' 2>&1) || { echo "FAIL: reconcile_caddy_surface returned non-zero"; echo "$OUT" >&2; exit 1; }
+
+# The converge must have replaced the Caddyfile (old "# old Caddyfile" → rendered).
+grep -q "rendered Caddyfile for test.example.com" "$ETC/Caddyfile" \
+    || { echo "FAIL: Caddyfile not re-rendered by converge"; echo "$OUT" >&2; exit 1; }
+echo "OK: Caddyfile converged (swap fired)"
+
+# The sentinel conf.d file must be byte-identical (untouched by the converge).
+[[ -f "$SENTINEL_PATH" ]] \
+    || { echo "FAIL: sentinel conf.d file deleted by converge"; exit 1; }
 POST_SHA=$(sha256sum "$SENTINEL_PATH" | awk '{print $1}')
 [[ "$POST_SHA" == "$SENTINEL_SHA" ]] \
     || { echo "FAIL: sentinel sha256 changed: before=$SENTINEL_SHA after=$POST_SHA"; exit 1; }
-echo "OK: conf.d/cheburator-vhosts.caddy unchanged after re_render_caddy (sha=$POST_SHA)"
-
-# Verify Caddyfile was re-rendered (it changed from "# old Caddyfile")
-grep -q "test.example.com" "$T_ETC/Caddyfile" \
-    || { echo "FAIL: Caddyfile not re-rendered"; exit 1; }
-echo "OK: Caddyfile was re-rendered"
+echo "OK: conf.d/cheburator-vhosts.caddy unchanged after converge (sha=$POST_SHA)"
 
 echo ""
-echo "PASS: conf.d/ survives upgrade --with-templates (re_render_caddy)"
+echo "PASS: conf.d/ survives a Caddyfile converge (reconcile_caddy_surface)"

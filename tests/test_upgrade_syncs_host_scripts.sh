@@ -561,7 +561,7 @@ if [[ "$*" == *"ps --quiet"* ]]; then
     printf 'fakectr1234567890\n'
     exit 0
 fi
-# _resolve_naive_socks_port's Tier 3 fallback (unrelated to this test) also
+# reconcile.sh's NAIVE_SOCKS_PORT Tier-3 fallback (unrelated to this test) also
 # calls `docker inspect oxpulse-partner-naive --format {{range ...}}` early
 # in the run. It must NOT consume the digest state-file toggle below — that
 # would desync the pre/post-pull digest pairing this test depends on. Handle
