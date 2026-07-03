@@ -11,12 +11,11 @@
 #   7. Behavioral: correct checksum → source succeeds
 #   8. lib-checksums.txt SHA256SUMS format valid (sha256sum --check compatible)
 
-# `run !` (used below to negate an assertion) requires bats >= 1.5.0 — a bare
-# `! command` as a bats statement does NOT propagate failure (SC2314: `!` disables
-# errexit for that one statement, so a later successful statement in the same test
-# masks the violation and the test silently reports "ok"). Declare the floor so a
-# too-old bats fails loudly instead of running the negation as an inert no-op.
-bats_require_minimum_version 1.5.0
+# Bats <1.5 compat (CI runs an old ubuntu-22.04 apt bats): to negate an assertion
+# WITHOUT `run !` (bats >= 1.5) or a bare `! command` (SC2314: `!` disables errexit
+# for that one statement, so a later successful statement silently masks the
+# violation and the test reports "ok"), use `run <cmd>; [ "$status" -ne 0 ]` — it
+# captures the exit code and the explicit check propagates failure on every bats.
 
 setup() {
 	REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -202,9 +201,9 @@ teardown() {
 # _mitm_overclaim_lines FILE — print any line matching an MITM-resistance /
 # signature-verification / tier-4-secure CLAIM that is not paired with an explicit
 # negation on the same line (e.g. "does NOT provide MITM-resistance" is a correct
-# disclaimer, not an overclaim). Exits 0 (found) / 1 (none) so `run !` below can
-# assert "no overclaim lines exist" without a crude keyword match flagging the
-# disclaimer sentence itself as a violation.
+# disclaimer, not an overclaim). Exits 0 (found) / 1 (none) so the `run …; [ "$status"
+# -ne 0 ]` negation below can assert "no overclaim lines exist" without a crude
+# keyword match flagging the disclaimer sentence itself as a violation.
 _mitm_overclaim_lines() {
 	grep -iE 'MITM.resist|signature.verif|tier.4.*secure' "$1" \
 		| grep -viE 'does[[:space:]]+not|is[[:space:]]+not|not[[:space:]]+provide|cannot|never'
@@ -215,11 +214,13 @@ _mitm_overclaim_lines() {
 # NOT "MITM-resistant" / "signature verification" / "tier-4 secure"
 # ---------------------------------------------------------------------------
 @test "install.sh _install_lib_source comment says tamper-evident (not MITM-resistant)" {
-	# Must NOT claim MITM resistance for the checksums validation block. `run !`
-	# (not a bare `! grep`, SC2314) — a bare `!` as a non-last statement does not
-	# propagate failure in bats: the second grep below would silently mask a
-	# violation and this assertion would become a permanent no-op.
-	run ! _mitm_overclaim_lines "$INSTALL"
+	# Must NOT claim MITM resistance for the checksums validation block. Use
+	# `run <cmd>; [ "$status" -ne 0 ]` (not a bare `! grep`, SC2314) — a bare `!`
+	# as a non-last statement does not propagate failure in bats: the second grep
+	# below would silently mask a violation and this assertion would become a
+	# permanent no-op.
+	run _mitm_overclaim_lines "$INSTALL"
+	[ "$status" -ne 0 ]
 	# MUST acknowledge the same-channel limitation
 	grep -qiE 'tamper.evident|tamper.at.rest|asset.bucket|cache' "$INSTALL"
 }
@@ -557,13 +558,13 @@ CEOF
 	[ -f "$UPGRADE" ] || skip "upgrade.sh not present"
 	grep -Eq 'ALLOW_UNVERIFIED="\$\{OXPULSE_UPGRADE_NO_INTEGRITY:-0\}"' "$UPGRADE" \
 		|| { echo "ALLOW_UNVERIFIED is not seeded from OXPULSE_UPGRADE_NO_INTEGRITY — env var will not reach the SHA256SUMS host-script guard"; return 1; }
-	# `run !` (not a bare `! grep … || { …; return 1; }`, SC2314-adjacent) — this is
-	# currently the LAST statement so the explicit `|| return 1` was already correct,
-	# but `run !` makes it immune to a future statement being appended after it
+	# Negate via `run <cmd>; [ "$status" -ne 0 ]` (not a bare `! grep … || { …; return 1; }`,
+	# SC2314-adjacent) — immune to a future statement being appended after it
 	# (which would silently mask a violation, per the same bare-`!` hazard fixed above).
 	# A stale 'ALLOW_UNVERIFIED=0' init would strand the env-var escape hatch before
 	# the host-script guard — must NOT be present.
-	run ! grep -Eq '^ALLOW_UNVERIFIED=0$' "$UPGRADE"
+	run grep -Eq '^ALLOW_UNVERIFIED=0$' "$UPGRADE"
+	[ "$status" -ne 0 ]
 }
 
 # ===========================================================================
