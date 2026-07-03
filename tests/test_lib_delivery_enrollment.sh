@@ -2,7 +2,9 @@
 # tests/test_lib_delivery_enrollment.sh — P4 strangler-harden delivery-enrollment
 # fix (synthetic_green defect).
 #
-bats_require_minimum_version 1.5.0
+# Bats <1.5 compat: no bats_require_minimum_version, no `run !` — CI runs an old
+# bats (ubuntu-22.04 apt). Negated assertions use `run <cmd>; [ "$status" -ne 0 ]`,
+# which propagates failure on every bats version.
 #
 # lib/healthcheck-lib.sh, lib/compose-lib.sh, and lib/host-scripts-lib.sh were
 # extracted from upgrade.sh/reconcile.sh and wired via same-name shims, but were
@@ -70,12 +72,14 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 @test "structural: _upgrade_resolve_host_scripts_lib LIB_DIR fallback is flat (no /lib/ subdir)" {
-	run ! grep -qF '${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/lib/host-scripts-lib.sh' "$UPGRADE"
+	run grep -qF '${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/lib/host-scripts-lib.sh' "$UPGRADE"
+	[ "$status" -ne 0 ]
 	grep -qF '${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/host-scripts-lib.sh' "$UPGRADE"
 }
 
 @test "structural: _upgrade_resolve_compose_lib LIB_DIR fallback is flat (no /lib/ subdir)" {
-	run ! grep -qF '${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/lib/compose-lib.sh' "$UPGRADE"
+	run grep -qF '${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/lib/compose-lib.sh' "$UPGRADE"
+	[ "$status" -ne 0 ]
 	grep -qF '${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/compose-lib.sh' "$UPGRADE"
 }
 
