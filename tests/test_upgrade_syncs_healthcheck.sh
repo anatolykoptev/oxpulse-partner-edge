@@ -58,7 +58,10 @@ grep -qF 'oxpulse-partner-edge-healthcheck)       echo "healthcheck.sh"' "$UPGRA
     && pass "A3: _host_script_remote_name maps it to healthcheck.sh" \
     || fail "A3: no remote-name mapping for oxpulse-partner-edge-healthcheck"
 
-grep -qF 'oxpulse-partner-edge-healthcheck) sha256_asset_name="partner-edge-healthcheck.sh"' "$UPGRADE" \
+# sha256_asset_name mapping lives inside sync_host_scripts, which moved to
+# lib/host-scripts-lib.sh (Phase 4 strangler-harden, task p4) — check there,
+# not upgrade.sh (which now only holds a thin forwarder).
+grep -qF 'oxpulse-partner-edge-healthcheck) sha256_asset_name="partner-edge-healthcheck.sh"' "$REPO_ROOT/lib/host-scripts-lib.sh" \
     && pass "A4: sha256_asset_name mapping present (matches release.yml's staged asset name)" \
     || fail "A4: no sha256_asset_name mapping — checksum guard would silently no-op for it"
 
@@ -128,7 +131,14 @@ HELPERS
     awk '/^_host_script_remote_name\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^_host_script_install_dir\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^_host_script_mode\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
+    # sync_host_scripts is now a thin lazy-source forwarder in upgrade.sh
+    # (Phase 4 strangler-harden, task p4) — the awk-extracted stub below
+    # can't resolve lib/host-scripts-lib.sh from inside this sourced-preamble
+    # harness (BASH_SOURCE[0] points at $PREAMBLE, not the real upgrade.sh).
+    # Append the REAL lib content after it: its sync_host_scripts definition
+    # lands LAST and overwrites the forwarder stub (bash: later def wins).
     awk '/^sync_host_scripts\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
+    cat "$REPO_ROOT/lib/host-scripts-lib.sh"
 } > "$PREAMBLE"
 bash -n "$PREAMBLE" || { fail "B0: extracted preamble has syntax errors"; exit 1; }
 

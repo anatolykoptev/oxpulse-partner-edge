@@ -196,10 +196,12 @@ else
 fi
 
 # ---- Test 4: xray.env provisioning in sync_host_scripts (static check) ----
-echo "==> Test 4: upgrade.sh sync_host_scripts provisions xray.env"
-grep -A 5 "Step 6.5" "$UPGRADE" | grep -q "xray.env" \
-    && pass "xray.env provisioning step present in upgrade.sh" \
-    || fail "xray.env provisioning step missing from upgrade.sh"
+# sync_host_scripts moved to lib/host-scripts-lib.sh (Phase 4 strangler-harden,
+# task p4) — check there, not upgrade.sh (which now only holds a thin forwarder).
+echo "==> Test 4: sync_host_scripts provisions xray.env"
+grep -A 5 "Step 6.5" "$REPO_ROOT/lib/host-scripts-lib.sh" | grep -q "xray.env" \
+    && pass "xray.env provisioning step present in lib/host-scripts-lib.sh" \
+    || fail "xray.env provisioning step missing from lib/host-scripts-lib.sh"
 
 # Verify install.sh also provisions xray.env.
 grep -q "xray.env" "$REPO_ROOT/install.sh" \
