@@ -36,6 +36,9 @@ setup() {
 		render-channel-lib.sh
 		reconcile.sh
 		telegram-alert-lib.sh
+		compose-lib.sh
+		healthcheck-lib.sh
+		host-scripts-lib.sh
 	)
 }
 

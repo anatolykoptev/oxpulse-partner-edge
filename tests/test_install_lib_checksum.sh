@@ -46,7 +46,12 @@ teardown() {
 	# reconcile.sh + telegram-alert-lib.sh were added by the P0 supply-chain resolver:
 	# both are fetched-as-root by upgrade.sh (_source_lib / _stage_lib) so both must be
 	# verified against a checksum. install-firewall.sh has been covered since its own
-	# bug-#5 fix — it is NOT absent.
+	# bug-#5 fix — it is NOT absent. compose-lib.sh / healthcheck-lib.sh /
+	# host-scripts-lib.sh were added by the P4 strangler-harden delivery-enrollment
+	# fix (synthetic_green — these three were extracted and wired via same-name
+	# shims but never enrolled as _stage_lib targets, so they were never delivered
+	# to an installed/curl|bash box); all three are now fetched-as-root by
+	# upgrade.sh's _stage_lib (BUG1-cure block) so all three must be verified too.
 	for basename in \
 		install-args.sh \
 		install-awg.sh \
@@ -60,7 +65,10 @@ teardown() {
 		install-systemd.sh \
 		render-channel-lib.sh \
 		reconcile.sh \
-		telegram-alert-lib.sh; do
+		telegram-alert-lib.sh \
+		compose-lib.sh \
+		healthcheck-lib.sh \
+		host-scripts-lib.sh; do
 		grep -q "$basename" "$CHECKSUMS"
 	done
 }

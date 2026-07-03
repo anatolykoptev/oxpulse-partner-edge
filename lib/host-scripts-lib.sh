@@ -35,12 +35,18 @@
 # nameref array params — a plain self-overwrite is simpler and there is no
 # nameref-collision risk to design around.
 #
-# Deliberately NOT an eager `_source_lib "host-scripts-lib.sh"` call
-# alongside reconcile.sh's: tests/test_install_lib_checksum.sh's fitness
-# check requires every such target to be staged in the release-pipeline
-# regen block + lib/lib-checksums.txt (Makefile / .github/workflows/
-# release.yml — both outside this task's edit scope, same precedent as
-# lib/healthcheck-lib.sh and lib/compose-lib.sh skipping that enrollment).
+# Sourcing stays LAZY (call-time, via the forwarders in upgrade.sh) rather
+# than an eager `_source_lib "host-scripts-lib.sh"` call alongside
+# reconcile.sh's, so callers who never call these three functions are not
+# forced to co-locate the lib at source time. This file IS, however, a
+# `_stage_lib` target now (upgrade.sh's BUG1-cure block stages it — see that
+# block's header comment): the delivery half of the fitness check in
+# tests/test_install_lib_checksum.sh (every _stage_lib/_source_lib target
+# must be in the release-pipeline regen block + lib/lib-checksums.txt —
+# Makefile / .github/workflows/release.yml) is satisfied by that staging
+# call, closing the synthetic_green gap where this lib was never delivered
+# to an installed/curl|bash box (same fix applied to lib/healthcheck-lib.sh
+# and lib/compose-lib.sh).
 #
 # Every helper this file's functions call BY NAME (log/warn/die,
 # _HOST_SCRIPT_SBIN_FILES/_HOST_SCRIPT_SYSTEMD_FILES/_HOST_SCRIPT_RESTART_UNITS,

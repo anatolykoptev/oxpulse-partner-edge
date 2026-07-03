@@ -452,6 +452,25 @@ _source_lib "reconcile.sh" \
 # the deps into a stable dir and point LIB_DIR at it. t14's fail-loud firewall
 # contract is preserved: the die on a genuinely-missing file AFTER staging is still
 # correct — this only closes the missing co-location on the fetch path.
+#
+# synthetic_green fix (P4 strangler-harden follow-up, review HIGH): the
+# healthcheck-lib.sh / compose-lib.sh / host-scripts-lib.sh forwarders below use
+# the SAME "co-located wins, else ${LIB_DIR:-...}/<name>" resolution as
+# reconcile_firewall_surface, but the strangler-harden extraction tasks (p2/p3/p4)
+# deliberately did NOT stage them here — leaving LIB_DIR populated with ONLY
+# firewall+telegram. On every real invocation of the installed
+# oxpulse-partner-edge-upgrade sbin (no adjacent lib/, same as this curl|bash
+# case) the three forwarders' ${LIB_DIR} fallback found nothing: the healthcheck
+# baseline gate silently disabled (fail-open), the compose digest-diff step
+# hard-aborted (fail-closed die), and host-script snapshot/restore/sync
+# no-op'd — while every bats test stayed green because it runs upgrade.sh from
+# ITS CHECKOUT PATH, where dirname($0)/lib/ always resolves and the LIB_DIR
+# fallback is never exercised. Stage all three here too, so LIB_DIR carries a
+# checksum-verified copy of every forwarder's dependency regardless of how
+# upgrade.sh itself was invoked — closing the gap for BOTH the curl|bash case
+# this block already handled AND the (more common) installed-sbin case it did
+# not. See lib-checksums.txt / Makefile / release.yml for the matching
+# manifest entries these staging calls require.
 # _CLEANUP_PATHS + the single EXIT trap were established above (before the first
 # _source_lib call). The staging dir and every later temp site append to that array.
 # (OXPULSE_UPGRADE_NO_INTEGRITY was pre-scanned above too, and is honored here by
@@ -469,9 +488,36 @@ _stage_lib "telegram-alert-lib.sh" \
     "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/telegram-alert-lib.sh" \
     "$REPO_RAW/lib/telegram-alert-lib.sh" \
     "$_LIB_STAGE_DIR"
+_stage_lib "healthcheck-lib.sh" \
+    "${_UPGRADE_SH_DIR}/lib/healthcheck-lib.sh" \
+    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/healthcheck-lib.sh" \
+    "$REPO_RAW/lib/healthcheck-lib.sh" \
+    "$_LIB_STAGE_DIR"
+_stage_lib "compose-lib.sh" \
+    "${_UPGRADE_SH_DIR}/lib/compose-lib.sh" \
+    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/compose-lib.sh" \
+    "$REPO_RAW/lib/compose-lib.sh" \
+    "$_LIB_STAGE_DIR"
+_stage_lib "host-scripts-lib.sh" \
+    "${_UPGRADE_SH_DIR}/lib/host-scripts-lib.sh" \
+    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/host-scripts-lib.sh" \
+    "$REPO_RAW/lib/host-scripts-lib.sh" \
+    "$_LIB_STAGE_DIR"
 export LIB_DIR="$_LIB_STAGE_DIR"
 export FIREWALL_LIB="$_LIB_STAGE_DIR/install-firewall.sh"
 export TELEGRAM_ALERT_LIB="$_LIB_STAGE_DIR/telegram-alert-lib.sh"
+# Deliberately NOT exporting HEALTHCHECK_LIB / COMPOSE_LIB / HOST_SCRIPTS_LIB
+# here: unlike FIREWALL_LIB/TELEGRAM_ALERT_LIB (whose reconcile.sh resolvers
+# are the flat `${VAR:-${LIB_DIR:-...}}` — no separate co-located tier, so
+# pre-setting the var is equivalent to relying on LIB_DIR), the three
+# forwarders below resolve co-located-with-upgrade.sh FIRST and
+# ${VAR:-...}/${LIB_DIR:-...} only as a fallback (priority deliberately
+# inverted from firewall/telegram — see _upgrade_resolve_host_scripts_lib /
+# _upgrade_resolve_compose_lib / _reconcile_resolve_healthcheck_lib). Their
+# env-var tier exists ONLY for explicit operator/test override; exporting it
+# unconditionally here would make it win over a trusted local dev checkout,
+# inverting that intent. LIB_DIR alone (already exported above) is sufficient
+# for their fallback tier to find the just-staged copies.
 # ------------------------------------------------------------------------------
 
 [[ $EUID -eq 0 || "${OXPULSE_SKIP_ROOT_CHECK:-0}" == "1" ]] || die "must run as root"
@@ -974,19 +1020,22 @@ _HOST_SCRIPT_SYSTEMD_FILES=(
 # lib/host-scripts-lib.sh under these SAME names. _upgrade_resolve_host_scripts_lib
 # is a lazy, call-time resolve+source (in the spirit of lib/reconcile.sh's
 # _reconcile_resolve_healthcheck_lib for lib/healthcheck-lib.sh) rather than an
-# eager _source_lib call alongside reconcile.sh's — deliberately, so
-# lib/host-scripts-lib.sh is NOT enrolled as a "root-fetched" _source_lib/
-# _stage_lib target: tests/test_install_lib_checksum.sh's fitness check requires
-# every such target to be staged in the release-pipeline regen block +
-# lib/lib-checksums.txt (Makefile / .github/workflows/release.yml — both outside
-# this task's edit scope, same as lib/healthcheck-lib.sh's and lib/compose-lib.sh's
-# own precedent of skipping that enrollment). Co-located-with-upgrade.sh takes
-# priority over ${LIB_DIR:-...}: LIB_DIR is unconditionally exported by the
-# BUG1-cure block above to a staging dir that stages ONLY
-# install-firewall.sh/telegram-alert-lib.sh (never host-scripts-lib.sh) — see
-# _reconcile_resolve_healthcheck_lib's header comment in lib/reconcile.sh for the
-# identical priority-inversion reasoning. HOST_SCRIPTS_LIB env override supported
-# for testability, mirroring COMPOSE_LIB/HEALTHCHECK_LIB.
+# eager _source_lib call alongside reconcile.sh's, so callers who never call these
+# three functions are not forced to co-locate/stage the lib at source time.
+#
+# lib/host-scripts-lib.sh (along with healthcheck-lib.sh and compose-lib.sh) IS
+# now a _stage_lib target (see the BUG1-cure block above) — fixing the
+# synthetic_green gap where these three forwarders' ${LIB_DIR} fallback found
+# nothing on an installed/curl|bash box (no adjacent lib/), while every bats
+# test masked it by running upgrade.sh from its checkout path. Co-located-with-
+# upgrade.sh still takes priority over ${LIB_DIR:-...} (a trusted local dev
+# checkout wins over the network-staged copy — see _reconcile_resolve_healthcheck_lib's
+# header comment in lib/reconcile.sh for the identical priority-inversion
+# reasoning); the LIB_DIR fallback below resolves FLAT (${LIB_DIR}/<name>, no
+# /lib/ subdir) to match how _stage_lib actually stages files — a prior
+# resolver bug had this as ${LIB_DIR}/lib/<name>, which never matched the flat
+# staging dir even once LIB_DIR was populated. HOST_SCRIPTS_LIB env override
+# supported for testability, mirroring COMPOSE_LIB/HEALTHCHECK_LIB.
 #
 # On the first call, sourcing lib/host-scripts-lib.sh defines the REAL
 # snapshot_host_scripts/restore_host_scripts/sync_host_scripts under these same
@@ -997,6 +1046,15 @@ _HOST_SCRIPT_SYSTEMD_FILES=(
 # (unlike lib/compose-lib.sh's capture_running_digests/resolve_pulled_digests)
 # a plain self-overwrite is used instead of a nameref-prefixed real-impl name —
 # there is no nameref-collision risk to design around here.
+#
+# Each forwarder `unset -f`s all three names immediately before sourcing the
+# lib: lib/host-scripts-lib.sh has its own double-source guard
+# (_HOST_SCRIPTS_LIB_LOADED), so if it was ever sourced directly BEFORE these
+# forwarders run (not reachable in today's wiring, but a footgun any future
+# eager/re-source trips), the guard would otherwise short-circuit `. "$_hsl"`
+# WITHOUT redefining the functions — leaving the forwarder calling itself
+# forever ("maximum function nesting level exceeded"). Unsetting first turns
+# that into a clean "command not found" instead of an infinite recursion.
 _upgrade_resolve_host_scripts_lib() {
 	if [[ -n "${HOST_SCRIPTS_LIB:-}" ]]; then
 		printf '%s' "$HOST_SCRIPTS_LIB"
@@ -1008,7 +1066,7 @@ _upgrade_resolve_host_scripts_lib() {
 		printf '%s' "$_colocated"
 		return 0
 	fi
-	printf '%s' "${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/lib/host-scripts-lib.sh"
+	printf '%s' "${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/host-scripts-lib.sh"
 }
 
 snapshot_host_scripts() {
@@ -1018,6 +1076,7 @@ snapshot_host_scripts() {
 		warn "snapshot_host_scripts: lib/host-scripts-lib.sh not found at $_hsl"
 		return 1
 	fi
+	unset -f snapshot_host_scripts restore_host_scripts sync_host_scripts
 	# shellcheck source=lib/host-scripts-lib.sh
 	. "$_hsl"
 	snapshot_host_scripts "$@"
@@ -1030,6 +1089,7 @@ restore_host_scripts() {
 		warn "restore_host_scripts: lib/host-scripts-lib.sh not found at $_hsl"
 		return 1
 	fi
+	unset -f snapshot_host_scripts restore_host_scripts sync_host_scripts
 	# shellcheck source=lib/host-scripts-lib.sh
 	. "$_hsl"
 	restore_host_scripts "$@"
@@ -1167,17 +1227,24 @@ $_cfg"
 # _upgrade_resolve_compose_lib / _upgrade_source_compose_lib: lazy, call-time
 # resolve+source (in the spirit of lib/reconcile.sh's
 # _reconcile_resolve_healthcheck_lib for lib/healthcheck-lib.sh) rather than
-# an eager _source_lib call alongside reconcile.sh's — deliberately, so
-# lib/compose-lib.sh is NOT enrolled as a "root-fetched" _source_lib/
-# _stage_lib target: tests/test_install_lib_checksum.sh's fitness check
-# requires every such target to be staged in the release-pipeline regen
-# block + lib/lib-checksums.txt (Makefile / .github/workflows/release.yml —
-# both outside this task's edit scope). Co-located-with-upgrade.sh takes
-# priority over ${LIB_DIR:-...}: LIB_DIR is unconditionally exported by the
-# BUG1-cure block above to a staging dir that stages ONLY
-# install-firewall.sh/telegram-alert-lib.sh (never compose-lib.sh) — see
+# an eager _source_lib call alongside reconcile.sh's, so callers who never
+# call capture_running_digests/resolve_pulled_digests are not forced to
+# co-locate/stage the lib at source time.
+#
+# lib/compose-lib.sh (along with healthcheck-lib.sh and host-scripts-lib.sh)
+# IS now a _stage_lib target (see the BUG1-cure block above) — fixing the
+# synthetic_green gap where this resolver's ${LIB_DIR} fallback found nothing
+# on an installed/curl|bash box (no adjacent lib/) and _upgrade_source_compose_lib's
+# die() hard-aborted every such upgrade at the digest-diff step, while every
+# bats test masked it by running upgrade.sh from its checkout path.
+# Co-located-with-upgrade.sh still takes priority over ${LIB_DIR:-...} (a
+# trusted local dev checkout wins over the network-staged copy — see
 # _reconcile_resolve_healthcheck_lib's header comment in lib/reconcile.sh for
-# the identical priority-inversion reasoning.
+# the identical priority-inversion reasoning); the LIB_DIR fallback below
+# resolves FLAT (${LIB_DIR}/<name>, no /lib/ subdir) to match how _stage_lib
+# actually stages files — a prior resolver bug had this as
+# ${LIB_DIR}/lib/<name>, which never matched the flat staging dir even once
+# LIB_DIR was populated.
 _upgrade_resolve_compose_lib() {
 	if [[ -n "${COMPOSE_LIB:-}" ]]; then
 		printf '%s' "$COMPOSE_LIB"
@@ -1189,13 +1256,23 @@ _upgrade_resolve_compose_lib() {
 		printf '%s' "$_colocated"
 		return 0
 	fi
-	printf '%s' "${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/lib/compose-lib.sh"
+	printf '%s' "${LIB_DIR:-$(dirname "${BASH_SOURCE[0]:-}")}/compose-lib.sh"
 }
 
+# _upgrade_source_compose_lib: unsets capture_running_digests/resolve_pulled_digests
+# before sourcing purely as defensive parity with the healthcheck-lib.sh /
+# host-scripts-lib.sh self-overwrite forwarders (whose same-named real
+# implementations make them vulnerable to a lib-sourced-before-forwarder
+# infinite recursion — see their header comments). lib/compose-lib.sh's real
+# functions use DIFFERENT names (compose_diff_recreate_*), so that recursion
+# is not reachable here today; unsetting keeps all three lib-forwarder call
+# sites uniform and stays safe against a future rename that reintroduces
+# same-name aliasing.
 _upgrade_source_compose_lib() {
 	local _cl
 	_cl="$(_upgrade_resolve_compose_lib)"
 	[[ -f "$_cl" ]] || die "lib/compose-lib.sh not found at $_cl — capture_running_digests/resolve_pulled_digests need it"
+	unset -f capture_running_digests resolve_pulled_digests
 	# shellcheck source=lib/compose-lib.sh
 	. "$_cl"
 }
@@ -1497,6 +1574,7 @@ sync_host_scripts() {
 		warn "sync_host_scripts: lib/host-scripts-lib.sh not found at $_hsl"
 		return 1
 	fi
+	unset -f snapshot_host_scripts restore_host_scripts sync_host_scripts
 	# shellcheck source=lib/host-scripts-lib.sh
 	. "$_hsl"
 	sync_host_scripts "$@"
