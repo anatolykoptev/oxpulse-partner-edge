@@ -254,7 +254,12 @@ reconcile_caddy_surface() {
     local _drift=0
     if [[ -n "$_state_sha" && "$_rendered_sha" == "$_state_sha" ]]; then
         local _ondisk_sha=""
-        [[ -f "$_installed_path" ]] && _ondisk_sha=$(_caddyfile_presub_sha "$_installed_path")
+        # 2>/dev/null || true: a read/permission edge on the installed Caddyfile
+        # (hardening pass, SELinux/AppArmor denial) must not hard-abort under the
+        # inherited `set -euo pipefail`; an empty _ondisk_sha is treated as "on-disk
+        # missing/unreadable" below → forces the converging swap (fail-safe), matching
+        # the _state_sha defensive extraction above.
+        [[ -f "$_installed_path" ]] && _ondisk_sha=$(_caddyfile_presub_sha "$_installed_path" 2>/dev/null || true)
         if [[ "$_ondisk_sha" == "$_rendered_sha" ]]; then
             log "reconcile_caddy: Caddyfile unchanged (sha256=$_rendered_sha matches STATE CADDYFILE_SHA and on-disk) — no swap needed"
             _reconcile_caddy_emit_drift_gauge 0
