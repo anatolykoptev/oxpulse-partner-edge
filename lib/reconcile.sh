@@ -518,6 +518,13 @@ _reconcile_persist_failed_caddyfile() {
     _ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || printf 'unknown')
     _dst="$_logdir/caddy-reload-fail-${_ts}.caddy"
     if cp -f "$_src" "$_dst" 2>/dev/null; then
+        # Restrict the post-mortem copy to the operator (0600). The live Caddyfile must
+        # carry NO secrets (invariant asserted in Caddyfile.tpl:387 / docs/runbooks/
+        # conf-d.md — conf.d/*.caddy are world-readable), but a future template change
+        # that inlines a credential must not silently land it in a world-readable file
+        # under the log dir; 0600 contains that and trips a reviewer if the invariant
+        # ever regresses.
+        chmod 600 "$_dst" 2>/dev/null || true
         warn "reconcile: saved un-loadable Caddyfile for post-mortem -> $_dst"
     fi
     return 0
@@ -544,6 +551,8 @@ apply_caddy_reloads() {
     local _reload_err
     if _reload_err=$("$_docker" compose -f "$_compose_file" exec -T caddy \
             caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1); then
+        # Success: the captured stdout/stderr is intentionally discarded (a clean caddy
+        # reload prints nothing load-bearing); it is surfaced only on the failure branch.
         log "reconcile: caddy reload successful (SFU/coturn/xray/naive untouched)"
         return 0
     fi
@@ -554,6 +563,7 @@ apply_caddy_reloads() {
     [[ -n "${_reload_err:-}" ]] && warn "reconcile: caddy reload stderr: ${_reload_err}"
     local _recreate_err
     if _recreate_err=$("$_docker" compose -f "$_compose_file" up -d --force-recreate caddy 2>&1); then
+        # Success: captured output intentionally discarded here (surfaced only on failure).
         log "reconcile: caddy container recreated (peers untouched)"
         return 0
     fi

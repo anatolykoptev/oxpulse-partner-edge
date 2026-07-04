@@ -67,6 +67,13 @@ if [[ -n "$_p1_file" ]] && basename "$_p1_file" | grep -qE 'caddy-reload-fail-[0
 else
     fail "P1b: persisted filename lacks a UTC timestamp: '$_p1_file'"
 fi
+# The post-mortem copy must be operator-only (0600): a future template regression that
+# inlines a secret must not land it in a world-readable file (Caddyfile.tpl:387 invariant).
+if [[ -n "$_p1_file" ]] && [[ "$(stat -c %a "$_p1_file" 2>/dev/null)" == "600" ]]; then
+    pass "P1c: persisted Caddyfile is mode 0600 (operator-only, no world-read of a future secret)"
+else
+    fail "P1c: persisted Caddyfile mode is '$(stat -c %a "$_p1_file" 2>/dev/null)', expected 600"
+fi
 
 # --- P2: apply_caddy_reloads surfaces the reload stderr on a double failure and
 #         persists the Caddyfile. ---
