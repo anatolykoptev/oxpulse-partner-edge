@@ -20,6 +20,9 @@ on:
       - 'tests/test_manifest_coverage.sh'
       - 'tests/test_converge_idempotent.sh'
       - 'tests/test_apply_restarts_wired.sh'
+      - 'tests/test_health_gate_cold_start_settle.sh'
+      - 'tests/test_upgrade_self_reexec.sh'
+      - 'tests/test_reconcile_caddy_reload_observability.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
@@ -43,6 +46,9 @@ on:
       - 'tests/test_manifest_coverage.sh'
       - 'tests/test_converge_idempotent.sh'
       - 'tests/test_apply_restarts_wired.sh'
+      - 'tests/test_health_gate_cold_start_settle.sh'
+      - 'tests/test_upgrade_self_reexec.sh'
+      - 'tests/test_reconcile_caddy_reload_observability.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
@@ -94,3 +100,12 @@ jobs:
 
       - name: apply_restarts wired inside reconcile_all — dead-code fix verified (Phase 4a)
         run: bash tests/test_apply_restarts_wired.sh
+
+      - name: Settle gate tolerates a transient cold-start regression (v0.14.3 FIX 1)
+        run: bash tests/test_health_gate_cold_start_settle.sh
+
+      - name: Stale upgrade.sh re-execs into the released one once (v0.14.3 FIX 2)
+        run: bash tests/test_upgrade_self_reexec.sh
+
+      - name: Caddy reload stderr surfaced + un-loadable Caddyfile persisted (v0.14.3 FIX 3)
+        run: bash tests/test_reconcile_caddy_reload_observability.sh
