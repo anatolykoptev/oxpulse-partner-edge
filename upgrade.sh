@@ -1417,6 +1417,16 @@ settle_healthcheck_with_retry() {
 	# parse retry) until it CLEARS (transient -> pass) or the budget is exhausted
 	# (persistent -> REAL regression -> rollback). This makes the post measurement
 	# symmetric with the warm baseline and preserves the real rollback path.
+	#
+	# ADJUDICATED (this settle gate re-polls the FUNCTIONAL healthcheck rather than
+	# gating on docker `State.Health.Status==healthy` before diffing): the functional
+	# healthcheck.sh --snapshot is a STRICTLY STRONGER end-to-end signal — a GREEN check
+	# proves the tunnel actually serves (Reality/TLS/relay reachability), not merely that
+	# the container's own HEALTHCHECK reports healthy. It also covers services that
+	# declare NO docker HEALTHCHECK (adding a `State.Health.Status` gate would introduce
+	# an "absent healthcheck" edge case on the critical path for zero coverage this
+	# re-poll does not already give), and it needs no `docker inspect` round-trip. So the
+	# docker-health gate is deliberately NOT added; the re-poll-until-clear supersedes it.
 	local _post_snap
 	_post_snap=$(mktemp)
 	# shellcheck disable=SC2064
@@ -1490,6 +1500,23 @@ settle_healthcheck_with_retry() {
 # proceeds (degraded to the historical two-run convergence), never a broken or an
 # unverified-code exec. Scope: real apply paths only (apply / with_templates), a
 # pinned tag (a floating 'latest' has no per-tag SHA256SUMS to verify against).
+#
+# THREAT MODEL (this fetches upgrade.sh + SHA256SUMS same-origin and execs the result
+# as ROOT on match — the SAME threat surface as _source_lib's tier-3, so it inherits
+# the SAME bound; see the _source_lib THREAT MODEL block above for the full statement):
+#   • DEFENDED: protocol-downgrade / plaintext-HTTP MITM (curl is TLS-pinned
+#     --proto =https --tlsv1.2), and passive/transit corruption of the payload (the
+#     sha256 must match a SHA256SUMS that resolved).
+#   • WEAK / NOT authenticated: manifest and payload share the RELEASES_BASE origin, so
+#     a hostile mirror / OXPULSE_MIRROR_BASE (or an active MITM presenting a cert the
+#     pin accepts) can serve a matching checksum. This is "TLS + transit-corruption
+#     detection", NOT origin authentication.
+#   • RESIDUAL: closing the hostile-origin case needs a signature rooted OUTSIDE that
+#     origin (a GPG/minisign-signed SHA256SUMS.asc) — a fleet-wide, separate change
+#     shared by all four fetch+verify sites; deliberately not attempted here.
+#   • ESCAPE HATCH: ALLOW_UNVERIFIED (from --allow-unverified / --no-integrity /
+#     OXPULSE_UPGRADE_NO_INTEGRITY, seeded at top level) SKIPS the sha256 gate for the
+#     fork/dev/restricted-network operator — same opt-in contract as the lib resolvers.
 _maybe_self_update_reexec() {
 	[[ "${OXPULSE_UPGRADE_REEXECED:-0}" == 1 ]] && return 0   # child of a prior re-exec
 	[[ "${DRY_RUN:-0}" -eq 1 ]] && return 0
