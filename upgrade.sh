@@ -1540,6 +1540,8 @@ _maybe_self_update_reexec() {
 	export OXPULSE_UPGRADE_REEXECED=1
 	# Release the upgrade-lock fd (if held) so the re-exec'd child reacquires cleanly.
 	{ exec 9>&-; } 2>/dev/null || true
+	# shellcheck disable=SC2093  # deliberate: exec replaces the process; the lines below
+	# are the exec-failed recovery path (file not executable / ENOENT), not fall-through.
 	exec "$_new" "$@"
 	# exec returns only on failure:
 	warn "self-update: re-exec of $_new failed - continuing with the current process"
