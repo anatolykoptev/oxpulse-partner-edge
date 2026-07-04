@@ -406,6 +406,15 @@ _run_cleanup() {
 }
 trap _run_cleanup EXIT
 
+# A self-update re-exec CHILD (see _maybe_self_update_reexec) executes FROM the
+# parent's throwaway tmpdir ($_new lives inside it). Register that dir here — after
+# the cumulative registry + EXIT trap are established — so the child's EXIT trap
+# removes it once bash has finished reading this script. Removing our own execution
+# dir at EXIT is safe (bash is done with the file); an immediate rm inside the still-
+# running child would race the interpreter. No-op in the parent / any normal run: the
+# env var is only set across the one re-exec.
+[[ -n "${OXPULSE_UPGRADE_REEXEC_TMPDIR:-}" ]] && _CLEANUP_PATHS+=("$OXPULSE_UPGRADE_REEXEC_TMPDIR")
+
 # Integrity escape hatch for the tier-3 fetch verify in _source_lib (immediately below)
 # AND _stage_lib (further down). Args are parsed later (args_parse), so pre-scan $@ here
 # — BEFORE the first _source_lib call — and honor the env var. Mirrors install.sh's
@@ -1519,7 +1528,13 @@ _maybe_self_update_reexec() {
 			warn "self-update: no SHA256SUMS for $_tag - skipping re-exec (converges next run)"
 			rm -rf "$_tmpdir"; return 0
 		fi
-		_expected=$(awk '$2=="partner-edge-upgrade.sh"{print $1; exit}' "$_sums" 2>/dev/null || true)
+		# Resolve the expected hash via the shared _lookup_expected_hash (defined
+		# above) so a SHA256SUMS line that carries the common `find`-generated
+		# "./partner-edge-upgrade.sh" column form still matches — an inline
+		# bare-name awk silently missed it, leaving _expected empty and fail-closing
+		# the self-update forever (review HIGH: same "./"-prefix drift the tier-3 lib
+		# resolvers already paid down; do not reinvent it here).
+		_expected=$(_lookup_expected_hash "partner-edge-upgrade.sh" "$_sums")
 		_actual=$(sha256sum "$_new" 2>/dev/null | awk '{print $1}')
 		if [[ -z "$_expected" || "$_expected" != "$_actual" ]]; then
 			warn "self-update: SHA256 mismatch/absent for upgrade.sh@$_tag - refusing to re-exec unverified code"
@@ -1538,13 +1553,28 @@ _maybe_self_update_reexec() {
 	chmod +x "$_new" 2>/dev/null || true
 	log "self-update: running upgrade.sh differs from the $_tag release - re-exec into the new version once so infra fixes apply this run"
 	export OXPULSE_UPGRADE_REEXECED=1
+	export OXPULSE_UPGRADE_REEXEC_TMPDIR="$_tmpdir"
 	# Release the upgrade-lock fd (if held) so the re-exec'd child reacquires cleanly.
 	{ exec 9>&-; } 2>/dev/null || true
-	# shellcheck disable=SC2093  # deliberate: exec replaces the process; the lines below
-	# are the exec-failed recovery path (file not executable / ENOENT), not fall-through.
-	exec "$_new" "$@"
-	# exec returns only on failure:
-	warn "self-update: re-exec of $_new failed - continuing with the current process"
+	# Throwaway-tmpdir hygiene (this dir is created on EVERY real fleet self-update):
+	#   • exec SUCCESS → the process image is replaced; the re-exec'd CHILD re-registers
+	#     this dir at top level (via OXPULSE_UPGRADE_REEXEC_TMPDIR) and its cumulative
+	#     EXIT trap sweeps it once bash is done reading the script from inside it.
+	#   • exec FAILURE → a non-interactive shell aborts on a failed exec AND does NOT
+	#     fire the EXIT trap (both verified), so it would both kill the whole upgrade and
+	#     leak the tmpdir. `shopt -s execfail` makes the shell CONTINUE into the recovery
+	#     block instead; `|| true` stops `set -e` from re-promoting exec's non-zero return
+	#     into that same abort. Recovery degrades to the historical two-run convergence
+	#     and removes the tmpdir. (On success we never reach `shopt -u`; the child re-parse
+	#     starts with execfail at its default, so nothing leaks into the new image.)
+	shopt -s execfail
+	# shellcheck disable=SC2093  # intentional: on success exec replaces the process; the
+	# lines below are the exec-FAILED recovery path, reachable because execfail is set.
+	exec "$_new" "$@" || true
+	shopt -u execfail
+	warn "self-update: re-exec of $_new failed - continuing with the current process (converges next run)"
+	rm -rf "$_tmpdir" 2>/dev/null || true
+	unset OXPULSE_UPGRADE_REEXECED OXPULSE_UPGRADE_REEXEC_TMPDIR
 	return 0
 }
 
