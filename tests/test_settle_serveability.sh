@@ -283,6 +283,45 @@ RC=$(_run_settle 'check_13_canary_tunnel=GREEN' 'check_13_canary_tunnel=RED' \
     $'ch1=OK' $'ch1=DOWN')
 if [[ "$RC" -eq 1 ]]; then ok "C7: single-homed xray death -> rollback preserved"; else bad "C7: expected rc=1, got $RC"; fi
 
+# C8 — the WARNING alert actually reaches a REAL tg_alert, not the C1-C7 runner's
+# own stub (review-fix: `declare -F tg_alert || return 0` silently no-op'd on every
+# real edge box because upgrade.sh never sourced telegram-alert-lib.sh into its own
+# process; C1's `tg_alert(){ ... }` stub masked this — it passed in CI while prod
+# dropped the alert). This runner intentionally defines NO tg_alert stub, points
+# TELEGRAM_ALERT_LIB at the REAL lib/telegram-alert-lib.sh, and routes it at
+# guaranteed-unreachable endpoints so tg_alert's own fail-soft path (no network,
+# no token) writes an "undelivered" breadcrumb instead of silently vanishing —
+# proving the full chain (lazy-source -> real tg_alert -> real message content)
+# actually runs, independent of network reachability.
+TG_STATE="$TC/tg-state"
+cat > "$TC/run_real_tg.sh" <<RUN
+#!/usr/bin/env bash
+source "$PRE"
+export HEALTHCHECK="$TC/hc"
+export OXPULSE_UPGRADE_HEALTH_TIMEOUT=3
+export TELEGRAM_ALERT_LIB="$REPO_ROOT/lib/telegram-alert-lib.sh"
+export OXPULSE_TG_STATE_DIR="$TG_STATE"
+export OXPULSE_TG_WEBHOOK="http://127.0.0.1:1/unreachable"
+export OXPULSE_TG_API_FALLBACK="http://127.0.0.1:1/unreachable"
+unset TG_TOKEN TG_CHAT OXPULSE_TG_CHAT
+settle_healthcheck_with_retry "c-test" "$TC/hc_baseline" "\${SERVE_BASELINE:-}"
+RUN
+rm -rf "$TG_STATE"
+printf '%s\n' 'check_13_canary_tunnel=GREEN' > "$TC/hc_baseline"
+printf '%s\n' 'check_13_canary_tunnel=RED' > "$TC/hc_post"
+printf '%s\n' $'ch1=OK\nch2=OK\nch3=OK' > "$TC/serve_baseline"
+printf '%s\n' $'ch1=DOWN\nch2=OK\nch3=OK' > "$TC/serve_post"
+set +e
+CHANNELS_HEALTH_REPORT="$TC/reporter" SERVE_BASELINE="$TC/serve_baseline" bash "$TC/run_real_tg.sh" >/dev/null 2>&1
+RC=$?
+set -e
+if [[ "$RC" -eq 0 ]]; then ok "C8: real-tg_alert runner also suppresses rollback (rc=0)"; else bad "C8: expected rc=0, got $RC"; fi
+if [[ -s "$TG_STATE/undelivered.log" ]] && grep -q 'ch1' "$TG_STATE/undelivered.log" 2>/dev/null; then
+    ok "C8: real tg_alert was lazy-sourced and actually invoked (undelivered breadcrumb has ch1)"
+else
+    bad "C8: real tg_alert never ran — lazy-source is broken; undelivered.log: $(cat "$TG_STATE/undelivered.log" 2>/dev/null || echo '<absent>')"
+fi
+
 rm -rf "$TC"
 
 echo

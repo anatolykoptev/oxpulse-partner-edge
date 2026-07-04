@@ -1636,11 +1636,26 @@ _settle_serveability_adjudicate() {
 # another channel (no rollback happened), so the operator should still know.
 # SERVING_FULL is clean (no alert); LOST already logs + metrics the real rollback.
 # Severity vocabulary is critical|warning|info only (the dozor webhook classifies
-# by lexical match). Reuses tg_alert (telegram-alert-lib, sourced via reconcile.sh);
-# a silent no-op if the alert lib is not in scope.
+# by lexical match). Reuses tg_alert (telegram-alert-lib) — lazy-sources it the
+# same way _reconcile_firewall_escalate does (lib/reconcile.sh) rather than
+# assuming it's already in scope: upgrade.sh runs in its own process, so
+# reconcile.sh having sourced it doesn't help here. TELEGRAM_ALERT_LIB is
+# already staged+exported by _stage_lib earlier in this script (integrity-
+# verified); this only sources it, never fetches. review-fix: the previous
+# `declare -F tg_alert || return 0` silently no-op'd on every real edge box
+# (tg_alert was never in scope in upgrade.sh's own process), so a suppressed
+# rollback produced NO Telegram signal at all — exactly the silent-degradation
+# class this arc exists to prevent.
 _settle_serveability_alert() {
 	local _verdict="$1" _label="$2"
 	case "$_verdict" in SERVING_PARTIAL*) ;; *) return 0 ;; esac
+	if ! declare -F tg_alert >/dev/null 2>&1; then
+		local _tg_lib="${TELEGRAM_ALERT_LIB:-${_UPGRADE_SH_DIR:-.}/lib/telegram-alert-lib.sh}"
+		if [[ -f "$_tg_lib" ]]; then
+			# shellcheck source=lib/telegram-alert-lib.sh
+			. "$_tg_lib"
+		fi
+	fi
 	declare -F tg_alert >/dev/null 2>&1 || return 0
 	local _host _regressed
 	_host=$(hostname -s 2>/dev/null || echo edge)
