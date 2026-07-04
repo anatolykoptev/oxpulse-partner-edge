@@ -56,6 +56,14 @@ trap 'rm -rf "$TMP"' EXIT
 # --- Extract the real settle_healthcheck_with_retry (self-contained fn). ---
 SETTLE_FN="$TMP/settle_fn.sh"
 awk '/^settle_healthcheck_with_retry\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE" > "$SETTLE_FN"
+# Non-vacuous guard: `bash -n` on an EMPTY file trivially succeeds, so a drifted awk
+# pattern (fn renamed / moved) would GREEN a test that never exercised the code. Assert
+# the extraction captured the fn signature before parsing.
+if [[ -s "$SETTLE_FN" ]] && grep -q '^settle_healthcheck_with_retry()' "$SETTLE_FN"; then
+    pass "S0: extraction captured settle_healthcheck_with_retry (non-empty, has signature)"
+else
+    fail "S0: extraction empty or signature-less — awk pattern drifted from upgrade.sh"; exit 1
+fi
 if bash -n "$SETTLE_FN"; then
     pass "S1: extracted settle_healthcheck_with_retry parses (self-contained)"
 else
