@@ -149,7 +149,13 @@ fi
 trap - EXIT
 rm -rf "$T1"
 
-# ── Test 2: running xray → ch1 handshake_ok=true ──────────────────────────────
+# ── Test 2: ch1 real end-to-end tunnel (canary/tunnel 2xx) → handshake_ok=true
+# Regression guard for the local-liveness blind spot: probe_ch1 no longer
+# checks `docker exec ... ss -ltn` (which stays green even when the real
+# VLESS-Reality path is ТСПУ-blocked — the zvonilka incident this rewrite
+# fixes, see Test 2b). It now curls the Phase 1 canary route
+# (http://127.0.0.1:9080/canary/tunnel) that proxies through xray-client to
+# the central backend end-to-end.
 T2=$(mktemp -d)
 trap 'rm -rf "$T2"' EXIT
 
@@ -157,15 +163,18 @@ make_bin "$T2"
 mkdir -p "$T2/etc"
 write_node_config "$T2/etc" '{"id":"ch1"}'
 
-cat > "$T2/docker" <<'STUB'
+# curl stub: canary/tunnel → 200 (tunnel + backend both reachable).
+cat > "$T2/curl" <<'STUB'
 #!/bin/bash
-if [[ "$*" == *"ss -ltn"* ]]; then
-    echo "LISTEN 0 128 0.0.0.0:3080 0.0.0.0:*"
-    exit 0
-fi
-exit 1
+for a in "$@"; do
+    case "$a" in
+        *canary/tunnel*) printf '200'; exit 0 ;;
+    esac
+done
+printf '200'
+exit 0
 STUB
-chmod +x "$T2/docker"
+chmod +x "$T2/curl"
 
 set +e
 OUTPUT2=$(PATH="$T2:/usr/bin:/bin" \
@@ -176,15 +185,74 @@ OUTPUT2=$(PATH="$T2:/usr/bin:/bin" \
 set -e
 
 if printf '%s\n' "$OUTPUT2" | jq -e 'select(.channel_name=="ch1" and .channel_handshake_ok==true)' >/dev/null 2>&1; then
-    ok "test2: ch1 with running xray → handshake_ok=true"
+    ok "test2: ch1 real tunnel reachable (canary/tunnel 200) → handshake_ok=true"
 else
-    fail "test2: ch1 with running xray should have handshake_ok=true; got: $OUTPUT2"
+    fail "test2: ch1 with reachable tunnel should have handshake_ok=true; got: $OUTPUT2"
+fi
+
+# channel_rtt_ms must be present (real measured round trip, not omitted).
+if printf '%s\n' "$OUTPUT2" | jq -e 'select(.channel_name=="ch1") | has("channel_rtt_ms")' >/dev/null 2>&1; then
+    ok "test2: ch1 payload carries channel_rtt_ms"
+else
+    fail "test2: ch1 payload missing channel_rtt_ms; got: $OUTPUT2"
 fi
 
 trap - EXIT
 rm -rf "$T2"
 
-# ── Test 3: dead hy2 listener → ch3 rtt_ms=0 ─────────────────────────────────
+# ── Test 2b: ch1 real end-to-end tunnel BLOCKED (canary/tunnel 502) ──────────
+# THE regression guard for the bug this whole rewrite exists to fix: live-
+# verified on zvonilka, xray was ТСПУ-blocked (502 on canary/tunnel, the real
+# path) while the OLD local-liveness probe (docker exec ss -ltn) stayed green
+# the entire time. probe_ch1 must now report handshake_ok=false when the real
+# tunnel path fails, even though nothing here checks local container state at
+# all any more.
+T2B=$(mktemp -d)
+trap 'rm -rf "$T2B"' EXIT
+
+make_bin "$T2B"
+mkdir -p "$T2B/etc"
+write_node_config "$T2B/etc" '{"id":"ch1"}'
+
+# curl stub: canary/tunnel → 502 (ТСПУ-blocked real tunnel path — zvonilka).
+cat > "$T2B/curl" <<'STUB'
+#!/bin/bash
+for a in "$@"; do
+    case "$a" in
+        *canary/tunnel*) printf '502'; exit 0 ;;
+    esac
+done
+printf '200'
+exit 0
+STUB
+chmod +x "$T2B/curl"
+
+set +e
+OUTPUT2B=$(PATH="$T2B:/usr/bin:/bin" \
+    _NODE_CONFIG="$T2B/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+if printf '%s\n' "$OUTPUT2B" | jq -e 'select(.channel_name=="ch1" and .channel_handshake_ok==false)' >/dev/null 2>&1; then
+    ok "test2b: ZVONILKA REGRESSION GUARD — 502 on real tunnel path → handshake_ok=false"
+else
+    fail "test2b: REGRESSION — 502 on canary/tunnel must report handshake_ok=false; got: $OUTPUT2B"
+fi
+
+trap - EXIT
+rm -rf "$T2B"
+
+# ── Test 3: ch3 real end-to-end tunnel unreachable → handshake_ok=false ──────
+# Regression guard + the core new deliverable: probe_ch3 no longer does a bare
+# `nc -z` port check (which only proves the LOCAL hysteria2-client forwarder
+# is listening, never that a byte reaches the backend) and, critically, it
+# NEVER emitted channel_handshake_ok at all before this rewrite — the
+# backend's ch1/ch2/ch3 OR'd signaling-health logic (health_poller.rs) had
+# zero visibility into ch3. It now curls the local forwarder
+# (127.0.0.1:$PORT/api/health, forwarded over the QUIC tunnel) and reports a
+# real handshake_ok.
 T3=$(mktemp -d)
 trap 'rm -rf "$T3"' EXIT
 
@@ -192,12 +260,19 @@ make_bin "$T3"
 mkdir -p "$T3/etc"
 write_node_config "$T3/etc" '{"id":"ch3"}'
 
-# nc stub: fail (port not listening)
-cat > "$T3/nc" <<'STUB'
-#!/bin/sh
-exit 1
+# curl stub: local hy2 forwarder unreachable — connection refused (curl's own
+# "000" convention for a failed dial, matching _post_channel's own idiom).
+cat > "$T3/curl" <<'STUB'
+#!/bin/bash
+for a in "$@"; do
+    case "$a" in
+        *:18443/api/health*) printf '000'; exit 0 ;;
+    esac
+done
+printf '200'
+exit 0
 STUB
-chmod +x "$T3/nc"
+chmod +x "$T3/curl"
 
 set +e
 OUTPUT3=$(PATH="$T3:/usr/bin:/bin" \
@@ -207,14 +282,62 @@ OUTPUT3=$(PATH="$T3:/usr/bin:/bin" \
     bash "$SCRIPT" --dry-run 2>/dev/null)
 set -e
 
-if printf '%s\n' "$OUTPUT3" | jq -e 'select(.channel_name=="ch3" and .channel_rtt_ms==0)' >/dev/null 2>&1; then
-    ok "test3: dead hy2 listener → ch3 rtt_ms=0"
+if printf '%s\n' "$OUTPUT3" | jq -e 'select(.channel_name=="ch3" and .channel_handshake_ok==false)' >/dev/null 2>&1; then
+    ok "test3: ch3 unreachable real tunnel → channel_handshake_ok=false (NEW field, was never emitted before)"
 else
-    fail "test3: expected ch3 rtt_ms=0 for dead listener; got: $OUTPUT3"
+    fail "test3: expected ch3 channel_handshake_ok=false for unreachable tunnel; got: $OUTPUT3"
+fi
+
+# channel_rtt_ms must still be present and non-negative (real elapsed time,
+# not a hardcoded magic 0 — the pre-rewrite contract).
+GOT_RTT3=$(printf '%s\n' "$OUTPUT3" | jq -r 'select(.channel_name=="ch3") | .channel_rtt_ms' 2>/dev/null)
+if [[ "$GOT_RTT3" =~ ^[0-9]+$ ]]; then
+    ok "test3: ch3 channel_rtt_ms is a non-negative integer ($GOT_RTT3)"
+else
+    fail "test3: ch3 channel_rtt_ms should be a non-negative integer; got: $GOT_RTT3"
 fi
 
 trap - EXIT
 rm -rf "$T3"
+
+# ── Test 3b: ch3 real end-to-end tunnel reachable → handshake_ok=true ────────
+# THE core new deliverable for ch3: it must start emitting handshake_ok at
+# all. Positive-path complement to Test 3.
+T3B=$(mktemp -d)
+trap 'rm -rf "$T3B"' EXIT
+
+make_bin "$T3B"
+mkdir -p "$T3B/etc"
+write_node_config "$T3B/etc" '{"id":"ch3"}'
+
+cat > "$T3B/curl" <<'STUB'
+#!/bin/bash
+for a in "$@"; do
+    case "$a" in
+        *:18443/api/health*) printf '200'; exit 0 ;;
+    esac
+done
+printf '200'
+exit 0
+STUB
+chmod +x "$T3B/curl"
+
+set +e
+OUTPUT3B=$(PATH="$T3B:/usr/bin:/bin" \
+    _NODE_CONFIG="$T3B/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+if printf '%s\n' "$OUTPUT3B" | jq -e 'select(.channel_name=="ch3" and .channel_handshake_ok==true)' >/dev/null 2>&1; then
+    ok "test3b: ch3 real tunnel reachable → channel_handshake_ok=true (first time ch3 ever emits this field)"
+else
+    fail "test3b: expected ch3 channel_handshake_ok=true for reachable tunnel; got: $OUTPUT3B"
+fi
+
+trap - EXIT
+rm -rf "$T3B"
 
 # ── Test 4: only ch1+ch2+ch3 provisioned; ch5/ch6 not in output ──────────────
 T4=$(mktemp -d)
@@ -882,6 +1005,235 @@ fi
 
 trap - EXIT
 rm -rf "$T16"
+
+
+# ── Test 17: ch2 real end-to-end tunnel (AWG mesh -> backend :8907/api/health)
+# Regression guard for the ping-only blind spot: probe_ch2 no longer does a
+# bare ICMP ping to the AWG "motherly" peer (which only proves the WireGuard
+# handshake is up, nothing about whether routed DATA reaches the backend). It
+# now curls the backend's /api/health directly through awg0, at
+# OXPULSE_AWG_MOTHERLY_IP:OXPULSE_BACKEND_PORT -- reusing the SAME two config
+# vars Caddyfile.tpl's own tunnel_upstream failover group already reads
+# (config/defaults.conf).
+T17=$(mktemp -d)
+trap 'rm -rf "$T17"' EXIT
+
+make_bin "$T17"
+mkdir -p "$T17/etc"
+write_node_config "$T17/etc" '{"id":"ch2"}'
+
+CH2_ARGV_LOG="$T17/ch2_curl_argv.log"
+cat > "$T17/curl" <<STUB
+#!/bin/bash
+for a in "\$@"; do
+    case "\$a" in
+        *:8907/api/health*)
+            printf '%s\n' "\$*" >> "$CH2_ARGV_LOG"
+            printf '200'; exit 0 ;;
+    esac
+done
+printf '200'
+exit 0
+STUB
+chmod +x "$T17/curl"
+
+set +e
+OUTPUT17=$(PATH="$T17:/usr/bin:/bin" \
+    _NODE_CONFIG="$T17/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+if printf '%s\n' "$OUTPUT17" | jq -e 'select(.channel_name=="ch2" and .channel_handshake_ok==true)' >/dev/null 2>&1; then
+    ok "test17: ch2 real tunnel reachable -> handshake_ok=true"
+else
+    fail "test17: expected ch2 handshake_ok=true; got: $OUTPUT17"
+fi
+
+if printf '%s\n' "$OUTPUT17" | jq -e 'select(.channel_name=="ch2") | has("channel_rtt_ms")' >/dev/null 2>&1; then
+    ok "test17: ch2 payload NOW carries channel_rtt_ms (never emitted by the ping-based probe it replaces)"
+else
+    fail "test17: ch2 payload missing channel_rtt_ms; got: $OUTPUT17"
+fi
+
+if grep -q '10\.9\.0\.2:8907' "$CH2_ARGV_LOG" 2>/dev/null; then
+    ok "test17: ch2 dials the default AWG motherly IP:port (10.9.0.2:8907)"
+else
+    fail "test17: ch2 did not dial 10.9.0.2:8907; argv log: $(cat "$CH2_ARGV_LOG" 2>/dev/null)"
+fi
+
+trap - EXIT
+rm -rf "$T17"
+
+# ── Test 18: ch2 honours OXPULSE_AWG_MOTHERLY_IP / OXPULSE_BACKEND_PORT overrides
+T18=$(mktemp -d)
+trap 'rm -rf "$T18"' EXIT
+
+make_bin "$T18"
+mkdir -p "$T18/etc"
+write_node_config "$T18/etc" '{"id":"ch2"}'
+
+CH2_ARGV_LOG18="$T18/ch2_curl_argv.log"
+cat > "$T18/curl" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$CH2_ARGV_LOG18"
+printf '200'
+exit 0
+STUB
+chmod +x "$T18/curl"
+
+set +e
+PATH="$T18:/usr/bin:/bin" \
+    _NODE_CONFIG="$T18/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    OXPULSE_AWG_MOTHERLY_IP="198.51.100.9" \
+    OXPULSE_BACKEND_PORT="9917" \
+    bash "$SCRIPT" --dry-run >/dev/null 2>&1
+set -e
+
+if grep -q '198\.51\.100\.9:9917' "$CH2_ARGV_LOG18" 2>/dev/null; then
+    ok "test18: ch2 honours OXPULSE_AWG_MOTHERLY_IP + OXPULSE_BACKEND_PORT overrides"
+else
+    fail "test18: override not honoured; argv: $(cat "$CH2_ARGV_LOG18" 2>/dev/null)"
+fi
+
+trap - EXIT
+rm -rf "$T18"
+
+# ── Test 19: ch2 real tunnel unreachable -> handshake_ok=false ───────────────
+T19=$(mktemp -d)
+trap 'rm -rf "$T19"' EXIT
+
+make_bin "$T19"
+mkdir -p "$T19/etc"
+write_node_config "$T19/etc" '{"id":"ch2"}'
+
+cat > "$T19/curl" <<'STUB'
+#!/bin/bash
+for a in "$@"; do
+    case "$a" in
+        *:8907/api/health*) printf '000'; exit 0 ;;
+    esac
+done
+printf '200'
+exit 0
+STUB
+chmod +x "$T19/curl"
+
+set +e
+OUTPUT19=$(PATH="$T19:/usr/bin:/bin" \
+    _NODE_CONFIG="$T19/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+
+if printf '%s\n' "$OUTPUT19" | jq -e 'select(.channel_name=="ch2" and .channel_handshake_ok==false)' >/dev/null 2>&1; then
+    ok "test19: ch2 unreachable real tunnel (awg0 up, backend not reachable) -> handshake_ok=false"
+else
+    fail "test19: expected ch2 handshake_ok=false; got: $OUTPUT19"
+fi
+
+trap - EXIT
+rm -rf "$T19"
+
+# ── Test 20: ch1/ch2/ch3 all pass --max-time, honouring OXPULSE_CHANNEL_PROBE_TIMEOUT
+T20=$(mktemp -d)
+trap 'rm -rf "$T20"' EXIT
+
+make_bin "$T20"
+mkdir -p "$T20/etc"
+write_node_config "$T20/etc" '{"id":"ch1"},{"id":"ch2"},{"id":"ch3"}'
+
+ARGV_LOG20="$T20/curl_argv.log"
+cat > "$T20/curl" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$ARGV_LOG20"
+printf '200'
+exit 0
+STUB
+chmod +x "$T20/curl"
+
+set +e
+PATH="$T20:/usr/bin:/bin" \
+    _NODE_CONFIG="$T20/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    OXPULSE_CHANNEL_PROBE_TIMEOUT="7" \
+    bash "$SCRIPT" --dry-run >/dev/null 2>&1
+set -e
+
+# All three probe curl invocations must carry --max-time 7 (OXPULSE_CHANNEL_PROBE_TIMEOUT, their hard timeout).
+MAXTIME_COUNT=$(grep -c -- '--max-time 7' "$ARGV_LOG20" 2>/dev/null || true)
+[[ -n "$MAXTIME_COUNT" ]] || MAXTIME_COUNT=0
+if [[ "$MAXTIME_COUNT" -eq 3 ]]; then
+    ok "test20: ch1/ch2/ch3 all pass --max-time 7 (OXPULSE_CHANNEL_PROBE_TIMEOUT honoured, exactly 3 calls)"
+else
+    fail "test20: expected exactly 3 curl calls with --max-time 7, got $MAXTIME_COUNT; argv: $(cat "$ARGV_LOG20" 2>/dev/null)"
+fi
+
+trap - EXIT
+rm -rf "$T20"
+
+# ── Test 21: ch1/ch2/ch3 run CONCURRENTLY -- total wall time bounded by the
+#    SLOWEST probe, not the SUM of all three (the core "run concurrently"
+#    requirement). Each probe's curl call sleeps 2s before responding; a
+#    serial implementation would take ~6s+, a concurrent one ~2s.
+T21=$(mktemp -d)
+trap 'rm -rf "$T21"' EXIT
+
+make_bin "$T21"
+mkdir -p "$T21/etc"
+write_node_config "$T21/etc" '{"id":"ch1"},{"id":"ch2"},{"id":"ch3"}'
+
+# curl stub: sleep 2s ONLY for the three probe URLs (canary/tunnel,
+# :8907/api/health, :18443/api/health) -- NOT for the POST endpoint, so the
+# measurement isolates the PROBE phase specifically.
+cat > "$T21/curl" <<'STUB'
+#!/bin/bash
+for a in "$@"; do
+    case "$a" in
+        *canary/tunnel*|*:8907/api/health*|*:18443/api/health*)
+            sleep 2
+            ;;
+    esac
+done
+printf '200'
+exit 0
+STUB
+chmod +x "$T21/curl"
+
+START21=$(date +%s)
+set +e
+OUTPUT21=$(PATH="$T21:/usr/bin:/bin" \
+    _NODE_CONFIG="$T21/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run 2>/dev/null)
+set -e
+END21=$(date +%s)
+ELAPSED21=$((END21 - START21))
+
+# Concurrent: ~2s (all three sleep in parallel). Serial would be ~6s+.
+if [[ "$ELAPSED21" -le 5 ]]; then
+    ok "test21: ch1/ch2/ch3 probed CONCURRENTLY -- total wall time ${ELAPSED21}s (bounded by slowest probe, not the sum)"
+else
+    fail "test21: REGRESSION -- probes ran serially (took ${ELAPSED21}s, expected <=5s for 3 concurrent 2s probes)"
+fi
+
+# Correctness: all three channels still present despite each being individually slow.
+COUNT21=$(printf '%s\n' "$OUTPUT21" | grep -c '"channel_name"' 2>/dev/null || true)
+[[ -n "$COUNT21" ]] || COUNT21=0
+if [[ "$COUNT21" -eq 3 ]]; then
+    ok "test21: all 3 channels still reported despite each probe being individually slow"
+else
+    fail "test21: expected 3 channel entries, got $COUNT21; output: $OUTPUT21"
+fi
+
+trap - EXIT
+rm -rf "$T21"
 
 # ---------- syntax check ----------
 bash -n "$SCRIPT" && ok "syntax check: oxpulse-channels-health-report.sh"
