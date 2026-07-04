@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
-# oxpulse-channels-health-report.sh — per-channel liveness probe + health report
-# to the central server via POST /api/partner/channel-health.
+# oxpulse-channels-health-report.sh — per-channel REAL end-to-end tunnel
+# probe + health report to the central server via
+# POST /api/partner/channel-health.
 #
 # Invoked by oxpulse-channels-health-report.timer every 60s.
 # Each provisioned channel produces one POST with the server's schema:
 #   { node_id, channel_name, channel_rtt_ms?, channel_handshake_ok?,
 #     channel_probed_at }
+#
+# probe_ch1/ch2/ch3 each dial all the way through their own tunnel/upstream
+# to the central backend's lightweight /api/health (or the local canary
+# route that fronts it) — NOT a local container-liveness check. A relay
+# whose process is up but whose tunnel is DPI-blocked end-to-end (live-
+# verified on zvonilka: xray listening, VLESS-Reality 502 on the real path)
+# now reports channel_handshake_ok=false instead of a false-healthy local
+# check. ch1-ch3 run CONCURRENTLY (backgrounded, each bounded by its own
+# curl --max-time via OXPULSE_CHANNEL_PROBE_TIMEOUT) so one blocked channel
+# cannot delay the others.
 #
 # Usage:
 #   oxpulse-channels-health-report           — probe + report, exit
@@ -107,46 +118,82 @@ _elapsed_ms() {
     awk "BEGIN { printf \"%d\", ($2 - $1) * 1000 }"
 }
 
-# ---------- probe: ch1 — xray dokodemo-door :3080 ----------
-# RTT = container exec time (ms). handshake_ok = listener present.
+# ---------- probe: ch1 — xray/VLESS-Reality — REAL end-to-end tunnel ----------
+# Dials the Phase 1 canary site's /canary/tunnel route (Caddyfile.tpl,
+# 127.0.0.1:9080, host-only) instead of checking local container liveness.
+# /canary/tunnel rewrites to /api/health/live and reverse-proxies through the
+# xray-client container's VLESS-Reality tunnel to the central backend — 2xx
+# only when BOTH the tunnel and the backend are reachable end-to-end.
+#
+# BEFORE this fix: `docker exec oxpulse-partner-xray ss -ltn | grep :3080`
+# only proved the xray-client PROCESS was listening. Live-verified on
+# zvonilka: ss -ltn stayed green the whole time ТСПУ was returning 502 on the
+# real VLESS-Reality path (canary/tunnel) — a silent healthy/blocked blind
+# spot with zero alerting, since nothing downstream ever saw a failure signal.
 probe_ch1() {
-    local t0 t1 exit_code rtt_ms
+    local t0 t1 http_code rtt_ms
+    local timeout_s="${OXPULSE_CHANNEL_PROBE_TIMEOUT:-5}"
+    local canary_url="${OXPULSE_CH1_CANARY_URL:-http://127.0.0.1:9080/canary/tunnel}"
 
     t0="${EPOCHREALTIME}"
-    docker exec oxpulse-partner-xray ss -ltn 2>/dev/null | grep -q ':3080'
-    exit_code=$?
+    http_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$timeout_s" \
+        "$canary_url" 2>/dev/null || echo '000')
     t1="${EPOCHREALTIME}"
 
     rtt_ms=$(_elapsed_ms "$t0" "$t1")
 
-    if [[ "$exit_code" -eq 0 ]]; then
+    if [[ "$http_code" =~ ^2 ]]; then
         printf '{"channel_name":"ch1","channel_rtt_ms":%d,"channel_handshake_ok":true}' "$rtt_ms"
     else
         printf '{"channel_name":"ch1","channel_rtt_ms":%d,"channel_handshake_ok":false}' "$rtt_ms"
     fi
 }
 
-# ---------- probe: ch2 — AmneziaWG mesh ping ----------
-# ch2: no RTT concept (awg-show is age-based). handshake_ok = ping reachable.
+# ---------- probe: ch2 — AmneziaWG mesh — REAL end-to-end tunnel ----------
+# Dials the central backend's /api/health directly through the awg0 tunnel
+# (the AWG mesh "motherly" hub node, OXPULSE_AWG_MOTHERLY_IP, on the port the
+# backend itself listens on, OXPULSE_BACKEND_PORT — both already shared with
+# Caddyfile.tpl's own tunnel_upstream failover group). A response proves the
+# awg0 DATA PLANE actually reaches the backend, not merely that the mesh peer
+# answers ICMP — the same class of blind spot ch1 had via ss -ltn: a
+# WireGuard handshake can be up while the routed traffic itself never reaches
+# anything. channel_rtt_ms is now populated for the first time (a real HTTP
+# round trip, unlike the ping-based check it replaces).
 probe_ch2() {
-    local motherly_ip exit_code
+    local motherly_ip backend_port t0 t1 http_code rtt_ms
+    local timeout_s="${OXPULSE_CHANNEL_PROBE_TIMEOUT:-5}"
 
     motherly_ip="${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"
+    backend_port="${OXPULSE_BACKEND_PORT:-8907}"
 
-    ping -c 1 -W 2 "$motherly_ip" >/dev/null 2>&1
-    exit_code=$?
+    t0="${EPOCHREALTIME}"
+    http_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$timeout_s" \
+        "http://${motherly_ip}:${backend_port}/api/health" 2>/dev/null || echo '000')
+    t1="${EPOCHREALTIME}"
 
-    if [[ "$exit_code" -eq 0 ]]; then
-        printf '{"channel_name":"ch2","channel_handshake_ok":true}'
+    rtt_ms=$(_elapsed_ms "$t0" "$t1")
+
+    if [[ "$http_code" =~ ^2 ]]; then
+        printf '{"channel_name":"ch2","channel_rtt_ms":%d,"channel_handshake_ok":true}' "$rtt_ms"
     else
-        printf '{"channel_name":"ch2","channel_handshake_ok":false}'
+        printf '{"channel_name":"ch2","channel_rtt_ms":%d,"channel_handshake_ok":false}' "$rtt_ms"
     fi
 }
 
-# ---------- probe: ch3 — Hysteria2 TCP forwarder ----------
-# RTT = nc connect time (ms). No handshake concept for Hysteria2 UDP.
+# ---------- probe: ch3 — Hysteria2 — REAL end-to-end tunnel ----------
+# Dials the central backend's /api/health through the hysteria2-client
+# container's local tcpForwarding listener (127.0.0.1:PORT), which forwards
+# over the QUIC tunnel to OXPULSE_HY2_REMOTE_BACKEND on the far side (the same
+# backend every other channel targets — defaults.conf: 127.0.0.1:8907, from
+# the hysteria2 SERVER's own vantage). This is the FIRST real signal for ch3:
+# the `nc -z` port check it replaces only proved the local forwarder was
+# LISTENING, never that a byte made it through the tunnel — and it never
+# emitted channel_handshake_ok at all, so the backend's ch1/ch2/ch3 OR'd
+# signaling health (health_poller.rs) had zero ch3 visibility.
+# channel_handshake_ok is populated for the first time here.
 probe_ch3() {
-    local listen port t0 t1 exit_code rtt_ms
+    local listen port t0 t1 http_code rtt_ms
+    local timeout_s="${OXPULSE_CHANNEL_PROBE_TIMEOUT:-5}"
 
     # Derive port from OXPULSE_HY2_LOCAL_LISTEN (addr:port) or override.
     listen="${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
@@ -154,18 +201,17 @@ probe_ch3() {
     port="${OXPULSE_HY2_FALLBACK_PORT:-${port:-18443}}"
 
     t0="${EPOCHREALTIME}"
-    nc -z 127.0.0.1 "$port" >/dev/null 2>&1
-    exit_code=$?
+    http_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$timeout_s" \
+        "http://127.0.0.1:${port}/api/health" 2>/dev/null || echo '000')
     t1="${EPOCHREALTIME}"
 
-    if [[ "$exit_code" -eq 0 ]]; then
-        rtt_ms=$(_elapsed_ms "$t0" "$t1")
-    else
-        rtt_ms=0
-    fi
+    rtt_ms=$(_elapsed_ms "$t0" "$t1")
 
-    # channel_handshake_ok intentionally absent for ch3 (no handshake concept).
-    printf '{"channel_name":"ch3","channel_rtt_ms":%d}' "$rtt_ms"
+    if [[ "$http_code" =~ ^2 ]]; then
+        printf '{"channel_name":"ch3","channel_rtt_ms":%d,"channel_handshake_ok":true}' "$rtt_ms"
+    else
+        printf '{"channel_name":"ch3","channel_rtt_ms":%d,"channel_handshake_ok":false}' "$rtt_ms"
+    fi
 }
 
 # ---------- probe: ch4 — coturn TURN Allocate (HMAC shared-secret) ----------
@@ -1465,25 +1511,51 @@ fi
 
 _AUTH_FAIL=0
 
+# Concurrency (real-tunnel rewrite): each provisioned channel's probe is
+# backgrounded so a single stuck/blocked channel (e.g. ch1 blackholed by
+# ТСПУ) cannot delay the others' reports. Every probe's own external call is
+# bounded by its own hard timeout (curl --max-time via
+# OXPULSE_CHANNEL_PROBE_TIMEOUT for ch1/ch2/ch3; probe_ch4 keeps its existing
+# internal `timeout` calls) — nothing backgrounded here can hang forever.
+# Results land in per-channel temp files under a private mktemp -d dir, then
+# POST runs serially afterwards (POST already has its own bounded --max-time
+# and gains nothing from concurrency; only the PROBE phase was ever the
+# source of head-of-line blocking).
+#
+# NOTE: deliberately NOT using an EXIT trap for cleanup here — this dir is
+# read-and-removed inline below, well before _run_peer_probe_loop runs, and
+# that function unconditionally clears EXIT/TERM/INT traps on its normal
+# return path (`trap - EXIT TERM INT`), which would silently clobber any
+# trap registered here.
+_CHAN_TMPROOT=$(mktemp -d) || die "mktemp -d failed for channel-probe concurrency"
+
+declare -a _CHAN_NAMES=()
+declare -a _CHAN_OUT=()
+_chan_idx=0
+
 for _chan in "${_PROVISIONED[@]}"; do
     # Channel ids in node-config may carry a node-specific suffix (e.g. "ch1-zvonilka").
     # Match on prefix: ch1* = Reality/VLESS, ch2* = AmneziaWG, ch3* = Hysteria2.
     # The server expects canonical names ch1/ch2/ch3, not the local variant.
     case "$_chan" in
         ch1*)
-            _payload=$(probe_ch1 2>/dev/null || printf '{"channel_name":"ch1","channel_handshake_ok":false}')
+            _probe_fn=probe_ch1
+            _fallback='{"channel_name":"ch1","channel_handshake_ok":false}'
             ;;
         ch2*)
-            _payload=$(probe_ch2 2>/dev/null || printf '{"channel_name":"ch2","channel_handshake_ok":false}')
+            _probe_fn=probe_ch2
+            _fallback='{"channel_name":"ch2","channel_handshake_ok":false}'
             ;;
         ch3*)
-            _payload=$(probe_ch3 2>/dev/null || printf '{"channel_name":"ch3","channel_rtt_ms":0}')
+            _probe_fn=probe_ch3
+            _fallback='{"channel_name":"ch3","channel_rtt_ms":0,"channel_handshake_ok":false}'
             ;;
         ch4*)
-            # The || here suppresses set -e for probe_ch4; probe_ch4 relies on
-            # this ||-shielded call site to remain safe under set -e — it must
-            # not be called bare (without ||) elsewhere in this script.
-            _payload=$(probe_ch4 2>/dev/null || printf '{"channel_name":"coturn","channel_rtt_ms":0,"channel_handshake_ok":false,"channel_probe_mode":"error"}')
+            _probe_fn=probe_ch4
+            # The fallback here mirrors probe_ch4's own ||-guard convention:
+            # probe_ch4 relies on being called through a shielded fallback to
+            # remain safe under set -e; it must not be called bare elsewhere.
+            _fallback='{"channel_name":"coturn","channel_rtt_ms":0,"channel_handshake_ok":false,"channel_probe_mode":"error"}'
             ;;
         ch0*|naive*|ch5*|ch6*)
             # ch0 = naive/socks fallback channel (install.sh PROTOCOL_ID_MAP
@@ -1501,10 +1573,30 @@ for _chan in "${_PROVISIONED[@]}"; do
             ;;
     esac
 
+    _chan_out="$_CHAN_TMPROOT/$_chan_idx.json"
+    _chan_idx=$((_chan_idx + 1))
+    ( "$_probe_fn" 2>/dev/null || printf '%s' "$_fallback" ) > "$_chan_out" &
+    _CHAN_NAMES+=("$_chan")
+    _CHAN_OUT+=("$_chan_out")
+done
+
+# Block until every backgrounded probe above has written its result file.
+# Bare `wait` (no PID args) waits for ALL background jobs and always returns
+# 0 — it cannot itself trip `set -e`, so no `|| true` guard is needed.
+wait
+
+for _i in "${!_CHAN_NAMES[@]}"; do
+    _payload=$(cat "${_CHAN_OUT[$_i]}" 2>/dev/null || true)
+    if [[ -z "$_payload" ]]; then
+        warn "${_CHAN_NAMES[$_i]}: empty probe result file — reporting as failed"
+        _payload="{\"channel_name\":\"${_CHAN_NAMES[$_i]}\",\"channel_handshake_ok\":false}"
+    fi
     if ! _post_channel "$_payload"; then
         _AUTH_FAIL=$((_AUTH_FAIL + 1))
     fi
 done
+
+rm -rf "$_CHAN_TMPROOT"
 
 # P3b mesh producer — probe roster peers' TURNS:443 + report prober-attributed
 # verdicts. Hung after the self-channel loop, before the auth-fail gate, so a
