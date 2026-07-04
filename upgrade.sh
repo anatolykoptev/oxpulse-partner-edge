@@ -66,6 +66,9 @@ PREV_HEALTHCHECK="$PREFIX_LIB/healthcheck.prev"
 # Directory where pre-upgrade host-script snapshots are stored for rollback.
 PREV_HOST_SCRIPTS_DIR="$PREFIX_LIB/host-scripts.prev"
 HEALTHCHECK="${OXPULSE_HEALTHCHECK:-/usr/local/sbin/oxpulse-partner-edge-healthcheck}"
+# Installed per-channel health reporter — the upgrade settle gate invokes it in
+# a focused --serveability mode to REUSE the honest end-to-end probe_ch1/ch2/ch3.
+CHANNELS_HEALTH_REPORT="${OXPULSE_CHANNELS_HEALTH_REPORT:-$PREFIX_SBIN/oxpulse-channels-health-report}"
 # @RELEASE_TAG_PLACEHOLDER@ in the default below is substituted by release.yml to the release tag
 # (vX.Y.Z starting at v0.12.60) so REPO_RAW fetches are pinned to the exact release
 # ref, not main HEAD. Without this pin the bytes fetched from raw.githubusercontent.com
@@ -1285,6 +1288,7 @@ recreate_changed_services() {
 settle_healthcheck_with_retry() {
 	local label="${1:-post-upgrade}"            # context for log messages
 	local _baseline_snap="${2:-}"               # Phase 3: pre-change snapshot file
+	local _serve_baseline="${3:-}"              # P3-serveability: pre-change chN=OK|DOWN snapshot
 	local budget="${OXPULSE_UPGRADE_HEALTH_TIMEOUT:-30}"
 	local interval=3
 	local max_attempts=$(( (budget + interval - 1) / interval ))  # ceil(budget/interval)
@@ -1462,10 +1466,50 @@ settle_healthcheck_with_retry() {
 	fi
 
 	if [[ "$_regressed" -ne 0 ]]; then
-		# Regression persisted through the ENTIRE poll budget -> real, roll back.
-		warn "settle_healthcheck: regression persisted after $max_attempts attempt(s) (budget=${budget}s) - rollback (${label})"
-		_settle_emit_rollback_metric real 1
-		return 1
+		# A snapshot regression persisted through the whole budget. Before rolling
+		# back, adjudicate ACTUAL serve-ability across the box's PROVISIONED channels
+		# by reusing the honest end-to-end probes. The xray-only canary (check_13/14)
+		# or check_07 going RED is NOT a serve-ability loss on a multi-homed box:
+		# Caddy's tunnel_upstream fails over to awg/hy2 and real users keep being
+		# served (live-verified on zvonilka). This can only SUPPRESS a false rollback,
+		# never create one — INDETERMINATE (no serve data / reporter absent / the
+		# awk-extracted isolation harness) and LOST (every serving channel went dark)
+		# both fall through to the real rollback below, preserving single-homed and
+		# current behavior.
+		# Strict first: if ANY non-channel-serve check regressed (coturn/API/
+		# containers/cert/…), that is a real problem beyond channel routing — roll
+		# back exactly as before. Only when the persisting regression is ENTIRELY
+		# channel-serve checks do we defer to the honest per-channel serve-ability
+		# quorum below (so a genuine non-channel breakage is never masked by failover).
+		if declare -F _settle_nonchannel_regression >/dev/null 2>&1 \
+			&& _settle_nonchannel_regression "$_baseline_snap" "$_post_snap"; then
+			warn "settle_healthcheck: regression persisted after $max_attempts attempt(s) (budget=${budget}s) — non-channel check, rollback (${label})"
+			_settle_emit_rollback_metric real 1
+			return 1
+		fi
+		local _serve_verdict="INDETERMINATE" _serve_post
+		if declare -F _settle_serveability_adjudicate >/dev/null 2>&1 \
+			&& declare -F _settle_serveability_snapshot >/dev/null 2>&1 \
+			&& [[ -n "$_serve_baseline" && -s "$_serve_baseline" ]]; then
+			_serve_post=$(mktemp)
+			if _settle_serveability_snapshot "$_serve_post"; then
+				_serve_verdict=$(_settle_serveability_adjudicate "$_serve_baseline" "$_serve_post")
+			fi
+			rm -f "$_serve_post"
+		fi
+		case "$_serve_verdict" in
+			SERVING*)
+				warn "settle_healthcheck: snapshot regression present, but the box still serves real users via >=1 provisioned channel (${_serve_verdict}) — NOT rolling back (${label})"
+				_settle_emit_rollback_metric serveability_intact 0
+				_settle_serveability_alert "$_serve_verdict" "$label"
+				return 0
+				;;
+			*)
+				warn "settle_healthcheck: regression persisted after $max_attempts attempt(s) (budget=${budget}s) — rollback (${label}) [serveability=${_serve_verdict}]"
+				_settle_emit_rollback_metric real 1
+				return 1
+				;;
+		esac
 	fi
 
 	if [[ "$_saw_transient" -eq 1 ]]; then
@@ -1476,6 +1520,132 @@ settle_healthcheck_with_retry() {
 		_settle_emit_rollback_metric none 0
 	fi
 	return 0
+}
+
+# ---------------------------------------------------------------------------
+# Serve-ability adjudication (P3 — multi-homed false-rollback fix).
+#
+# These three TOP-LEVEL helpers are called by settle_healthcheck_with_retry via
+# declare -F guards, so the awk-extracted, self-contained settle fn stays valid
+# in the Section-F isolation harness (guards are no-ops there → current
+# rollback behavior). They reuse the installed channel reporter and never touch
+# the pinned _settle_hc_snapshot / _settle_hc_regressions helpers.
+# ---------------------------------------------------------------------------
+
+# _settle_nonchannel_regression BASELINE POST — returns 0 (true) iff a NON-channel
+# healthcheck check regressed GREEN→RED. Those are real box problems beyond channel
+# routing (coturn secret, API, containers, cert, SFU, TCP443, …) and must roll back
+# regardless of multi-homed failover. The DEFERRED channel-serve checks — the
+# single-channel liveness/canary checks that falsely trip when one channel (xray/
+# hy2) is ТСПУ-blocked while others still serve — are the ONLY checks whose
+# GREEN→RED is adjudicated by the honest per-channel serve-ability quorum instead.
+# awg (ch2) has no healthcheck check, so an awg change only shows in the probe.
+_settle_nonchannel_regression() {
+	local _bl="$1" _po="$2" _id _bst _pst
+	[[ -f "$_bl" && -s "$_bl" ]] || return 1
+	while IFS="=" read -r _id _bst || [[ -n "$_id" ]]; do
+		[[ "$_bst" == "GREEN" ]] || continue
+		case "$_id" in
+			check_07_xray_tunnel|check_13_canary_tunnel|check_14_canary_upstream|check_16_hy2|check_18_hy2_tcp)
+				continue ;;
+		esac
+		_pst=$(grep "^${_id}=" "$_po" 2>/dev/null | head -1 | cut -d= -f2 || true)
+		[[ "$_pst" == "RED" ]] && return 0
+	done < "$_bl"
+	return 1
+}
+
+# _settle_serveability_snapshot OUTFILE — capture a per-channel serve-ability
+# snapshot (chN=OK|DOWN) by invoking the installed reporter's focused
+# --serveability mode, which reuses the honest end-to-end probe_ch1/ch2/ch3.
+# Writes only parseable chN=OK|DOWN lines to OUTFILE. Returns 0 iff >=1 line was
+# captured (mode supported + >=1 provisioned serve channel); 1 otherwise (legacy
+# reporter without the mode, reporter absent, or no serve channels) — the caller
+# then keeps the snapshot-only behavior. --dry-run is passed too so a legacy
+# reporter that does not know --serveability never POSTs (its JSON is grep-filtered
+# out). Never trips set -e; each probe is curl --max-time bound, so it cannot hang.
+_settle_serveability_snapshot() {
+	local _out="$1"
+	local _bin="${CHANNELS_HEALTH_REPORT:-$PREFIX_SBIN/oxpulse-channels-health-report}"
+	: > "$_out"
+	[[ -x "$_bin" ]] || return 1
+	"$_bin" --serveability --dry-run 2>/dev/null | grep -E '^ch[0-9]+=(OK|DOWN)$' > "$_out" 2>/dev/null || true
+	[[ -s "$_out" ]] || return 1
+	return 0
+}
+
+# _settle_serveability_adjudicate BASELINE POST — pure OR-quorum serve-ability
+# diff over two chN=OK|DOWN snapshots. Echoes ONE verdict token the settle gate
+# cases on; always returns 0 (verdict on stdout, not the exit code).
+#
+#   SERVING_FULL                  no provisioned serve channel regressed
+#   SERVING_PARTIAL regressed=<l> >=1 regressed but >=1 still serves
+#                                 (degraded — operator alert, NO rollback)
+#   LOST regressed=<l>            every channel serving pre-upgrade is now down
+#                                 (box would go dark → real rollback)
+#   INDETERMINATE                 no channel served pre-upgrade — nothing to
+#                                 adjudicate; defer to the base snapshot gate
+#
+# The "any channel serving → serve-able" OR-quorum deliberately MIRRORS the
+# server-side oracle compute_health_signal_perchannel() in oxpulse-chat
+# crates/server/src/partner_registry/health_poller.rs (Wave 3b.2):
+#   healthy = (any of ch1/ch2/ch3 handshake_ok=true) AND (coturn ok/absent)
+# Both consume the SAME per-channel handshake_ok signal (probe_ch1/ch2/ch3);
+# keeping the boolean shape identical stops the edge gate and the server oracle
+# silently drifting apart (the two-copies-diverge class behind the v0.13→v0.14.x
+# xray-recreate regression). coturn (ch4) is excluded — a TURN relay, not a
+# user-facing serve channel, matching the oracle's separate fail-open coturn path.
+_settle_serveability_adjudicate() {
+	local _bl="$1" _po="$2"
+	local _serving_post=0 _baseline_serving=0 _regressed=0 _regressed_list="" _id _st _pst
+	# Post serve count (OR-quorum numerator).
+	while IFS="=" read -r _id _st || [[ -n "$_id" ]]; do
+		[[ "$_id" =~ ^ch[0-9]+$ ]] || continue
+		[[ "$_st" == "OK" ]] && _serving_post=$(( _serving_post + 1 ))
+	done < "$_po"
+	# Baseline serve count + regressions (OK pre-upgrade, DOWN post-upgrade).
+	while IFS="=" read -r _id _st || [[ -n "$_id" ]]; do
+		[[ "$_id" =~ ^ch[0-9]+$ ]] || continue
+		[[ "$_st" == "OK" ]] || continue
+		_baseline_serving=$(( _baseline_serving + 1 ))
+		_pst=$(grep "^${_id}=" "$_po" 2>/dev/null | head -1 | cut -d= -f2 || true)
+		if [[ "$_pst" == "DOWN" ]]; then
+			_regressed=$(( _regressed + 1 ))
+			_regressed_list="${_regressed_list:+$_regressed_list,}$_id"
+		fi
+	done < "$_bl"
+
+	if [[ "$_baseline_serving" -eq 0 ]]; then
+		printf 'INDETERMINATE'
+		return 0
+	fi
+	if [[ "$_serving_post" -ge 1 ]]; then
+		if [[ "$_regressed" -ge 1 ]]; then
+			printf 'SERVING_PARTIAL regressed=%s' "$_regressed_list"
+		else
+			printf 'SERVING_FULL'
+		fi
+		return 0
+	fi
+	printf 'LOST regressed=%s' "$_regressed_list"
+	return 0
+}
+
+# _settle_serveability_alert VERDICT LABEL — partial-degradation alert (WARNING).
+# A provisioned channel stopped serving post-upgrade but the box still serves via
+# another channel (no rollback happened), so the operator should still know.
+# SERVING_FULL is clean (no alert); LOST already logs + metrics the real rollback.
+# Severity vocabulary is critical|warning|info only (the dozor webhook classifies
+# by lexical match). Reuses tg_alert (telegram-alert-lib, sourced via reconcile.sh);
+# a silent no-op if the alert lib is not in scope.
+_settle_serveability_alert() {
+	local _verdict="$1" _label="$2"
+	case "$_verdict" in SERVING_PARTIAL*) ;; *) return 0 ;; esac
+	declare -F tg_alert >/dev/null 2>&1 || return 0
+	local _host _regressed
+	_host=$(hostname -s 2>/dev/null || echo edge)
+	_regressed="${_verdict#SERVING_PARTIAL regressed=}"
+	tg_alert "[$_host] WARNING partner-edge ${_label}: partial channel degradation after upgrade — channel(s) ${_regressed} stopped serving end-to-end, but the box still serves real users via another provisioned channel (Caddy multi-homed failover), so NO rollback. Investigate ${_regressed}." || true
 }
 
 # _maybe_self_update_reexec ARGS... - self-update guard (canonical: Go GOTOOLCHAIN
@@ -2347,6 +2517,14 @@ if [[ "$MODE" == with_templates ]]; then
 		log "healthcheck binary absent — skipping pre-change baseline (first install?)"
 		rm -f "$_wt_baseline_snap"; _wt_baseline_snap=""
 	fi
+	# P3-serveability: pre-change per-channel serve-ability baseline (chN=OK|DOWN)
+	# captured at the SAME pre-change point as the health baseline and registered
+	# for EXIT cleanup, so the settle gate can tell a real serve-ability loss from a
+	# single-channel (e.g. xray-only) regression. Best-effort — an empty file (a
+	# reporter without --serveability) disables the serve-ability gate for this run.
+	_wt_serve_baseline=$(mktemp)
+	_CLEANUP_PATHS+=("$_wt_serve_baseline")
+	_settle_serveability_snapshot "$_wt_serve_baseline" || true
 
 	# Step 6: reconcile all surfaces (Phase 4a engine).
 	# Phase 4a wires caddyfile only; apply_caddy_reloads fires a targeted caddy hot-reload
@@ -2422,7 +2600,7 @@ if [[ "$MODE" == with_templates ]]; then
 
 	# Step 8: verify with retry — Phase 3 baseline-aware gate.
 	# Pass baseline snapshot so gate diffs pre-change vs post-change.
-	if ! settle_healthcheck_with_retry "with-templates-upgrade" "${_wt_baseline_snap:-}"; then
+	if ! settle_healthcheck_with_retry "with-templates-upgrade" "${_wt_baseline_snap:-}" "${_wt_serve_baseline:-}"; then
 		warn "healthcheck regression after --with-templates upgrade — rolling back"
 		rm -f "${_wt_baseline_snap:-}"
 		do_rollback_templates
@@ -2533,6 +2711,13 @@ else
 	log "healthcheck binary absent — skipping pre-change baseline"
 	rm -f "$_baseline_snapshot"; _baseline_snapshot=""
 fi
+# P3-serveability: pre-change per-channel serve-ability baseline (chN=OK|DOWN),
+# registered for EXIT cleanup — lets the settle gate tell a real serve-ability
+# loss from a single-channel (e.g. xray-only) regression. Best-effort (empty file
+# = reporter without --serveability = serve-ability gate disabled this run).
+_serve_baseline_snapshot=$(mktemp)
+_CLEANUP_PATHS+=("$_serve_baseline_snapshot")
+_settle_serveability_snapshot "$_serve_baseline_snapshot" || true
 
 # Capture per-service image digests BEFORE pull so we can skip recreating
 # services whose image did not actually change (e.g. no-op version bump where
@@ -2599,7 +2784,7 @@ fi
 # with added margin for a loaded edge.  A single sleep 10 was replaced because
 # the 2s slack was insufficient on loaded edges (see function definition comment).
 # Phase 3: pass baseline snapshot for regression-aware gate.
-if ! settle_healthcheck_with_retry "plain-upgrade" "${_baseline_snapshot:-}"; then
+if ! settle_healthcheck_with_retry "plain-upgrade" "${_baseline_snapshot:-}" "${_serve_baseline_snapshot:-}"; then
 	warn "healthcheck regression after upgrade — rolling back"
 	rm -f "${_baseline_snapshot:-}"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"

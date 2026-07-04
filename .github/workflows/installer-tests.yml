@@ -25,6 +25,9 @@ on:
       - 'tests/test_reconcile_caddy_reload_observability.sh'
       - 'oxpulse-channels-health-report.sh'
       - 'tests/test_channels_health_report.sh'
+      - 'lib/healthcheck-lib.sh'
+      - 'tests/test_settle_serveability.sh'
+      - 'tests/test_settle_dual_pin_consistency.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
@@ -53,6 +56,9 @@ on:
       - 'tests/test_reconcile_caddy_reload_observability.sh'
       - 'oxpulse-channels-health-report.sh'
       - 'tests/test_channels_health_report.sh'
+      - 'lib/healthcheck-lib.sh'
+      - 'tests/test_settle_serveability.sh'
+      - 'tests/test_settle_dual_pin_consistency.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
@@ -116,3 +122,9 @@ jobs:
 
       - name: Channel-canary honest end-to-end probes (multi-channel failover hardening, P1)
         run: bash tests/test_channels_health_report.sh
+
+      - name: Serve-ability-aware settle gate — suppress multi-homed false rollback (P3)
+        run: bash tests/test_settle_serveability.sh
+
+      - name: Settle dual-pin fitness — inline vs lib health primitives stay identical
+        run: bash tests/test_settle_dual_pin_consistency.sh

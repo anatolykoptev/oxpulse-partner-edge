@@ -42,11 +42,13 @@ _DEFAULTS_CONF_LOCAL="${_DEFAULTS_CONF_LOCAL:-$(dirname "$0")/config/defaults.co
 # ---------- flags ----------
 DRY_RUN=0
 CURL_TRACE=0
+SERVE_ONLY=0
 
 for _arg in "$@"; do
     case "$_arg" in
         --dry-run)    DRY_RUN=1 ;;
         --curl-trace) CURL_TRACE=1 ;;
+        --serveability) SERVE_ONLY=1 ;;   # settle-gate probe-only mode (see _emit_serveability)
         --once)       ;;   # no-op; timer drives cadence, --once is for clarity
         *) printf 'WARN: unknown flag: %s\n' "$_arg" >&2 ;;
     esac
@@ -1496,8 +1498,47 @@ _check_upstream_transitions() {
     mv -f "$tmp" "$state_file"
 }
 
+# ---------- serve-ability probe (upgrade settle-gate consumer) ----------
+# --serveability: probe ONLY the provisioned tunnel channels (ch1/ch2/ch3) via
+# the SAME honest end-to-end probe_ch1/ch2/ch3 used by the 60s health report,
+# and emit one parseable `chN=OK|DOWN` line each — no POST, no peer-probe, no
+# ch4 (coturn is a TURN relay, not a user-facing serve channel; its probe is
+# also slow and leaks allocations, so it must never run on the settle path).
+# This is the real-time serve-ability oracle the upgrade settle gate consults
+# before rolling back: a box whose xray (ch1) is ТСПУ-blocked but whose awg
+# (ch2) / hy2 (ch3) still serve via Caddy's multi-homed tunnel_upstream must NOT
+# be rolled back. `OK` = the channel's tunnel reached the backend end-to-end
+# (handshake_ok true); `DOWN` otherwise. Channels absent from node-config are
+# simply not emitted (the consumer treats an absent channel as non-applicable /
+# info, never a regression).
+_emit_serveability() {
+    local _chan _fn _canon _json _ok
+    for _chan in "${_PROVISIONED[@]}"; do
+        case "$_chan" in
+            ch1*) _fn=probe_ch1; _canon=ch1 ;;
+            ch2*) _fn=probe_ch2; _canon=ch2 ;;
+            ch3*) _fn=probe_ch3; _canon=ch3 ;;
+            *)    continue ;;   # ch4/coturn, ch0/naive (unwired), unknown → not a serve channel
+        esac
+        _json=$( "$_fn" 2>/dev/null || printf '{"channel_handshake_ok":false}' )
+        _ok=$(printf '%s' "$_json" | jq -r '.channel_handshake_ok // false' 2>/dev/null || echo false)
+        if [[ "$_ok" == "true" ]]; then
+            printf '%s=OK\n' "$_canon"
+        else
+            printf '%s=DOWN\n' "$_canon"
+        fi
+    done
+}
+
 # ---------- main ----------
 mapfile -t _PROVISIONED < <(jq -r '.channels[]?.id // empty' "$_NODE_CONFIG" 2>/dev/null || true)
+
+# Serve-ability probe mode: emit chN=OK|DOWN and exit BEFORE the report/POST/
+# peer-probe machinery. Safe on a box with no channels (emits nothing, exit 0).
+if [[ "${SERVE_ONLY:-0}" -eq 1 ]]; then
+    _emit_serveability
+    exit 0
+fi
 
 if [[ "${#_PROVISIONED[@]}" -eq 0 ]]; then
     log "no channels in node-config.json — nothing to report"
