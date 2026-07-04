@@ -283,3 +283,30 @@ remember to touch two files by hand instead of one.
 `upgrade.sh:432` (`_stage_lib "install-firewall.sh" ...`), `lib/reconcile.sh`
 (`${FIREWALL_LIB:-...}` default — currently unreachable), `lib/install-firewall.sh`
 (header — kill-criteria source of truth).
+
+---
+
+## settle-gate lacks an explicit "warming/starting" channel state (race-core comparison, 2026-07-04)
+
+The upgrade settle-gate's cold-start hazard (a post-recreate COLD read on a not-yet-warm
+container reporting a transient regression) is currently papered over by a re-poll-until-clear
+heuristic rather than an explicit state. A code-research comparison against DARPA's RACE
+framework (`tst-race/race-core` — otherwise not a fit for us: frozen since 2024, C++, built for
+async covert-messaging over a mix-network, not our continuous-throughput relay) surfaced one
+pattern worth taking as an IDEA, not code (wrong language, wrong shape everywhere else):
+`racesdk/common/include/ChannelStatus.h:24` models channel state as 8 explicit values including
+a distinct `CHANNEL_STARTING` vs `CHANNEL_FAILED` — "warming up" is a first-class state, not
+inferred by retrying until a FAILED reading clears.
+
+**Followup:** consider replacing (or complementing) the settle-gate's cold-start re-poll
+(`upgrade.sh` cold-start retry logic, ~line 1439, and its twin in `lib/healthcheck-lib.sh`) with
+an explicit STARTING status per channel/check, so a not-yet-warm container reports STARTING
+rather than a transient RED that has to be waited out. Subsumed in large part by the
+serve-ability-aware settle-gate rework (this same file, tracked separately, in flight as of this
+writing) — revisit only if the re-poll heuristic causes a real incident after that lands.
+
+**Severity:** LOW — the existing re-poll heuristic already covers the practical case; this is a
+robustness/clarity improvement, not a live bug.
+
+**File:line:** `upgrade.sh` (cold-start retry logic, ~line 1439), `lib/healthcheck-lib.sh`
+(twin copy). Full comparison: agent memory `race-core-vs-oxpulse-channels.md`.
