@@ -23,6 +23,8 @@ on:
       - 'tests/test_health_gate_cold_start_settle.sh'
       - 'tests/test_upgrade_self_reexec.sh'
       - 'tests/test_reconcile_caddy_reload_observability.sh'
+      - 'oxpulse-channels-health-report.sh'
+      - 'tests/test_channels_health_report.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
@@ -49,6 +51,8 @@ on:
       - 'tests/test_health_gate_cold_start_settle.sh'
       - 'tests/test_upgrade_self_reexec.sh'
       - 'tests/test_reconcile_caddy_reload_observability.sh'
+      - 'oxpulse-channels-health-report.sh'
+      - 'tests/test_channels_health_report.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
@@ -109,3 +113,6 @@ jobs:
 
       - name: Caddy reload stderr surfaced + un-loadable Caddyfile persisted (v0.14.3 FIX 3)
         run: bash tests/test_reconcile_caddy_reload_observability.sh
+
+      - name: Channel-canary honest end-to-end probes (multi-channel failover hardening, P1)
+        run: bash tests/test_channels_health_report.sh

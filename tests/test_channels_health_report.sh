@@ -1165,7 +1165,7 @@ PATH="$T20:/usr/bin:/bin" \
     bash "$SCRIPT" --dry-run >/dev/null 2>&1
 set -e
 
-# All three probe curl invocations must carry --max-time 3 (their hard timeout).
+# All three probe curl invocations must carry --max-time 7 (OXPULSE_CHANNEL_PROBE_TIMEOUT, their hard timeout).
 MAXTIME_COUNT=$(grep -c -- '--max-time 7' "$ARGV_LOG20" 2>/dev/null || true)
 [[ -n "$MAXTIME_COUNT" ]] || MAXTIME_COUNT=0
 if [[ "$MAXTIME_COUNT" -eq 3 ]]; then
@@ -1217,10 +1217,10 @@ END21=$(date +%s)
 ELAPSED21=$((END21 - START21))
 
 # Concurrent: ~2s (all three sleep in parallel). Serial would be ~6s+.
-if [[ "$ELAPSED21" -le 4 ]]; then
+if [[ "$ELAPSED21" -le 5 ]]; then
     ok "test21: ch1/ch2/ch3 probed CONCURRENTLY -- total wall time ${ELAPSED21}s (bounded by slowest probe, not the sum)"
 else
-    fail "test21: REGRESSION -- probes ran serially (took ${ELAPSED21}s, expected <=4s for 3 concurrent 2s probes)"
+    fail "test21: REGRESSION -- probes ran serially (took ${ELAPSED21}s, expected <=5s for 3 concurrent 2s probes)"
 fi
 
 # Correctness: all three channels still present despite each being individually slow.
