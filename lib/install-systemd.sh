@@ -179,6 +179,22 @@ _systemd_install_lib_scripts() {
 		chmod 0755 "$PREFIX_SBIN/channel-health-lib.sh"
 	fi
 
+	# P3b cross-probe lib — mesh peer-probe functions sourced by
+	# oxpulse-channels-health-report.sh at runtime (strangler-fig extraction).
+	# 0644 (sourced, not executed). Same delivery tiers as telegram-alert-lib.sh;
+	# upgrade.sh syncs it to existing boxes via _HOST_SCRIPT_SBIN_FILES.
+	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/cross-probe-lib.sh" ]]; then
+		install -m 0644 "$src_dir/lib/cross-probe-lib.sh" "$PREFIX_SBIN/cross-probe-lib.sh"
+	elif [[ -n "${src_dir:-}" && -f "$src_dir/cross-probe-lib.sh" ]]; then
+		install -m 0644 "$src_dir/cross-probe-lib.sh" "$PREFIX_SBIN/cross-probe-lib.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/cross-probe-lib.sh" ]]; then
+		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/cross-probe-lib.sh" \
+			"$PREFIX_SBIN/cross-probe-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/lib/cross-probe-lib.sh" -o "$PREFIX_SBIN/cross-probe-lib.sh"
+		chmod 0644 "$PREFIX_SBIN/cross-probe-lib.sh"
+	fi
+
 	# Fleet-wide infrastructure defaults (Bug 8 fix — install to canonical share path).
 	# channel-render-lib.sh and oxpulse-channels-health-report.sh both source this file
 	# from /usr/local/share/oxpulse-partner-edge/config/defaults.conf at runtime.

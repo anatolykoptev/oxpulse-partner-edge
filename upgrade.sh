@@ -776,6 +776,13 @@ _HOST_SCRIPT_SBIN_FILES=(
 	# found" — the exact partially-upgraded-fleet-node risk this sync exists
 	# to close (see the cheburator incident note above this array).
 	channel-health-lib.sh
+	# Cross-probe (P3b mesh peer-probe) lib: sourced by
+	# oxpulse-channels-health-report at runtime. MUST sync here or a
+	# plain-upgraded edge gets the new health-report script sourcing a lib that
+	# never arrived — mesh probing goes dark (the health-report source is
+	# fail-soft, so this does NOT auto-rollback, but the feature is silently lost
+	# until a fresh install). Same fetch+sha256-verify path as telegram-alert-lib.
+	cross-probe-lib.sh
 	# Split-routing scripts (PR #280; RU profile only, ship to all edges for idempotency).
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable
@@ -818,6 +825,7 @@ _host_script_remote_name() {
 		telegram-alert-lib.sh)           echo "lib/telegram-alert-lib.sh" ;;
 		peer-ip-guard-lib.sh)            echo "lib/peer-ip-guard-lib.sh" ;;
 		channel-health-lib.sh)           echo "lib/channel-health-lib.sh" ;;
+		cross-probe-lib.sh)              echo "lib/cross-probe-lib.sh" ;;
 		oxpulse-partner-edge-split-routing)    echo "oxpulse-partner-edge-split-routing.sh" ;;
 		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
 		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;
@@ -842,7 +850,7 @@ _host_script_install_dir() {
 _host_script_mode() {
 	local installed_name="$1"
 	case "$installed_name" in
-		channel-render-lib.sh|ghcr-auth-lib.sh|render-channel-lib.sh|oxpulse-token-lib.sh)
+		channel-render-lib.sh|ghcr-auth-lib.sh|render-channel-lib.sh|oxpulse-token-lib.sh|cross-probe-lib.sh)
 			echo "0644" ;;
 		*)  echo "0755" ;;
 	esac
