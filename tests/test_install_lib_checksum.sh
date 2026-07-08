@@ -68,7 +68,8 @@ teardown() {
 		telegram-alert-lib.sh \
 		compose-lib.sh \
 		healthcheck-lib.sh \
-		host-scripts-lib.sh; do
+		host-scripts-lib.sh \
+		channel-health-lib.sh; do
 		grep -q "$basename" "$CHECKSUMS"
 	done
 }

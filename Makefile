@@ -47,5 +47,6 @@ lib-checksums:
 	  healthcheck-lib.sh \
 	  host-scripts-lib.sh \
 	  peer-ip-guard-lib.sh \
+	  channel-health-lib.sh \
 	) > lib/lib-checksums.txt
 	@echo "lib/lib-checksums.txt regenerated — commit the result"
