@@ -15,17 +15,19 @@
 #   PARTNER_EDGE_TEXTFILE_DIR — env override resolved directly by _emit_prom_gauge_file
 #                                (independent of the caller's $TEXTFILE_DIR — same
 #                                resolution lib/reconcile.sh's _reconcile_emit_prom_gauge
-#                                uses, so both the counter sink and the gauge sink honor
-#                                the same single knob without the caller wiring it through).
+#                                wrapper uses, so both the counter sink and the gauge sink
+#                                honor the same single knob without the caller wiring it
+#                                through).
 #
-# Sourced by oxpulse-partner-edge-refresh.sh. lib/reconcile.sh's own
-# _reconcile_emit_prom_gauge (lib/reconcile.sh:1332-1352) is the CANONICAL
-# atomic-gauge shape _emit_prom_gauge_file below adopts verbatim (own-file-
-# per-gauge, tmp+mv, same `# TYPE %s gauge` format) — P1b of the same plan
-# retargets reconcile.sh onto this shared primitive so there is exactly one
-# gauge-textfile writer repo-wide (fitness function:
-# `rg 'TYPE %s gauge' lib/*.sh *.sh` → one implementation once P1b lands).
-# Not executable on its own.
+# Sourced by oxpulse-partner-edge-refresh.sh. `_emit_prom_gauge_file` below
+# adopted lib/reconcile.sh's original `_reconcile_emit_prom_gauge` shape verbatim
+# at P1 (own-file-per-gauge, tmp+mv, `# TYPE %s gauge` format) as the canonical
+# atomic-gauge primitive. P1b (2026-07-08 refresh-lib-extraction-strangler,
+# in-arc follow-up) retargeted lib/reconcile.sh's `_reconcile_emit_prom_gauge`
+# onto THIS `_emit_prom_gauge_file` (lazy call-time source, same convention as
+# reconcile.sh's other lib deps) so there is exactly one gauge-textfile-writer
+# implementation repo-wide (fitness: `rg 'TYPE %s gauge' lib/*.sh *.sh` → one hit,
+# see tests/test_gauge_writer_fitness.sh). Not executable on its own.
 
 # Guard against double-sourcing.
 [[ "${_METRIC_SINK_LIB_LOADED:-0}" -eq 1 ]] && return 0
