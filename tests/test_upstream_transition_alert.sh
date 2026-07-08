@@ -32,13 +32,17 @@ SCRIPT_DIR="$REPO_ROOT" \
     bash -c '
         source "$SCRIPT_DIR/lib/telegram-alert-lib.sh"
 
-        # Extract and define _check_upstream_transitions from the main script
-        # by sourcing only the function block (we set guard vars to prevent main
-        # execution — guard is irrelevant since we call bash -c, not source).
+        # Extract and define _check_upstream_transitions by sourcing only the
+        # function block (we set guard vars to prevent main execution — guard
+        # is irrelevant since we call bash -c, not source).
         #
-        # Use sed to extract function body from the main script and eval it:
+        # P2 strangler extraction (2026-07-08 plan): _check_upstream_transitions
+        # moved into lib/channel-health-lib.sh — extract from its new home, not
+        # the orchestrator (a stale path here would silently no-op this test the
+        # moment the function moved, per the plans own "test-porting no-op" risk).
+        # Use sed to extract function body from the lib and eval it:
         func_body=$(sed -n "/^_check_upstream_transitions()/,/^}/p" \
-            "$SCRIPT_DIR/oxpulse-channels-health-report.sh")
+            "$SCRIPT_DIR/lib/channel-health-lib.sh")
         eval "$func_body"
 
         _check_upstream_transitions

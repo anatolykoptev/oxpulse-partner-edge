@@ -40,8 +40,12 @@ _run_check() {
     OXPULSE_TG_MIN_INTERVAL="$min_interval" \
     bash -c '
         source "$SCRIPT_DIR/lib/telegram-alert-lib.sh"
+        # P2 strangler extraction (2026-07-08 plan): _check_upstream_transitions
+        # moved into lib/channel-health-lib.sh — extract from its new home, not
+        # the orchestrator (a stale path here would silently no-op this test the
+        # moment the function moved, per the plans own "test-porting no-op" risk).
         func_body=$(sed -n "/^_check_upstream_transitions()/,/^}/p" \
-            "$SCRIPT_DIR/oxpulse-channels-health-report.sh")
+            "$SCRIPT_DIR/lib/channel-health-lib.sh")
         eval "$func_body"
         _check_upstream_transitions
     '

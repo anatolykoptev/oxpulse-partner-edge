@@ -768,6 +768,14 @@ _HOST_SCRIPT_SBIN_FILES=(
 	# it fail-CLOSED — a missing copy on an existing fleet node would die()
 	# every tick, not silently degrade, so this entry is not optional).
 	peer-ip-guard-lib.sh
+	# P2 strangler extraction (2026-07-08 plan): channel probes + report/verdict
+	# logic sourced fail-closed by oxpulse-channels-health-report.sh every 60s
+	# tick. Bears both externally-depended wire contracts (see the lib's own
+	# header). Must ship here or an upgraded-but-not-freshly-installed edge
+	# dies on its next health-report tick with "channel-health-lib.sh not
+	# found" — the exact partially-upgraded-fleet-node risk this sync exists
+	# to close (see the cheburator incident note above this array).
+	channel-health-lib.sh
 	# Split-routing scripts (PR #280; RU profile only, ship to all edges for idempotency).
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable
@@ -809,6 +817,7 @@ _host_script_remote_name() {
 		oxpulse-token-lib.sh)            echo "oxpulse-token-lib.sh" ;;
 		telegram-alert-lib.sh)           echo "lib/telegram-alert-lib.sh" ;;
 		peer-ip-guard-lib.sh)            echo "lib/peer-ip-guard-lib.sh" ;;
+		channel-health-lib.sh)           echo "lib/channel-health-lib.sh" ;;
 		oxpulse-partner-edge-split-routing)    echo "oxpulse-partner-edge-split-routing.sh" ;;
 		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
 		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;
