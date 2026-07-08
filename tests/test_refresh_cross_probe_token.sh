@@ -827,6 +827,31 @@ pass "test13 (CWE-214): cross-probe token fetch hardened — Authorization heade
 trap - EXIT
 rm -rf "$T13"
 
+# ── Test 14 (P3 wiring): metric-sink-lib.sh sourced BEFORE xprb-refresh-lib.sh ──
+# lib/xprb-refresh-lib.sh declares "Requires: lib/metric-sink-lib.sh" in its
+# own header (emit_xprb_failure calls emit_metric directly) — the
+# orchestrator must source metric-sink-lib.sh first. Static fitness function:
+# assert the source-statement line order in the real script. (Tests 1-13
+# above already exercise the real integration path end-to-end — e.g. test3's
+# PROM_FILE3 assertion only passes if emit_metric was actually reachable when
+# refresh_cross_probe_token → emit_xprb_failure ran — this test adds an
+# explicit static guard on top so a future reordering fails loudly at review
+# time, not just via a downstream metric going silently missing.)
+[[ -f "$REPO_ROOT/lib/xprb-refresh-lib.sh" ]] \
+    || fail "test14: lib/xprb-refresh-lib.sh not found"
+
+MSL_SOURCE_LINE=$(grep -n 'source "\$_MSL_LOCAL"' "$SCRIPT" | head -n1 | cut -d: -f1)
+XRL_SOURCE_LINE=$(grep -n 'source "\$_XRL_LOCAL"' "$SCRIPT" | head -n1 | cut -d: -f1)
+
+[[ -n "$MSL_SOURCE_LINE" ]] \
+    || fail "test14: metric-sink-lib.sh source statement not found in $SCRIPT"
+[[ -n "$XRL_SOURCE_LINE" ]] \
+    || fail "test14: xprb-refresh-lib.sh source statement not found in $SCRIPT"
+[[ "$MSL_SOURCE_LINE" -lt "$XRL_SOURCE_LINE" ]] \
+    || fail "test14: metric-sink-lib.sh (line $MSL_SOURCE_LINE) must be sourced BEFORE xprb-refresh-lib.sh (line $XRL_SOURCE_LINE) — emit_xprb_failure calls emit_metric directly"
+
+pass "test14: metric-sink-lib.sh sourced before xprb-refresh-lib.sh (line $MSL_SOURCE_LINE < $XRL_SOURCE_LINE), lib file present"
+
 # ── Syntax check ───────────────────────────────────────────────────────────
 bash -n "$SCRIPT" \
     || fail "refresh script has syntax errors"

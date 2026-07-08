@@ -233,6 +233,26 @@ _systemd_install_lib_scripts() {
 		chmod 0644 "$PREFIX_SBIN/surgical-restart-lib.sh"
 	fi
 
+	# Xprb-refresh lib (P3 of the 2026-07-08 refresh-lib-extraction-strangler
+	# plan) — the cross-probe (xprb_) bearer-token daily re-mint leg, sourced
+	# fail-CLOSED by oxpulse-partner-edge-refresh.sh at every daily tick (no
+	# safe inline fallback: a missing lib would silently stop the daily
+	# re-mint forever). Requires metric-sink-lib.sh to already be sourced
+	# (refresh.sh enforces the order). Same delivery tier + 0644 mode as
+	# surgical-restart-lib.sh directly above (sourced, not executed);
+	# upgrade.sh syncs it to existing boxes via _HOST_SCRIPT_SBIN_FILES.
+	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/xprb-refresh-lib.sh" ]]; then
+		install -m 0644 "$src_dir/lib/xprb-refresh-lib.sh" "$PREFIX_SBIN/xprb-refresh-lib.sh"
+	elif [[ -n "${src_dir:-}" && -f "$src_dir/xprb-refresh-lib.sh" ]]; then
+		install -m 0644 "$src_dir/xprb-refresh-lib.sh" "$PREFIX_SBIN/xprb-refresh-lib.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/xprb-refresh-lib.sh" ]]; then
+		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/xprb-refresh-lib.sh" \
+			"$PREFIX_SBIN/xprb-refresh-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/lib/xprb-refresh-lib.sh" -o "$PREFIX_SBIN/xprb-refresh-lib.sh"
+		chmod 0644 "$PREFIX_SBIN/xprb-refresh-lib.sh"
+	fi
+
 	# Fleet-wide infrastructure defaults (Bug 8 fix — install to canonical share path).
 	# channel-render-lib.sh and oxpulse-channels-health-report.sh both source this file
 	# from /usr/local/share/oxpulse-partner-edge/config/defaults.conf at runtime.
