@@ -798,6 +798,16 @@ _HOST_SCRIPT_SBIN_FILES=(
 	# refresh run (no safe inline fallback), so this entry is not optional.
 	# Same fetch+sha256-verify path as metric-sink-lib.sh directly above.
 	surgical-restart-lib.sh
+	# Xprb-refresh lib (P3 of the 2026-07-08 refresh-lib-extraction-strangler
+	# plan): the cross-probe (xprb_) bearer-token daily re-mint leg, sourced
+	# fail-CLOSED by oxpulse-partner-edge-refresh.sh at every daily tick — a
+	# missing copy on an existing fleet node would die() on the next refresh
+	# run (no safe inline fallback), so this entry is not optional. Requires
+	# metric-sink-lib.sh (directly above) to already be delivered — both ship
+	# together in this array so a partial sync can never land one without the
+	# other. Same fetch+sha256-verify path as surgical-restart-lib.sh directly
+	# above.
+	xprb-refresh-lib.sh
 	# Split-routing scripts (PR #280; RU profile only, ship to all edges for idempotency).
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable
@@ -843,6 +853,7 @@ _host_script_remote_name() {
 		cross-probe-lib.sh)              echo "lib/cross-probe-lib.sh" ;;
 		metric-sink-lib.sh)              echo "lib/metric-sink-lib.sh" ;;
 		surgical-restart-lib.sh)         echo "lib/surgical-restart-lib.sh" ;;
+		xprb-refresh-lib.sh)             echo "lib/xprb-refresh-lib.sh" ;;
 		oxpulse-partner-edge-split-routing)    echo "oxpulse-partner-edge-split-routing.sh" ;;
 		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
 		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;
@@ -867,7 +878,7 @@ _host_script_install_dir() {
 _host_script_mode() {
 	local installed_name="$1"
 	case "$installed_name" in
-		channel-render-lib.sh|ghcr-auth-lib.sh|render-channel-lib.sh|oxpulse-token-lib.sh|cross-probe-lib.sh|metric-sink-lib.sh|surgical-restart-lib.sh)
+		channel-render-lib.sh|ghcr-auth-lib.sh|render-channel-lib.sh|oxpulse-token-lib.sh|cross-probe-lib.sh|metric-sink-lib.sh|surgical-restart-lib.sh|xprb-refresh-lib.sh)
 			echo "0644" ;;
 		*)  echo "0755" ;;
 	esac
