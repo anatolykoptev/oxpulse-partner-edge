@@ -32,7 +32,7 @@ CHANNELS_VERSION_FILE="$PREFIX_LIB/channels-version"
 SFU_KEYS_ENV="$PREFIX_LIB/sfu-keys.env"
 # Single source for the SFU container_name (docker-compose.yml.tpl `container_name:`).
 # Used by the applied-gauge detector (docker ps filter + docker exec target) and as
-# the `_restart_if_changed` state_container (docker inspect liveness). NOT the compose
+# the `_docker_restart_if_sha_changed` state_container (docker inspect liveness). NOT the compose
 # SERVICE key — that is the literal `sfu` (docker compose targets services, not
 # container_names). Functions sourced in isolation by the tests set this themselves.
 SFU_CONTAINER_NAME="oxpulse-partner-sfu"
@@ -70,6 +70,30 @@ else
     die "metric-sink-lib.sh not found (checked $_MSL_LOCAL and $_MSL_SBIN) — refusing to run without the metric sink (would silently regress emit_metric's PR #328 duplicate-TYPE-line fix)"
 fi
 unset _MSL_LOCAL _MSL_SBIN
+
+# _docker_restart_if_sha_changed (sha-diff-gated docker compose restart/
+# recreate mechanism) — extracted to lib/surgical-restart-lib.sh (P2 of the
+# 2026-07-08 refresh-lib-extraction-strangler plan). PURE mechanism, zero
+# channels-status.env knowledge (ADR-9) — see the lib's own header for the
+# full boundary-split rationale and the caller-side gate wrapper
+# (_channel_restart_if_changed) defined further below in this script.
+#
+# Sourced fail-closed for the same reason as metric-sink-lib.sh above: a
+# missing lib here would leave channel/SFU config changes silently un-applied
+# forever (the sha never advances, so nothing ever retries visibly) — refuse
+# to run rather than silently regress to a stale-config fleet.
+_SRL_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/surgical-restart-lib.sh"
+_SRL_SBIN="${PREFIX_SBIN:-/usr/local/sbin}/surgical-restart-lib.sh"
+if [[ -r "$_SRL_LOCAL" ]]; then
+    # shellcheck source=lib/surgical-restart-lib.sh
+    source "$_SRL_LOCAL"
+elif [[ -r "$_SRL_SBIN" ]]; then
+    # shellcheck source=/dev/null
+    source "$_SRL_SBIN"
+else
+    die "surgical-restart-lib.sh not found (checked $_SRL_LOCAL and $_SRL_SBIN) — refusing to run without the surgical-restart mechanism (would silently leave channel/SFU config changes un-applied)"
+fi
+unset _SRL_LOCAL _SRL_SBIN
 
 # OS-aware install hint: returns the appropriate install command for the host PM.
 suggest_install() {
@@ -450,114 +474,46 @@ unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTE
 # restarted. Healthy unchanged containers are left running. Failed channels
 # (from channels-status.env) are skipped entirely.
 
-# _restart_if_changed kind cfg_file sha_file compose_file container [apply_mode] [state_container] [skip_channel_status]
-# Restarts a single docker compose service only when its config file hash
-# differs from the last persisted hash. Updates the sha file on success.
-# Consults channels-status.env: skips channels that are not active — UNLESS the
-# 8th arg (skip_channel_status) is set. channels-status.env is written by the
-# backend's channel-provisioning surface (xray/naive/hysteria2/…) and has no
-# `sfu` vocabulary, so the sfu key-apply caller sets that flag to decouple its
-# lifecycle from a status file that was never designed for it (a stray `sfu=`
-# line there must NOT silently suppress a signing-key recreate).
+# _channel_restart_if_changed kind cfg_file sha_file compose_file container [apply_mode] [state_container]
 #
-# MAJOR 6 review-fix note: uses `docker compose restart` (not `up --force-recreate`).
-# This is intentional: the channels_version path re-renders only channel config
-# files (xray-client.json, etc.) — it does NOT re-render docker-compose.yml.
-# The compose service definitions are invariant under channels_version changes;
+# Thin CALLER-SIDE wrapper (ADR-9 of the 2026-07-08 refresh-lib-extraction-
+# strangler plan): consults channels-status.env — the channel-provisioning
+# surface's status vocabulary (written by the backend for xray/naive/
+# hysteria2/…) — and skips non-active channels, BEFORE delegating to the PURE
+# `_docker_restart_if_sha_changed` mechanism (lib/surgical-restart-lib.sh,
+# sourced fail-closed above). Channel callers below go through this wrapper.
+#
+# The SFU key-apply caller (further below) has no channels-status.env
+# vocabulary for `sfu` — a stray `sfu=` line there must NOT silently suppress
+# a signing-key recreate — so it calls `_docker_restart_if_sha_changed`
+# directly, SKIPPING this wrapper entirely, rather than the prior
+# `_restart_if_changed`'s 8th `skip_channel_status` bypass-flag arg (the
+# Fowler flag-argument smell the architecture council flagged: domain policy
+# leaking into what should be a pure infrastructure primitive).
+#
+# MAJOR 6 review-fix note (unchanged from pre-extraction): the channels_version
+# path uses `docker compose restart` (not `up --force-recreate`). This is
+# intentional: the channels_version path re-renders only channel config files
+# (xray-client.json, etc.) — it does NOT re-render docker-compose.yml. The
+# compose service definitions are invariant under channels_version changes;
 # only the mounted config files change. `restart` is therefore correct here.
 # If compose.yml drift is detected via `install.sh --check`, the operator must
 # run a full re-install. This assumption is CI-verified via test_install_sh_check_drift.sh.
 #
-# apply_mode (6th arg, default "restart"):
-#   restart  — `docker compose restart SVC`. Correct for BIND-MOUNTED config
-#              files (xray/naive/hy2): the container re-reads the mounted file on
-#              restart. `container` is the service name compose knows.
-#   recreate — `docker compose up -d --no-deps --force-recreate SVC`. Required
-#              for env_file consumers (sfu): env_file is injected at container
-#              CREATION, so a plain `restart` keeps the OLD environment — the new
-#              key would never take effect (verified: restart does not re-read
-#              env_file). --no-deps keeps the blast radius to the one service.
-#
-# state_container (7th arg, default = `container`): the CONTAINER NAME to verify
-#   post-apply via `docker inspect --format '{{.State.Running}}'`. Kept separate
-#   from `container` because compose targets a SERVICE name (`sfu`) while inspect
-#   needs the fixed container_name (`oxpulse-partner-sfu`). `docker inspect`'s
-#   `{{.State.Running}}` template is evaluated by the daemon and its output shape
-#   (`true`/`false`) is stable across Docker/Compose versions — unlike parsing
-#   `docker compose ps --format json`, whose object/array/JSONL shape has drifted
-#   between Compose releases. A fragile parse here would fall back to "not running"
-#   on a healthy container, never advance the sha, and re-trigger a live-media
-#   `force-recreate` on every daily cycle (review HIGH: cross-host recreate loop).
-_restart_if_changed() {
-    local kind="$1" cfg_file="$2" sha_file="$3" compose_file="$4" container="$5"
-    local apply_mode="${6:-restart}"
-    local state_container="${7:-$container}"
-    # 8th arg (default off): when non-empty, bypass the channels-status.env gate.
-    # The sfu key-apply caller sets it because that file's status vocabulary
-    # (written by the channel-provisioning surface) has no notion of `sfu`; a
-    # stray `sfu=` line must not silently suppress a signing-key recreate.
-    local skip_channel_status="${8:-}"
-
-    # Consult channels-status.env: skip non-active channels (channel callers only)
-    if [[ -z "$skip_channel_status" ]]; then
-        local _ch_status=""
-        local _chs_env="${PREFIX_LIB}/channels-status.env"
-        if [[ -f "$_chs_env" ]]; then
-            _ch_status=$(grep "^${kind}=" "$_chs_env" 2>/dev/null | cut -d= -f2 || true)
-        fi
-        if [[ -n "$_ch_status" && "$_ch_status" != "active" ]]; then
-            log "  [surgical] channel $kind status=$_ch_status — skipping restart"
-            return 0
-        fi
+# See lib/surgical-restart-lib.sh's header for apply_mode / state_container
+# semantics (unchanged by this split).
+_channel_restart_if_changed() {
+    local kind="$1"
+    local _ch_status=""
+    local _chs_env="${PREFIX_LIB}/channels-status.env"
+    if [[ -f "$_chs_env" ]]; then
+        _ch_status=$(grep "^${kind}=" "$_chs_env" 2>/dev/null | cut -d= -f2 || true)
     fi
-
-    [[ -f "$cfg_file" ]] || return 0
-    local _new_sha
-    _new_sha=$(sha256sum "$cfg_file" | awk '{print $1}')
-    local _old_sha
-    _old_sha=$(cat "$sha_file" 2>/dev/null || printf '')
-    if [[ "$_new_sha" != "$_old_sha" ]]; then
-        local _apply_ok=1
-        if [[ "$apply_mode" == "recreate" ]]; then
-            log "  [surgical] $kind config changed — recreating $container (env_file re-read)"
-            docker compose -f "$compose_file" up -d --no-deps --force-recreate "$container" \
-                2>>"$LOG_FILE" || _apply_ok=0
-        else
-            log "  [surgical] channel $kind config changed — restarting $container"
-            docker compose -f "$compose_file" restart "$container" 2>>"$LOG_FILE" || _apply_ok=0
-        fi
-        if [[ "$_apply_ok" -eq 1 ]]; then
-            # MAJOR 3 review-fix: write sha only after verifying the container
-            # is actually running. If the container is in CrashLoopBackOff /
-            # restarting state, writing the sha would suppress the next refresh
-            # cycle from retrying — leaving the container stuck on stale config.
-            # Allow ~5s for Docker to transition the state post-restart.
-            #
-            # Review HIGH (cross-host): verify liveness with `docker inspect
-            # --format '{{.State.Running}}' CONTAINER` (daemon-evaluated, stable
-            # `true`/`false` output) instead of parsing `docker compose ps
-            # --format json`, whose shape drifts across Compose versions on the
-            # partner fleet. A parse failure on a HEALTHY container would leave
-            # the sha unadvanced and re-fire `force-recreate` (a live-UDP session
-            # drop for the sfu) on every subsequent daily cycle.
-            sleep 5
-            local _running
-            _running=$(docker inspect --format '{{.State.Running}}' "$state_container" \
-                2>/dev/null || printf 'false')
-            if [[ "$_running" == "true" ]]; then
-                printf '%s\n' "$_new_sha" > "$sha_file"
-                log "  [surgical] $container restarted OK ($state_container running)"
-            else
-                log "WARNING: [surgical] $state_container State.Running=$_running after restart — sha not updated, next refresh will retry"
-            fi
-        elif [[ "$apply_mode" == "recreate" ]]; then
-            log "WARNING: [surgical] docker compose up -d --force-recreate $container failed — container may use stale config"
-        else
-            log "WARNING: [surgical] docker compose restart $container failed — container may use stale config"
-        fi
-    else
-        log "  [surgical] channel $kind unchanged — no restart"
+    if [[ -n "$_ch_status" && "$_ch_status" != "active" ]]; then
+        log "  [surgical] channel $kind status=$_ch_status — skipping restart"
+        return 0
     fi
+    _docker_restart_if_sha_changed "$@"
 }
 
 # _sfu_env_file_wired COMPOSE_FILE — true iff the live compose's `sfu` service
@@ -670,14 +626,16 @@ if [[ "$KEYS_OK" -eq 1 ]]; then
         # stays visible and alertable.
         log "WARNING: [sfu] live docker-compose.yml has no env_file wiring for sfu-keys.env — SFU signing-key refresh cannot apply on this node; run install.sh to re-render compose. Skipping recreate to avoid dropping live media"
     else
-        _restart_if_changed sfu \
+        # ADR-9: calls the PURE mechanism directly, bypassing
+        # _channel_restart_if_changed's channels-status.env gate entirely
+        # (that file has no `sfu` vocabulary — see the wrapper's own header).
+        _docker_restart_if_sha_changed sfu \
             "$SFU_KEYS_ENV" \
             "${PREFIX_LIB}/sfu-keys.sha" \
             "$_sfu_compose" \
             sfu \
             recreate \
-            "$SFU_CONTAINER_NAME" \
-            skip-channel-status
+            "$SFU_CONTAINER_NAME"
     fi
     _emit_sfu_applied_gauge "$_sfu_wired"
     unset _sfu_compose _sfu_wired
@@ -714,14 +672,14 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
     # rendered config file actually changed vs. the persisted sha.
     _compose="${PREFIX_ETC}/docker-compose.yml"
     if [[ -f "$_compose" ]]; then
-        _restart_if_changed xray \
+        _channel_restart_if_changed xray \
             "${PREFIX_ETC}/xray-client.json" \
             "${PREFIX_LIB}/xray-config.sha" \
             "$_compose" \
             oxpulse-partner-xray
         # Naive channel (CH5) — skip when not deployed
         if [[ -f "${PREFIX_ETC}/naive-client.json" ]]; then
-            _restart_if_changed naive \
+            _channel_restart_if_changed naive \
                 "${PREFIX_ETC}/naive-client.json" \
                 "${PREFIX_LIB}/naive-config.sha" \
                 "$_compose" \
@@ -730,7 +688,7 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
         # Hysteria2 channel (CH3) — restart existing or bootstrap from node-config
         _hy2_server=$(jq -r ".hysteria2_server // empty" "$NODE_CFG" 2>/dev/null || true)
         if [[ -f "${PREFIX_ETC}/hysteria2-client.yaml" ]]; then
-            _restart_if_changed hysteria2 \
+            _channel_restart_if_changed hysteria2 \
                 "${PREFIX_ETC}/hysteria2-client.yaml" \
                 "${PREFIX_LIB}/hysteria2-config.sha" \
                 "$_compose" \
