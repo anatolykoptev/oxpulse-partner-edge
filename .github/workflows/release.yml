@@ -481,6 +481,11 @@ jobs:
           # delivers it to already-installed edges on upgrade (not just fresh
           # installs via install-systemd.sh).
           cp lib/channel-health-lib.sh         channel-health-lib.sh
+          # Cross-probe (P3b mesh peer-probe) lib — sourced by
+          # oxpulse-channels-health-report.sh at runtime, synced to existing boxes
+          # via upgrade.sh _HOST_SCRIPT_SBIN_FILES (verified against SHA256SUMS),
+          # same delivery pattern as telegram-alert-lib.sh.
+          cp lib/cross-probe-lib.sh            cross-probe-lib.sh
           # NOTE: reconcile.sh is intentionally NOT staged as a repo-root release
           # asset. upgrade.sh's _source_lib fetches it from $REPO_RAW/lib/reconcile.sh
           # and verifies it against lib-checksums.txt (the lib/*.sh home manifest,
@@ -553,6 +558,7 @@ jobs:
             host-scripts-lib.sh \
             peer-ip-guard-lib.sh \
             channel-health-lib.sh \
+            cross-probe-lib.sh \
           ) > lib/lib-checksums.txt
           cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
@@ -585,6 +591,7 @@ jobs:
             telegram-alert-lib.sh \
             peer-ip-guard-lib.sh \
             channel-health-lib.sh \
+            cross-probe-lib.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
@@ -653,6 +660,7 @@ jobs:
             telegram-alert-lib.sh \
             peer-ip-guard-lib.sh \
             channel-health-lib.sh \
+            cross-probe-lib.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \

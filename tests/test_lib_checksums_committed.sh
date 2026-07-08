@@ -41,6 +41,7 @@ setup() {
 		host-scripts-lib.sh
 		peer-ip-guard-lib.sh
 		channel-health-lib.sh
+		cross-probe-lib.sh
 	)
 }
 
