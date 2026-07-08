@@ -762,6 +762,12 @@ _HOST_SCRIPT_SBIN_FILES=(
 	render-channel-lib.sh
 	oxpulse-token-lib.sh
 	telegram-alert-lib.sh
+	# SSRF / internal-IP guard (P1 of the 2026-07-08 health-report-lib-
+	# extraction plan): same consumer + same delivery shape as
+	# telegram-alert-lib.sh above (oxpulse-channels-health-report.sh sources
+	# it fail-CLOSED — a missing copy on an existing fleet node would die()
+	# every tick, not silently degrade, so this entry is not optional).
+	peer-ip-guard-lib.sh
 	# Split-routing scripts (PR #280; RU profile only, ship to all edges for idempotency).
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable
@@ -802,6 +808,7 @@ _host_script_remote_name() {
 		render-channel-lib.sh)           echo "lib/render-channel-lib.sh" ;;
 		oxpulse-token-lib.sh)            echo "oxpulse-token-lib.sh" ;;
 		telegram-alert-lib.sh)           echo "lib/telegram-alert-lib.sh" ;;
+		peer-ip-guard-lib.sh)            echo "lib/peer-ip-guard-lib.sh" ;;
 		oxpulse-partner-edge-split-routing)    echo "oxpulse-partner-edge-split-routing.sh" ;;
 		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
 		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;

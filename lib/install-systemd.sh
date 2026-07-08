@@ -117,6 +117,27 @@ _systemd_install_lib_scripts() {
 		chmod 0644 "$PREFIX_SBIN/ghcr-auth-lib.sh"
 	fi
 
+	# Peer-IP-guard lib (SSRF / internal-IP classification) — sourced fail-
+	# closed by oxpulse-channels-health-report.sh from PREFIX_SBIN at every
+	# 60s tick (P1 of the 2026-07-08 health-report-lib-extraction plan).
+	# Mirrors the telegram-alert-lib.sh block above exactly — same consumer
+	# (oxpulse-channels-health-report.sh), same PREFIX_SBIN destination, same
+	# 4-way src_dir/lib → src_dir/flat → operator-staged INSTALL_LIB_DIR →
+	# curl fallback shape. Existing fleet nodes get this synced on upgrade via
+	# upgrade.sh's separate _HOST_SCRIPT_SBIN_FILES array (this function only
+	# covers fresh installs) — see that array's peer-ip-guard-lib.sh entry.
+	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/peer-ip-guard-lib.sh" ]]; then
+		install -m 0755 "$src_dir/lib/peer-ip-guard-lib.sh" "$PREFIX_SBIN/peer-ip-guard-lib.sh"
+	elif [[ -n "${src_dir:-}" && -f "$src_dir/peer-ip-guard-lib.sh" ]]; then
+		install -m 0755 "$src_dir/peer-ip-guard-lib.sh" "$PREFIX_SBIN/peer-ip-guard-lib.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/peer-ip-guard-lib.sh" ]]; then
+		install -m 0755 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/peer-ip-guard-lib.sh" \
+			"$PREFIX_SBIN/peer-ip-guard-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/lib/peer-ip-guard-lib.sh" -o "$PREFIX_SBIN/peer-ip-guard-lib.sh"
+		chmod 0755 "$PREFIX_SBIN/peer-ip-guard-lib.sh"
+	fi
+
 	# Service token lib (sourced by refresh.sh + any script calling authenticated
 	# /api/partner/* endpoints)
 	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-token-lib.sh" ]]; then
