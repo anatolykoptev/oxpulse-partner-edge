@@ -1327,29 +1327,44 @@ PYEOF
 # "0" when they resolved (render path reached).
 # ---------------------------------------------------------------------------
 
-# _reconcile_emit_prom_gauge FILE_BASENAME METRIC VALUE — shared textfile-collector
-# gauge writer for the reconcile surfaces (firewall + xray). Each metric gets its
-# OWN .prom file (never partner_edge.prom, which oxpulse-partner-edge-refresh.sh
-# truncates once per its own run): appending a differently-typed metric into a file
-# another process truncates would race and risk duplicate `# TYPE` lines, which
-# corrupts the whole file for node_exporter's textfile collector. Atomic tmp+mv;
-# skips silently when the textfile dir is unwritable/absent (non-fatal).
+# _reconcile_emit_prom_gauge FILE_BASENAME METRIC VALUE [LABELS] — shared textfile-
+# collector gauge writer for the reconcile surfaces (firewall + xray + caddy). Each
+# metric gets its OWN .prom file (never partner_edge.prom, which
+# oxpulse-partner-edge-refresh.sh truncates once per its own run): appending a
+# differently-typed metric into a file another process truncates would race and
+# risk duplicate `# TYPE` lines, which corrupts the whole file for node_exporter's
+# textfile collector. Atomic tmp+mv; skips silently when the textfile dir is
+# unwritable/absent (non-fatal).
+#
+# P1b (2026-07-08 refresh-lib-extraction-strangler, in-arc follow-up to P1): this
+# used to carry its own copy of the atomic tmp+mv body. lib/metric-sink-lib.sh's
+# `_emit_prom_gauge_file` (P1) is that SAME shape verbatim, generalized to a shared
+# name — see that lib's header. Delegating here, instead of keeping a second
+# fleet-distributed copy, is the ADR-7/P1b fitness goal: exactly one atomic
+# own-file-per-gauge textfile-writer implementation repo-wide
+# (`rg 'TYPE %s gauge' lib/*.sh *.sh` → one hit). This wrapper's name/signature are
+# UNCHANGED so every existing caller (_reconcile_xray_emit_gauge,
+# _reconcile_caddy_emit_drift_gauge, _reconcile_firewall_emit_gauge) and every
+# existing test needs zero changes.
+#
+# Lazy call-time source (not eager at reconcile.sh's own source time), same
+# convention as reconcile_firewall_surface's lib/firewall-lib.sh source below and
+# _reconcile_firewall_escalate's lib/telegram-alert-lib.sh source further down —
+# callers who source reconcile.sh but never emit a gauge are not forced to
+# co-locate lib/metric-sink-lib.sh. Non-fatal by design if the lib cannot be
+# resolved (warn + no-op): a missing gauge sink must never break reconcile_all's
+# actual convergence work over a Prometheus side-signal.
 _reconcile_emit_prom_gauge() {
-    local _basename="$1" _metric="$2" _value="$3" _labels="${4:-}"
-    local _dir="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
-    [[ -d "$_dir" ]] || mkdir -p "$_dir" 2>/dev/null || return 0
-    local _f="$_dir/$_basename"
-    local _tmp="${_f}.tmp.$$"
-    # Optional _labels (e.g. kind="real") - backward-compatible: 3-arg callers emit
-    # the identical unlabeled line they always did.
-    { printf '# TYPE %s gauge\n' "$_metric"
-      if [[ -n "$_labels" ]]; then
-          printf '%s{%s} %s\n' "$_metric" "$_labels" "$_value"
-      else
-          printf '%s %s\n' "$_metric" "$_value"
-      fi
-    } >"$_tmp" 2>/dev/null && mv -f "$_tmp" "$_f" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
-    return 0
+    local _msl="${METRIC_SINK_LIB:-${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)}/metric-sink-lib.sh}"
+    if [[ ! -f "$_msl" ]]; then
+        warn "_reconcile_emit_prom_gauge: lib/metric-sink-lib.sh not found at $_msl — gauge not emitted"
+        return 0
+    fi
+    if ! declare -f _emit_prom_gauge_file >/dev/null 2>&1; then
+        # shellcheck source=lib/metric-sink-lib.sh
+        . "$_msl"
+    fi
+    _emit_prom_gauge_file "$@"
 }
 
 _reconcile_xray_emit_gauge() {
