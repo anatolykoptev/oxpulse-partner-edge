@@ -492,6 +492,13 @@ jobs:
           # existing boxes via upgrade.sh _HOST_SCRIPT_SBIN_FILES (verified
           # against SHA256SUMS), same delivery pattern as cross-probe-lib.sh.
           cp lib/metric-sink-lib.sh            metric-sink-lib.sh
+          # Surgical-restart lib (P2 of the 2026-07-08 refresh-lib-extraction-
+          # strangler plan) — the sha-diff-gated docker restart/recreate
+          # mechanism, sourced fail-closed by oxpulse-partner-edge-refresh.sh,
+          # synced to existing boxes via upgrade.sh _HOST_SCRIPT_SBIN_FILES
+          # (verified against SHA256SUMS), same delivery pattern as
+          # metric-sink-lib.sh directly above.
+          cp lib/surgical-restart-lib.sh       surgical-restart-lib.sh
           # NOTE: reconcile.sh is intentionally NOT staged as a repo-root release
           # asset. upgrade.sh's _source_lib fetches it from $REPO_RAW/lib/reconcile.sh
           # and verifies it against lib-checksums.txt (the lib/*.sh home manifest,
@@ -566,6 +573,7 @@ jobs:
             channel-health-lib.sh \
             cross-probe-lib.sh \
             metric-sink-lib.sh \
+            surgical-restart-lib.sh \
           ) > lib/lib-checksums.txt
           cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
@@ -600,6 +608,7 @@ jobs:
             channel-health-lib.sh \
             cross-probe-lib.sh \
             metric-sink-lib.sh \
+            surgical-restart-lib.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
@@ -670,6 +679,7 @@ jobs:
             channel-health-lib.sh \
             cross-probe-lib.sh \
             metric-sink-lib.sh \
+            surgical-restart-lib.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \

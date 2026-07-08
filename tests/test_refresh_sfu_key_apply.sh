@@ -15,13 +15,15 @@
 #   C3 refresh (real code, docker spied): a simulated rotation recreates the sfu
 #      service via `up -d --force-recreate sfu` — NOT a plain `restart` (which
 #      does not re-read env_file) — and persists the new sha.
-#   C4 refresh (REAL _restart_if_changed + REAL docker, self-skips w/o daemon):
-#      the effective container env actually flips PubKeyA → PubKeyB within one
-#      apply cycle. This is the "effective env resolves to PubKeyB" proof.
+#   C4 refresh (REAL _docker_restart_if_sha_changed + REAL docker, self-skips
+#      w/o daemon): the effective container env actually flips PubKeyA →
+#      PubKeyB within one apply cycle. This is the "effective env resolves to
+#      PubKeyB" proof.
 #
-# Real-code mandate: C3/C4 source the actual _restart_if_changed from
-# oxpulse-partner-edge-refresh.sh (not a hand-copy); reverting the recreate wiring
-# turns them RED.
+# Real-code mandate: C3/C4 source the actual _docker_restart_if_sha_changed
+# from lib/surgical-restart-lib.sh (not a hand-copy; P2 of the 2026-07-08
+# refresh-lib-extraction-strangler plan moved the mechanism there — see
+# ADR-9); reverting the recreate wiring turns them RED.
 set -uo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -187,23 +189,34 @@ YML
     # Rotate the key on disk, then drive the REAL apply helper from refresh.sh.
     printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyB\n' > "$etc/sfu-keys.env"
     # Capture the apply's diagnostics (docker force-recreate stderr goes to
-    # `2>>"$LOG_FILE"` inside _restart_if_changed; the helper's WARNING lines go
-    # through log()). Route both to a real file so a FAILURE below can surface the
-    # underlying docker error instead of swallowing it to /dev/null.
+    # `2>>"$LOG_FILE"` inside _docker_restart_if_sha_changed; the helper's
+    # WARNING lines go through log()). Route both to a real file so a FAILURE
+    # below can surface the underlying docker error instead of swallowing it
+    # to /dev/null.
+    #
+    # P2 strangler extraction (2026-07-08 plan, ADR-9): the pure mechanism now
+    # lives in lib/surgical-restart-lib.sh as `_docker_restart_if_sha_changed`
+    # — source the lib directly instead of sed-range-extracting
+    # `_restart_if_changed` from refresh.sh (the function no longer lives
+    # there; that sed range would now silently source nothing). This call
+    # also proves the SFU caller's new shape: no channels-status.env gate is
+    # consulted at all (the pure fn has zero knowledge of that file — see the
+    # lib's own header), matching the production call site's
+    # caller-omits-the-check posture.
     local apply_log="$tmp/c4-apply.log"; : > "$apply_log"
     (
         set +e
         log() { printf '%s\n' "$*" >> "$apply_log"; }
-        # Both are consumed by the sourced production _restart_if_changed.
+        # Both are consumed by the sourced production _docker_restart_if_sha_changed.
         # shellcheck disable=SC2034
         PREFIX_LIB="$lib"
         # shellcheck disable=SC2034
         LOG_FILE="$apply_log"
         # shellcheck disable=SC1090
-        source <(sed -n '/^_restart_if_changed()/,/^}/p' "$REFRESH")
+        source "$REPO_ROOT/lib/surgical-restart-lib.sh"
         # 7th arg = the real container_name so the post-recreate `docker inspect
         # --format {{.State.Running}}` liveness check resolves and the sha advances.
-        _restart_if_changed sfu "$etc/sfu-keys.env" "$lib/sfu-keys.sha" "$etc/docker-compose.yml" sfu recreate sfu-apply-c4-sfu
+        _docker_restart_if_sha_changed sfu "$etc/sfu-keys.env" "$lib/sfu-keys.sha" "$etc/docker-compose.yml" sfu recreate sfu-apply-c4-sfu
     )
     local after; after=$(docker exec sfu-apply-c4-sfu printenv SFU_SIGNING_PUBLIC_KEY 2>/dev/null)
     ( cd "$etc" && docker compose down >/dev/null 2>&1 )
@@ -442,16 +455,22 @@ exit 0
 DOCK
     chmod +x "$tmp/shims/docker"
 
+    # P2 strangler extraction (2026-07-08 plan, ADR-9): source the pure
+    # mechanism directly from lib/surgical-restart-lib.sh as
+    # `_docker_restart_if_sha_changed` instead of sed-range-extracting
+    # `_restart_if_changed` from refresh.sh. PREFIX_LIB is set here only as a
+    # harmless leftover ambient var — the pure fn never reads
+    # channels-status.env (or any file under PREFIX_LIB) at all.
     (
         set +e
         export PATH="$tmp/shims:$PATH"
         # shellcheck disable=SC2034
-        PREFIX_LIB="$lib"          # sourced _restart_if_changed reads channels-status.env under it
+        PREFIX_LIB="$lib"
         LOG_FILE="$tmp/refresh.log"
         log() { echo "$*" >> "$LOG_FILE"; }
         # shellcheck disable=SC1090
-        source <(sed -n '/^_restart_if_changed()/,/^}/p' "$REFRESH")
-        _restart_if_changed sfu "$etc/sfu-keys.env" "$lib/sfu-keys.sha" "$etc/docker-compose.yml" sfu recreate oxpulse-partner-sfu
+        source "$REPO_ROOT/lib/surgical-restart-lib.sh"
+        _docker_restart_if_sha_changed sfu "$etc/sfu-keys.env" "$lib/sfu-keys.sha" "$etc/docker-compose.yml" sfu recreate oxpulse-partner-sfu
     )
 
     local ok=1
@@ -477,10 +496,15 @@ c8
 #     That file's status vocabulary is written by the channel-provisioning surface
 #     (xray/naive/hysteria2/…) and has no `sfu` notion; a stray/hand-edited
 #     `sfu=inactive` line there must NOT silently suppress a signing-key recreate.
-#     The production call site passes skip-channel-status (8th arg) to bypass the
-#     gate. This drives the REAL refresh with `sfu=inactive` present and asserts the
-#     recreate STILL fires. Removing the 8th arg re-couples SFU to the channel gate
-#     → the recreate would be skipped → this turns RED.
+#     P2 strangler extraction (2026-07-08 plan, ADR-9): the production call site
+#     calls the PURE `_docker_restart_if_sha_changed` (lib/surgical-restart-lib.sh)
+#     directly, entirely OMITTING the channels-status.env gate check — rather
+#     than the prior `_restart_if_changed`'s 8th `skip_channel_status`
+#     bypass-flag arg (a Fowler flag-argument smell the council flagged; see
+#     the lib's own header). This drives the REAL refresh with `sfu=inactive`
+#     present and asserts the recreate STILL fires. Re-routing the SFU caller
+#     through the gated `_channel_restart_if_changed` wrapper re-couples SFU
+#     to the channel gate → the recreate would be skipped → this turns RED.
 # ---------------------------------------------------------------------------
 c9() {
     local tmp; tmp=$(mktemp -d)
@@ -502,8 +526,9 @@ services:
 YML
     printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyA\n' > "$lib/sfu-keys.env"
     sha256sum "$lib/sfu-keys.env" | awk '{print $1}' > "$lib/sfu-keys.sha"
-    # The trap: channels-status.env marks sfu inactive. The channel gate would skip
-    # here; the production call site's skip-channel-status must override it.
+    # The trap: channels-status.env marks sfu inactive. The gated
+    # _channel_restart_if_changed wrapper would skip here; the production SFU
+    # call site must bypass it entirely (calls the pure fn directly).
     printf 'sfu=inactive\n' > "$lib/channels-status.env"
 
     cat > "$tmp/shims/docker" <<DOCK
@@ -546,7 +571,7 @@ CURL
     fi
     # The channel-status skip line must NOT appear for the sfu apply.
     if grep -qE '\[surgical\] channel sfu status=inactive' "$tmp/refresh.log"; then
-        fail "C9: sfu apply consulted channels-status.env and hit the inactive skip — skip-channel-status bypass missing"
+        fail "C9: sfu apply went through the gated _channel_restart_if_changed wrapper and hit the inactive skip — must call _docker_restart_if_sha_changed directly"
         ok=0
     fi
     [[ "$ok" -eq 1 ]] && pass "C9: sfu key-apply ignores channels-status.env (sfu=inactive) → recreate still fires"

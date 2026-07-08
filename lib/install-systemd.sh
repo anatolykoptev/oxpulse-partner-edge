@@ -214,6 +214,25 @@ _systemd_install_lib_scripts() {
 		chmod 0644 "$PREFIX_SBIN/metric-sink-lib.sh"
 	fi
 
+	# Surgical-restart lib (P2 of the 2026-07-08 refresh-lib-extraction-
+	# strangler plan) — the sha-diff-gated docker restart/recreate mechanism,
+	# sourced fail-CLOSED by oxpulse-partner-edge-refresh.sh at every daily
+	# tick (no safe inline fallback: a missing lib would leave channel/SFU
+	# config changes silently un-applied forever). Same delivery tier + 0644
+	# mode as metric-sink-lib.sh directly above (sourced, not executed);
+	# upgrade.sh syncs it to existing boxes via _HOST_SCRIPT_SBIN_FILES.
+	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/surgical-restart-lib.sh" ]]; then
+		install -m 0644 "$src_dir/lib/surgical-restart-lib.sh" "$PREFIX_SBIN/surgical-restart-lib.sh"
+	elif [[ -n "${src_dir:-}" && -f "$src_dir/surgical-restart-lib.sh" ]]; then
+		install -m 0644 "$src_dir/surgical-restart-lib.sh" "$PREFIX_SBIN/surgical-restart-lib.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/surgical-restart-lib.sh" ]]; then
+		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/surgical-restart-lib.sh" \
+			"$PREFIX_SBIN/surgical-restart-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/lib/surgical-restart-lib.sh" -o "$PREFIX_SBIN/surgical-restart-lib.sh"
+		chmod 0644 "$PREFIX_SBIN/surgical-restart-lib.sh"
+	fi
+
 	# Fleet-wide infrastructure defaults (Bug 8 fix — install to canonical share path).
 	# channel-render-lib.sh and oxpulse-channels-health-report.sh both source this file
 	# from /usr/local/share/oxpulse-partner-edge/config/defaults.conf at runtime.
