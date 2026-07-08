@@ -56,7 +56,12 @@ pass "lib/reconcile.sh and lib/metric-sink-lib.sh exist"
 # 1. Exactly one atomic-write implementation repo-wide.
 # ---------------------------------------------------------------------------
 cd "$REPO_ROOT" || exit 1
-HITS=$(git ls-files '*.sh' | xargs grep -lF "printf '# TYPE %s gauge" 2>/dev/null || true)
+# Exclude tests/*.sh: this very file's grep -lF search string literally contains
+# the pattern it's searching for, so a repo-wide *.sh scan self-matches without
+# the exclusion (found the hard way — the check passed count==1 but then failed
+# the path-equality assertion because $HITS was "lib/metric-sink-lib.sh
+# tests/test_gauge_writer_fitness.sh", not the single expected path).
+HITS=$(git ls-files '*.sh' ':!tests/*.sh' | xargs grep -lF "printf '# TYPE %s gauge" 2>/dev/null || true)
 COUNT=$(printf '%s\n' "$HITS" | grep -c . || true)
 
 if [[ "$COUNT" -eq 1 ]]; then
