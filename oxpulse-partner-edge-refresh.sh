@@ -44,108 +44,32 @@ BACKEND_URL="${BACKEND_URL%/}"
 ts()   { date -Iseconds; }
 log()  { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG_FILE"; }
 die()  { log "ERR $*"; exit 1; }
-# emit_metric name labels delta — increments a persisted Prometheus textfile
-# counter (node_exporter textfile collector) and rewrites partner_edge.prom
-# from scratch, atomically.
-#
-# PR review MED-4 on #328: the prior implementation blindly `>>`-appended a
-# fresh `# TYPE <name> counter` + sample line on EVERY call, forever. Two
-# daily failures produce TWO `# TYPE partner_edge_keys_fetch_failure_total`
-# lines in the same file — invalid Prometheus exposition format (a metric
-# family's TYPE line must appear exactly once, with all its samples
-# contiguous). node_exporter's textfile collector does not skip just the bad
-# family on a parse error — it drops the ENTIRE .prom file, silently
-# blackholing every counter this script emits, including ones unrelated to
-# the failure that caused the duplicate.
-#
-# Fix: persist cumulative counter state (name, labels) -> value in a small
-# tab-separated side file, then regenerate partner_edge.prom fresh from that
-# state on every call — one `# TYPE` line per metric name, its samples
-# grouped directly under it, written atomically (tmp+mv, same idiom as the
-# secret writes elsewhere in this script). This also makes the counters
-# real monotonic counters (increase()/rate() over the scrape window shows an
-# actual delta) instead of a flat "1" re-written every failing day.
-#
-# T12 independently proposed a per-run truncate-then-append fix for the same
-# duplicate-TYPE-line bug (reset_metrics_file() wiping partner_edge.prom once
-# at script start); superseded by #328's state-file model above, which is
-# strictly better — it also survives ACROSS runs as real monotonic counters,
-# where a per-run truncate would reset every counter to 0 on each invocation.
-emit_metric() {
-    local name="$1" labels="$2" delta="$3"
-    [[ -d "$TEXTFILE_DIR" ]] || mkdir -p "$TEXTFILE_DIR" 2>/dev/null || return 0
-    local prom_file="$TEXTFILE_DIR/partner_edge.prom"
-    local state_file="$TEXTFILE_DIR/partner_edge.prom.state"
 
-    # ---- merge (name, labels) -> cumulative value into the state file ----
-    local state_tmp found=0 _n _l _v
-    state_tmp=$(mktemp "${state_file}.XXXXXX" 2>/dev/null) || return 0
-    if [[ -f "$state_file" ]]; then
-        while IFS=$'\t' read -r _n _l _v || [[ -n "$_n" ]]; do
-            [[ -z "$_n" ]] && continue
-            # Defensive (PR review round 2, council LOW): a hand-edited or
-            # otherwise tampered state file could carry a non-numeric 3rd
-            # field. Without this guard, `_v + delta` under `set -euo
-            # pipefail` throws "value too great for base" / a syntax error
-            # and takes the WHOLE script down via an uncaught arithmetic
-            # failure — the exact class of bug HIGH-1 fixed for the write
-            # path, just one line lower. Reset to 0 instead of trusting it.
-            [[ "$_v" =~ ^[0-9]+$ ]] || _v=0
-            if [[ "$_n" == "$name" && "$_l" == "$labels" ]]; then
-                _v=$(( _v + delta )); found=1
-            fi
-            printf '%s\t%s\t%s\n' "$_n" "$_l" "$_v"
-        done < "$state_file" > "$state_tmp"
-    fi
-    if [[ "$found" -eq 0 ]]; then
-        printf '%s\t%s\t%s\n' "$name" "$labels" "$delta" >> "$state_tmp"
-    fi
-    mv -f "$state_tmp" "$state_file" 2>/dev/null || { rm -f "$state_tmp" 2>/dev/null || true; return 0; }
-
-    # ---- regenerate partner_edge.prom fresh, grouped by metric name ----
-    local prom_tmp
-    prom_tmp=$(mktemp "${prom_file}.XXXXXX" 2>/dev/null) || return 0
-    {
-        local -A _samples=()
-        local -a _order=()
-        while IFS=$'\t' read -r _n _l _v || [[ -n "$_n" ]]; do
-            [[ -z "$_n" ]] && continue
-            [[ -z "${_samples[$_n]+x}" ]] && _order+=("$_n")
-            _samples[$_n]+="${_n}{${_l}} ${_v}"$'\n'
-        done < "$state_file"
-        local _name
-        for _name in "${_order[@]}"; do
-            printf '# TYPE %s counter\n' "$_name"
-            printf '%s' "${_samples[$_name]}"
-        done
-    } > "$prom_tmp" 2>/dev/null
-    # T3 review round 3: mktemp creates $prom_tmp at mode 0600 (mkstemp,
-    # umask-independent), and a bare mv carries that mode onto $prom_file — so
-    # after the first emit the file drops to 0600 root:root and node_exporter's
-    # textfile collector (an unprivileged system user) loses read access,
-    # blacking out EVERY partner_edge_* metric on the node exactly like the
-    # duplicate-TYPE-line bug this rewrite fixed. Restore the world-readable
-    # 0644 the prior `>>` append produced under root's default umask 022.
-    if mv -f "$prom_tmp" "$prom_file" 2>/dev/null; then
-        chmod 0644 "$prom_file" 2>/dev/null || true
-    else
-        rm -f "$prom_tmp" 2>/dev/null || true
-    fi
-}
-
-# Emit a current-state GAUGE to its own textfile, TRUNCATED each run so exactly
-# one sample per series survives. A gauge must not share the append-only
-# partner_edge.prom (emit_metric): re-emitting the same series every daily run
-# would accumulate duplicate lines and node_exporter would reject the whole file.
-# One file per gauge name keeps it idempotent. Skips silently when TEXTFILE_DIR
-# is unwritable or absent (non-fatal), matching emit_metric.
-emit_gauge() {
-    local name="$1" labels="$2" value="$3"
-    [[ -d "$TEXTFILE_DIR" ]] || mkdir -p "$TEXTFILE_DIR" 2>/dev/null || return 0
-    local prom_file="$TEXTFILE_DIR/${name}.prom"
-    printf '# TYPE %s gauge\n%s{%s} %s\n' \
-        "$name" "$name" "$labels" "$value" > "$prom_file" 2>/dev/null || true
-}
+# emit_metric / emit_gauge (Prometheus textfile-collector sink) — extracted to
+# lib/metric-sink-lib.sh (P1 of the 2026-07-08 refresh-lib-extraction-
+# strangler plan). emit_metric carries the load-bearing PR #328 MED-4 fix
+# (cumulative state-file counter model, atomic mktemp+mv+chmod — see the lib's
+# own header for the full duplicate-TYPE-line blackhole history); emit_gauge
+# is now backed by the ATOMIC _emit_prom_gauge_file primitive (ADR-7).
+#
+# Sourced fail-closed: unlike render-channel-lib.sh's fail-soft degrade below
+# (an optional fast-path optimization), there is no safe inline fallback for
+# emit_metric's PR #328 fix — an inline duplicate here would be exactly the
+# "known non-atomic/buggy duplicate re-ossified" mistake the council flagged
+# for emit_gauge (ADR-7). Refuse to run rather than silently regress to the
+# pre-#328 duplicate-TYPE-line blackhole bug.
+_MSL_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/metric-sink-lib.sh"
+_MSL_SBIN="${PREFIX_SBIN:-/usr/local/sbin}/metric-sink-lib.sh"
+if [[ -r "$_MSL_LOCAL" ]]; then
+    # shellcheck source=lib/metric-sink-lib.sh
+    source "$_MSL_LOCAL"
+elif [[ -r "$_MSL_SBIN" ]]; then
+    # shellcheck source=/dev/null
+    source "$_MSL_SBIN"
+else
+    die "metric-sink-lib.sh not found (checked $_MSL_LOCAL and $_MSL_SBIN) — refusing to run without the metric sink (would silently regress emit_metric's PR #328 duplicate-TYPE-line fix)"
+fi
+unset _MSL_LOCAL _MSL_SBIN
 
 # OS-aware install hint: returns the appropriate install command for the host PM.
 suggest_install() {
