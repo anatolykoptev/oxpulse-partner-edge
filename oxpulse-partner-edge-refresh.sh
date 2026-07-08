@@ -283,13 +283,36 @@ fi
 # Written before the early-exit so the SFU container always has the current
 # key even when Reality hasn't rotated. Ed25519 pubkeys are single-line
 # base64 (~44 chars) — no heredoc needed.
+#
+# Defense-in-depth (CWE-116/943): /api/partner/keys is unauthenticated
+# ("no auth, returns version hash" — not a live-exploited path today, but
+# its response is still untrusted input). The previous `printf ... >
+# "$SFU_KEYS_ENV"` had two defects: (1) non-atomic — a crash/kill mid-write
+# left a truncated/corrupt file the SFU container could source; (2)
+# unescaped — an embedded newline in the value could inject an extra
+# KEY=VALUE line into sfu-keys.env. Fixed by mirroring the SAME encoding
+# opec already uses for this exact field (crates/opec/src/secrets/
+# sfu_key.rs::fetch/write_env_file): encode any embedded newline/CR as a
+# literal \n/\r escape (so the value can never span more than one physical
+# line), single-quote the value with the canonical `'\''` shell-escape for
+# embedded quotes, then persist via the same atomic mktemp+chmod+mv helper
+# (write_secret_atomic, defined above / sourced from oxpulse-token-lib.sh)
+# already used for CROSS_PROBE_TOKEN_FILE below — reusing it here instead
+# of hand-rolling a second tmp+mv idiom.
 if [[ "$KEYS_OK" -eq 1 ]]; then
     SFU_SIGNING_PUBKEY=$(printf '%s' "$RESP" | jq -r '.sfu_signing_public_key // empty')
     if [[ -n "$SFU_SIGNING_PUBKEY" ]]; then
+        _sfu_key_encoded="${SFU_SIGNING_PUBKEY//$'\n'/\\n}"
+        _sfu_key_encoded="${_sfu_key_encoded//$'\r'/\\r}"
+        _sfu_key_escaped="${_sfu_key_encoded//\'/\'\\\'\'}"
+        printf -v _sfu_key_line "SFU_SIGNING_PUBLIC_KEY='%s'\n" "$_sfu_key_escaped"
         install -d -m 0700 "$PREFIX_LIB"
-        printf 'SFU_SIGNING_PUBLIC_KEY=%s\n' "$SFU_SIGNING_PUBKEY" > "$SFU_KEYS_ENV"
-        chmod 0600 "$SFU_KEYS_ENV"
-        log "sfu_signing_public_key extracted and saved to $SFU_KEYS_ENV"
+        if _sfu_key_write_err=$(write_secret_atomic "$SFU_KEYS_ENV" "$_sfu_key_line" 0600 2>&1); then
+            log "sfu_signing_public_key extracted and saved to $SFU_KEYS_ENV"
+        else
+            log "WARNING: sfu-keys.env write failed: $_sfu_key_write_err (existing file, if any, preserved)"
+        fi
+        unset _sfu_key_encoded _sfu_key_escaped _sfu_key_line _sfu_key_write_err
     else
         log "WARNING: sfu_signing_public_key not in /api/partner/keys response (signaling may need updating)"
     fi
