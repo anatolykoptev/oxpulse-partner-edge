@@ -162,6 +162,23 @@ _systemd_install_lib_scripts() {
 		chmod 0755 "$PREFIX_SBIN/telegram-alert-lib.sh"
 	fi
 
+	# P2 strangler extraction (2026-07-08 plan): channel-health-lib.sh — E2E
+	# channel probes + report/verdict logic sourced fail-closed by
+	# oxpulse-channels-health-report.sh every 60s tick. Bears both externally-
+	# depended wire contracts (see the lib's own header). Mirrors the
+	# telegram-alert-lib.sh install pattern immediately above exactly.
+	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/channel-health-lib.sh" ]]; then
+		install -m 0755 "$src_dir/lib/channel-health-lib.sh" "$PREFIX_SBIN/channel-health-lib.sh"
+	elif [[ -n "${src_dir:-}" && -f "$src_dir/channel-health-lib.sh" ]]; then
+		install -m 0755 "$src_dir/channel-health-lib.sh" "$PREFIX_SBIN/channel-health-lib.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/channel-health-lib.sh" ]]; then
+		install -m 0755 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/channel-health-lib.sh" \
+			"$PREFIX_SBIN/channel-health-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/lib/channel-health-lib.sh" -o "$PREFIX_SBIN/channel-health-lib.sh"
+		chmod 0755 "$PREFIX_SBIN/channel-health-lib.sh"
+	fi
+
 	# Fleet-wide infrastructure defaults (Bug 8 fix — install to canonical share path).
 	# channel-render-lib.sh and oxpulse-channels-health-report.sh both source this file
 	# from /usr/local/share/oxpulse-partner-edge/config/defaults.conf at runtime.

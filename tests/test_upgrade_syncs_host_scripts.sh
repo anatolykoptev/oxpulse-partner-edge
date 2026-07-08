@@ -467,6 +467,7 @@ if [[ -f "$RELEASE_YML" ]]; then
         [render-channel-lib.sh]="render-channel-lib.sh"
         [oxpulse-token-lib.sh]="oxpulse-token-lib.sh"
         [telegram-alert-lib.sh]="telegram-alert-lib.sh"
+        [channel-health-lib.sh]="channel-health-lib.sh"
     )
 
     for sbin_name in "${!sbin_to_asset[@]}"; do
