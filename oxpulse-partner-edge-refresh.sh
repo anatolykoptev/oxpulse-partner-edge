@@ -95,6 +95,32 @@ else
 fi
 unset _SRL_LOCAL _SRL_SBIN
 
+# emit_xprb_failure / xprb_curl_get_with_retry / refresh_cross_probe_token
+# (cross-probe bearer-token daily re-mint) — extracted to
+# lib/xprb-refresh-lib.sh (P3 of the 2026-07-08 refresh-lib-extraction-
+# strangler plan). Requires: lib/metric-sink-lib.sh (sourced above — MUST
+# stay before this block; emit_xprb_failure calls emit_metric directly). See
+# the lib's own header for the full trust-boundary-isolation rationale and
+# the CROSS_PROBE_TOKEN_FILE cross-reference with lib/cross-probe-lib.sh.
+#
+# Sourced fail-closed for the same reason as the two libs above: a missing
+# lib here would silently stop the daily xprb re-mint forever, and the fleet
+# would eventually hit the exact MeshCrossProbeRejectionStorm this leg exists
+# to prevent (see the lib's refresh_cross_probe_token header for the
+# 2026-07-01 root cause).
+_XRL_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/xprb-refresh-lib.sh"
+_XRL_SBIN="${PREFIX_SBIN:-/usr/local/sbin}/xprb-refresh-lib.sh"
+if [[ -r "$_XRL_LOCAL" ]]; then
+    # shellcheck source=lib/xprb-refresh-lib.sh
+    source "$_XRL_LOCAL"
+elif [[ -r "$_XRL_SBIN" ]]; then
+    # shellcheck source=/dev/null
+    source "$_XRL_SBIN"
+else
+    die "xprb-refresh-lib.sh not found (checked $_XRL_LOCAL and $_XRL_SBIN) — refusing to run without the cross-probe token refresh mechanism (would silently stop the daily xprb re-mint, eventually re-triggering MeshCrossProbeRejectionStorm)"
+fi
+unset _XRL_LOCAL _XRL_SBIN
+
 # OS-aware install hint: returns the appropriate install command for the host PM.
 suggest_install() {
     local pkg="$1"
@@ -245,7 +271,8 @@ fi
 # line), single-quote the value with the canonical `'\''` shell-escape for
 # embedded quotes, then persist via the same atomic mktemp+chmod+mv helper
 # (write_secret_atomic, defined above / sourced from oxpulse-token-lib.sh)
-# already used for CROSS_PROBE_TOKEN_FILE below — reusing it here instead
+# also used by refresh_cross_probe_token's CROSS_PROBE_TOKEN_FILE write
+# (lib/xprb-refresh-lib.sh, called further below) — reusing it here instead
 # of hand-rolling a second tmp+mv idiom.
 if [[ "$KEYS_OK" -eq 1 ]]; then
     SFU_SIGNING_PUBKEY=$(printf '%s' "$RESP" | jq -r '.sfu_signing_public_key // empty')
@@ -290,178 +317,13 @@ else
 fi
 
 # ---------- cross-probe token refresh (T2.4.c re-mint endpoint) ----------
-# Root cause 2026-07-01: the central mints cross_probe_token (xprb_) ONLY in
-# the /api/partner/register response (persisted by hydrate.sh / install.sh),
-# which runs once at first boot. TTL=7d → all 5 fleet edges (registered
-# ~06-24 05:36) expired their tokens together, firing
-# MeshCrossProbeRejectionStorm (stale_token 0.29/s) from 07-01 05:46 — the
-# central's GET /api/partner/cross-probe-token re-mint endpoint (built for
-# exactly this) had zero consumers anywhere in this repo. This step is that
-# consumer: refresh the token daily, well before it expires.
-#
-# Cadence: refresh once the file is older than half the TTL (default
-# 302400s = 3.5d of a 604800s/7d TTL) — cheap file-mtime check, no network
-# call on the common "still fresh" path.
-#
-# COALESCE-PRESERVE (mirrors hydrate.sh MAJOR 2 / install.sh's cross-probe
-# write site): ANY failure — curl non-2xx/timeout, missing/malformed token,
-# no service token available — warns and leaves the existing file untouched.
-# Never rm/truncate a working token on a transient failure; a revoked token
-# simply 4xx's on the prober-report POST and is ignored there.
-#
-# NON-FATAL: no `die` in this block. Mirrors the 2026-05-13 lesson above
-# (heartbeat decoupled from keys-fetch) — this step must not be able to
-# abort the script before later refresh work runs.
-CROSS_PROBE_TOKEN_FILE="$PREFIX_ETC/cross-probe-token"
-CROSS_PROBE_TOKEN_TTL_SECS="${OXPULSE_CROSS_PROBE_TOKEN_TTL_SECS:-604800}"
-CROSS_PROBE_REFRESH_AFTER_SECS=$(( CROSS_PROBE_TOKEN_TTL_SECS / 2 ))
-
-_xprb_needs_refresh=1
-if [[ -f "$CROSS_PROBE_TOKEN_FILE" ]]; then
-    _xprb_mtime=$(stat -c '%Y' "$CROSS_PROBE_TOKEN_FILE" 2>/dev/null \
-        || stat -f '%m' "$CROSS_PROBE_TOKEN_FILE" 2>/dev/null || echo 0)
-    _xprb_age=$(( $(date +%s) - _xprb_mtime ))
-    if [[ "$_xprb_age" -lt "$CROSS_PROBE_REFRESH_AFTER_SECS" ]]; then
-        _xprb_needs_refresh=0
-        log "cross-probe token: age=${_xprb_age}s < refresh threshold ${CROSS_PROBE_REFRESH_AFTER_SECS}s — skipping"
-    fi
-    unset _xprb_mtime _xprb_age
-fi
-
-emit_xprb_failure() {
-    # $1 = reason label value. Centralizes the metric call so every failure
-    # branch below stays a one-liner.
-    emit_metric "partner_edge_cross_probe_token_refresh_failure_total" \
-        "partner_id=\"${NODE_ID}\",reason=\"$1\"" "1"
-}
-
-# xprb_curl_get_with_retry url bearer — mirrors opec's get_with_retry
-# semantics (PR review round 2, gating MEDIUM): up to 3 attempts, short
-# backoff (2s, then 5s), retry ONLY on a curl transport failure (DNS,
-# connect, TLS, timeout) or an HTTP 5xx — a transient backend blip must not
-# defer re-mint by a full day (the next daily tick). A 4xx is NEVER
-# retried: auth/permission errors are deterministic, and burning the retry
-# budget on one just delays surfacing a real misconfiguration.
-#
-# --max-time 15 per attempt (unchanged budget per try). On success (any
-# transfer that completes, including a 4xx/5xx the caller still needs to
-# see) prints "body\n%{http_code}" to stdout exactly like a single curl -w
-# call, so the caller's EXISTING tail/sed parsing below is untouched.
-# Returns 0 when a transfer completed (any status); returns the last curl
-# exit code when every attempt was a transport failure. This function does
-# not know about log()/emit_metric() — same two-state-primitive contract as
-# write_secret_atomic — the caller decides how to report the outcome.
-xprb_curl_get_with_retry() {
-    local url="$1" bearer="$2"
-    local attempt out rc code delays=(2 5)
-    for attempt in 1 2 3; do
-        rc=0
-        # CWE-214 hardening (2026-07-08 review, mirrors the same fix already
-        # applied to _post_channel/_post_cross_probe in lib/*.sh, PR #370):
-        # the Bearer token goes via `-K -` (curl config on stdin, a bash
-        # here-string — no separate process ever holds the token as its own
-        # argv) instead of `-H "Authorization: Bearer $bearer"`, which was
-        # ps/proc-visible to any local user on the relay host for curl's
-        # whole lifetime.
-        out=$(curl -sS --max-time 15 -L \
-            -K - \
-            "$url" -w '\n%{http_code}' 2>&1 <<< "header = \"Authorization: Bearer ${bearer}\"") || rc=$?
-
-        if [[ "$rc" -ne 0 ]]; then
-            if [[ "$attempt" -lt 3 ]]; then
-                sleep "${delays[$((attempt - 1))]}"
-                continue
-            fi
-            printf '%s' "$out"
-            return "$rc"
-        fi
-
-        code=$(printf '%s' "$out" | tail -n1)
-        if [[ "$code" =~ ^5[0-9][0-9]$ && "$attempt" -lt 3 ]]; then
-            sleep "${delays[$((attempt - 1))]}"
-            continue
-        fi
-
-        # Transfer completed: success, a non-retryable 4xx, or a 5xx that
-        # survived all retries — hand back to the caller as-is either way.
-        printf '%s' "$out"
-        return 0
-    done
-}
-
-if [[ "$_xprb_needs_refresh" -eq 1 ]]; then
-    _xprb_svc_token=$(read_service_token 2>/dev/null || true)
-    if [[ -z "$_xprb_svc_token" ]]; then
-        log "WARN cross-probe token refresh: no service token available — skipping (existing file, if any, preserved)"
-        emit_xprb_failure "no_service_token"
-    else
-        # No `-f`: we want the HTTP status explicitly (below) rather than
-        # having curl fold a 4xx/5xx into its own exit code — that lets us
-        # log the status without ever touching the response BODY (HIGH-2:
-        # this is a credential-issuing endpoint; a token-shaped-but-
-        # unexpected body must never reach the log verbatim).
-        _xprb_curl_rc=0
-        _xprb_curl_out=$(xprb_curl_get_with_retry \
-            "${BACKEND_URL}/api/partner/cross-probe-token" "${_xprb_svc_token}") \
-            || _xprb_curl_rc=$?
-
-        if [[ "$_xprb_curl_rc" -ne 0 ]]; then
-            log "WARN cross-probe token fetch failed (curl exit=${_xprb_curl_rc}; existing file, if any, preserved)"
-            emit_xprb_failure "fetch_failed"
-        else
-            _xprb_code=$(printf '%s' "$_xprb_curl_out" | tail -n1)
-            _xprb_body=$(printf '%s' "$_xprb_curl_out" | sed '$d')
-
-            if [[ "$_xprb_code" != "200" ]]; then
-                # Status only — never the body (HIGH-2).
-                log "WARN cross-probe token refresh: HTTP ${_xprb_code} (existing file, if any, preserved)"
-                emit_xprb_failure "http_${_xprb_code}"
-            elif [[ -z "$_xprb_body" ]]; then
-                # MED-3: an empty 200 body previously matched neither the
-                # success arm nor the "malformed" arm — silently invisible.
-                log "WARN cross-probe token refresh: empty response body on HTTP 200 (existing file, if any, preserved)"
-                emit_xprb_failure "empty_response"
-            else
-                _xprb_new_token=$(printf '%s' "$_xprb_body" | jq -r '.cross_probe_token // empty' 2>/dev/null || true)
-
-                if [[ -n "$_xprb_new_token" && "$_xprb_new_token" == xprb_* ]]; then
-                    # HIGH-1 / MED-5: the guarded shared helper (sourced above
-                    # from oxpulse-token-lib.sh, real or inline fallback) —
-                    # every step of the mktemp/write/chmod/mv sequence is
-                    # explicitly checked inside it, so a missing/unwritable
-                    # $PREFIX_ETC can NEVER kill this `set -euo pipefail`
-                    # script via an uncaught mktemp failure. Called as an
-                    # `if` condition, so even without that internal guarding
-                    # a nonzero return would not trip `set -e` here either —
-                    # belt-and-suspenders.
-                    if _xprb_write_err=$(write_secret_atomic "$CROSS_PROBE_TOKEN_FILE" "$_xprb_new_token" 0600 2>&1); then
-                        log "cross-probe token refreshed → $CROSS_PROBE_TOKEN_FILE (raw value redacted)"
-                    else
-                        log "WARN cross-probe token persist failed: $_xprb_write_err (existing file, if any, preserved)"
-                        emit_xprb_failure "write_failed"
-                    fi
-                    unset _xprb_write_err
-                else
-                    # HIGH-2: never log $_xprb_body verbatim — it may contain
-                    # a token-shaped string from a misbehaving/misauthed
-                    # response. A fixed-length sha256 prefix is enough to
-                    # correlate/dedup without leaking a credential to logs.
-                    _xprb_body_sha=$(printf '%s' "$_xprb_body" | sha256sum 2>/dev/null | cut -c1-16)
-                    log "WARN cross-probe token refresh: missing/malformed cross_probe_token in response (body sha256=${_xprb_body_sha:-unknown}...; existing file, if any, preserved)"
-                    emit_xprb_failure "malformed_response"
-                    unset _xprb_body_sha
-                fi
-                unset _xprb_new_token
-            fi
-            unset _xprb_code _xprb_body
-        fi
-        unset _xprb_curl_rc _xprb_curl_out
-    fi
-    unset _xprb_svc_token
-fi
-unset -f emit_xprb_failure xprb_curl_get_with_retry
-unset _xprb_needs_refresh
-unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTER_SECS
+# refresh_cross_probe_token (emit_xprb_failure / xprb_curl_get_with_retry) —
+# extracted to lib/xprb-refresh-lib.sh (P3 of the 2026-07-08
+# refresh-lib-extraction-strangler plan). See the lib's own header for the
+# 2026-07-01 MeshCrossProbeRejectionStorm root cause, the age-gated cadence,
+# the COALESCE-PRESERVE failure posture, and the CWE-214 bearer-off-argv fix
+# (P-sec1, PR #371) this move carries over unmodified.
+refresh_cross_probe_token
 
 # channels_version check — independent of Reality key rotation.
 # Skip when keys fetch failed (NEW_CHANNELS_VERSION will be empty).

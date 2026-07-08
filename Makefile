@@ -51,5 +51,6 @@ lib-checksums:
 	  cross-probe-lib.sh \
 	  metric-sink-lib.sh \
 	  surgical-restart-lib.sh \
+	  xprb-refresh-lib.sh \
 	) > lib/lib-checksums.txt
 	@echo "lib/lib-checksums.txt regenerated — commit the result"
