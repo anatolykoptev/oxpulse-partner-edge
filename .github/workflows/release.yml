@@ -486,6 +486,12 @@ jobs:
           # via upgrade.sh _HOST_SCRIPT_SBIN_FILES (verified against SHA256SUMS),
           # same delivery pattern as telegram-alert-lib.sh.
           cp lib/cross-probe-lib.sh            cross-probe-lib.sh
+          # Metric-sink lib (P1 of the 2026-07-08 refresh-lib-extraction-
+          # strangler plan) — emit_metric/emit_gauge Prometheus textfile sink,
+          # sourced fail-closed by oxpulse-partner-edge-refresh.sh, synced to
+          # existing boxes via upgrade.sh _HOST_SCRIPT_SBIN_FILES (verified
+          # against SHA256SUMS), same delivery pattern as cross-probe-lib.sh.
+          cp lib/metric-sink-lib.sh            metric-sink-lib.sh
           # NOTE: reconcile.sh is intentionally NOT staged as a repo-root release
           # asset. upgrade.sh's _source_lib fetches it from $REPO_RAW/lib/reconcile.sh
           # and verifies it against lib-checksums.txt (the lib/*.sh home manifest,
@@ -559,6 +565,7 @@ jobs:
             peer-ip-guard-lib.sh \
             channel-health-lib.sh \
             cross-probe-lib.sh \
+            metric-sink-lib.sh \
           ) > lib/lib-checksums.txt
           cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
@@ -592,6 +599,7 @@ jobs:
             peer-ip-guard-lib.sh \
             channel-health-lib.sh \
             cross-probe-lib.sh \
+            metric-sink-lib.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
@@ -661,6 +669,7 @@ jobs:
             peer-ip-guard-lib.sh \
             channel-health-lib.sh \
             cross-probe-lib.sh \
+            metric-sink-lib.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
