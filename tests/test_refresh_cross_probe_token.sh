@@ -164,6 +164,49 @@ CURLSTUB
     chmod +x "$dir/curl"
 }
 
+# write_curl_stub_argv_capture dir argv_log stdin_log
+# CWE-214 hardening proof stub: on the cross-probe-token call, captures (a)
+# THIS process's own /proc/self/cmdline — exactly what `ps`/a co-resident
+# attacker inspecting /proc/<pid>/cmdline on the relay host would see for a
+# real curl invocation with the same argv (the shebang/interpreter
+# substitution does not alter the trailing args) — and (b) whatever was
+# piped to curl's stdin, so the test can assert BOTH halves of the fix: the
+# bearer token is absent from argv, AND the header still reaches curl via
+# `-K -` (i.e. the fix doesn't silently drop the Authorization header).
+write_curl_stub_argv_capture() {
+    local dir="$1" argv_log="$2" stdin_log="$3"
+    cat > "$dir/curl" <<CURLSTUB
+#!/bin/bash
+for arg in "\$@"; do
+    if [[ "\$arg" == *partner/heartbeat* ]]; then
+        echo '{"ok":true}'
+        echo '200'
+        exit 0
+    fi
+    if [[ "\$arg" == *partner/cross-probe-token* ]]; then
+        # NOTE: must read /proc/self/cmdline with a bash BUILTIN (no fork)
+        # — piping through an external \`tr\`/\`cat\` forks a new process
+        # whose OWN /proc/self/cmdline (e.g. "tr" "\\0" "\\n") is what gets
+        # read, not this script's argv (verified empirically — the naive
+        # \`tr ... < /proc/self/cmdline\` version silently captured tr's
+        # argv instead of curl's). A \`while read -d ''\` loop redirected
+        # straight onto a compound command does not fork in bash.
+        : > "$argv_log"
+        while IFS= read -r -d '' _xprb_arg; do
+            printf '%s\\n' "\$_xprb_arg" >> "$argv_log"
+        done < /proc/self/cmdline
+        cat > "$stdin_log" 2>/dev/null || true
+        echo '{"cross_probe_token":"xprb_new_token_abc123","issued_at":"2026-07-01T06:00:00Z","ttl_secs":604800}'
+        echo '200'
+        exit 0
+    fi
+done
+echo '$KEYS_BODY'
+exit 0
+CURLSTUB
+    chmod +x "$dir/curl"
+}
+
 # run_refresh dir [service_token]
 # service_token, when passed, is exported as OXPULSE_SERVICE_TOKEN; omitted
 # means "no service token available" (tests the no-token skip path).
@@ -715,6 +758,74 @@ pass "test12 (fsync-before-rename round 2): a failing sync is advisory-only — 
 
 trap - EXIT
 rm -rf "$T12"
+
+# ── Test 13 (CWE-214): bearer token never lands on the curl process's own ────
+# argv — /proc/<pid>/cmdline is world-readable on the relay host (no
+# hidepid), so any local user could scrape a live curl's argv for the
+# TTL=7d cross-probe token. xprb_curl_get_with_retry must pass the
+# Authorization header via `-K -` (curl config on stdin, a bash
+# here-string) instead of `-H "Authorization: Bearer $bearer"`.
+T13=$(mktemp -d)
+trap 'rm -rf "$T13"' EXIT
+
+make_bin "$T13"
+ARGV_LOG13="$T13/xprb_curl_argv.log"
+STDIN_LOG13="$T13/xprb_curl_stdin.log"
+SERVICE_TOKEN13="stkn_t13_must_not_appear_on_argv"
+write_curl_stub_argv_capture "$T13" "$ARGV_LOG13" "$STDIN_LOG13"
+
+mkdir -p "$T13/etc" "$T13/var"
+printf '{"node_id":"test-node-xprb13"}\n' > "$T13/etc/node-config.json"
+echo "v1" > "$T13/var/keys-version"
+echo "c1" > "$T13/var/channels-version"
+# No cross-probe-token file → the leg always attempts a fetch here.
+
+set +e
+run_refresh "$T13" "$SERVICE_TOKEN13"
+EXIT13=$?
+set -e
+
+[[ $EXIT13 -eq 0 ]] \
+    || fail "test13: script must exit 0 (got $EXIT13); output: $(cat "$T13/out.txt")"
+[[ -s "$ARGV_LOG13" ]] \
+    || fail "test13: cross-probe-token curl argv capture is empty — call never happened; output: $(cat "$T13/out.txt")"
+
+if grep -qF "$SERVICE_TOKEN13" "$ARGV_LOG13"; then
+    fail "test13: SECRET LEAK — bearer token found on curl's own argv (/proc/<pid>/cmdline): $(cat "$ARGV_LOG13")"
+else
+    pass "test13: bearer token NOT on curl's own argv (/proc/<pid>/cmdline) — $(cat "$ARGV_LOG13" | tr '\n' ' ')"
+fi
+
+if grep -q -- '-H' "$ARGV_LOG13" && grep -qF "Authorization" "$ARGV_LOG13"; then
+    fail "test13: curl argv still carries a literal -H Authorization header (CWE-214 not fixed): $(cat "$ARGV_LOG13")"
+else
+    pass "test13: no -H Authorization on curl argv"
+fi
+
+grep -qF -- '-K' "$ARGV_LOG13" \
+    || fail "test13: expected curl to be invoked with -K (config-on-stdin) — got: $(cat "$ARGV_LOG13")"
+
+# Second half of the fix: the header must still actually reach curl (via
+# stdin/-K), not just be dropped — the receiving backend still needs it.
+[[ -s "$STDIN_LOG13" ]] \
+    || fail "test13: nothing was piped to curl's stdin — -K config never sent"
+grep -qF "Authorization: Bearer $SERVICE_TOKEN13" "$STDIN_LOG13" \
+    || fail "test13: curl's stdin (-K config) did not carry the Authorization header — got: $(cat "$STDIN_LOG13")"
+pass "test13: Authorization header still delivered to curl via -K stdin config"
+
+# End-to-end: the fetch must still succeed functionally (no wire-contract
+# change on the happy path).
+TOKEN_FILE13="$T13/etc/cross-probe-token"
+[[ -f "$TOKEN_FILE13" ]] \
+    || fail "test13: token file not created despite a successful stub response"
+CONTENT13=$(cat "$TOKEN_FILE13")
+[[ "$CONTENT13" == "xprb_new_token_abc123" ]] \
+    || fail "test13: token content mismatch after -K hardening — got '$CONTENT13'"
+
+pass "test13 (CWE-214): cross-probe token fetch hardened — Authorization header off argv, still delivered, happy path unchanged"
+
+trap - EXIT
+rm -rf "$T13"
 
 # ── Syntax check ───────────────────────────────────────────────────────────
 bash -n "$SCRIPT" \
