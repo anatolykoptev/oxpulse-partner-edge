@@ -476,6 +476,11 @@ jobs:
           # SHA256SUMS covers it and a tier-4 curl|bash fresh install (no local
           # clone, install-systemd.sh's curl fallback) can fetch it too.
           cp lib/peer-ip-guard-lib.sh          peer-ip-guard-lib.sh
+          # P2 strangler extraction (2026-07-08 plan): channel probes +
+          # report/verdict logic, in _HOST_SCRIPT_SBIN_FILES so sync_host_scripts
+          # delivers it to already-installed edges on upgrade (not just fresh
+          # installs via install-systemd.sh).
+          cp lib/channel-health-lib.sh         channel-health-lib.sh
           # NOTE: reconcile.sh is intentionally NOT staged as a repo-root release
           # asset. upgrade.sh's _source_lib fetches it from $REPO_RAW/lib/reconcile.sh
           # and verifies it against lib-checksums.txt (the lib/*.sh home manifest,
@@ -547,6 +552,7 @@ jobs:
             healthcheck-lib.sh \
             host-scripts-lib.sh \
             peer-ip-guard-lib.sh \
+            channel-health-lib.sh \
           ) > lib/lib-checksums.txt
           cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
@@ -578,6 +584,7 @@ jobs:
             oxpulse-token-lib.sh \
             telegram-alert-lib.sh \
             peer-ip-guard-lib.sh \
+            channel-health-lib.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
@@ -645,6 +652,7 @@ jobs:
             oxpulse-token-lib.sh \
             telegram-alert-lib.sh \
             peer-ip-guard-lib.sh \
+            channel-health-lib.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \

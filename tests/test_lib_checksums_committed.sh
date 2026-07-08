@@ -40,6 +40,7 @@ setup() {
 		healthcheck-lib.sh
 		host-scripts-lib.sh
 		peer-ip-guard-lib.sh
+		channel-health-lib.sh
 	)
 }
 
