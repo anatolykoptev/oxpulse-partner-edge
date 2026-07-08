@@ -136,7 +136,10 @@ CURL
         ok=0
     fi
     # sha persisted to the NEW key → next cycle won't needlessly recreate.
-    local want_sha; want_sha=$(printf 'SFU_SIGNING_PUBLIC_KEY=PubKeyB\n' | sha256sum | awk '{print $1}')
+    # Format: refresh.sh now single-quotes the value (matches opec's
+    # write_env_file — see the CWE-116/943 fix in oxpulse-partner-edge-refresh.sh's
+    # SFU-key write block), not the old bare KEY=VALUE.
+    local want_sha; want_sha=$(printf "SFU_SIGNING_PUBLIC_KEY='PubKeyB'\n" | sha256sum | awk '{print $1}')
     if [[ "$(cat "$lib/sfu-keys.sha" 2>/dev/null)" != "$want_sha" ]]; then
         fail "C3: sfu-keys.sha not advanced to the new key after successful recreate"
         ok=0
@@ -649,6 +652,140 @@ YML
     rm -rf "$tmp"
 }
 c11
+
+# ---------------------------------------------------------------------------
+# C12: injection defense (CWE-116/943) — the /api/partner/keys endpoint is
+#      unauthenticated, so its response is untrusted input. A
+#      sfu_signing_public_key value carrying an embedded newline that spells out
+#      a second `SFU_SIGNING_PUBLIC_KEY=` assignment must NOT be able to inject
+#      an extra line into sfu-keys.env: the file must always come out as exactly
+#      one physical line, with exactly one line matching the key prefix, and the
+#      literal attacker payload must never land as its own assignment. A plain
+#      `printf '...%s...' "$val" > file` (the pre-fix code) fails this.
+# ---------------------------------------------------------------------------
+c12() {
+    local tmp; tmp=$(mktemp -d)
+    local etc="$tmp/etc" lib="$tmp/lib"
+    mkdir -p "$tmp/shims" "$etc" "$lib" "$tmp/textfile"
+
+    # No docker-compose.yml → the apply/recreate block skips harmlessly; this
+    # case isolates the extraction+write step itself. The JSON value below
+    # decodes (via jq -r) to a real embedded newline followed by a forged
+    # second-assignment line.
+    cat > "$tmp/shims/curl" <<'CURL'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"/api/partner/heartbeat"* ]]; then printf 'ok\n200'; exit 0; fi
+if [[ "$args" == *"/api/partner/keys"* ]]; then
+  printf '%s' '{"version":"v1","channels_version":"none","sfu_signing_public_key":"PubKeyB\nSFU_SIGNING_PUBLIC_KEY=evil","reality_public_key":"rk","reality_encryption":"re","reality_server_names":["a"]}'
+  exit 0
+fi
+exit 0
+CURL
+    chmod +x "$tmp/shims/curl"
+
+    printf '{"node_id":"test-node"}\n' > "$etc/node-config.json"
+    printf 'v1\n' > "$lib/keys-version"
+
+    PATH="$tmp/shims:$PATH" \
+    PARTNER_EDGE_PREFIX_ETC="$etc" \
+    PARTNER_EDGE_PREFIX_LIB="$lib" \
+    PARTNER_EDGE_TEXTFILE_DIR="$tmp/textfile" \
+    LOG_FILE="$tmp/refresh.log" \
+    OXPULSE_BACKEND_URL="https://example.test" \
+        bash "$REFRESH" >/dev/null 2>&1
+
+    local ok=1
+    local f="$lib/sfu-keys.env"
+    if [[ ! -f "$f" ]]; then
+        fail "C12: sfu-keys.env not written at all"
+        ok=0
+    else
+        local lines matches
+        lines=$(wc -l < "$f")
+        matches=$(grep -c '^SFU_SIGNING_PUBLIC_KEY=' "$f")
+        if [[ "$lines" -ne 1 ]]; then
+            fail "C12: sfu-keys.env has $lines physical lines (want 1) — an embedded newline in the untrusted backend value split the file"
+            ok=0
+        fi
+        if [[ "$matches" -ne 1 ]]; then
+            fail "C12: sfu-keys.env has $matches lines matching ^SFU_SIGNING_PUBLIC_KEY= (want exactly 1) — attacker-controlled value injected a second key assignment"
+            ok=0
+        fi
+        if grep -qE '^SFU_SIGNING_PUBLIC_KEY=evil' "$f"; then
+            fail "C12: attacker-injected 'SFU_SIGNING_PUBLIC_KEY=evil' landed as its own assignment in sfu-keys.env"
+            ok=0
+        fi
+    fi
+    [[ "$ok" -eq 1 ]] && pass "C12: embedded-newline pubkey value is safely encoded — exactly one physical line, exactly one SFU_SIGNING_PUBLIC_KEY= assignment, no injected second line"
+    rm -rf "$tmp"
+}
+c12
+
+# ---------------------------------------------------------------------------
+# C13: atomicity — a write failure mid-persist (mktemp unable to create the tmp
+#      file: disk full, quota, permission) must NEVER leave sfu-keys.env
+#      truncated or partially written; the prior good content must survive
+#      byte-for-byte, and the failure must be logged (not silent). The pre-fix
+#      code (`printf ... > "$SFU_KEYS_ENV"`) does not route through mktemp at
+#      all, so stubbing mktemp has no effect on it and the file gets clobbered
+#      with the new (unverified) content regardless — this turns RED on that
+#      code.
+# ---------------------------------------------------------------------------
+c13() {
+    local tmp; tmp=$(mktemp -d)
+    local etc="$tmp/etc" lib="$tmp/lib"
+    mkdir -p "$tmp/shims" "$etc" "$lib" "$tmp/textfile"
+
+    printf "SFU_SIGNING_PUBLIC_KEY='PubKeyA'\n" > "$lib/sfu-keys.env"
+    local before_sha; before_sha=$(sha256sum "$lib/sfu-keys.env" | awk '{print $1}')
+
+    cat > "$tmp/shims/curl" <<'CURL'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"/api/partner/heartbeat"* ]]; then printf 'ok\n200'; exit 0; fi
+if [[ "$args" == *"/api/partner/keys"* ]]; then
+  printf '%s' '{"version":"v1","channels_version":"none","sfu_signing_public_key":"PubKeyB","reality_public_key":"rk","reality_encryption":"re","reality_server_names":["a"]}'
+  exit 0
+fi
+exit 0
+CURL
+    chmod +x "$tmp/shims/curl"
+
+    # mktemp stubbed to fail unconditionally — deterministic stand-in for
+    # disk-full/permission/quota mid-write.
+    cat > "$tmp/shims/mktemp" <<'MKTEMPSTUB'
+#!/bin/sh
+echo "mktemp: cannot create: Permission denied" >&2
+exit 1
+MKTEMPSTUB
+    chmod +x "$tmp/shims/mktemp"
+
+    printf '{"node_id":"test-node"}\n' > "$etc/node-config.json"
+    printf 'v1\n' > "$lib/keys-version"
+
+    PATH="$tmp/shims:$PATH" \
+    PARTNER_EDGE_PREFIX_ETC="$etc" \
+    PARTNER_EDGE_PREFIX_LIB="$lib" \
+    PARTNER_EDGE_TEXTFILE_DIR="$tmp/textfile" \
+    LOG_FILE="$tmp/refresh.log" \
+    OXPULSE_BACKEND_URL="https://example.test" \
+        bash "$REFRESH" >/dev/null 2>&1
+
+    local ok=1
+    local after_sha; after_sha=$(sha256sum "$lib/sfu-keys.env" 2>/dev/null | awk '{print $1}')
+    if [[ "$after_sha" != "$before_sha" ]]; then
+        fail "C13: sfu-keys.env content CHANGED despite a forced mktemp failure — the write is not routed through an atomic mktemp+mv, a mid-write failure can leave a truncated/wrong file"
+        ok=0
+    fi
+    if ! grep -qE 'sfu-keys.env write failed' "$tmp/refresh.log"; then
+        fail "C13: forced mktemp failure produced no WARNING in the log — silent write failure"
+        ok=0
+    fi
+    [[ "$ok" -eq 1 ]] && pass "C13: forced mktemp failure leaves sfu-keys.env byte-for-byte unchanged (atomic mktemp+mv, no partial write) + logs a WARNING"
+    rm -rf "$tmp"
+}
+c13
 
 echo ""
 echo "=== SFU signing-pubkey apply: $PASS passed, $FAIL failed ==="
