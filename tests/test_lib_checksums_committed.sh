@@ -39,6 +39,7 @@ setup() {
 		compose-lib.sh
 		healthcheck-lib.sh
 		host-scripts-lib.sh
+		peer-ip-guard-lib.sh
 	)
 }
 
