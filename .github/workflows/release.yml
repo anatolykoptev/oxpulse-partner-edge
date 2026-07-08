@@ -470,6 +470,12 @@ jobs:
           # upload steps below. (A `cp X X` here fails "same file" and aborts the
           # whole Stage step → 0 assets. Only subdir/renamed files need cp.)
           cp lib/telegram-alert-lib.sh         telegram-alert-lib.sh
+          # SSRF / internal-IP guard (P1 of the 2026-07-08 health-report-lib-
+          # extraction plan): same _HOST_SCRIPT_SBIN_FILES / sync_host_scripts
+          # delivery shape as telegram-alert-lib.sh directly above — staged so
+          # SHA256SUMS covers it and a tier-4 curl|bash fresh install (no local
+          # clone, install-systemd.sh's curl fallback) can fetch it too.
+          cp lib/peer-ip-guard-lib.sh          peer-ip-guard-lib.sh
           # NOTE: reconcile.sh is intentionally NOT staged as a repo-root release
           # asset. upgrade.sh's _source_lib fetches it from $REPO_RAW/lib/reconcile.sh
           # and verifies it against lib-checksums.txt (the lib/*.sh home manifest,
@@ -540,6 +546,7 @@ jobs:
             compose-lib.sh \
             healthcheck-lib.sh \
             host-scripts-lib.sh \
+            peer-ip-guard-lib.sh \
           ) > lib/lib-checksums.txt
           cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
@@ -570,6 +577,7 @@ jobs:
             channel-render-lib.sh \
             oxpulse-token-lib.sh \
             telegram-alert-lib.sh \
+            peer-ip-guard-lib.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
@@ -636,6 +644,7 @@ jobs:
             channel-render-lib.sh \
             oxpulse-token-lib.sh \
             telegram-alert-lib.sh \
+            peer-ip-guard-lib.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
