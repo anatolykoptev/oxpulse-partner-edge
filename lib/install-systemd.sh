@@ -195,6 +195,25 @@ _systemd_install_lib_scripts() {
 		chmod 0644 "$PREFIX_SBIN/cross-probe-lib.sh"
 	fi
 
+	# Metric-sink lib (P1 of the 2026-07-08 refresh-lib-extraction-strangler
+	# plan) — emit_metric/emit_gauge Prometheus textfile sink sourced
+	# fail-CLOSED by oxpulse-partner-edge-refresh.sh at every daily tick (no
+	# safe inline fallback for emit_metric's load-bearing PR #328 fix). Same
+	# delivery tier + 0644 mode as cross-probe-lib.sh directly above (sourced,
+	# not executed); upgrade.sh syncs it to existing boxes via
+	# _HOST_SCRIPT_SBIN_FILES.
+	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/metric-sink-lib.sh" ]]; then
+		install -m 0644 "$src_dir/lib/metric-sink-lib.sh" "$PREFIX_SBIN/metric-sink-lib.sh"
+	elif [[ -n "${src_dir:-}" && -f "$src_dir/metric-sink-lib.sh" ]]; then
+		install -m 0644 "$src_dir/metric-sink-lib.sh" "$PREFIX_SBIN/metric-sink-lib.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/metric-sink-lib.sh" ]]; then
+		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/metric-sink-lib.sh" \
+			"$PREFIX_SBIN/metric-sink-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/lib/metric-sink-lib.sh" -o "$PREFIX_SBIN/metric-sink-lib.sh"
+		chmod 0644 "$PREFIX_SBIN/metric-sink-lib.sh"
+	fi
+
 	# Fleet-wide infrastructure defaults (Bug 8 fix — install to canonical share path).
 	# channel-render-lib.sh and oxpulse-channels-health-report.sh both source this file
 	# from /usr/local/share/oxpulse-partner-edge/config/defaults.conf at runtime.

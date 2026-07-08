@@ -254,8 +254,11 @@ DOCK
         NODE_ID="test-node"
         # shellcheck disable=SC2034
         SFU_KEYS_ENV="$lib/sfu-keys.env"
+        # emit_gauge (now lib/metric-sink-lib.sh) resolves its textfile dir via
+        # PARTNER_EDGE_TEXTFILE_DIR directly (not the caller's $TEXTFILE_DIR
+        # local), matching lib/reconcile.sh's _reconcile_emit_prom_gauge.
         # shellcheck disable=SC2034
-        TEXTFILE_DIR="$tmp/textfile"
+        PARTNER_EDGE_TEXTFILE_DIR="$tmp/textfile"
         # _emit_sfu_applied_gauge reads SFU_CONTAINER_NAME (top-level const in refresh.sh)
         # for its `docker ps` filter + `docker exec` target; define it here because we
         # source the function in isolation, without the script's top-level constants.
@@ -263,9 +266,12 @@ DOCK
         SFU_CONTAINER_NAME="oxpulse-partner-sfu"
         log() { :; }
         export PATH="$tmp/shims:$PATH"
-        # Source the REAL gauge helpers from refresh.sh (not hand-copies).
+        # Source the REAL gauge helpers. emit_gauge moved to
+        # lib/metric-sink-lib.sh (P1 of the 2026-07-08 refresh-lib-
+        # extraction-strangler plan); _emit_sfu_applied_gauge stays inline in
+        # refresh.sh (ADR-4) and is still sed-extracted from there.
         # shellcheck disable=SC1090
-        source <(sed -n '/^emit_gauge()/,/^}/p' "$REFRESH")
+        source "$REPO_ROOT/lib/metric-sink-lib.sh"
         # shellcheck disable=SC1090
         source <(sed -n '/^_emit_sfu_applied_gauge()/,/^}/p' "$REFRESH")
         _emit_sfu_applied_gauge
@@ -576,8 +582,11 @@ DOCK
         NODE_ID="test-node"
         # shellcheck disable=SC2034
         SFU_KEYS_ENV="$lib/sfu-keys.env"
+        # emit_gauge (now lib/metric-sink-lib.sh) resolves its textfile dir via
+        # PARTNER_EDGE_TEXTFILE_DIR directly (not the caller's $TEXTFILE_DIR
+        # local), matching lib/reconcile.sh's _reconcile_emit_prom_gauge.
         # shellcheck disable=SC2034
-        TEXTFILE_DIR="$tmp/textfile"
+        PARTNER_EDGE_TEXTFILE_DIR="$tmp/textfile"
         # _emit_sfu_applied_gauge reads SFU_CONTAINER_NAME (top-level const in refresh.sh);
         # define it here because we source the function without the top-level constants.
         # shellcheck disable=SC2034
