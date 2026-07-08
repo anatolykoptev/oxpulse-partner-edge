@@ -131,6 +131,23 @@ setup() {
 	}
 }
 
+@test "ADR-5 guard actually fires: _emit_serveability dies when probe_ch1 is undefined" {
+	[ -f "$LIB" ] || skip "lib missing"
+	# Static-text checks above only confirm the guard STRING is present; this
+	# proves it actually EXECUTES and halts before reaching the dispatch loop
+	# (a load-order/partial-source regression must not silently fall through
+	# to reporting a false all-DOWN, which would trip upgrade.sh's rollback
+	# gate on a healthy box — code-quality-reviewer NIT, 2026-07-08 review).
+	run bash -c "
+		die() { printf 'DIED: %s\n' \"\$*\" >&2; exit 1; }
+		source '$LIB'
+		unset -f probe_ch1
+		_emit_serveability
+	"
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -q "DIED:.*probe functions not loaded"
+}
+
 @test "wire contract #1: _post_channel JSON envelope fields unchanged" {
 	[ -f "$LIB" ] || skip "lib missing"
 	local body

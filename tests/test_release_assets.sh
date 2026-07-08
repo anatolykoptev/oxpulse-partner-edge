@@ -115,9 +115,16 @@ setup() {
 # Bug 15: uninstall.sh must be staged, checksummed, and uploaded in release.yml
 # ---------------------------------------------------------------------------
 
-@test "Bug15: release.yml stages uninstall.sh as a release asset" {
-	# Must have a `cp uninstall.sh  uninstall.sh` line in Stage artifacts block
-	grep -qE 'cp[[:space:]]+uninstall\.sh[[:space:]]+uninstall\.sh' .github/workflows/release.yml
+@test "Bug15: release.yml does NOT self-cp uninstall.sh (already at repo root)" {
+	# uninstall.sh lives at repo root == the Stage step's cwd, so it needs no
+	# cp to be picked up by the sha256sum/upload steps below (see the
+	# "7 sbin files ... no cp needed" comment a few lines above the lib/*.sh
+	# cp block). A `cp uninstall.sh uninstall.sh` line would fail "same file"
+	# under `set -e` and abort the whole Stage step -> 0 release assets
+	# (this was Bug15's actual original test bug, not release.yml's).
+	! grep -qE 'cp[[:space:]]+uninstall\.sh[[:space:]]+uninstall\.sh' .github/workflows/release.yml
+	# The file must genuinely be present at repo root for the "no cp needed" claim to hold.
+	[[ -f uninstall.sh ]]
 }
 
 @test "Bug15: release.yml SHA256SUMS block covers uninstall.sh" {
