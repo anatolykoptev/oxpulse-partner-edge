@@ -600,14 +600,19 @@ _post_channel() {
     fi
 
     local http_code
+    # CWE-214 hardening (2026-07-08 review, low-severity accepted-residual
+    # closed): the Bearer token goes via `-K -` (curl config on stdin, a bash
+    # here-string — no separate process ever holds the token as its own argv)
+    # instead of `-H "Authorization: Bearer $token"`, which was ps/proc-visible
+    # to any local user on the relay host for curl's whole lifetime.
     http_code=$(curl -s -o /dev/null -w '%{http_code}' \
         --max-time 15 \
         -X POST \
         -H 'Content-Type: application/json' \
-        -H "Authorization: Bearer $token" \
+        -K - \
         -d "$full_payload" \
         "${OXPULSE_BACKEND_API}/api/partner/channel-health" \
-        2>/dev/null || echo '000')
+        2>/dev/null <<< "header = \"Authorization: Bearer $token\"" || echo '000')
 
     if [[ "$http_code" =~ ^2 ]]; then
         log "channel $channel_name reported OK (HTTP $http_code)"

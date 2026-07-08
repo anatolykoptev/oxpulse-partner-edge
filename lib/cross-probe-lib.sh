@@ -356,14 +356,19 @@ _post_cross_probe() {
     local http_code
     # --max-time 8 (was 15) — the cross-probe POST slice of the per-peer budget
     # (getent 3 + probe 8 + post 8 = 19s/peer); see _run_peer_probe_loop BUDGET.
+    # CWE-214 hardening (2026-07-08 review, low-severity accepted-residual
+    # closed): the Bearer token goes via `-K -` (curl config on stdin, a bash
+    # here-string — no separate process ever holds the token as its own argv)
+    # instead of `-H "Authorization: Bearer $token"`, which was ps/proc-visible
+    # to any local user on the relay host for curl's whole lifetime.
     http_code=$(curl -s -o /dev/null -w '%{http_code}' \
         --max-time "${OXPULSE_PEER_PROBE_POST_TIMEOUT:-8}" \
         -X POST \
         -H 'Content-Type: application/json' \
-        -H "Authorization: Bearer $token" \
+        -K - \
         -d "$body" \
         "${OXPULSE_BACKEND_API}/api/partner/channel-health" \
-        2>/dev/null || echo '000')
+        2>/dev/null <<< "header = \"Authorization: Bearer $token\"" || echo '000')
 
     if [[ "$http_code" =~ ^2 ]]; then
         log "cross-probe target=$target_node_id reported OK (HTTP $http_code)"
