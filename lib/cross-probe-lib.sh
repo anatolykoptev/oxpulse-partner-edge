@@ -181,14 +181,18 @@ _write_peer_probe_state() {
 # → no withdrawal (conservative/safe). All other failure modes (down/blackholed
 # :443, expired/mismatched cert, non-coturn backend) agree.
 #
-# SEC-CR-302 (DNS-rebinding TOCTOU) — residual UNCHANGED from the turnutils leg:
-# _host_is_internal resolves+vets the host, but openssl re-resolves the SAME
-# hostname at dial time. Bounded: the roster is SERVER-CURATED (P2 only lists
-# vetted partner edges). UNLIKE turnutils, openssl CAN close this cleanly —
-# `-connect <vetted-IP>:<port> -servername <hostname>` dials the pre-vetted IP
-# while keeping SNI = hostname — once the caller threads the resolved IP through.
-# Tracked in docs/FOLLOWUPS.md as MEDIUM; the connect-IP+SNI fix is now a clean
-# follow-up (was IMPOSSIBLE with turnutils). BLOCKING before default-ON fleetwide.
+# SEC-CR-302 (DNS-rebinding TOCTOU) — FIXED (PR #324, 2026-06-16, see
+# docs/FOLLOWUPS.md §Q): _host_is_internal ECHOES the first vetted public IP
+# on its allow path; the peer loop captures it as $4/dial_ip below and PINS
+# the dial to that IP on both probe legs — openssl never re-resolves the
+# hostname, so the resolve-then-dial window is closed. caddy-l4 still routes
+# by SNI and the cert SAN is still checked against the hostname (`-connect
+# <vetted-IP>:<port> -servername <hostname> -verify_hostname <hostname>`).
+# tests/test_cross_probe_loop.sh test16 asserts the pin. No longer blocking —
+# the loop may run default-ON fleetwide. Residual: the `${4:-$turns_host}`
+# fallback below (older call sites / tests that don't pass dial_ip) keeps the
+# pre-#324 re-resolve behavior on that path only — the live _run_peer_probe_loop
+# call site always passes $vetted_ip, so production is not exposed.
 _probe_peer_coturn() {
     local turns_host="$1"
     local turns_port="$2"
