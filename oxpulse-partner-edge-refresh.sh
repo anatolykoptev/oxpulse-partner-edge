@@ -385,9 +385,16 @@ xprb_curl_get_with_retry() {
     local attempt out rc code delays=(2 5)
     for attempt in 1 2 3; do
         rc=0
+        # CWE-214 hardening (2026-07-08 review, mirrors the same fix already
+        # applied to _post_channel/_post_cross_probe in lib/*.sh, PR #370):
+        # the Bearer token goes via `-K -` (curl config on stdin, a bash
+        # here-string — no separate process ever holds the token as its own
+        # argv) instead of `-H "Authorization: Bearer $bearer"`, which was
+        # ps/proc-visible to any local user on the relay host for curl's
+        # whole lifetime.
         out=$(curl -sS --max-time 15 -L \
-            -H "Authorization: Bearer ${bearer}" \
-            "$url" -w '\n%{http_code}' 2>&1) || rc=$?
+            -K - \
+            "$url" -w '\n%{http_code}' 2>&1 <<< "header = \"Authorization: Bearer ${bearer}\"") || rc=$?
 
         if [[ "$rc" -ne 0 ]]; then
             if [[ "$attempt" -lt 3 ]]; then
