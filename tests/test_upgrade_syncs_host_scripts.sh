@@ -470,6 +470,7 @@ if [[ -f "$RELEASE_YML" ]]; then
         [channel-health-lib.sh]="channel-health-lib.sh"
         [metric-sink-lib.sh]="metric-sink-lib.sh"
         [surgical-restart-lib.sh]="surgical-restart-lib.sh"
+        [xprb-refresh-lib.sh]="xprb-refresh-lib.sh"
     )
 
     for sbin_name in "${!sbin_to_asset[@]}"; do
