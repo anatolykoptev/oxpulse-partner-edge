@@ -442,3 +442,46 @@ cadence gives ample natural retry via the next scheduled run even without this.
 **File:line:** `lib/xprb-refresh-lib.sh:88` (`xprb_curl_get_with_retry()`),
 `lib/channel-health-lib.sh:620`, `lib/cross-probe-lib.sh:389` (the carve-out
 pattern to mirror).
+
+---
+
+## `_source_lib` fallthrough does not rescue a PRESENT-but-stale tier-2 entry (PR3, v0.14.5 arc)
+
+PR3 fixed `_source_lib`'s tier-2 permanent fail-closed on a *missing* manifest
+entry (a stale `lib-checksums.txt` that predates a newly-introduced lib): the
+resolver now walks candidates in tier order and falls through past any
+candidate that resolves but has no opinion on the file, terminating only at a
+candidate that actually contains an entry. That fix does NOT — and by design
+cannot — help the sibling case: a lib whose CONTENT changed while its tier-2
+entry is still PRESENT in the manifest, just now WRONG (stale hash, not a
+missing line). Per this PR's own security-critical invariant (a found entry,
+right or wrong, terminates the search immediately — a mismatch is never
+"rescued" by trying another tier), that case correctly stays fail-closed today:
+the stale-but-present tier-2 entry wins the search and dies on mismatch before
+the correct tier-3 remote entry is ever consulted. There is no fix for this
+inside `_source_lib`'s current resolution model — loosening "mismatch is
+terminal" to "mismatch also falls through" would reopen exactly the downgrade
+attack the invariant defends against (an attacker able to plant one bad
+manifest entry could force fallthrough to a source they also control).
+
+**Followup:** the real fix is keeping tier-2 current, not making the resolver
+more permissive. Two options, both operator/architecture decisions out of this
+PR's scope: (1) tier-2-refresh-post-sync — have `reconcile.sh`/`upgrade.sh`
+overwrite `${INSTALL_LIB_DIR}/lib-checksums.txt` with the freshly-verified
+manifest after every successful sync, so a staged tier-2 anchor is never more
+than one run stale; or (2) a GPG-signed `SHA256SUMS.asc` for genuine
+cross-origin authentication, which would let the resolver safely prefer a newer
+signed manifest over an older one instead of relying on tier order alone. Note
+per the THREAT MODEL header that nothing in the current release pipeline
+actually populates `INSTALL_LIB_DIR` automatically today — this gap is real
+only for the subset of operators who manually stage tier-2, but it is worth
+tracking before that staging path becomes more common.
+
+**Severity:** LOW — requires an operator who manually staged tier-2 in the
+first place, AND that lib's content changing upstream without the operator
+re-staging; the far more common "just never staged tier-2 at all" and "staged
+once, new lib added later" cases are both fixed by this PR's fallthrough.
+
+**File:line:** `upgrade.sh:_source_lib` (the mismatch-is-terminal invariant
+that correctly refuses to fall through here), `upgrade.sh:_source_lib` THREAT
+MODEL header (RESIDUAL bullet documents this exact gap).
