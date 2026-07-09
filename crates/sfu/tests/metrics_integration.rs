@@ -140,15 +140,46 @@ async fn metrics_track_client_and_packet_counts() {
     // bracket strings no longer work. Match on the metric name + key label
     // value as a substring — ordering within {} is not guaranteed by prometheus 0.13.
     assert!(
-        body.contains(r#"sfu_forwarded_packets_total"#) && body.contains(r#"kind="video""#),
-        "forwarded video counter present:\n{body}",
-    );
-    assert!(
         body.contains(r#"sfu_layer_selection_total"#) && body.contains(r#"layer="q""#),
         "layer q counter present:\n{body}",
     );
 
-    // Numeric assertions: 2 connects, active_participants = 2, ≥1 forwarded video.
+    // `sfu_forwarded_packets_total` increments ONLY after a successful SRTP
+    // `writer.write()` (client/fanout.rs) — which requires the underlying
+    // str0m `Rtc` to have a real negotiated m-line for `mid`, i.e. a
+    // completed SDP offer/answer exchange. `new_client()` builds a bare,
+    // unnegotiated `Rtc` (`client/test_seed.rs`'s own doc comment: "The
+    // writer path early-returns on unnegotiated Rtc ... tests observe filter
+    // semantics purely via the delivered_media counter"), so B's
+    // `Rtc::writer(mid)` can never return `Some` in this in-process harness.
+    // Asserting the counter's presence (the pre-fix expectation) was stale:
+    // it dates back to when `forwarded_packets_total` incremented BEFORE the
+    // `mid()` gate (see fanout.rs: "Previously fired before the mid() gate
+    // (inflated counts during Negotiating window); now moved here so it
+    // reflects actual delivery"). The counter's genuine absence here is
+    // itself the regression guard against that inflation bug reappearing.
+    assert!(
+        !(body.contains(r#"sfu_forwarded_packets_total"#) && body.contains(r#"kind="video""#)),
+        "sfu_forwarded_packets_total{{kind=\"video\"}} must stay absent on an unnegotiated Rtc \
+         (writer.write() cannot succeed without a real SDP-negotiated m-line):\n{body}",
+    );
+
+    // What DOES happen: `Registry::insert` cross-advertises A's track to B
+    // on join (`client.handle_track_open`), so B's `tracks_out` is wired —
+    // but B has no `ws_msg_tx`, so `handle_track_open`'s legacy path leaves
+    // the entry at `TrackOutState::ToOpen` (`mid() == None`) forever. The
+    // forwarded packet therefore hits fanout.rs's `skipped_no_track` branch.
+    // Assert that's exactly what happened, for the same (src=100, dst=101,
+    // kind=video) pair the removed assertion above expected to be forwarded.
+    assert!(
+        body.contains(r#"sfu_sfu_forward_decisions_total"#)
+            && body.contains(r#"dst_peer="101""#)
+            && body.contains(r#"kind="video""#)
+            && body.contains(r#"action="skipped_no_track""#),
+        "forward-decision skipped_no_track for dst_peer=101/kind=video present:\n{body}",
+    );
+
+    // Numeric assertions: 2 connects, active_participants = 2.
     // Use contains-based line matching since labels now include edge_id.
     for line in body.lines() {
         if line.starts_with("sfu_client_connect_total{") {
@@ -159,11 +190,16 @@ async fn metrics_track_client_and_packet_counts() {
             let v: f64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
             assert_eq!(v, 2.0, "active_participants = 2, got {v}");
         }
-        if line.contains(r#"sfu_forwarded_packets_total"#) && line.contains(r#"kind="video""#) {
-            let v: f64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
-            assert!(v >= 1.0, "forwarded video ≥ 1, got {v}");
-        }
     }
+
+    // Confirm the packet genuinely reached B's per-client fanout filter (so
+    // the "0 forwarded" above is provably the writer gate, not the layer
+    // filter silently dropping the packet for an unrelated reason).
+    assert_eq!(
+        registry.clients()[1].layer_passed_count(),
+        1,
+        "B must have received the fanned-out packet past the layer filter"
+    );
 }
 
 #[tokio::test]
