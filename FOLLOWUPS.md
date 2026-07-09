@@ -1,5 +1,27 @@
 # Follow-ups
 
+## Self-update convergence gate is scoped to upgrade.sh only (PR4 v0.14.5)
+
+`_assert_self_update_converged` (PR4) fail-closes only on `upgrade.sh`'s own
+convergence: it compares the running process's pre-sync bytes against the
+post-sync installed `oxpulse-partner-edge-upgrade`. It does NOT assert that the
+*other* host-scripts (`install-firewall.sh`, `host-scripts-lib.sh`, …) synced
+successfully — a corner case where `upgrade.sh` converges but a sibling
+host-script independently 429s during the same `sync_host_scripts` burst would
+leave a converged orchestrator calling a stale sibling (the historical two-run
+state). This is deliberately out of scope: it is mitigated by Part A
+(`RETRY_OPTS` + a loud fetch-failure `warn`) and by `sync_host_scripts`'s own
+per-file "could not fetch … skipping" warn, and the orchestrator itself being
+converged means it knows how to drive whatever host-script version is present.
+
+**Followup (LOW):** if per-host-script staleness ever recurs, extend the gate to
+assert every `_HOST_SCRIPT_SBIN_FILES` entry's installed sha matches its
+`SHA256SUMS` expectation after sync (fail-closed), reusing `_lookup_expected_hash`.
+
+**File:line:** `upgrade.sh` `_assert_self_update_converged`.
+
+---
+
 ## Phase 5.5 fail-soft for hydrate/refresh/update (MAJOR 1 deferred)
 
 `hydrate.sh`, `oxpulse-partner-edge-refresh.sh`, and `update.sh` do not use
