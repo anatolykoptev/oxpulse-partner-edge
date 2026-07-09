@@ -2424,6 +2424,48 @@ run_conflict_checks() {
 	fi
 }
 
+# ---------------------------------------------------------------------------
+# _patch_compose_sfu_healthcheck_cidr — LIVE-BOX MIGRATION SHIM (2026-07-08).
+#
+# v0.14.4 and earlier rendered the SFU healthcheck's wget/nc host tokens from
+# {{AWG_ALLOCATED_IP}} — the mesh IP WITH its /CIDR suffix intact (e.g.
+# 10.9.0.7/24, kept for `ip addr add` / awg0.conf — see install.sh:744
+# AWG_HOST_IP="${AWG_ALLOCATED_IP%%/*}"). Substituted raw into a wget URL /
+# nc target, that suffix makes the healthcheck fail permanently: docker
+# reports the container "unhealthy" even though the SFU itself is fine
+# (confirmed live on ruoxp, failingstreak=19471+, 6+ days).
+#
+# v0.14.5 fixes the TEMPLATE (docker-compose.yml.tpl now references the
+# container's own ${SFU_METRICS_BIND}/${SFU_RELAY_API_BIND} runtime env vars,
+# already CIDR-stripped — see tpl:153-154), but upgrade.sh never re-renders
+# docker-compose.yml from the template on an existing box (only image tags +
+# IMAGE_VERSION are sed-patched in place — see the two call sites below), so
+# an already-deployed compose file would keep the broken /CIDR healthcheck
+# forever without this heal.
+#
+# Narrowly anchored: only strips a trailing /NN CIDR suffix that immediately
+# follows an IPv4 address in the two SFU healthcheck host positions (wget URL
+# host, nc -z host) — the patterns can only match inside that one CMD-SHELL
+# string, so the image-tag line and every other line are untouched by
+# construction (see tests/test_upgrade_sfu_healthcheck_heal.sh case c).
+#
+# Idempotent (case b): a file with no CIDR suffix in those two positions —
+# already healed by a prior run, OR freshly rendered by v0.14.5's
+# ${SFU_METRICS_BIND} form (no digits before "/", so the pattern can't
+# match) — is a byte-for-byte no-op.
+#
+# FOLLOWUP: remove this shim once fleet telemetry confirms 100% of nodes are
+# on >= v0.14.5 (see FOLLOWUPS.md; cites this PR).
+# ---------------------------------------------------------------------------
+_patch_compose_sfu_healthcheck_cidr() {
+	local _compose="$1"
+	[[ -f "$_compose" ]] || return 0
+	sed -i -E \
+		-e 's#(wget -qO- http://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/[0-9]+(:)#\1\2#' \
+		-e 's#(nc -z [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/[0-9]+( )#\1\2#' \
+		"$_compose"
+}
+
 # ---- --with-templates mode ----
 if [[ "$MODE" == with_templates ]]; then
 	resolve_default_target
@@ -2562,6 +2604,10 @@ if [[ "$MODE" == with_templates ]]; then
 	sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
 		"$COMPOSE_FILE"
 	sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
+	# Live-box migration shim (2026-07-08): heal any pre-v0.14.5 SFU
+	# healthcheck that still probes the raw /CIDR mesh IP — see the
+	# function's docstring above (_patch_compose_sfu_healthcheck_cidr).
+	_patch_compose_sfu_healthcheck_cidr "$COMPOSE_FILE"
 
 	# Step 4: sync host-scripts for the release tag (health-report, sbin libs, units).
 	# Must run BEFORE the baseline snapshot so the newly-installed healthcheck.sh
@@ -2756,6 +2802,10 @@ snapshot_host_scripts "$CURRENT"
 sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
 	"$COMPOSE_FILE"
 sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
+# Live-box migration shim (2026-07-08): heal any pre-v0.14.5 SFU healthcheck
+# that still probes the raw /CIDR mesh IP — see the function's docstring
+# above (_patch_compose_sfu_healthcheck_cidr).
+_patch_compose_sfu_healthcheck_cidr "$COMPOSE_FILE"
 log "compose image tags rewritten to $TARGET (pre-pull)"
 
 # Sync host-scripts for the release tag before pulling images so that a

@@ -199,15 +199,30 @@ services:
     # against the service's environment block.
     #
     # Bug #4 fix (2026-05-28 ruoxp): SFU metrics and relay-API listeners bind
-    # on {{AWG_ALLOCATED_IP}} (mesh-only, not 0.0.0.0). Probing 127.0.0.1 for
-    # those planes → connection refused → container marked unhealthy → false
+    # on the mesh IP (mesh-only, not 0.0.0.0). Probing 127.0.0.1 for those
+    # planes → connection refused → container marked unhealthy → false
     # positive operator alarm. client_ws stays on 127.0.0.1 (SFU_BIND_ADDRESS
-    # is 0.0.0.0). {{AWG_ALLOCATED_IP}} is substituted at install time by opec
-    # (same value SFU_METRICS_BIND / SFU_RELAY_API_BIND receive) — no compose
-    # env-escape needed. Empty AWG_ALLOCATED_IP (mesh disabled) → probe fails
-    # → unhealthy (correct: SFU shouldn't run without mesh).
+    # is 0.0.0.0).
+    #
+    # 2026-07-08 fix (env-var-by-construction, ruoxp failingstreak=19471):
+    # the Bug #4 fix above originally substituted the raw {{AWG_ALLOCATED_IP}}
+    # template placeholder here — but that placeholder INTENTIONALLY keeps its
+    # /CIDR suffix (e.g. 10.9.0.7/24, needed by `ip addr add` / awg0.conf
+    # elsewhere), which a URL host / nc target cannot parse. That made this
+    # healthcheck a SECOND, independently-drifting source of the mesh IP,
+    # out of sync with the environment: block above which already derives the
+    # CIDR-stripped {{AWG_HOST_IP}} into SFU_METRICS_BIND / SFU_RELAY_API_BIND
+    # (see install.sh:744 AWG_HOST_IP="${AWG_ALLOCATED_IP%%/*}"). Referencing
+    # ${SFU_METRICS_BIND} / ${SFU_RELAY_API_BIND} — the container's own
+    # runtime env vars, already expanded in this CMD-SHELL context (see the
+    # "Round-2 review fix" comment above) — collapses both probes onto the
+    # SAME write site as the environment: block, eliminating the whole class
+    # of "two placeholders that can independently drift" rather than just
+    # swapping one drifted value for a fresher one. Empty bind (mesh
+    # disabled) → probe fails → unhealthy (correct: SFU shouldn't run
+    # without mesh) — same fail-closed behaviour as before.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://{{AWG_ALLOCATED_IP}}:{{SFU_METRICS_PORT}}/metrics >/dev/null 2>&1 && { [ -z \"$SIGNALING_SFU_SECRET\" ] || nc -z 127.0.0.1 \"${SFU_CLIENT_WS_PORT:-8920}\"; } && { [ -z \"$RELAY_JWT_SECRET\" ] || nc -z {{AWG_ALLOCATED_IP}} \"${SFU_RELAY_API_PORT:-8912}\"; } || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://${SFU_METRICS_BIND}:{{SFU_METRICS_PORT}}/metrics >/dev/null 2>&1 && { [ -z \"$SIGNALING_SFU_SECRET\" ] || nc -z 127.0.0.1 \"${SFU_CLIENT_WS_PORT:-8920}\"; } && { [ -z \"$RELAY_JWT_SECRET\" ] || nc -z ${SFU_RELAY_API_BIND} \"${SFU_RELAY_API_PORT:-8912}\"; } || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

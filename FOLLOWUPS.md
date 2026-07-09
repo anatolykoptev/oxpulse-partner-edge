@@ -310,3 +310,40 @@ robustness/clarity improvement, not a live bug.
 
 **File:line:** `upgrade.sh` (cold-start retry logic, ~line 1439), `lib/healthcheck-lib.sh`
 (twin copy). Full comparison: agent memory `race-core-vs-oxpulse-channels.md`.
+
+---
+
+## `_patch_compose_sfu_healthcheck_cidr` live-box migration shim — remove once fleet is >= v0.14.5 (2026-07-08)
+
+PR1 of the v0.14.5 installer/upgrade robustness arc fixed
+`docker-compose.yml.tpl`'s SFU healthcheck to reference the container's own
+`${SFU_METRICS_BIND}`/`${SFU_RELAY_API_BIND}` runtime env vars instead of the
+raw `{{AWG_ALLOCATED_IP}}` template placeholder (which kept its `/CIDR`
+suffix, breaking the wget/nc probes and causing a permanent false
+"unhealthy" — confirmed on ruoxp, failingstreak=19471+). Because
+`upgrade.sh` never re-renders `docker-compose.yml` from the template on an
+existing box (only `image_tags` are sed-patched in place per
+`manifest.yaml`'s `compose` surface `patch_only` list), the template fix
+alone does not reach already-deployed boxes. `upgrade.sh` gained a second,
+narrowly-anchored sed helper — `_patch_compose_sfu_healthcheck_cidr()`,
+called from both compose-patch sites (`--with-templates` and plain apply
+paths) — that strips the `/CIDR` suffix from the two SFU healthcheck host
+tokens on every upgrade, idempotently, until the box's compose file is
+eventually re-rendered fresh by v0.14.5+ install.sh.
+
+**Followup:** delete `_patch_compose_sfu_healthcheck_cidr()`, its two call
+sites, and the `sfu_healthcheck_cidr` entry in `manifest.yaml`'s `compose`
+surface `patch_only` list once fleet telemetry confirms 100% of nodes are on
+`>= v0.14.5` (the shim becomes a permanent no-op at that point — safe to
+leave, but it is dead weight once no live box can still carry the pre-fix
+template).
+
+**Severity:** LOW — the shim itself is safe (idempotent, narrowly anchored,
+covered by `tests/test_upgrade_sfu_healthcheck_heal.sh`); this entry exists
+so the shim doesn't outlive its purpose.
+
+**File:line:** `upgrade.sh` (`_patch_compose_sfu_healthcheck_cidr()` +
+its two call sites in the `--with-templates` and plain-apply compose-patch
+steps), `manifest.yaml:69` (`compose` surface `patch_only` list),
+`docker-compose.yml.tpl` (the fixed healthcheck `test:` line — the source of
+truth going forward). Cites: v0.14.5 installer/upgrade robustness arc, PR1.
