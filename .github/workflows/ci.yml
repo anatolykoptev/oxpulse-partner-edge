@@ -28,6 +28,54 @@ jobs:
       - run: cargo clippy -p oxpulse-sfu --features test-utils,vfm --all-targets -- -D warnings
         working-directory: crates/sfu
 
+  # ADR-S10 — single-str0m fitness. Both oxpulse-sfu-kit and this crate MUST
+  # resolve to ONE str0m version; two mismatched 0.x minors are a hard compile
+  # break at every interop boundary (SfuRid/Rid, MediaData). Fails if the
+  # workspace resolves more than one str0m version.
+  single-str0m:
+    name: Single str0m version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Assert exactly one str0m version
+        run: |
+          set -euo pipefail
+          count=$(cargo tree --workspace --prefix none -i str0m 2>/dev/null | grep -c '^str0m v' || true)
+          echo "resolved str0m versions: $count"
+          cargo tree --workspace -i str0m || true
+          if [ "$count" != "1" ]; then
+            echo "::error::expected exactly 1 str0m version, found $count (two minors are a hard interop break)"
+            exit 1
+          fi
+
+  # ADR-S8 — release-train guardrail. A validation-only [patch.crates-io]
+  # override that points oxpulse-sfu-kit at a git/path source MUST NEVER reach a
+  # deployable branch. Runs only for main/dev (push or PR target); a scratch
+  # validation branch is intentionally exempt.
+  no-kit-source-override:
+    name: No oxpulse-sfu-kit source override
+    runs-on: ubuntu-latest
+    if: >-
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/dev' ||
+      github.base_ref == 'main' ||
+      github.base_ref == 'dev'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject git=/path= override on oxpulse-sfu-kit
+        run: |
+          set -euo pipefail
+          # Match a [patch...] entry pinning oxpulse-sfu-kit to a git or path source.
+          if grep -Eiq 'oxpulse-sfu-kit[[:space:]]*=.*(\bgit\b|\bpath\b)[[:space:]]*=' Cargo.toml; then
+            echo "::error::Cargo.toml carries a git=/path= override on oxpulse-sfu-kit."
+            echo "This validation-only [patch.crates-io] must never land on main/dev."
+            grep -niE 'oxpulse-sfu-kit[[:space:]]*=.*(git|path)[[:space:]]*=' Cargo.toml || true
+            exit 1
+          fi
+          echo "OK: no oxpulse-sfu-kit source override present."
+
   test:
     name: Tests
     runs-on: ubuntu-latest
