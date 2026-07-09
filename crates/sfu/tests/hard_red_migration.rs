@@ -13,34 +13,52 @@
 // At 85_000 bps — above kit's 80k, below partner-edge's 100k — the pacer
 // must report audio-only.  If kit's threshold were inadvertently used, the
 // test fails because video would be forwarded.
+//
+// Migration note (str0m 0.18 / kit 0.11+): partner-edge no longer owns a
+// bespoke `Pacer` type with a stateless `should_forward_audio_only(bps)`
+// predicate — that was replaced by the kit's stateful
+// `oxpulse_sfu_kit::bwe::SubscriberPacer`, whose `update(bps)` is a
+// hysteretic state machine (see `hysteresis.rs`), not a pure function of
+// `bps` alone. This test is rewritten against the CURRENT production seam:
+// a fresh `SubscriberPacer` seeded with `oxpulse_partner_edge_pacer_config()`
+// (the same config `Client::new` uses), asserting the `PacerAction` returned
+// by the first `update()` call — `GoAudioOnly` iff the partner-edge
+// `audio_only_bps` (100k), not the kit default (80k), gates the transition.
 #[test]
 fn pacer_uses_partner_edge_audio_only_threshold_not_kit_threshold() {
-    use oxpulse_sfu::pacer::Pacer;
-
-    let pacer = Pacer::new();
+    use oxpulse_sfu::pacer::oxpulse_partner_edge_pacer_config;
+    use oxpulse_sfu_kit::bwe::{PacerAction, SubscriberPacer};
 
     // 85 kbps: above kit threshold (80k), below partner-edge threshold (100k).
-    assert!(
-        pacer.should_forward_audio_only(85_000u64),
+    let mut pacer = SubscriberPacer::with_config(oxpulse_partner_edge_pacer_config());
+    assert_eq!(
+        pacer.update(85_000u64),
+        PacerAction::GoAudioOnly,
         "at 85k bps, partner-edge must use audio-only (threshold=100k); \
          kit's 80k threshold would allow video — AUDIO_ONLY_THRESHOLD_BPS regression",
     );
 
-    // 95 kbps: still in the zone.
-    assert!(
-        pacer.should_forward_audio_only(95_000u64),
+    // 95 kbps: still in the zone (fresh pacer — each threshold probed independently).
+    let mut pacer = SubscriberPacer::with_config(oxpulse_partner_edge_pacer_config());
+    assert_eq!(
+        pacer.update(95_000u64),
+        PacerAction::GoAudioOnly,
         "at 95k bps, still below partner-edge 100k threshold",
     );
 
     // Exactly at 100k: boundary is strict-less-than (<), so video is allowed.
-    assert!(
-        !pacer.should_forward_audio_only(100_000u64),
+    let mut pacer = SubscriberPacer::with_config(oxpulse_partner_edge_pacer_config());
+    assert_ne!(
+        pacer.update(100_000u64),
+        PacerAction::GoAudioOnly,
         "at exactly 100k bps the threshold is not exceeded; video must be allowed",
     );
 
     // Well above threshold: definitely not audio-only.
-    assert!(
-        !pacer.should_forward_audio_only(200_000u64),
+    let mut pacer = SubscriberPacer::with_config(oxpulse_partner_edge_pacer_config());
+    assert_ne!(
+        pacer.update(200_000u64),
+        PacerAction::GoAudioOnly,
         "at 200k bps, video must be forwarded",
     );
 }
@@ -91,6 +109,17 @@ fn pacer_h_floor_uses_partner_edge_value_not_kit() {
 // Kit's F_FLOOR=700k would promote to HIGH, breaking the partner-edge contract.
 //
 // REGRESSION GUARD: constants already correct; test catches any swap.
+//
+// Drift note (kit 0.11+): reaching MEDIUM from the pacer's LOW starting state
+// requires `UPGRADE_STREAK` (3) consecutive `SubscriberPacer::update` ticks —
+// the LiveKit-style hysteresis kit 0.11 introduced to avoid single-sample
+// thrash (see oxpulse_sfu_kit::bwe::hysteresis; `client/fanout.rs`'s
+// `pacer_select_layer` doc comment: "kit uses dual-threshold ... hysteresis
+// instead of the single-threshold 2-tick symmetric debounce"). One
+// `force_pacer_refresh_for_tests` call is one tick, so this test must call
+// it 3 times before the layer actually flips; a single call — as this test
+// originally did — leaves the subscriber at LOW regardless of the
+// threshold constants under test, silently defeating the regression guard.
 #[test]
 fn pacer_f_floor_uses_partner_edge_value_not_kit() {
     use oxpulse_sfu::client::layer;
@@ -110,7 +139,10 @@ fn pacer_f_floor_uses_partner_edge_value_not_kit() {
     // 1_000_000 bps: above kit F_FLOOR (700k), below partner-edge F_FLOOR (1_500_000).
     registry.cap_subscriber_bandwidth_for_tests(ClientId(911), 1_000_000);
     registry.drive_subscriber_bandwidth_for_tests(ClientId(911), 1_000_000);
-    registry.force_pacer_refresh_for_tests(ClientId(910));
+    // UPGRADE_STREAK=3 consecutive ticks required to actually flip the layer.
+    for _ in 0..3 {
+        registry.force_pacer_refresh_for_tests(ClientId(910));
+    }
 
     let desired = registry.clients()[1].desired_layer();
     assert_eq!(
@@ -134,12 +166,26 @@ fn pacer_f_floor_uses_partner_edge_value_not_kit() {
 //
 // GENUINELY RED candidate: if `record_client_hint` or `combined_bps` is broken,
 // the high Kalman estimate leaks through uncapped.
+//
+// Drift note (kit 0.11+): `Registry::insert` now unconditionally calls
+// `enable_googcc_for_subscriber` (registry/mod.rs), so every registry-inserted
+// subscriber has a per-subscriber GoogCC v2 estimator active from the first
+// packet. `PerSubscriber::combined_bps` (oxpulse-sfu-kit) applies GoogCC's
+// `current_bps()` as an ADDITIONAL ceiling alongside Kalman/loss/native/hint —
+// and a freshly-enabled GoogCC estimator starts at `GOOGCC_INITIAL_BPS`
+// (500k). That ceiling now binds *tighter* than the 5 Mbps this test forces
+// into the Kalman/loss estimators via `force_high_estimate_for_tests` (which
+// does not touch `googcc`), so the pre-hint baseline is genuinely 500k, not
+// the old assumption of "high/uncapped". This reflects real production
+// wiring, not a test artifact — the original ">1_000_000" expectation predates
+// the GoogCC auto-enable and was never re-verified against it (hard-red rot).
 #[test]
 fn client_budget_hint_caps_bandwidth_estimate() {
     use std::time::Instant;
 
     use oxpulse_sfu::client::test_seed::new_client;
     use oxpulse_sfu::{ClientId, Registry};
+    use oxpulse_sfu_kit::bwe::googcc::GOOGCC_INITIAL_BPS;
 
     let mut registry = Registry::new_for_tests();
     let sub_id = ClientId(200);
@@ -148,19 +194,24 @@ fn client_budget_hint_caps_bandwidth_estimate() {
     let now = Instant::now();
     let kit_id = oxpulse_sfu_kit::propagate::ClientId(*sub_id);
 
-    // Force the internal estimators to a high value (5 Mbps).
+    // Force the internal Kalman/loss estimators to a high value (5 Mbps).
+    // Does NOT touch the GoogCC ceiling wired in by Registry::insert.
     registry
         .bandwidth_mut()
         .force_high_estimate_for_tests(kit_id, 5_000_000.0);
 
     let before = registry.bandwidth().estimate_bps(kit_id, now);
-    assert!(
-        before.unwrap_or(0) > 1_000_000,
-        "baseline must be high after force_high_estimate_for_tests; got {:?}",
+    assert_eq!(
+        before,
+        Some(GOOGCC_INITIAL_BPS),
+        "baseline must be GoogCC's initial ceiling ({GOOGCC_INITIAL_BPS} bps): GoogCC is \
+         always active on a registry-inserted subscriber and its ceiling binds tighter than \
+         the forced 5 Mbps Kalman/loss estimate here; got {:?}",
         before,
     );
 
-    // Apply a browser-reported budget hint ceiling at 200k bps.
+    // Apply a browser-reported budget hint ceiling at 200k bps — below
+    // GoogCC's 500k ceiling, so the hint must be the binding ceiling.
     registry
         .bandwidth_mut()
         .record_client_hint(kit_id, 200_000, now);

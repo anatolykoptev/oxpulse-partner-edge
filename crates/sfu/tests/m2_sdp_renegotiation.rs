@@ -42,7 +42,7 @@ fn media_added_send_only_transitions_negotiating_to_open() {
     let mut client = new_client(ClientId(1001));
     let metrics = client.metrics_for_tests().clone();
 
-    let mid: Mid = Mid::from(&*"m42");
+    let mid: Mid = Mid::from("m42");
     let origin = ClientId(999);
     let track_in = Arc::new(TrackIn {
         origin,
@@ -83,7 +83,7 @@ fn media_added_recv_only_creates_track_in_not_track_out() {
     let mut client = new_client(ClientId(1002));
     let metrics = client.metrics_for_tests().clone();
 
-    let mid: Mid = Mid::from(&*"m7");
+    let mid: Mid = Mid::from("m7");
     let origin = ClientId(888);
     let track_in = Arc::new(TrackIn {
         origin,
@@ -128,7 +128,7 @@ fn media_added_recv_only_creates_track_in_not_track_out() {
 #[test]
 fn media_added_send_only_unknown_mid_is_noop() {
     let mut client = new_client(ClientId(1003));
-    let unknown_mid: Mid = Mid::from(&*"m99");
+    let unknown_mid: Mid = Mid::from("m99");
 
     // No entries — must not panic.
     client.handle_event(media_added_send_only(unknown_mid, MediaKind::Video));

@@ -23,6 +23,10 @@ jobs:
         working-directory: crates/sfu
       - run: cargo clippy --workspace -- -D warnings
         working-directory: crates/sfu
+      # Same featureless blind spot as the `test` job: clippy --workspace never
+      # lints the required-features=["test-utils"] test files either.
+      - run: cargo clippy -p oxpulse-sfu --features test-utils,vfm --all-targets -- -D warnings
+        working-directory: crates/sfu
 
   test:
     name: Tests
@@ -32,6 +36,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+        working-directory: crates/sfu
+      # `cargo test --workspace` above is featureless, so every test with
+      # `required-features = ["test-utils"]` (most of crates/sfu/tests/*.rs —
+      # see each [[test]] entry in Cargo.toml) is silently skipped, not run.
+      # That let several of them bit-rot uncompiled (fixed in the sfu test
+      # hygiene pass). Compile + run them explicitly so this can't recur.
+      - run: cargo test -p oxpulse-sfu --features test-utils,vfm
         working-directory: crates/sfu
 
   fips-build:
