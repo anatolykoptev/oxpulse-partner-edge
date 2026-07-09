@@ -81,11 +81,16 @@ INSTALL_SPLICES=$(grep -c '\${RETRY_OPTS\[@\]}' "$INSTALL")
     && pass "S3b: install.sh splices RETRY_OPTS into >=3 bootstrap-tier curl calls (got $INSTALL_SPLICES)" \
     || fail "S3b: expected >=3 RETRY_OPTS splice sites in install.sh, got $INSTALL_SPLICES"
 
-# S4: the self-update-reexec fetch (PR4 territory) must NOT be touched by this PR.
-if sed -n '/_maybe_self_update_reexec()/,/^}$/p' "$UPGRADE" | grep -q 'RETRY_OPTS'; then
-    fail "S4: _maybe_self_update_reexec's fetch was spliced with RETRY_OPTS — out of PR2 scope (PR4 territory)"
+# S4: the self-update-reexec fetches (both curl calls) now splice RETRY_OPTS. PR2
+# deliberately left this untouched ("PR4 territory"); PR4/v0.14.5 claimed it — the
+# same silent-429 that motivated RETRY_OPTS elsewhere was the ROOT CAUSE of the
+# self-update no-op that killed 2/5 boxes in the v0.14.4 rollout. Assert the
+# splice now covers BOTH fetches in the function.
+REEXEC_SPLICES=$(sed -n '/_maybe_self_update_reexec()/,/^}$/p' "$UPGRADE" | grep -c '${RETRY_OPTS\[@\]}')
+if [[ "$REEXEC_SPLICES" -ge 2 ]]; then
+    pass "S4: _maybe_self_update_reexec's fetches splice RETRY_OPTS (>=2 sites, got $REEXEC_SPLICES) — PR4 429-hardened the self-update fetch"
 else
-    pass "S4: _maybe_self_update_reexec's fetch is untouched (PR4's own territory, not PR2's)"
+    fail "S4: expected >=2 RETRY_OPTS splice sites in _maybe_self_update_reexec (upgrade.sh + SHA256SUMS fetch), got $REEXEC_SPLICES"
 fi
 
 # ---------------------------------------------------------------------------

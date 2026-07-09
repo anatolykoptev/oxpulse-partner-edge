@@ -78,6 +78,19 @@ else
     fail "S2: _lookup_expected_hash extraction empty/signature-less — awk pattern drifted"; exit 1
 fi
 
+# --- Extract the shared _should_self_update applicability predicate (PR4). The real
+# _maybe_self_update_reexec now opens with `_should_self_update || return 0`, so both
+# wrappers below MUST inline it or the extracted fn returns early (command not found ->
+# non-zero -> no re-exec, which T1 would catch as a FAIL). Same single-copy predicate
+# _assert_self_update_converged reuses. ---
+SHOULD_FN="$TMP/should_fn.sh"
+awk '/^_should_self_update\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE" > "$SHOULD_FN"
+if [[ -s "$SHOULD_FN" ]] && grep -q '^_should_self_update()' "$SHOULD_FN"; then
+    pass "S3: extraction captured _should_self_update (the single-copy applicability predicate)"
+else
+    fail "S3: _should_self_update extraction empty/signature-less — awk pattern drifted"; exit 1
+fi
+
 # --- Common cumulative-cleanup registry preamble (faithful minimal copy of
 # upgrade.sh's _CLEANUP_PATHS + single EXIT trap + the self-update re-exec tmpdir
 # registration line). Inlined into both wrappers so the re-exec tmpdir is swept
@@ -95,9 +108,13 @@ REG
 # must return immediately (no re-fetch, no loop). ---
 SERVED="$TMP/served"; mkdir -p "$SERVED"
 {
-    printf '#!/bin/bash\nset -uo pipefail\nlog(){ :; }\nwarn(){ :; }\n'
+    # RETRY_OPTS=(): curl is stubbed here, so the retry flags are inert, but the real
+    # _maybe_self_update_reexec now splices "${RETRY_OPTS[@]}" into its fetches — define
+    # it (empty) so the array expansion is not an unbound-variable error under set -u.
+    printf '#!/bin/bash\nset -uo pipefail\nlog(){ :; }\nwarn(){ :; }\nRETRY_OPTS=()\n'
     cat "$REGISTRY_PRE"
     cat "$LOOKUP_FN"
+    cat "$SHOULD_FN"
     cat "$FN"
     printf '_maybe_self_update_reexec "$@"\n'
     printf 'echo "CHILD_RAN sentinel=${OXPULSE_UPGRADE_REEXECED:-0} reexec_tmpdir=${OXPULSE_UPGRADE_REEXEC_TMPDIR:-} args=$*"\n'
@@ -122,6 +139,7 @@ WRAP="$TMP/oxpulse-partner-edge-upgrade"
 set -uo pipefail
 log(){ :; }
 warn(){ :; }
+RETRY_OPTS=()   # curl stubbed below; define (empty) so "${RETRY_OPTS[@]}" is set -u safe
 # Offline curl stub: serve $SERVED_DIR/<basename(url)> -> the -o target.
 curl() {
     local out="" url="" i
@@ -139,6 +157,7 @@ curl() {
 PRE
     cat "$REGISTRY_PRE"
     cat "$LOOKUP_FN"
+    cat "$SHOULD_FN"
     cat "$FN"
     printf '_maybe_self_update_reexec "$@"\n'
     printf 'echo "PARENT_CONTINUED sentinel=${OXPULSE_UPGRADE_REEXECED:-0}"\n'
