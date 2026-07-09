@@ -2041,9 +2041,22 @@ _maybe_self_update_reexec() {
 # apply path immediately AFTER that path's sync_host_scripts. Invariant (general, NOT
 # narrowly "before reconcile_all"): never proceed past sync_host_scripts running STALE
 # in-memory upgrade.sh logic against the NEW host-script set just installed to disk.
-# That is the exact v0.14.4 failure class — a silent-429 self-update no-op left the OLD
+# That is the v0.14.4 failure CLASS — a silent-429 self-update no-op left the OLD
 # process running, which then walked into a freshly-synced install-firewall.sh it did
 # not understand and died deep in reconcile_firewall_surface with no clear diagnostic.
+#
+# COVERAGE LIMIT (code-quality review, PR4): this gate proxies "did the whole
+# host-script set converge" via ONE file — upgrade.sh's own sbin copy — not every
+# file _HOST_SCRIPT_SBIN_FILES installs. It reliably catches the case where
+# sync_host_scripts successfully re-installed upgrade.sh itself (the common case,
+# now RETRY_OPTS-hardened both here and in host-scripts-lib.sh's shared fetch — see
+# that file's fetch_url curl call). It does NOT catch the narrower residual case where
+# upgrade.sh's OWN sbin fetch specifically fails/skips (leaving OLD bytes + a matching
+# presync fingerprint → gate reads "converged") while a SIBLING host-script (e.g.
+# install-firewall.sh, fetched from a different origin) succeeds and installs NEW
+# bytes — that combination is the actual v0.14.4 incident and is NOT closed by this
+# gate alone. See FOLLOWUPS.md for the tracked residual (asserting every
+# _HOST_SCRIPT_SBIN_FILES entry's post-sync sha, not just upgrade.sh's).
 #
 # Only meaningful when self-update was applicable to THIS invocation: a dev/CI/manual
 # run, DRY_RUN, a floating/empty tag, or a non-installed running copy never self-updates,

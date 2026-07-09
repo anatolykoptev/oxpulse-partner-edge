@@ -6,19 +6,37 @@
 convergence: it compares the running process's pre-sync bytes against the
 post-sync installed `oxpulse-partner-edge-upgrade`. It does NOT assert that the
 *other* host-scripts (`install-firewall.sh`, `host-scripts-lib.sh`, …) synced
-successfully — a corner case where `upgrade.sh` converges but a sibling
-host-script independently 429s during the same `sync_host_scripts` burst would
-leave a converged orchestrator calling a stale sibling (the historical two-run
-state). This is deliberately out of scope: it is mitigated by Part A
-(`RETRY_OPTS` + a loud fetch-failure `warn`) and by `sync_host_scripts`'s own
-per-file "could not fetch … skipping" warn, and the orchestrator itself being
-converged means it knows how to drive whatever host-script version is present.
+successfully. There are two directions this can diverge in, and only one is benign:
 
-**Followup (LOW):** if per-host-script staleness ever recurs, extend the gate to
-assert every `_HOST_SCRIPT_SBIN_FILES` entry's installed sha matches its
-`SHA256SUMS` expectation after sync (fail-closed), reusing `_lookup_expected_hash`.
+- **Benign:** upgrade.sh converges (new bytes on disk, gate passes) but a sibling
+  host-script independently 429s and stays stale. The orchestrator is up to date
+  and (per its own version) knows how to drive whatever host-script version is
+  present; degrades to the historical two-run convergence for that one file.
+- **DANGEROUS (code-quality review, PR4 — this is the actual v0.14.4 incident
+  reproduced, not just a corner case):** upgrade.sh's OWN sbin fetch specifically
+  fails/skips (leaving OLD bytes, so the pre-sync fingerprint matches the
+  post-sync installed sha → gate reads "converged") while a SIBLING host-script
+  (fetched from a *different* origin — see `lib/host-scripts-lib.sh`'s
+  `fetch_url` branch: upgrade.sh's own asset comes from `RELEASES_BASE`, every
+  sibling from `REPO_RAW`) succeeds and installs NEW bytes. The gate is silent;
+  an OLD orchestrator then drives a NEW host-script set it doesn't understand —
+  exactly the `reconcile_firewall_surface` death that triggered this whole arc.
 
-**File:line:** `upgrade.sh` `_assert_self_update_converged`.
+**Mitigation shipped in PR4:** `RETRY_OPTS` was added to `host-scripts-lib.sh`'s
+shared per-file fetch (previously unretried for every file in
+`_HOST_SCRIPT_SBIN_FILES`, including upgrade.sh's own), narrowing how often a
+transient 429 on ONE origin causes exactly one file to lag behind the rest. This
+reduces the window but does not close it — a sustained/systemic outage on one
+origin while the other stays healthy is still possible.
+
+**Followup (MEDIUM — the dangerous direction is a real, if narrower, gap):**
+extend the gate to assert every `_HOST_SCRIPT_SBIN_FILES` entry's installed sha
+matches its `SHA256SUMS` expectation after sync (fail-closed), reusing
+`_lookup_expected_hash`, instead of proxying whole-set convergence through
+upgrade.sh's own file alone.
+
+**File:line:** `upgrade.sh` `_assert_self_update_converged`; `lib/host-scripts-lib.sh`'s
+`fetch_url`/`curl` site (the shared per-file fetch this followup would extend).
 
 ---
 
