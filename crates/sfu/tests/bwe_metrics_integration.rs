@@ -314,7 +314,7 @@ async fn layer_transitions_total_increments_on_layer_change() {
 /// gauge is back to 0.
 #[tokio::test]
 async fn reap_dead_drops_reactions_dc_gauge() {
-    let (port, _handle, metrics) = bind_metrics_server();
+    let (_port, _handle, metrics) = bind_metrics_server();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Directly bump the gauge — simulates what ChannelOpen does in dispatch.
@@ -359,7 +359,7 @@ async fn reap_dead_drops_reactions_dc_gauge() {
 /// Mirrors `reap_dead_drops_reactions_dc_gauge` but exercises the session-steal path.
 #[tokio::test]
 async fn evict_for_steal_drops_reactions_dc_gauge() {
-    let (port, _handle, metrics) = bind_metrics_server();
+    let (_port, _handle, metrics) = bind_metrics_server();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Directly bump the gauge to simulate the ChannelOpen inc.
