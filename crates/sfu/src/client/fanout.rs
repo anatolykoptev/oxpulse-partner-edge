@@ -51,12 +51,14 @@ impl Client {
         match self.pacer.update(budget) {
             PacerAction::NoChange => Some(self.desired_layer),
             PacerAction::ChangeLayer(sfu_rid) => {
-                // Convert kit SfuRid -> str0m Rid. Both wrap the same 8-byte
-                // array constant; match against known constants avoids the
-                // pub(crate) SfuRid::to_str0m() method.
+                // Convert kit SfuRid -> str0m Rid via the kit's public
+                // `impl From<SfuRid> for str0m::media::Rid` (ADR-S11). The
+                // conversion is lossless/zero-cost — it hands back the exact
+                // inner `Rid` the kit holds — replacing the former hand-rolled
+                // 3-arm `sfu_rid_to_rid` shadow-duplicate.
                 // Clamp to available_rids: if the target isn't available,
                 // fall back to the highest available layer below it.
-                let target = sfu_rid_to_rid(sfu_rid);
+                let target: Rid = sfu_rid.into();
                 let rid = clamp_to_available(target, available_rids);
                 if rid != self.desired_layer {
                     self.set_desired_layer(rid);
@@ -270,27 +272,6 @@ impl Client {
         if let Err(e) = ch.write(false, payload.as_bytes()) {
             tracing::warn!(client = *self.id, error = ?e, "active_speaker DC write failed");
         }
-    }
-}
-
-/// Convert a kit `SfuRid` to a str0m `Rid`.
-///
-/// `SfuRid::to_str0m()` is `pub(crate)` in the kit crate, so we cannot
-/// call it directly. Both types share the same 8-byte backing array for
-/// the q/h/f constants, so a 3-arm match is both correct and zero-cost.
-/// Unknown SfuRid values (future kit additions) parse via `Rid::from(s)`.
-fn sfu_rid_to_rid(sfu_rid: oxpulse_sfu_kit::SfuRid) -> Rid {
-    use oxpulse_sfu_kit::SfuRid;
-    if sfu_rid == SfuRid::LOW {
-        layer::LOW
-    } else if sfu_rid == SfuRid::MEDIUM {
-        layer::MEDIUM
-    } else if sfu_rid == SfuRid::HIGH {
-        layer::HIGH
-    } else {
-        // Defensive fallback: parse via Display. str0m Rid::from() accepts
-        // any short ASCII string without allocating on the heap.
-        Rid::from(sfu_rid.to_string().as_str())
     }
 }
 

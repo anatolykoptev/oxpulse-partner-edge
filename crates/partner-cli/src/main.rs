@@ -107,9 +107,9 @@ async fn main() -> Result<()> {
     // `keygen` is a pure local operation — no DB needed.
     if let Command::Keygen = &cli.cmd {
         let (private_key, public_key) = commands::keygen_x25519();
-        // Deref Zeroizing<String> → &str; avoids an intermediate String copy
-        // so the base64 encoding is wiped when private_key drops at end of block.
-        println!("private_key: {}", &*private_key);
+        // Deref Zeroizing<String>; the format macro borrows it (no intermediate
+        // String copy) so the base64 encoding is wiped when private_key drops.
+        println!("private_key: {}", *private_key);
         println!("public_key:  {public_key}");
         return Ok(());
     }
