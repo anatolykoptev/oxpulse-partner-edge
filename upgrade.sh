@@ -242,37 +242,63 @@ _lookup_expected_hash() {
 #   • DEFENDED: a protocol-downgrade / plaintext-HTTP MITM (the TLS-pin refuses to
 #     fall back to http://), and accidental/passive corruption or a partial/stale
 #     tamper of the payload that leaves a LOCALLY-TRUSTED manifest intact.
-#   • DEFENDED (manifest omission): a manifest that RESOLVES (curl 200 / readable
-#     file) but has NO line for this file — what a truncated download, a captive
-#     portal, or a stale/wrong-version manifest produces — is treated IDENTICALLY to
-#     "no manifest at all": FAIL-CLOSED (die unless the escape hatch is set), NOT
-#     sourced-with-a-warn. Every file this resolver fetches is committed to its home
-#     manifest, so a missing entry is never the legit norm; closing it denies the
-#     free "omit one line and the check is skipped" bypass (review HIGH). _stage_lib
-#     and install.sh:_install_lib_source's tier-4 resolver now fail-closed on the
-#     identical no-entry case too (review HIGH fix) — all three tier-3/tier-4
-#     resolvers agree on this contract; _source_lib is not the odd one out anymore.
-#   • STRONG only when the manifest is resolved LOCALLY (tier-1 adjacent checkout, or
-#     tier-2 ${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/lib-checksums.txt IF an
-#     operator has staged it there): then it is an INDEPENDENT trust anchor and the
-#     sha256 is genuine tamper-evidence. Be precise about reachability: nothing in the
-#     current release pipeline (release.yml) writes lib-checksums.txt into
-#     INSTALL_LIB_DIR — the tier-2 anchor exists only if an operator manually copies it
-#     there, which is not the documented/automated path. Do not read "tier-2 installed
-#     tarball" as a common deployment shape.
-#   • WEAK in the remote-fallback sub-case (no local manifest → manifest curl'd from
-#     the SAME REPO_RAW/RELEASES_BASE origin as the payload): this is the NORMAL,
-#     near-universal path for a real reconcile.sh curl|bash run (reconcile.sh is not
-#     installed to disk, and tier-2 is unreachable absent manual staging per above).
-#     Here manifest and payload share an origin, so this does NOT authenticate a
-#     malicious REPO_RAW / OXPULSE_MIRROR_BASE or an active MITM presenting a cert the
-#     TLS-pin accepts — such an adversary can serve a matching checksum. It reduces to
-#     "TLS + transit-corruption detection", not origin authentication.
+#   • DEFENDED (manifest omission → FALLTHROUGH, not bypass): manifest candidates are
+#     walked in tier order (adjacent → installed → remote) and a candidate that
+#     RESOLVES (curl 200 / readable file) but has NO line for this file — what a
+#     truncated download, a captive portal, or a stale/wrong-version manifest
+#     produces — is no longer terminal by itself: it is treated as "this candidate
+#     has no opinion" and the search moves on to the next tier. Only once EVERY
+#     candidate has been tried and NONE contains an entry for this file does the
+#     resolver FAIL-CLOSED (die unless the escape hatch is set). This still denies the
+#     "omit one line and the check is skipped" bypass — an omission at every tier is
+#     exactly "no manifest at all" and dies the same way; an omission at ONE tier only
+#     defers to the next tier's data, it never widens into "proceed unverified" (PR3:
+#     fixes a real fleet incident where a stale tier-2 lib-checksums.txt that predated
+#     a newly-introduced lib permanently fail-closed that lib forever, even though the
+#     fresh tier-3 remote manifest had a correct entry for it all along). _stage_lib
+#     and install.sh:_install_lib_source's tier-4 resolver still fail-closed on their
+#     OWN single-manifest no-entry case (their resolution shape was not changed here) —
+#     only _source_lib gained cross-tier fallthrough in this PR.
+#   • MISMATCH IS ALWAYS TERMINAL, never rescued by fallthrough: a candidate that
+#     resolves and DOES contain an entry, but the hash is WRONG, dies IMMEDIATELY —
+#     the search never continues to another tier after a mismatch. "No opinion"
+#     (missing entry) defers to the next source; "wrong opinion" (mismatched entry) is
+#     authoritative and stops the run on the spot. This is the security-critical
+#     asymmetry the fallthrough above depends on: an attacker who compromises exactly
+#     one of the manifest sources cannot force a downgrade to a source they control by
+#     making their tampered entry look like "no entry" instead of "wrong entry" — it
+#     cannot look like "no entry" once a genuine, different, correct entry has already
+#     terminally resolved things at an earlier tier, and if it simply omits the line
+#     instead of forging one, that is indistinguishable from a legitimately-stale-but-
+#     honest manifest (exactly the bug this PR fixes) and correctly falls through.
+#   • STRONG only when the ENTRY THAT TERMINATED THE SEARCH was resolved LOCALLY
+#     (tier-1 adjacent checkout, or tier-2 ${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/
+#     lib-checksums.txt IF an operator has staged it there): then it is an INDEPENDENT
+#     trust anchor and the sha256 is genuine tamper-evidence. Be precise about
+#     reachability: nothing in the current release pipeline (release.yml) writes
+#     lib-checksums.txt into INSTALL_LIB_DIR — the tier-2 anchor exists only if an
+#     operator manually copies it there, which is not the documented/automated path.
+#     Do not read "tier-2 installed tarball" as a common deployment shape.
+#   • WEAK when the entry that terminated the search came from the tier-3 remote
+#     fallback (manifest curl'd from the SAME REPO_RAW/RELEASES_BASE origin as the
+#     payload): this is the NORMAL, near-universal path for a real reconcile.sh
+#     curl|bash run (reconcile.sh is not installed to disk, and tier-2 is unreachable
+#     absent manual staging per above) — and now ALSO the path taken whenever a local
+#     manifest resolved but omitted the entry. Here manifest and payload share an
+#     origin, so this does NOT authenticate a malicious REPO_RAW / OXPULSE_MIRROR_BASE
+#     or an active MITM presenting a cert the TLS-pin accepts — such an adversary can
+#     serve a matching checksum. It reduces to "TLS + transit-corruption detection",
+#     not origin authentication. This trust level is UNCHANGED by the fallthrough fix
+#     in this PR — only WHEN tier-3 gets consulted changed, not what it proves once
+#     consulted.
 #   • RESIDUAL: full supply-chain authentication of a hostile origin needs a signature
 #     rooted OUTSIDE that origin (a GPG-signed SHA256SUMS.asc, or refusing tier-3
 #     without a locally-staged manifest). That is a larger, separate change (signing
 #     infrastructure) not attempted here — this block deliberately does not claim to
-#     close it.
+#     close it. Also residual: a lib whose CONTENT changed while its tier-2 entry is
+#     still PRESENT but now WRONG (not missing) stays fail-closed today per the
+#     mismatch-is-terminal rule above — fallthrough only rescues a MISSING entry, never
+#     a mismatched one (see FOLLOWUPS.md for the tracked gap and its real fix options).
 # Fetched file is sourced from a temp dir, NOT installed to disk (sync_host_scripts
 # does the verified install later in the run). A fork/dev/restricted-network operator
 # who cannot supply a manifest passes --allow-unverified (or --no-integrity, or
@@ -305,39 +331,58 @@ _source_lib() {
 On a standalone upgrade.sh download ensure network access to REPO_RAW or stage
 the lib files adjacent to upgrade.sh."
     fi
-    # Resolve the file's home manifest (adjacent → installed → remote fallback).
+    # Resolve the file's home manifest by walking candidates in tier order (adjacent →
+    # installed → remote fallback) and STOPPING at the first candidate that HAS an
+    # entry for $name — not the first candidate that merely resolves (is readable /
+    # fetches successfully). A candidate that resolves but lacks the entry has "no
+    # opinion" on this file and falls through to the next tier; this is what lets a
+    # stale tier-2 manifest (readable, but predates a newly-introduced lib) get
+    # rescued by a fresher tier-3 remote manifest instead of permanently fail-closing.
+    # An entry that IS found is terminal immediately, whether it matches (source) or
+    # mismatches (die) — a mismatch is never "rescued" by trying another tier; see the
+    # THREAT MODEL header above for why that distinction is security-critical.
     _sd="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
     if [[ "$raw_path" == "$REPO_RAW/lib/"* ]]; then
         # lib/*.sh → lib-checksums.txt (committed, so remotely fetchable from REPO_RAW).
         for _cand in "${_sd}/lib/lib-checksums.txt" \
                      "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/lib-checksums.txt"; do
-            [[ -r "$_cand" ]] && { _man="$_cand"; break; }
+            [[ -r "$_cand" ]] || continue
+            _expected=$(_lookup_expected_hash "$name" "$_cand")
+            [[ -n "$_expected" ]] && { _man="$_cand"; break; }
         done
         if [[ -z "$_man" ]]; then
             _man_tmp=$(mktemp); _CLEANUP_PATHS+=("$_man_tmp")
-            curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 "${RETRY_OPTS[@]}" \
-                "$REPO_RAW/lib/lib-checksums.txt" -o "$_man_tmp" 2>/dev/null && _man="$_man_tmp"
+            if curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 "${RETRY_OPTS[@]}" \
+                "$REPO_RAW/lib/lib-checksums.txt" -o "$_man_tmp" 2>/dev/null; then
+                _expected=$(_lookup_expected_hash "$name" "$_man_tmp")
+                [[ -n "$_expected" ]] && _man="$_man_tmp"
+            fi
         fi
     else
         # repo-root *.sh → the release SHA256SUMS. Not committed to REPO_RAW, so the
         # remote fallback fetches the per-tag release asset. On a floating/dev tag
         # (sentinel or non-vX.Y.Z) there is no SHA256SUMS → _man stays empty →
-        # fail-closed unless the operator set the escape hatch.
-        [[ -r "${_sd}/SHA256SUMS" ]] && _man="${_sd}/SHA256SUMS"
+        # fail-closed unless the operator set the escape hatch. Same fallthrough-on-
+        # missing-entry semantics as the lib/*.sh branch above.
+        if [[ -r "${_sd}/SHA256SUMS" ]]; then
+            _expected=$(_lookup_expected_hash "$name" "${_sd}/SHA256SUMS")
+            [[ -n "$_expected" ]] && _man="${_sd}/SHA256SUMS"
+        fi
         if [[ -z "$_man" && "${OXPULSE_UPGRADE_TAG}" =~ ^v[0-9]+\. ]]; then
             _man_tmp=$(mktemp); _CLEANUP_PATHS+=("$_man_tmp")
-            curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 "${RETRY_OPTS[@]}" \
-                "$RELEASES_BASE/${OXPULSE_UPGRADE_TAG}/SHA256SUMS" -o "$_man_tmp" 2>/dev/null && _man="$_man_tmp"
+            if curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 "${RETRY_OPTS[@]}" \
+                "$RELEASES_BASE/${OXPULSE_UPGRADE_TAG}/SHA256SUMS" -o "$_man_tmp" 2>/dev/null; then
+                _expected=$(_lookup_expected_hash "$name" "$_man_tmp")
+                [[ -n "$_expected" ]] && _man="$_man_tmp"
+            fi
         fi
     fi
-    # Verify FAIL-CLOSED. Resolve the expected checksum from whichever manifest we
-    # found; a manifest that resolved but OMITS this file's line leaves _expected empty
-    # and is handled the SAME as "no manifest at all" (see the manifest-omission bullet
-    # in the header) — both fail-closed unless the escape hatch is set. The three
-    # possible outcomes: (a) entry present + matches → source; (b) entry present +
-    # mismatch → die; (c) no entry (no manifest, or manifest omits it) → die unless
-    # OXPULSE_UPGRADE_NO_INTEGRITY.
-    _expected=$(_lookup_expected_hash "$name" "$_man")
+    # Verify FAIL-CLOSED. $_expected was resolved above by the tier walk (empty unless
+    # SOME candidate — local or remote — actually CONTAINED an entry for $name); a
+    # candidate that resolved but omitted the entry already fell through above and left
+    # no trace here. The three possible outcomes: (a) entry found + matches → source;
+    # (b) entry found + mismatch → die immediately, no further fallthrough; (c) no
+    # candidate (local or remote) had an entry → die unless OXPULSE_UPGRADE_NO_INTEGRITY.
     if [[ -n "$_expected" ]]; then
         _actual=$(sha256sum "$_fetch_tmp" | awk '{print $1}')
         [[ "$_actual" != "$_expected" ]] && die "_source_lib: tier-3 checksum mismatch for $name — refusing to source untrusted code (expected ${_expected:0:16}… got ${_actual:0:16}…)"
