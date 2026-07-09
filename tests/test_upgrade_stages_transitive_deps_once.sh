@@ -115,9 +115,14 @@ STAGE_DEPS_FN="$TMP/stage_deps_fn.sh"
 awk '/^_TRANSITIVE_DEPS_STAGED=0$/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE" > "$STAGE_DEPS_FN"
 REEXEC_FN="$TMP/reexec_fn.sh"
 awk '/^_maybe_self_update_reexec\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE" > "$REEXEC_FN"
+# PR4: _maybe_self_update_reexec now opens with `_should_self_update || return 0`, so
+# the extracted fn needs the predicate inlined too (else it returns early -> no re-exec).
+SHOULD_FN="$TMP/should_fn.sh"
+awk '/^_should_self_update\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE" > "$SHOULD_FN"
 
 for f in "$LOOKUP_FN:_lookup_expected_hash" "$STAGE_LIB_FN:_stage_lib" \
-         "$STAGE_DEPS_FN:_stage_reconcile_transitive_deps" "$REEXEC_FN:_maybe_self_update_reexec"; do
+         "$STAGE_DEPS_FN:_stage_reconcile_transitive_deps" "$REEXEC_FN:_maybe_self_update_reexec" \
+         "$SHOULD_FN:_should_self_update"; do
     path="${f%%:*}"; sym="${f##*:}"
     if [[ -s "$path" ]] && grep -q "$sym" "$path"; then
         pass "X0($sym): extraction non-empty and captured the real symbol"
@@ -145,6 +150,7 @@ COMMON_BODY="$TMP/common_body.sh"
 {
     cat "$REGISTRY_PRE"
     cat "$LOOKUP_FN"
+    cat "$SHOULD_FN"
     cat "$STAGE_LIB_FN"
     cat "$STAGE_DEPS_FN"
     cat "$REEXEC_FN"
@@ -175,7 +181,7 @@ run_wrap() {
     # Body = preamble + common functions + the real call-site ORDER this fix
     # depends on: _maybe_self_update_reexec then _stage_reconcile_transitive_deps.
     {
-        printf '#!/bin/bash\nset -uo pipefail\nlog(){ :; }\nwarn(){ :; }\n'
+        printf '#!/bin/bash\nset -uo pipefail\nlog(){ :; }\nwarn(){ :; }\nRETRY_OPTS=()\n'
         cat "$COMMON_BODY"
         printf '_UPGRADE_SH_DIR="%s"\n' "$TMP"
         printf '_maybe_self_update_reexec "$@"\n'
@@ -271,7 +277,7 @@ fi
 # ---------------------------------------------------------------------------
 T1C_LOG=$(mktemp -p "$TMP")
 {
-    printf '#!/bin/bash\nset -uo pipefail\nlog(){ :; }\nwarn(){ :; }\n'
+    printf '#!/bin/bash\nset -uo pipefail\nlog(){ :; }\nwarn(){ :; }\nRETRY_OPTS=()\n'
     cat "$COMMON_BODY"
     printf '_UPGRADE_SH_DIR="%s"\n' "$TMP"
     # PRE-FIX order: stage FIRST (unconditional top-level shape), THEN decide

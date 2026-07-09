@@ -1880,6 +1880,30 @@ _settle_serveability_alert() {
 # unverified-code exec. Scope: real apply paths only (apply / with_templates), a
 # pinned tag (a floating 'latest' has no per-tag SHA256SUMS to verify against).
 #
+# APPLICABILITY: the guard stack that answers "is self-update even relevant to THIS
+# invocation" is extracted into _should_self_update() (single copy) so the
+# convergence gate below reuses the identical predicate instead of a second, drift-
+# prone copy of the guard list (same anti-drift discipline as the tier-3 lib
+# resolvers). PR4/v0.14.5.
+#
+# RETRY (PR4): both curl fetches here splice ${RETRY_OPTS[@]} (429-aware, gated on a
+# curl >=7.71 --retry-all-errors probe, same as the bootstrap-tier _source_lib/
+# _stage_lib fetches) so a transient GitHub raw-CDN 429 is retried rather than
+# silently no-op'ing the self-update. The ROOT CAUSE of the v0.14.4 incident was a
+# silent 429 on the FIRST fetch below with NO diagnostic — it now warn()s on failure
+# (parity with the SHA256SUMS fetch), so an operator/rollout-operator sees the skip.
+#
+# CONVERGENCE GATE (PR4): _assert_self_update_converged() runs in each apply path
+# immediately AFTER that path's sync_host_scripts and fail-closed die()s if this
+# process is still executing the OLD upgrade.sh while the NEW release bytes are
+# already installed to disk — the exact v0.14.4 failure class (an old process walking
+# into a freshly-synced host-script set, dying deep in reconcile_firewall_surface).
+# It compares OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA (the bytes THIS process is
+# executing, fingerprinted below before any sync can overwrite the sbin copy - the
+# running path IS the sbin path when self-update is applicable, so a post-sync re-hash
+# would read the new bytes and hide the divergence) against the post-sync installed
+# sha. Escape hatch OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 downgrades die->warn.
+#
 # THREAT MODEL (this fetches upgrade.sh + SHA256SUMS same-origin and execs the result
 # as ROOT on match — the SAME threat surface as _source_lib's tier-3, so it inherits
 # the SAME bound; see the _source_lib THREAT MODEL block above for the full statement):
@@ -1896,15 +1920,24 @@ _settle_serveability_alert() {
 #   • ESCAPE HATCH: ALLOW_UNVERIFIED (from --allow-unverified / --no-integrity /
 #     OXPULSE_UPGRADE_NO_INTEGRITY, seeded at top level) SKIPS the sha256 gate for the
 #     fork/dev/restricted-network operator — same opt-in contract as the lib resolvers.
-_maybe_self_update_reexec() {
-	[[ "${OXPULSE_UPGRADE_REEXECED:-0}" == 1 ]] && return 0   # child of a prior re-exec
-	[[ "${DRY_RUN:-0}" -eq 1 ]] && return 0
-	[[ "${OXPULSE_UPGRADE_NO_SELF_UPDATE:-0}" == 1 ]] && return 0   # operator/CI opt-out
-	case "${MODE:-apply}" in apply|with_templates) ;; *) return 0 ;; esac
+# _should_self_update - single-copy applicability predicate. Returns 0 when
+# self-update is relevant to THIS invocation, 1 when one of the guard conditions
+# fires (child of a prior re-exec / dry-run / opt-out / non-apply mode / floating
+# or empty tag / unreadable running script / not the installed sbin copy). Extracted
+# from _maybe_self_update_reexec's guard stack (behaviour-identical: same checks,
+# same order) so BOTH _maybe_self_update_reexec AND _assert_self_update_converged
+# reuse ONE copy — a second, independently-maintained guard list is exactly the
+# drift this arc has paid down at every other resolver seam. Pure predicate: no
+# fetch, no mktemp, no side effects (safe to call twice per apply path).
+_should_self_update() {
+	[[ "${OXPULSE_UPGRADE_REEXECED:-0}" == 1 ]] && return 1   # child of a prior re-exec
+	[[ "${DRY_RUN:-0}" -eq 1 ]] && return 1
+	[[ "${OXPULSE_UPGRADE_NO_SELF_UPDATE:-0}" == 1 ]] && return 1   # operator/CI opt-out
+	case "${MODE:-apply}" in apply|with_templates) ;; *) return 1 ;; esac
 	local _tag="${RELEASE_TAG:-}"
-	[[ -z "$_tag" || "$_tag" == latest ]] && return 0
+	[[ -z "$_tag" || "$_tag" == latest ]] && return 1
 	local _running="${BASH_SOURCE[0]:-$0}"
-	[[ -r "$_running" ]] || return 0
+	[[ -r "$_running" ]] || return 1
 
 	# Only self-update when running the INSTALLED sbin copy - never silently
 	# replace a dev/CI/manual invocation (e.g. `bash ./upgrade.sh`) with the
@@ -1914,22 +1947,42 @@ _maybe_self_update_reexec() {
 	local _rp_run _rp_inst
 	_rp_run=$(realpath -m "$_running" 2>/dev/null || printf '%s' "$_running")
 	_rp_inst=$(realpath -m "$_installed" 2>/dev/null || printf '%s' "$_installed")
-	[[ "$_rp_run" == "$_rp_inst" ]] || return 0
+	[[ "$_rp_run" == "$_rp_inst" ]] || return 1
+	return 0
+}
+
+_maybe_self_update_reexec() {
+	_should_self_update || return 0
+	local _tag="${RELEASE_TAG:-}"
+	local _running="${BASH_SOURCE[0]:-$0}"
+
+	# Fingerprint the bytes THIS process is executing BEFORE any fetch (and, later,
+	# before this apply path's sync_host_scripts) can overwrite the on-disk sbin
+	# copy. When self-update is applicable the running path IS the sbin path, so a
+	# post-sync re-hash of "$_running" would read the freshly-installed NEW bytes and
+	# hide a stale-in-memory divergence — _assert_self_update_converged compares this
+	# captured value against the post-sync installed sha to catch exactly that.
+	export OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA
+	OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA=$(sha256sum "$_running" 2>/dev/null | awk '{print $1}')
 
 	local _tmpdir _new _sums _expected _actual _running_sha
 	_tmpdir=$(mktemp -d 2>/dev/null) || return 0
 	_new="$_tmpdir/partner-edge-upgrade.sh"
 
-	# Fetch the substituted upgrade.sh release asset for the pinned tag (TLS-pinned).
-	if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
+	# Fetch the substituted upgrade.sh release asset for the pinned tag (TLS-pinned,
+	# 429-aware retry). ROOT-CAUSE FIX (v0.14.4 incident): warn() on failure — a
+	# silent 429 here left ZERO diagnostic while the OLD process walked on into the
+	# NEW host-script set. Parity with the SHA256SUMS-fetch warn two blocks below.
+	if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "${RETRY_OPTS[@]}" \
 		"$RELEASES_BASE/$_tag/partner-edge-upgrade.sh" -o "$_new" 2>/dev/null; then
+		warn "self-update: could not fetch upgrade.sh for $_tag (rate-limited/offline?) - skipping re-exec (converges next run)"
 		rm -rf "$_tmpdir"; return 0
 	fi
 
 	# Verify against the release SHA256SUMS unless integrity is explicitly waived.
 	if [[ "${ALLOW_UNVERIFIED:-0}" != 1 ]]; then
 		_sums="$_tmpdir/SHA256SUMS"
-		if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
+		if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "${RETRY_OPTS[@]}" \
 			"$RELEASES_BASE/$_tag/SHA256SUMS" -o "$_sums" 2>/dev/null; then
 			warn "self-update: no SHA256SUMS for $_tag - skipping re-exec (converges next run)"
 			rm -rf "$_tmpdir"; return 0
@@ -1982,6 +2035,73 @@ _maybe_self_update_reexec() {
 	rm -rf "$_tmpdir" 2>/dev/null || true
 	unset OXPULSE_UPGRADE_REEXECED OXPULSE_UPGRADE_REEXEC_TMPDIR
 	return 0
+}
+
+# _assert_self_update_converged - fail-closed convergence gate, called ONCE in each
+# apply path immediately AFTER that path's sync_host_scripts. Invariant (general, NOT
+# narrowly "before reconcile_all"): never proceed past sync_host_scripts running STALE
+# in-memory upgrade.sh logic against the NEW host-script set just installed to disk.
+# That is the v0.14.4 failure CLASS — a silent-429 self-update no-op left the OLD
+# process running, which then walked into a freshly-synced install-firewall.sh it did
+# not understand and died deep in reconcile_firewall_surface with no clear diagnostic.
+#
+# COVERAGE LIMIT (code-quality review, PR4): this gate proxies "did the whole
+# host-script set converge" via ONE file — upgrade.sh's own sbin copy — not every
+# file _HOST_SCRIPT_SBIN_FILES installs. It reliably catches the case where
+# sync_host_scripts successfully re-installed upgrade.sh itself (the common case,
+# now RETRY_OPTS-hardened both here and in host-scripts-lib.sh's shared fetch — see
+# that file's fetch_url curl call). It does NOT catch the narrower residual case where
+# upgrade.sh's OWN sbin fetch specifically fails/skips (leaving OLD bytes + a matching
+# presync fingerprint → gate reads "converged") while a SIBLING host-script (e.g.
+# install-firewall.sh, fetched from a different origin) succeeds and installs NEW
+# bytes — that combination is the actual v0.14.4 incident and is NOT closed by this
+# gate alone. See FOLLOWUPS.md for the tracked residual (asserting every
+# _HOST_SCRIPT_SBIN_FILES entry's post-sync sha, not just upgrade.sh's).
+#
+# Only meaningful when self-update was applicable to THIS invocation: a dev/CI/manual
+# run, DRY_RUN, a floating/empty tag, or a non-installed running copy never self-updates,
+# so _should_self_update returns "not applicable" and the gate is a silent no-op — its
+# running-vs-installed bytes ALWAYS differ in a dev/test tree, and dying there would be a
+# correctness disaster for this repo's own CI. When applicable, compare the bytes this
+# process is EXECUTING (OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA, fingerprinted by
+# _maybe_self_update_reexec before sync overwrote the sbin copy) against the post-sync
+# installed sbin bytes; a difference means we are still running the old release while the
+# new one is already on disk. die() with an actionable message — a plain re-run starts
+# fresh from the now-correct on-disk bytes and converges immediately (cheap, always
+# effective). Escape hatch OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 downgrades die->warn for an
+# operator who legitimately expects the bytes to differ (e.g. testing a locally-patched
+# upgrade.sh against a released sbin target) and wants to proceed anyway.
+_assert_self_update_converged() {
+	_should_self_update || return 0
+
+	local _running _installed _presync _installed_sha
+	_running="${BASH_SOURCE[0]:-$0}"
+	# Same resolution _maybe_self_update_reexec/_should_self_update use for the sbin copy.
+	_installed="${OXPULSE_INSTALLED_UPGRADE_PATH:-${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-partner-edge-upgrade}"
+	_presync="${OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA:-}"
+	_installed_sha=$(sha256sum "$_installed" 2>/dev/null | awk '{print $1}')
+
+	# No fingerprint (self-update entrypoint not reached this run) or an unreadable
+	# install => cannot assert convergence. Do NOT fall back to a re-hash of "$_running"
+	# (it is the same file as "$_installed" here, so it would trivially "match" and mask a
+	# real divergence). Warn for observability and proceed (degrades to historical
+	# two-run convergence) rather than fail-close on missing instrumentation.
+	if [[ -z "$_presync" || -z "$_installed_sha" ]]; then
+		warn "self-update convergence gate: no running-bytes fingerprint (or unreadable $_installed) - cannot assert convergence, proceeding (converges next run)"
+		return 0
+	fi
+
+	# Converged: the bytes we are executing == the bytes now installed on disk.
+	[[ "$_presync" == "$_installed_sha" ]] && return 0
+
+	# Divergence: still running the OLD upgrade.sh while the NEW release is on disk.
+	if [[ "${OXPULSE_UPGRADE_NO_CONVERGE_GATE:-0}" == 1 ]]; then
+		warn "self-update did NOT converge (this process runs the old upgrade.sh; ${RELEASE_TAG:-target} bytes are installed at $_installed) - OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 set, proceeding anyway"
+		return 0
+	fi
+	die "self-update did not converge: this process is still running the OLD upgrade.sh, but the ${RELEASE_TAG:-target} release is already installed at $_installed.
+Continuing would apply stale upgrade logic (reconcile_all / firewall / caddy) to the freshly-synced host-scripts - the exact failure that killed the v0.14.4 rollout deep in reconcile_firewall_surface.
+FIX: simply re-run this upgrade. The correct bytes are already on disk, so the next invocation starts fresh and converges immediately (or set OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 to override if you intend the mismatch)."
 }
 
 # sync_host_scripts TAG — forwarder; see snapshot_host_scripts/restore_host_scripts's
@@ -2778,6 +2898,13 @@ if [[ "$MODE" == with_templates ]]; then
 	log "syncing host-scripts to $RELEASE_TAG (image tag=$TARGET)"
 	sync_host_scripts "$RELEASE_TAG"
 
+	# Convergence gate (PR4): sync_host_scripts just installed the released upgrade.sh
+	# to disk. If this process is still executing the OLD bytes (a self-update no-op
+	# that _maybe_self_update_reexec could not re-exec through), fail-closed here rather
+	# than walk stale logic into the new host-script set (the v0.14.4 incident). No-op
+	# when self-update was not applicable to this run (dev/CI/manual/dry-run).
+	_assert_self_update_converged
+
 	# Step 5: capture baseline health snapshot BEFORE reconcile_all (MAJOR-2 fix).
 	# Correct order: sync_host_scripts → baseline → reconcile_all → pull/recreate → post.
 	# Prior order had baseline AFTER reconcile_all: a caddy-reload-induced breakage was
@@ -2982,6 +3109,12 @@ log "compose image tags rewritten to $TARGET (pre-pull)"
 # RELEASE_TAG = TARGET = vX.Y.Z (single tag form starting at v0.12.60).
 log "syncing host-scripts to $RELEASE_TAG (image tag=$TARGET)"
 sync_host_scripts "$RELEASE_TAG"
+
+# Convergence gate (PR4): fail-closed if this process is still running the OLD
+# upgrade.sh while sync_host_scripts just installed the released bytes to disk
+# (the v0.14.4 stale-in-memory failure class). No-op when self-update was not
+# applicable to this run. See _assert_self_update_converged.
+_assert_self_update_converged
 
 # Refresh ghcr auth from stored token (no-op if file absent).
 ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"
