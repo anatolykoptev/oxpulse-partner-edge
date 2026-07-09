@@ -5,6 +5,16 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.5](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.14.4...v0.14.5) (2026-07-09)
+
+
+### Bug Fixes
+
+* SFU healthcheck CIDR-drift heal — env-var-by-construction (PR1/4 v0.14.5) ([#378](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/378)) ([71e2b68](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/71e2b68a02067f7a51ded6b274862265c1a740bd))
+* **upgrade:** _source_lib manifest resolution falls through on a missing entry, not just an unresolved candidate ([#381](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/381)) ([f3ae31d](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/f3ae31da8146657f0cf56532eb50ec9960556ab0))
+* **upgrade:** 429-aware curl retry + stage-once transitive-dep fetch ([#380](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/380)) ([08c0258](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/08c02588c84e9f4e6c0c22ef0731f739f64f1ee6))
+* **upgrade:** self-update root-cause warn + RETRY_OPTS + fail-closed convergence gate (PR4/4 v0.14.5) ([#382](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/382)) ([c46108d](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c46108ddbda2ad44bb39a27f4e5685a218ed9f61))
+
 ## [0.14.4](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.14.3...v0.14.4) (2026-07-08)
 
 
