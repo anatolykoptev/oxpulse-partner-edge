@@ -5,6 +5,18 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.4](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.14.3...v0.14.4) (2026-07-08)
+
+
+### Bug Fixes
+
+* Bug15 test bug + review nits from health-report strangler arc ([#369](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/369)) ([41968d3](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/41968d3dc0c1787a817d44225ec60b38b737cd13))
+* CWE-214 argv hardening — cross-probe token refresh bearer via -K stdin ([#371](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/371)) ([c53d8e4](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c53d8e4573d64aaeeb015ebf3d0d7ca7b9da97cb))
+* P3 review residuals — lib-missing marker + CWE-214 argv hardening ([#370](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/370)) ([bafb45e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/bafb45ef338f46fe15a492bbc8b1610e9ba3435b))
+* **probe:** ch1/ch2/ch3 test the real end-to-end tunnel, not local liveness ([#362](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/362)) ([a46bde8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a46bde85d45bb44d58af8067d900010a59004cbb))
+* SFU signing-key write — atomic + escaped (CWE-116/943 defense-in-depth) ([#372](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/372)) ([11a6a65](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/11a6a65b739ec8ece0a0e91ae89720c8fe9b031a))
+* **upgrade:** serve-ability-aware settle gate — stop false rollbacks on multi-homed boxes ([#365](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/365)) ([2729a92](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/2729a923aba31a644e2978ad18158e0df820a52f))
+
 ## [0.14.3](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.14.2...v0.14.3) (2026-07-04)
 
 
