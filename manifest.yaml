@@ -66,7 +66,12 @@ surfaces:
   - id: compose
     kind: persist_rendered
     out: /etc/oxpulse-partner-edge/docker-compose.yml
-    patch_only: ["image_tags"]          # sed image:TAG; everything else is authority
+    # sed image:TAG; sfu_healthcheck_cidr = live-box migration shim
+    # (_patch_compose_sfu_healthcheck_cidr, upgrade.sh) stripping the /CIDR
+    # suffix from a pre-v0.14.5 SFU healthcheck host — see FOLLOWUPS.md,
+    # removable once fleet telemetry confirms 100% of nodes are >= v0.14.5.
+    # Everything else is authority.
+    patch_only: ["image_tags", "sfu_healthcheck_cidr"]
     secret_surface: true
     wired: false                        # Phase 4b deferred (compose/node_config out of scope)
 
