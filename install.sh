@@ -73,7 +73,10 @@ die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" 
 # different retry policies (xprb_curl_get_with_retry, the channel-health-lib.sh
 # / cross-probe-lib.sh 429/408 carve-out) — do not unify them.
 RETRY_OPTS=(--retry 3 --retry-delay 2 --retry-max-time 60)
-_curl_ver="$(curl --version 2>/dev/null | head -1 | awk '{print $2}')"
+# `|| true`: see upgrade.sh's identical probe for why — under set -euo
+# pipefail a non-zero exit here would otherwise kill the whole script before
+# any real work runs, with zero diagnostic output.
+_curl_ver="$(curl --version 2>/dev/null | head -1 | awk '{print $2}')" || true
 if [[ "$_curl_ver" =~ ^([0-9]+)\.([0-9]+) ]]; then
     _curl_maj="${BASH_REMATCH[1]}"; _curl_min="${BASH_REMATCH[2]}"
     if (( _curl_maj > 7 || (_curl_maj == 7 && _curl_min >= 71) )); then

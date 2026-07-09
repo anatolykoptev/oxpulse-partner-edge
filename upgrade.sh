@@ -190,7 +190,13 @@ die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" 
 # really for (finding 4a: fewer requests beats retrying more of them). RETRY_OPTS
 # mainly helps the more common transient/uncached 429 case.
 RETRY_OPTS=(--retry 3 --retry-delay 2 --retry-max-time 60)
-_curl_ver="$(curl --version 2>/dev/null | head -1 | awk '{print $2}')"
+# `|| true`: under set -euo pipefail, a non-zero exit anywhere in this pipeline
+# (e.g. a minimal curl replacement/wrapper that doesn't implement --version)
+# would otherwise kill the WHOLE script here, before any real work runs, with
+# zero diagnostic output. This probe is best-effort — worst case _curl_ver
+# stays empty, the version regex below doesn't match, and RETRY_OPTS simply
+# skips --retry-all-errors (safe, matches the <7.71 fallback path).
+_curl_ver="$(curl --version 2>/dev/null | head -1 | awk '{print $2}')" || true
 if [[ "$_curl_ver" =~ ^([0-9]+)\.([0-9]+) ]]; then
     _curl_maj="${BASH_REMATCH[1]}"; _curl_min="${BASH_REMATCH[2]}"
     if (( _curl_maj > 7 || (_curl_maj == 7 && _curl_min >= 71) )); then
