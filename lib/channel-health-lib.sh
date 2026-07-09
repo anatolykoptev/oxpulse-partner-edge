@@ -621,6 +621,14 @@ _post_channel() {
         # TRANSIENT (RFC 6585): rate-limited / request-timeout — NOT an auth
         # failure. Back off (the 60s timer is our retry; central sends
         # Retry-After) and retry next tick. Must NOT return 1, or a recoverable
+        #
+        # CROSS-REFERENCE (PR2 finding 4b — do NOT unify with the other retry
+        # policies in this repo): this bash-level status-code carve-out is
+        # DELIBERATELY separate from upgrade.sh/install.sh's RETRY_OPTS
+        # (bootstrap-tier lib-loader fetches only, uses curl's own native
+        # --retry-all-errors) and lib/xprb-refresh-lib.sh:88 (3-attempt backoff,
+        # 4xx always terminal). See upgrade.sh's RETRY_OPTS header comment for
+        # the full 3-way rationale.
         # rate-limit would surface as a systemd unit failure.
         warn "channel $channel_name: HTTP $http_code — rate-limited/transient, retry next tick"
         return 0
