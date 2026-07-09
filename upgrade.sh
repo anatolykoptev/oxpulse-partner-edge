@@ -151,6 +151,60 @@ log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
 
+# RETRY_OPTS (finding 4b, PR2) — curl-native retry for the bootstrap-tier lib-loader
+# fetches (_source_lib / _stage_lib below): the fetches that load the FIRST copy of
+# any lib, so the retry logic cannot itself live in a synced lib for these call
+# sites (chicken-egg — nothing has been fetched yet to source a retry helper from).
+# Motivated by a live v0.14.4 fleet rollout: staging these libs re-fetches from
+# raw.githubusercontent.com on both the pre-self-update-reexec pass and the
+# post-reexec pass (see _stage_reconcile_transitive_deps below), and 2 of 5 relay
+# nodes hit GitHub's anonymous rate limit (HTTP 429) mid-rollout.
+#
+# curl's --retry alone only retries on a TRANSPORT failure (DNS/connect/TLS/
+# timeout); it does NOT retry on an HTTP error response (4xx/5xx) by default —
+# --retry-all-errors (curl >=7.71) extends --retry to cover that, which is what
+# turns a 429 into a retried request instead of an immediate die(). Probed once
+# below (NOT unconditionally spliced): an older curl (<7.71 — still the shipped
+# version on some LTS/oldstable boxes this fleet runs) errors out on an unknown
+# long option under a script using -f-style strict invocation, so the flag must be
+# gated on the installed curl's version, never assumed present.
+#
+# CROSS-REFERENCE (do NOT unify — 3 DELIBERATELY DIFFERENT retry policies live in
+# this repo; a future "simplify by sharing one retry helper" would silently break
+# an invariant one of them depends on):
+#   1. xprb_curl_get_with_retry() in lib/xprb-refresh-lib.sh:88 — 3 attempts,
+#      2s/5s backoff, retries ONLY transport-failure-or-5xx; a 4xx is NEVER
+#      retried (auth/permission failures are deterministic — burning retry budget
+#      on one just delays surfacing a real misconfiguration).
+#   2. lib/channel-health-lib.sh:620 and lib/cross-probe-lib.sh:389 — both carve
+#      429/408 out of the general 4xx-is-terminal bucket as transient-not-fatal
+#      (RFC 6585), distinct from every other 4xx which stays terminal.
+#   3. RETRY_OPTS (here) — bootstrap tier only (_source_lib / _stage_lib's own
+#      fetches, before any lib exists to source a retry helper from). Treats 429
+#      as retry-worthy via curl's OWN native mechanism (--retry-all-errors), not
+#      bash-level status-code branching like #1/#2 use.
+# RETRY_OPTS is the WEAKEST defense of the two this PR ships against a rate-limit
+# 429: a Fastly/Varnish CDN edge caches the 429 response itself for ~5 minutes, so
+# curl's own retry (max ~66s total budget below) cannot outlast a cached negative
+# response at one edge — that's what the deferred single-fetch staging below is
+# really for (finding 4a: fewer requests beats retrying more of them). RETRY_OPTS
+# mainly helps the more common transient/uncached 429 case.
+RETRY_OPTS=(--retry 3 --retry-delay 2 --retry-max-time 60)
+# `|| true`: under set -euo pipefail, a non-zero exit anywhere in this pipeline
+# (e.g. a minimal curl replacement/wrapper that doesn't implement --version)
+# would otherwise kill the WHOLE script here, before any real work runs, with
+# zero diagnostic output. This probe is best-effort — worst case _curl_ver
+# stays empty, the version regex below doesn't match, and RETRY_OPTS simply
+# skips --retry-all-errors (safe, matches the <7.71 fallback path).
+_curl_ver="$(curl --version 2>/dev/null | head -1 | awk '{print $2}')" || true
+if [[ "$_curl_ver" =~ ^([0-9]+)\.([0-9]+) ]]; then
+    _curl_maj="${BASH_REMATCH[1]}"; _curl_min="${BASH_REMATCH[2]}"
+    if (( _curl_maj > 7 || (_curl_maj == 7 && _curl_min >= 71) )); then
+        RETRY_OPTS+=(--retry-all-errors)
+    fi
+fi
+unset _curl_ver _curl_maj _curl_min
+
 # _lookup_expected_hash NAME MANIFEST_FILE — resolve NAME's expected sha256 from a
 # checksum manifest (lib-checksums.txt or a release SHA256SUMS), field-exact matching
 # column 2 (NOT a suffix grep — a suffix match would also hit an unrelated file whose
@@ -246,7 +300,7 @@ _source_lib() {
     # mismatch) + the manifest temp below would otherwise leak in /tmp on every failed
     # run — the hostile-network case this hardening targets (review LOW).
     _CLEANUP_PATHS+=("$_fetch_tmp")
-    if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "$raw_path" -o "$_fetch_tmp" 2>/dev/null; then
+    if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "${RETRY_OPTS[@]}" "$raw_path" -o "$_fetch_tmp" 2>/dev/null; then
         die "$name not found (tried: $local_path, $installed_path, $raw_path).
 On a standalone upgrade.sh download ensure network access to REPO_RAW or stage
 the lib files adjacent to upgrade.sh."
@@ -261,7 +315,7 @@ the lib files adjacent to upgrade.sh."
         done
         if [[ -z "$_man" ]]; then
             _man_tmp=$(mktemp); _CLEANUP_PATHS+=("$_man_tmp")
-            curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
+            curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 "${RETRY_OPTS[@]}" \
                 "$REPO_RAW/lib/lib-checksums.txt" -o "$_man_tmp" 2>/dev/null && _man="$_man_tmp"
         fi
     else
@@ -272,7 +326,7 @@ the lib files adjacent to upgrade.sh."
         [[ -r "${_sd}/SHA256SUMS" ]] && _man="${_sd}/SHA256SUMS"
         if [[ -z "$_man" && "${OXPULSE_UPGRADE_TAG}" =~ ^v[0-9]+\. ]]; then
             _man_tmp=$(mktemp); _CLEANUP_PATHS+=("$_man_tmp")
-            curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
+            curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 "${RETRY_OPTS[@]}" \
                 "$RELEASES_BASE/${OXPULSE_UPGRADE_TAG}/SHA256SUMS" -o "$_man_tmp" 2>/dev/null && _man="$_man_tmp"
         fi
     fi
@@ -330,7 +384,7 @@ _stage_lib() {
     # die() calls exit and never fires a RETURN trap, so the die paths below (fetch-fail
     # / no-manifest / mismatch) + the checksum temp would otherwise leak in /tmp (review LOW).
     _CLEANUP_PATHS+=("$_fetch_tmp")
-    if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "$raw_path" -o "$_fetch_tmp" 2>/dev/null; then
+    if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "${RETRY_OPTS[@]}" "$raw_path" -o "$_fetch_tmp" 2>/dev/null; then
         die "$name could not be staged (tried: $local_path, $installed_path, $raw_path).
 reconcile_firewall_surface needs it on-disk in LIB_DIR; ensure network access to
 REPO_RAW or stage lib/ adjacent to upgrade.sh."
@@ -345,7 +399,7 @@ REPO_RAW or stage lib/ adjacent to upgrade.sh."
     done
     if [[ -z "$_ck" ]]; then
         _ck_tmp=$(mktemp); _CLEANUP_PATHS+=("$_ck_tmp")
-        curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
+        curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 "${RETRY_OPTS[@]}" \
             "$REPO_RAW/lib/lib-checksums.txt" -o "$_ck_tmp" 2>/dev/null && _ck="$_ck_tmp"
     fi
     if [[ -z "$_ck" ]]; then
@@ -483,53 +537,96 @@ _source_lib "reconcile.sh" \
 # this block already handled AND the (more common) installed-sbin case it did
 # not. See lib-checksums.txt / Makefile / release.yml for the matching
 # manifest entries these staging calls require.
+#
+# PR2 finding 4a (deferred, lazy, stage-once — was unconditional top-level code
+# here through v0.14.4): a live fleet rollout showed this block re-fetching ALL
+# 5 files TWICE per upgrade invocation whenever _maybe_self_update_reexec (below)
+# decides to re-exec — once in the pre-reexec parent (about to be replaced by
+# exec, so the fetch is thrown away) and once again in the re-exec'd child,
+# doubling GitHub raw.githubusercontent.com requests (10 instead of 5) and
+# contributing to a 429 on 2 of 5 relays during that rollout.
+#
+# _stage_reconcile_transitive_deps() below is now a lazy, idempotent function
+# (guarded by _TRANSITIVE_DEPS_STAGED) called from FOUR sites, each positioned
+# right before that mode/path's first actual use of a staged dep, and — for the
+# two self-update-guarded apply paths — AFTER that path's _maybe_self_update_reexec
+# call so a process about to be exec-replaced never reaches its call site:
+#   1. --rollback mode      (before restore_host_scripts)
+#   2. --host-scripts-only  (before sync_host_scripts)
+#   3. --with-templates apply path  (after _maybe_self_update_reexec, before
+#      sync_host_scripts / reconcile_all)
+#   4. plain apply path             (after _maybe_self_update_reexec, before
+#      sync_host_scripts)
+# NOT hoisted earlier and NOT simply moved to "right before reconcile_all" as a
+# single call site (spec deviation from the original ADR-10 framing, documented
+# here + in the PR body): sync_host_scripts/restore_host_scripts also depend on
+# this staged LIB_DIR via the SAME co-located-else-LIB_DIR forwarder resolution
+# described above, and reconcile_all is reached ONLY by the --with-templates
+# path — a single call site scoped to "just before reconcile_all" would silently
+# reintroduce this exact BUG1 synthetic_green gap for --rollback,
+# --host-scripts-only, and the with-templates path's OWN pre-reconcile_all
+# sync_host_scripts call (line ref: the sync_host_scripts call in that path runs
+# before reconcile_all). --check and --templates-only never call this function
+# at all (neither mode touches a staged dep) — a bonus fetch saving over the old
+# unconditional top-level call that ran for every mode.
+#
 # _CLEANUP_PATHS + the single EXIT trap were established above (before the first
 # _source_lib call). The staging dir and every later temp site append to that array.
 # (OXPULSE_UPGRADE_NO_INTEGRITY was pre-scanned above too, and is honored here by
 # _stage_lib's tier-3 verify as well.)
-_LIB_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/oxpulse-lib-stage-XXXXXX")
-_CLEANUP_PATHS+=("$_LIB_STAGE_DIR")
+#
+# _UPGRADE_SH_DIR stays a top-level (not lazy) assignment: it is a pure local
+# dirname lookup (no network, negligible cost) and _settle_serveability_alert's
+# TELEGRAM_ALERT_LIB fallback (below) reads it independently of whether staging
+# has run yet in this process.
 _UPGRADE_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-_stage_lib "install-firewall.sh" \
-    "${_UPGRADE_SH_DIR}/lib/install-firewall.sh" \
-    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/install-firewall.sh" \
-    "$REPO_RAW/lib/install-firewall.sh" \
-    "$_LIB_STAGE_DIR"
-_stage_lib "telegram-alert-lib.sh" \
-    "${_UPGRADE_SH_DIR}/lib/telegram-alert-lib.sh" \
-    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/telegram-alert-lib.sh" \
-    "$REPO_RAW/lib/telegram-alert-lib.sh" \
-    "$_LIB_STAGE_DIR"
-_stage_lib "healthcheck-lib.sh" \
-    "${_UPGRADE_SH_DIR}/lib/healthcheck-lib.sh" \
-    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/healthcheck-lib.sh" \
-    "$REPO_RAW/lib/healthcheck-lib.sh" \
-    "$_LIB_STAGE_DIR"
-_stage_lib "compose-lib.sh" \
-    "${_UPGRADE_SH_DIR}/lib/compose-lib.sh" \
-    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/compose-lib.sh" \
-    "$REPO_RAW/lib/compose-lib.sh" \
-    "$_LIB_STAGE_DIR"
-_stage_lib "host-scripts-lib.sh" \
-    "${_UPGRADE_SH_DIR}/lib/host-scripts-lib.sh" \
-    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/host-scripts-lib.sh" \
-    "$REPO_RAW/lib/host-scripts-lib.sh" \
-    "$_LIB_STAGE_DIR"
-export LIB_DIR="$_LIB_STAGE_DIR"
-export FIREWALL_LIB="$_LIB_STAGE_DIR/install-firewall.sh"
-export TELEGRAM_ALERT_LIB="$_LIB_STAGE_DIR/telegram-alert-lib.sh"
-# Deliberately NOT exporting HEALTHCHECK_LIB / COMPOSE_LIB / HOST_SCRIPTS_LIB
-# here: unlike FIREWALL_LIB/TELEGRAM_ALERT_LIB (whose reconcile.sh resolvers
-# are the flat `${VAR:-${LIB_DIR:-...}}` — no separate co-located tier, so
-# pre-setting the var is equivalent to relying on LIB_DIR), the three
-# forwarders below resolve co-located-with-upgrade.sh FIRST and
-# ${VAR:-...}/${LIB_DIR:-...} only as a fallback (priority deliberately
-# inverted from firewall/telegram — see _upgrade_resolve_host_scripts_lib /
-# _upgrade_resolve_compose_lib / _reconcile_resolve_healthcheck_lib). Their
-# env-var tier exists ONLY for explicit operator/test override; exporting it
-# unconditionally here would make it win over a trusted local dev checkout,
-# inverting that intent. LIB_DIR alone (already exported above) is sufficient
-# for their fallback tier to find the just-staged copies.
+_TRANSITIVE_DEPS_STAGED=0
+_stage_reconcile_transitive_deps() {
+    [[ "$_TRANSITIVE_DEPS_STAGED" -eq 1 ]] && return 0
+    _LIB_STAGE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/oxpulse-lib-stage-XXXXXX")
+    _CLEANUP_PATHS+=("$_LIB_STAGE_DIR")
+    _stage_lib "install-firewall.sh" \
+        "${_UPGRADE_SH_DIR}/lib/install-firewall.sh" \
+        "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/install-firewall.sh" \
+        "$REPO_RAW/lib/install-firewall.sh" \
+        "$_LIB_STAGE_DIR"
+    _stage_lib "telegram-alert-lib.sh" \
+        "${_UPGRADE_SH_DIR}/lib/telegram-alert-lib.sh" \
+        "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/telegram-alert-lib.sh" \
+        "$REPO_RAW/lib/telegram-alert-lib.sh" \
+        "$_LIB_STAGE_DIR"
+    _stage_lib "healthcheck-lib.sh" \
+        "${_UPGRADE_SH_DIR}/lib/healthcheck-lib.sh" \
+        "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/healthcheck-lib.sh" \
+        "$REPO_RAW/lib/healthcheck-lib.sh" \
+        "$_LIB_STAGE_DIR"
+    _stage_lib "compose-lib.sh" \
+        "${_UPGRADE_SH_DIR}/lib/compose-lib.sh" \
+        "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/compose-lib.sh" \
+        "$REPO_RAW/lib/compose-lib.sh" \
+        "$_LIB_STAGE_DIR"
+    _stage_lib "host-scripts-lib.sh" \
+        "${_UPGRADE_SH_DIR}/lib/host-scripts-lib.sh" \
+        "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/host-scripts-lib.sh" \
+        "$REPO_RAW/lib/host-scripts-lib.sh" \
+        "$_LIB_STAGE_DIR"
+    export LIB_DIR="$_LIB_STAGE_DIR"
+    export FIREWALL_LIB="$_LIB_STAGE_DIR/install-firewall.sh"
+    export TELEGRAM_ALERT_LIB="$_LIB_STAGE_DIR/telegram-alert-lib.sh"
+    # Deliberately NOT exporting HEALTHCHECK_LIB / COMPOSE_LIB / HOST_SCRIPTS_LIB
+    # here: unlike FIREWALL_LIB/TELEGRAM_ALERT_LIB (whose reconcile.sh resolvers
+    # are the flat `${VAR:-${LIB_DIR:-...}}` — no separate co-located tier, so
+    # pre-setting the var is equivalent to relying on LIB_DIR), the three
+    # forwarders below resolve co-located-with-upgrade.sh FIRST and
+    # ${VAR:-...}/${LIB_DIR:-...} only as a fallback (priority deliberately
+    # inverted from firewall/telegram — see _upgrade_resolve_host_scripts_lib /
+    # _upgrade_resolve_compose_lib / _reconcile_resolve_healthcheck_lib). Their
+    # env-var tier exists ONLY for explicit operator/test override; exporting it
+    # unconditionally here would make it win over a trusted local dev checkout,
+    # inverting that intent. LIB_DIR alone (already exported above) is sufficient
+    # for their fallback tier to find the just-staged copies.
+    _TRANSITIVE_DEPS_STAGED=1
+}
 # ------------------------------------------------------------------------------
 
 [[ $EUID -eq 0 || "${OXPULSE_SKIP_ROOT_CHECK:-0}" == "1" ]] || die "must run as root"
@@ -1956,6 +2053,11 @@ if [[ "$MODE" == rollback ]]; then
 	[[ "$_have_template_prev" -eq 1 || "$_have_image_prev" -eq 1 || "$_have_host_scripts_prev" -eq 1 ]] \
 		|| die "no previous version recorded — nothing to roll back to"
 
+	# PR2 finding 4a call site 1/4: restore_host_scripts below needs LIB_DIR
+	# staged (see _stage_reconcile_transitive_deps's header comment) — --rollback
+	# has no self-update-reexec (that guard is scoped to apply|with_templates
+	# only), so a single unconditional call here is already single-fetch.
+	_stage_reconcile_transitive_deps
 	log "rolling back to previous state"
 	do_rollback_templates  # restores Caddyfile, healthcheck, compose, install.env .prev files
 	restore_host_scripts   # restores sbin scripts + systemd units from snapshot
@@ -1999,6 +2101,11 @@ if [[ "$MODE" == host_scripts_only ]]; then
 		log "[dry-run] image pull and container recreate: not performed (--host-scripts-only)"
 		exit 0
 	fi
+	# PR2 finding 4a call site 2/4: sync_host_scripts below needs LIB_DIR staged
+	# (see _stage_reconcile_transitive_deps's header comment) — --host-scripts-only
+	# has no self-update-reexec, so a single unconditional call here is already
+	# single-fetch. Skipped entirely on the [[ "$DRY_RUN" -eq 1 ]] early-exit above.
+	_stage_reconcile_transitive_deps
 	sync_host_scripts "$RELEASE_TAG"
 	log "--host-scripts-only complete (release_tag=$RELEASE_TAG target=$TARGET); no image pull or container recreate"
 	exit 0
@@ -2540,6 +2647,16 @@ if [[ "$MODE" == with_templates ]]; then
 	# temp copy, disk untouched (see _maybe_self_update_reexec).
 	_maybe_self_update_reexec "$@"
 
+	# PR2 finding 4a call site 3/4: staged AFTER the self-update-reexec decision
+	# above, not before — if that call re-execs, THIS process is replaced and never
+	# reaches this line, so only the surviving process (re-exec'd child, or this
+	# same process when no re-exec fired) stages the 5 transitive deps, exactly
+	# once. Must precede sync_host_scripts (Step 4, below) AND reconcile_all (Step
+	# 6, further below) — both consume the staged LIB_DIR — see
+	# _stage_reconcile_transitive_deps's header comment for why a single call site
+	# scoped to "just before reconcile_all" is not safe here.
+	_stage_reconcile_transitive_deps
+
 	# Phase 3 (Decision 4): baseline captured AFTER sync_host_scripts (Step 5) so the
 	# new --snapshot-capable healthcheck.sh is in place before the snapshot is taken.
 	# Declared here (empty) so Step 1–5 rollback paths can reference ${_wt_baseline_snap:-}
@@ -2784,6 +2901,12 @@ fi
 # released upgrade.sh (once) if the running copy is stale (see with-templates
 # path). Rollback-safe: temp-exec, disk untouched.
 _maybe_self_update_reexec "$@"
+
+# PR2 finding 4a call site 4/4: staged AFTER the self-update-reexec decision
+# above (same rationale as the with-templates call site) — must precede the
+# host-script sync step below and every restore_host_scripts rollback branch
+# further down this path (pull-failure and post-pull-failure both call it).
+_stage_reconcile_transitive_deps
 
 declare -a _edge_svcs
 resolve_edge_service_scope _edge_svcs

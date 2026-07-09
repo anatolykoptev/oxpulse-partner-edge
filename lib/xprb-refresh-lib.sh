@@ -85,6 +85,15 @@ emit_xprb_failure() {
 # when every attempt was a transport failure. This function does not know
 # about log()/emit_metric() — same two-state-primitive contract as
 # write_secret_atomic — the caller decides how to report the outcome.
+#
+# CROSS-REFERENCE (PR2 finding 4b — do NOT unify with the other retry policies in
+# this repo): this is DELIBERATELY 4xx-terminal, unlike upgrade.sh/install.sh's
+# RETRY_OPTS (bootstrap-tier lib-loader fetches, treats 429 as retry-worthy via
+# curl's native --retry-all-errors) and lib/channel-health-lib.sh:620 /
+# lib/cross-probe-lib.sh:389 (which carve 429/408 out as transient). A future
+# "simplify by sharing one retry helper" would silently let an auth/permission
+# 4xx here burn the retry budget instead of failing fast — see upgrade.sh's
+# RETRY_OPTS header comment for the full 3-way rationale.
 xprb_curl_get_with_retry() {
     local url="$1" bearer="$2"
     local attempt out rc code delays=(2 5)
