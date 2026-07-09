@@ -5,6 +5,17 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.14.5...v0.15.0) (2026-07-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt oxpulse-sfu-kit 0.12.0 (str0m 0.21) + retire sfu_rid_to_rid shadow-dup
+
+### Features
+
+* adopt oxpulse-sfu-kit 0.12.0 (str0m 0.21) + retire sfu_rid_to_rid shadow-dup ([bd1372e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/bd1372e0652900acd0d6607639967f7c62088547))
+
 ## [0.14.5](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.14.4...v0.14.5) (2026-07-09)
 
 
