@@ -291,18 +291,7 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 		fi
 		mode=$(_host_script_mode "$f")
 
-		# RETRY_OPTS (429-aware, defined in upgrade.sh — this lib is only ever sourced
-		# from upgrade.sh's own process, see upgrade.sh's 3 `source lib/host-scripts-
-		# lib.sh` sites) narrows a differential-429 window a code-quality review found
-		# in PR4: this ONE curl call fetches every _HOST_SCRIPT_SBIN_FILES entry,
-		# including upgrade.sh's own release-CDN asset AND every sibling's REPO_RAW
-		# asset from a DIFFERENT origin — without retry, a transient 429 on exactly
-		# ONE of those two origins could leave upgrade.sh's sbin copy stale while its
-		# siblings (e.g. install-firewall.sh) install fresh, which is invisible to
-		# _assert_self_update_converged's single-file proxy (see that function's
-		# COVERAGE LIMIT comment). Retrying here reduces how often ANY one file in
-		# this loop lags behind the rest, in either direction.
-		if ! curl -fsSL --max-time 30 "${RETRY_OPTS[@]}" "$fetch_url" -o "$fetch_tmp" 2>/dev/null; then
+		if ! curl -fsSL --max-time 30 "$fetch_url" -o "$fetch_tmp" 2>/dev/null; then
 			warn "host-script sync: could not fetch $fetch_url — skipping $f"
 			continue
 		fi

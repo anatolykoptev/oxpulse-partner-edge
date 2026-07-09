@@ -22,18 +22,26 @@ successfully. There are two directions this can diverge in, and only one is beni
   an OLD orchestrator then drives a NEW host-script set it doesn't understand —
   exactly the `reconcile_firewall_surface` death that triggered this whole arc.
 
-**Mitigation shipped in PR4:** `RETRY_OPTS` was added to `host-scripts-lib.sh`'s
-shared per-file fetch (previously unretried for every file in
-`_HOST_SCRIPT_SBIN_FILES`, including upgrade.sh's own), narrowing how often a
-transient 429 on ONE origin causes exactly one file to lag behind the rest. This
-reduces the window but does not close it — a sustained/systemic outage on one
-origin while the other stays healthy is still possible.
+**Mitigation attempted, then reverted:** splicing `RETRY_OPTS` into
+`host-scripts-lib.sh`'s shared per-file fetch (to narrow the differential-429
+window) was tried in PR4 but caused CI's "Installer bash tests" job to time out
+(15 min job cap) — that ONE curl call fetches every `_HOST_SCRIPT_SBIN_FILES`
+entry (~20 files) and is exercised by many tests that deliberately mock a
+404/unreachable target to test the degraded-fetch path; with `--retry-all-errors`
+active (curl ≥7.71) every one of those now retries for real wall-clock seconds
+instead of failing fast, compounding across the whole suite. Reverted rather than
+tuned under arc-completion time pressure — the retry-count/delay tradeoff for
+this specific heavily-iterated fetch site needs its own consideration (e.g. a
+shorter/separate retry policy, or retrying only the two files that matter for
+this gate's purposes) rather than reusing RETRY_OPTS verbatim.
 
-**Followup (MEDIUM — the dangerous direction is a real, if narrower, gap):**
+**Followup (MEDIUM — the dangerous direction is real and currently unmitigated):**
 extend the gate to assert every `_HOST_SCRIPT_SBIN_FILES` entry's installed sha
 matches its `SHA256SUMS` expectation after sync (fail-closed), reusing
 `_lookup_expected_hash`, instead of proxying whole-set convergence through
-upgrade.sh's own file alone.
+upgrade.sh's own file alone — this closes the gap directly without touching the
+per-file fetch's retry behavior at all, so it doesn't carry the same CI-runtime
+risk as the reverted RETRY_OPTS attempt.
 
 **File:line:** `upgrade.sh` `_assert_self_update_converged`; `lib/host-scripts-lib.sh`'s
 `fetch_url`/`curl` site (the shared per-file fetch this followup would extend).
