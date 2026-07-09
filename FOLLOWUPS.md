@@ -347,3 +347,98 @@ its two call sites in the `--with-templates` and plain-apply compose-patch
 steps), `manifest.yaml:69` (`compose` surface `patch_only` list),
 `docker-compose.yml.tpl` (the fixed healthcheck `test:` line — the source of
 truth going forward). Cites: v0.14.5 installer/upgrade robustness arc, PR1.
+## reconcile.sh's own top-level `source` still double-fetches across a self-update reexec (PR2 finding 4, acknowledged out of scope)
+
+PR2 (finding 4a) deferred the 5-file `_stage_lib` transitive-dep staging block to a
+lazy, stage-once `_stage_reconcile_transitive_deps()` so it no longer re-fetches
+across `_maybe_self_update_reexec`'s re-exec boundary. `upgrade.sh`'s OWN
+`_source_lib "reconcile.sh" ...` call (upgrade.sh:~500, inside the eager
+`_source_lib "channel-render-lib.sh"` / `"ghcr-auth-lib.sh"` / `"reconcile.sh"`
+trio near the top of the script) was deliberately left as-is: it still runs
+unconditionally at top level, before `_maybe_self_update_reexec` is ever called,
+so a pre-reexec parent fetches `lib/reconcile.sh` once, and the re-exec'd child
+fetches it again — a single extra request per self-update, not the 5-file (10
+request) double-fetch this PR fixed.
+
+**Followup:** apply the same "defer past the self-update-reexec decision" treatment
+to the `reconcile.sh` source call as `_stage_reconcile_transitive_deps` — either
+fold it into that same lazy function (it is already the thing that consumes
+`reconcile.sh`'s definitions) or give it its own lazy-source wrapper called from
+the same 4 call sites. Left out of this PR to keep the diff to the specific
+5-file staging bug this PR's live-rollout evidence covered; the `channel-render-
+lib.sh` / `ghcr-auth-lib.sh` eager sources are unaffected (their consumers run
+before any self-update-reexec call site, so they are not part of this class of
+double-fetch).
+
+**Severity:** LOW — 1 extra request per self-update-triggering upgrade run
+(compare: the 5-file bug was 5 extra requests), and `reconcile.sh` itself is a
+committed repo file with a stable size, so it is a smaller rate-limit contributor
+than the 5-file block this PR already fixed.
+
+**File:line:** `upgrade.sh:~500` (`_source_lib "reconcile.sh" ...`), `upgrade.sh`
+(`_stage_reconcile_transitive_deps()` — the pattern to mirror).
+
+---
+
+## Single-tarball/bundle fetch for upgrade.sh's transitive deps (PR2 finding 4c, explicitly out of scope)
+
+PR2 hardened the existing per-file fetch model (curl-native retry via
+`RETRY_OPTS`, finding 4b; stage-once across self-update reexec, finding 4a) but
+deliberately did NOT replace the N-separate-requests shape itself with a single
+bundled tarball/archive fetch (e.g. one `tar.gz` containing all 5 transitive-dep
+libs + their checksums, fetched and verified as one request instead of 5+1).
+A bundle fetch would cut GitHub raw/release request volume further (helps both
+the rate-limit and the Fastly/Varnish cached-429 case `RETRY_OPTS`'s header
+comment notes it cannot fix) but is a materially larger, riskier change: it
+touches the release pipeline (what gets built/published), the verification
+model (one tarball checksum vs. per-file `lib-checksums.txt` entries), and the
+resolution order (`_source_lib`/`_stage_lib`'s tier-1/2/3 fallback chain).
+
+**Followup:** if GitHub rate-limiting on the per-file fetch model recurs after
+this PR's mitigations (429-aware retry + stage-once), design a single-request
+bundle fetch for the transitive-dep set as a separate, dedicated arc — NOT a
+quick addition to this PR. `tests/test_release_assets.sh` documents this repo's
+own history with exactly this class of change: a prior `bootstrap.sh` incident
+spanned 39 releases before being fully resolved, which is the concrete precedent
+for treating a release-asset-shape change as high-risk and worth its own
+council-vetted plan rather than folding into a resilience PR.
+
+**Severity:** LOW (mitigations already shipped materially reduce the exposure);
+tracked here so the option is not silently forgotten if the mitigations turn out
+insufficient at higher fleet scale.
+
+**File:line:** `upgrade.sh` (`_source_lib`/`_stage_lib` — the fetch model a bundle
+would replace), `tests/test_release_assets.sh` (the 39-release precedent for
+release-asset-shape-change risk), `.github/workflows/release.yml` (where a bundle
+would need to be built/published).
+
+---
+
+## Backport the 429/408 transient carve-out into xprb_curl_get_with_retry() (PR2 finding 4b, nice-to-have consistency)
+
+`lib/channel-health-lib.sh:620` and `lib/cross-probe-lib.sh:389` both carve
+HTTP 429/408 out of the general 4xx-is-terminal bucket as transient-not-fatal
+(RFC 6585) — a rate-limited or timed-out channel-health/cross-probe POST retries
+next tick instead of tripping the systemd-timer failure path. `lib/xprb-refresh-
+lib.sh:88`'s `xprb_curl_get_with_retry()` does not: it treats EVERY 4xx
+(including a 429) as terminal, on the stated rationale that "auth/permission
+errors are deterministic, and burning the retry budget on one just delays
+surfacing a real misconfiguration." A rate-limited xprb refresh call today
+surfaces as an immediate non-retried failure instead of getting the same
+2s/5s-backoff retry a transport failure or 5xx gets.
+
+**Followup:** decide whether xprb refresh calls are frequent/bursty enough
+(daily-tick re-mint, per this file's own header comment) to plausibly hit a
+central-side rate limiter, and if so, add the same `429/408 → transient, treat
+like a 5xx (retry within the existing 3-attempt/2s-5s budget)` carve-out inside
+`xprb_curl_get_with_retry()`'s status-code branch, keeping every OTHER 4xx
+terminal. This is a consistency improvement raised while cross-referencing this
+repo's 3 deliberately-different retry policies for PR2 (finding 4b) — not a
+reported live incident on the xprb path, so it is a nice-to-have, not urgent.
+
+**Severity:** LOW — no observed live incident on this path; xprb's own daily-tick
+cadence gives ample natural retry via the next scheduled run even without this.
+
+**File:line:** `lib/xprb-refresh-lib.sh:88` (`xprb_curl_get_with_retry()`),
+`lib/channel-health-lib.sh:620`, `lib/cross-probe-lib.sh:389` (the carve-out
+pattern to mirror).

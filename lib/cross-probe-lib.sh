@@ -390,6 +390,14 @@ _post_cross_probe() {
         # TRANSIENT (RFC 6585): rate-limited / request-timeout — NOT a revoked
         # token. The central sizes a dedicated channel-health limiter and sends
         # Retry-After; the 60s timer is our back-off, so just skip this tick and
+        #
+        # CROSS-REFERENCE (PR2 finding 4b — do NOT unify with the other retry
+        # policies in this repo): this bash-level status-code carve-out is
+        # DELIBERATELY separate from upgrade.sh/install.sh's RETRY_OPTS
+        # (bootstrap-tier lib-loader fetches only, uses curl's own native
+        # --retry-all-errors) and lib/xprb-refresh-lib.sh:88 (3-attempt backoff,
+        # 4xx always terminal). See upgrade.sh's RETRY_OPTS header comment for
+        # the full 3-way rationale.
         # retry next. Do NOT set the persistent-4xx marker (would mis-signal a
         # revoked token and trip the systemd failure on a recoverable hiccup).
         warn "cross-probe target=$target_node_id: HTTP $http_code — rate-limited/transient, retry next tick"
