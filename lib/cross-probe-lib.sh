@@ -44,6 +44,19 @@
 # file's raw contents to a log — the only bearer print is the DRY_RUN+CURL_TRACE
 # debug seam in _post_cross_probe (both off in production). See
 # tests/test_cross_probe_state_lib.sh (secret-non-leak fitness grep).
+#
+# CROSS-REFERENCE (council LOW4, undeclared file contract, 2026-07-08
+# refresh-lib-extraction-strangler P3): _read_cross_probe_token above READS
+# ${_PREFIX_ETC}/cross-probe-token (this script's own prefix var). The
+# WRITER of that same physical path is lib/xprb-refresh-lib.sh's
+# refresh_cross_probe_token, sourced by the SEPARATE daily
+# oxpulse-partner-edge-refresh.sh process (its own $PREFIX_ETC var — same
+# file-path convention, different variable, different script). A
+# cross-repo-file contract between two independently-scheduled processes
+# (60s peer-probe loop here vs. daily re-mint there), not a runtime function
+# call — nothing statically ties them together. Keep the 0600 perms +
+# raw-token-string (no trailing newline, no JSON envelope) contract stable
+# on both sides if either changes it.
 
 # Guard against double-sourcing.
 [[ "${_CROSS_PROBE_LIB_LOADED:-0}" -eq 1 ]] && return 0

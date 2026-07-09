@@ -32,7 +32,7 @@ CHANNELS_VERSION_FILE="$PREFIX_LIB/channels-version"
 SFU_KEYS_ENV="$PREFIX_LIB/sfu-keys.env"
 # Single source for the SFU container_name (docker-compose.yml.tpl `container_name:`).
 # Used by the applied-gauge detector (docker ps filter + docker exec target) and as
-# the `_restart_if_changed` state_container (docker inspect liveness). NOT the compose
+# the `_docker_restart_if_sha_changed` state_container (docker inspect liveness). NOT the compose
 # SERVICE key — that is the literal `sfu` (docker compose targets services, not
 # container_names). Functions sourced in isolation by the tests set this themselves.
 SFU_CONTAINER_NAME="oxpulse-partner-sfu"
@@ -44,108 +44,82 @@ BACKEND_URL="${BACKEND_URL%/}"
 ts()   { date -Iseconds; }
 log()  { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG_FILE"; }
 die()  { log "ERR $*"; exit 1; }
-# emit_metric name labels delta — increments a persisted Prometheus textfile
-# counter (node_exporter textfile collector) and rewrites partner_edge.prom
-# from scratch, atomically.
-#
-# PR review MED-4 on #328: the prior implementation blindly `>>`-appended a
-# fresh `# TYPE <name> counter` + sample line on EVERY call, forever. Two
-# daily failures produce TWO `# TYPE partner_edge_keys_fetch_failure_total`
-# lines in the same file — invalid Prometheus exposition format (a metric
-# family's TYPE line must appear exactly once, with all its samples
-# contiguous). node_exporter's textfile collector does not skip just the bad
-# family on a parse error — it drops the ENTIRE .prom file, silently
-# blackholing every counter this script emits, including ones unrelated to
-# the failure that caused the duplicate.
-#
-# Fix: persist cumulative counter state (name, labels) -> value in a small
-# tab-separated side file, then regenerate partner_edge.prom fresh from that
-# state on every call — one `# TYPE` line per metric name, its samples
-# grouped directly under it, written atomically (tmp+mv, same idiom as the
-# secret writes elsewhere in this script). This also makes the counters
-# real monotonic counters (increase()/rate() over the scrape window shows an
-# actual delta) instead of a flat "1" re-written every failing day.
-#
-# T12 independently proposed a per-run truncate-then-append fix for the same
-# duplicate-TYPE-line bug (reset_metrics_file() wiping partner_edge.prom once
-# at script start); superseded by #328's state-file model above, which is
-# strictly better — it also survives ACROSS runs as real monotonic counters,
-# where a per-run truncate would reset every counter to 0 on each invocation.
-emit_metric() {
-    local name="$1" labels="$2" delta="$3"
-    [[ -d "$TEXTFILE_DIR" ]] || mkdir -p "$TEXTFILE_DIR" 2>/dev/null || return 0
-    local prom_file="$TEXTFILE_DIR/partner_edge.prom"
-    local state_file="$TEXTFILE_DIR/partner_edge.prom.state"
 
-    # ---- merge (name, labels) -> cumulative value into the state file ----
-    local state_tmp found=0 _n _l _v
-    state_tmp=$(mktemp "${state_file}.XXXXXX" 2>/dev/null) || return 0
-    if [[ -f "$state_file" ]]; then
-        while IFS=$'\t' read -r _n _l _v || [[ -n "$_n" ]]; do
-            [[ -z "$_n" ]] && continue
-            # Defensive (PR review round 2, council LOW): a hand-edited or
-            # otherwise tampered state file could carry a non-numeric 3rd
-            # field. Without this guard, `_v + delta` under `set -euo
-            # pipefail` throws "value too great for base" / a syntax error
-            # and takes the WHOLE script down via an uncaught arithmetic
-            # failure — the exact class of bug HIGH-1 fixed for the write
-            # path, just one line lower. Reset to 0 instead of trusting it.
-            [[ "$_v" =~ ^[0-9]+$ ]] || _v=0
-            if [[ "$_n" == "$name" && "$_l" == "$labels" ]]; then
-                _v=$(( _v + delta )); found=1
-            fi
-            printf '%s\t%s\t%s\n' "$_n" "$_l" "$_v"
-        done < "$state_file" > "$state_tmp"
-    fi
-    if [[ "$found" -eq 0 ]]; then
-        printf '%s\t%s\t%s\n' "$name" "$labels" "$delta" >> "$state_tmp"
-    fi
-    mv -f "$state_tmp" "$state_file" 2>/dev/null || { rm -f "$state_tmp" 2>/dev/null || true; return 0; }
+# emit_metric / emit_gauge (Prometheus textfile-collector sink) — extracted to
+# lib/metric-sink-lib.sh (P1 of the 2026-07-08 refresh-lib-extraction-
+# strangler plan). emit_metric carries the load-bearing PR #328 MED-4 fix
+# (cumulative state-file counter model, atomic mktemp+mv+chmod — see the lib's
+# own header for the full duplicate-TYPE-line blackhole history); emit_gauge
+# is now backed by the ATOMIC _emit_prom_gauge_file primitive (ADR-7).
+#
+# Sourced fail-closed: unlike render-channel-lib.sh's fail-soft degrade below
+# (an optional fast-path optimization), there is no safe inline fallback for
+# emit_metric's PR #328 fix — an inline duplicate here would be exactly the
+# "known non-atomic/buggy duplicate re-ossified" mistake the council flagged
+# for emit_gauge (ADR-7). Refuse to run rather than silently regress to the
+# pre-#328 duplicate-TYPE-line blackhole bug.
+_MSL_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/metric-sink-lib.sh"
+_MSL_SBIN="${PREFIX_SBIN:-/usr/local/sbin}/metric-sink-lib.sh"
+if [[ -r "$_MSL_LOCAL" ]]; then
+    # shellcheck source=lib/metric-sink-lib.sh
+    source "$_MSL_LOCAL"
+elif [[ -r "$_MSL_SBIN" ]]; then
+    # shellcheck source=/dev/null
+    source "$_MSL_SBIN"
+else
+    die "metric-sink-lib.sh not found (checked $_MSL_LOCAL and $_MSL_SBIN) — refusing to run without the metric sink (would silently regress emit_metric's PR #328 duplicate-TYPE-line fix)"
+fi
+unset _MSL_LOCAL _MSL_SBIN
 
-    # ---- regenerate partner_edge.prom fresh, grouped by metric name ----
-    local prom_tmp
-    prom_tmp=$(mktemp "${prom_file}.XXXXXX" 2>/dev/null) || return 0
-    {
-        local -A _samples=()
-        local -a _order=()
-        while IFS=$'\t' read -r _n _l _v || [[ -n "$_n" ]]; do
-            [[ -z "$_n" ]] && continue
-            [[ -z "${_samples[$_n]+x}" ]] && _order+=("$_n")
-            _samples[$_n]+="${_n}{${_l}} ${_v}"$'\n'
-        done < "$state_file"
-        local _name
-        for _name in "${_order[@]}"; do
-            printf '# TYPE %s counter\n' "$_name"
-            printf '%s' "${_samples[$_name]}"
-        done
-    } > "$prom_tmp" 2>/dev/null
-    # T3 review round 3: mktemp creates $prom_tmp at mode 0600 (mkstemp,
-    # umask-independent), and a bare mv carries that mode onto $prom_file — so
-    # after the first emit the file drops to 0600 root:root and node_exporter's
-    # textfile collector (an unprivileged system user) loses read access,
-    # blacking out EVERY partner_edge_* metric on the node exactly like the
-    # duplicate-TYPE-line bug this rewrite fixed. Restore the world-readable
-    # 0644 the prior `>>` append produced under root's default umask 022.
-    if mv -f "$prom_tmp" "$prom_file" 2>/dev/null; then
-        chmod 0644 "$prom_file" 2>/dev/null || true
-    else
-        rm -f "$prom_tmp" 2>/dev/null || true
-    fi
-}
+# _docker_restart_if_sha_changed (sha-diff-gated docker compose restart/
+# recreate mechanism) — extracted to lib/surgical-restart-lib.sh (P2 of the
+# 2026-07-08 refresh-lib-extraction-strangler plan). PURE mechanism, zero
+# channels-status.env knowledge (ADR-9) — see the lib's own header for the
+# full boundary-split rationale and the caller-side gate wrapper
+# (_channel_restart_if_changed) defined further below in this script.
+#
+# Sourced fail-closed for the same reason as metric-sink-lib.sh above: a
+# missing lib here would leave channel/SFU config changes silently un-applied
+# forever (the sha never advances, so nothing ever retries visibly) — refuse
+# to run rather than silently regress to a stale-config fleet.
+_SRL_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/surgical-restart-lib.sh"
+_SRL_SBIN="${PREFIX_SBIN:-/usr/local/sbin}/surgical-restart-lib.sh"
+if [[ -r "$_SRL_LOCAL" ]]; then
+    # shellcheck source=lib/surgical-restart-lib.sh
+    source "$_SRL_LOCAL"
+elif [[ -r "$_SRL_SBIN" ]]; then
+    # shellcheck source=/dev/null
+    source "$_SRL_SBIN"
+else
+    die "surgical-restart-lib.sh not found (checked $_SRL_LOCAL and $_SRL_SBIN) — refusing to run without the surgical-restart mechanism (would silently leave channel/SFU config changes un-applied)"
+fi
+unset _SRL_LOCAL _SRL_SBIN
 
-# Emit a current-state GAUGE to its own textfile, TRUNCATED each run so exactly
-# one sample per series survives. A gauge must not share the append-only
-# partner_edge.prom (emit_metric): re-emitting the same series every daily run
-# would accumulate duplicate lines and node_exporter would reject the whole file.
-# One file per gauge name keeps it idempotent. Skips silently when TEXTFILE_DIR
-# is unwritable or absent (non-fatal), matching emit_metric.
-emit_gauge() {
-    local name="$1" labels="$2" value="$3"
-    [[ -d "$TEXTFILE_DIR" ]] || mkdir -p "$TEXTFILE_DIR" 2>/dev/null || return 0
-    local prom_file="$TEXTFILE_DIR/${name}.prom"
-    printf '# TYPE %s gauge\n%s{%s} %s\n' \
-        "$name" "$name" "$labels" "$value" > "$prom_file" 2>/dev/null || true
-}
+# emit_xprb_failure / xprb_curl_get_with_retry / refresh_cross_probe_token
+# (cross-probe bearer-token daily re-mint) — extracted to
+# lib/xprb-refresh-lib.sh (P3 of the 2026-07-08 refresh-lib-extraction-
+# strangler plan). Requires: lib/metric-sink-lib.sh (sourced above — MUST
+# stay before this block; emit_xprb_failure calls emit_metric directly). See
+# the lib's own header for the full trust-boundary-isolation rationale and
+# the CROSS_PROBE_TOKEN_FILE cross-reference with lib/cross-probe-lib.sh.
+#
+# Sourced fail-closed for the same reason as the two libs above: a missing
+# lib here would silently stop the daily xprb re-mint forever, and the fleet
+# would eventually hit the exact MeshCrossProbeRejectionStorm this leg exists
+# to prevent (see the lib's refresh_cross_probe_token header for the
+# 2026-07-01 root cause).
+_XRL_LOCAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib/xprb-refresh-lib.sh"
+_XRL_SBIN="${PREFIX_SBIN:-/usr/local/sbin}/xprb-refresh-lib.sh"
+if [[ -r "$_XRL_LOCAL" ]]; then
+    # shellcheck source=lib/xprb-refresh-lib.sh
+    source "$_XRL_LOCAL"
+elif [[ -r "$_XRL_SBIN" ]]; then
+    # shellcheck source=/dev/null
+    source "$_XRL_SBIN"
+else
+    die "xprb-refresh-lib.sh not found (checked $_XRL_LOCAL and $_XRL_SBIN) — refusing to run without the cross-probe token refresh mechanism (would silently stop the daily xprb re-mint, eventually re-triggering MeshCrossProbeRejectionStorm)"
+fi
+unset _XRL_LOCAL _XRL_SBIN
 
 # OS-aware install hint: returns the appropriate install command for the host PM.
 suggest_install() {
@@ -297,7 +271,8 @@ fi
 # line), single-quote the value with the canonical `'\''` shell-escape for
 # embedded quotes, then persist via the same atomic mktemp+chmod+mv helper
 # (write_secret_atomic, defined above / sourced from oxpulse-token-lib.sh)
-# already used for CROSS_PROBE_TOKEN_FILE below — reusing it here instead
+# also used by refresh_cross_probe_token's CROSS_PROBE_TOKEN_FILE write
+# (lib/xprb-refresh-lib.sh, called further below) — reusing it here instead
 # of hand-rolling a second tmp+mv idiom.
 if [[ "$KEYS_OK" -eq 1 ]]; then
     SFU_SIGNING_PUBKEY=$(printf '%s' "$RESP" | jq -r '.sfu_signing_public_key // empty')
@@ -342,178 +317,13 @@ else
 fi
 
 # ---------- cross-probe token refresh (T2.4.c re-mint endpoint) ----------
-# Root cause 2026-07-01: the central mints cross_probe_token (xprb_) ONLY in
-# the /api/partner/register response (persisted by hydrate.sh / install.sh),
-# which runs once at first boot. TTL=7d → all 5 fleet edges (registered
-# ~06-24 05:36) expired their tokens together, firing
-# MeshCrossProbeRejectionStorm (stale_token 0.29/s) from 07-01 05:46 — the
-# central's GET /api/partner/cross-probe-token re-mint endpoint (built for
-# exactly this) had zero consumers anywhere in this repo. This step is that
-# consumer: refresh the token daily, well before it expires.
-#
-# Cadence: refresh once the file is older than half the TTL (default
-# 302400s = 3.5d of a 604800s/7d TTL) — cheap file-mtime check, no network
-# call on the common "still fresh" path.
-#
-# COALESCE-PRESERVE (mirrors hydrate.sh MAJOR 2 / install.sh's cross-probe
-# write site): ANY failure — curl non-2xx/timeout, missing/malformed token,
-# no service token available — warns and leaves the existing file untouched.
-# Never rm/truncate a working token on a transient failure; a revoked token
-# simply 4xx's on the prober-report POST and is ignored there.
-#
-# NON-FATAL: no `die` in this block. Mirrors the 2026-05-13 lesson above
-# (heartbeat decoupled from keys-fetch) — this step must not be able to
-# abort the script before later refresh work runs.
-CROSS_PROBE_TOKEN_FILE="$PREFIX_ETC/cross-probe-token"
-CROSS_PROBE_TOKEN_TTL_SECS="${OXPULSE_CROSS_PROBE_TOKEN_TTL_SECS:-604800}"
-CROSS_PROBE_REFRESH_AFTER_SECS=$(( CROSS_PROBE_TOKEN_TTL_SECS / 2 ))
-
-_xprb_needs_refresh=1
-if [[ -f "$CROSS_PROBE_TOKEN_FILE" ]]; then
-    _xprb_mtime=$(stat -c '%Y' "$CROSS_PROBE_TOKEN_FILE" 2>/dev/null \
-        || stat -f '%m' "$CROSS_PROBE_TOKEN_FILE" 2>/dev/null || echo 0)
-    _xprb_age=$(( $(date +%s) - _xprb_mtime ))
-    if [[ "$_xprb_age" -lt "$CROSS_PROBE_REFRESH_AFTER_SECS" ]]; then
-        _xprb_needs_refresh=0
-        log "cross-probe token: age=${_xprb_age}s < refresh threshold ${CROSS_PROBE_REFRESH_AFTER_SECS}s — skipping"
-    fi
-    unset _xprb_mtime _xprb_age
-fi
-
-emit_xprb_failure() {
-    # $1 = reason label value. Centralizes the metric call so every failure
-    # branch below stays a one-liner.
-    emit_metric "partner_edge_cross_probe_token_refresh_failure_total" \
-        "partner_id=\"${NODE_ID}\",reason=\"$1\"" "1"
-}
-
-# xprb_curl_get_with_retry url bearer — mirrors opec's get_with_retry
-# semantics (PR review round 2, gating MEDIUM): up to 3 attempts, short
-# backoff (2s, then 5s), retry ONLY on a curl transport failure (DNS,
-# connect, TLS, timeout) or an HTTP 5xx — a transient backend blip must not
-# defer re-mint by a full day (the next daily tick). A 4xx is NEVER
-# retried: auth/permission errors are deterministic, and burning the retry
-# budget on one just delays surfacing a real misconfiguration.
-#
-# --max-time 15 per attempt (unchanged budget per try). On success (any
-# transfer that completes, including a 4xx/5xx the caller still needs to
-# see) prints "body\n%{http_code}" to stdout exactly like a single curl -w
-# call, so the caller's EXISTING tail/sed parsing below is untouched.
-# Returns 0 when a transfer completed (any status); returns the last curl
-# exit code when every attempt was a transport failure. This function does
-# not know about log()/emit_metric() — same two-state-primitive contract as
-# write_secret_atomic — the caller decides how to report the outcome.
-xprb_curl_get_with_retry() {
-    local url="$1" bearer="$2"
-    local attempt out rc code delays=(2 5)
-    for attempt in 1 2 3; do
-        rc=0
-        # CWE-214 hardening (2026-07-08 review, mirrors the same fix already
-        # applied to _post_channel/_post_cross_probe in lib/*.sh, PR #370):
-        # the Bearer token goes via `-K -` (curl config on stdin, a bash
-        # here-string — no separate process ever holds the token as its own
-        # argv) instead of `-H "Authorization: Bearer $bearer"`, which was
-        # ps/proc-visible to any local user on the relay host for curl's
-        # whole lifetime.
-        out=$(curl -sS --max-time 15 -L \
-            -K - \
-            "$url" -w '\n%{http_code}' 2>&1 <<< "header = \"Authorization: Bearer ${bearer}\"") || rc=$?
-
-        if [[ "$rc" -ne 0 ]]; then
-            if [[ "$attempt" -lt 3 ]]; then
-                sleep "${delays[$((attempt - 1))]}"
-                continue
-            fi
-            printf '%s' "$out"
-            return "$rc"
-        fi
-
-        code=$(printf '%s' "$out" | tail -n1)
-        if [[ "$code" =~ ^5[0-9][0-9]$ && "$attempt" -lt 3 ]]; then
-            sleep "${delays[$((attempt - 1))]}"
-            continue
-        fi
-
-        # Transfer completed: success, a non-retryable 4xx, or a 5xx that
-        # survived all retries — hand back to the caller as-is either way.
-        printf '%s' "$out"
-        return 0
-    done
-}
-
-if [[ "$_xprb_needs_refresh" -eq 1 ]]; then
-    _xprb_svc_token=$(read_service_token 2>/dev/null || true)
-    if [[ -z "$_xprb_svc_token" ]]; then
-        log "WARN cross-probe token refresh: no service token available — skipping (existing file, if any, preserved)"
-        emit_xprb_failure "no_service_token"
-    else
-        # No `-f`: we want the HTTP status explicitly (below) rather than
-        # having curl fold a 4xx/5xx into its own exit code — that lets us
-        # log the status without ever touching the response BODY (HIGH-2:
-        # this is a credential-issuing endpoint; a token-shaped-but-
-        # unexpected body must never reach the log verbatim).
-        _xprb_curl_rc=0
-        _xprb_curl_out=$(xprb_curl_get_with_retry \
-            "${BACKEND_URL}/api/partner/cross-probe-token" "${_xprb_svc_token}") \
-            || _xprb_curl_rc=$?
-
-        if [[ "$_xprb_curl_rc" -ne 0 ]]; then
-            log "WARN cross-probe token fetch failed (curl exit=${_xprb_curl_rc}; existing file, if any, preserved)"
-            emit_xprb_failure "fetch_failed"
-        else
-            _xprb_code=$(printf '%s' "$_xprb_curl_out" | tail -n1)
-            _xprb_body=$(printf '%s' "$_xprb_curl_out" | sed '$d')
-
-            if [[ "$_xprb_code" != "200" ]]; then
-                # Status only — never the body (HIGH-2).
-                log "WARN cross-probe token refresh: HTTP ${_xprb_code} (existing file, if any, preserved)"
-                emit_xprb_failure "http_${_xprb_code}"
-            elif [[ -z "$_xprb_body" ]]; then
-                # MED-3: an empty 200 body previously matched neither the
-                # success arm nor the "malformed" arm — silently invisible.
-                log "WARN cross-probe token refresh: empty response body on HTTP 200 (existing file, if any, preserved)"
-                emit_xprb_failure "empty_response"
-            else
-                _xprb_new_token=$(printf '%s' "$_xprb_body" | jq -r '.cross_probe_token // empty' 2>/dev/null || true)
-
-                if [[ -n "$_xprb_new_token" && "$_xprb_new_token" == xprb_* ]]; then
-                    # HIGH-1 / MED-5: the guarded shared helper (sourced above
-                    # from oxpulse-token-lib.sh, real or inline fallback) —
-                    # every step of the mktemp/write/chmod/mv sequence is
-                    # explicitly checked inside it, so a missing/unwritable
-                    # $PREFIX_ETC can NEVER kill this `set -euo pipefail`
-                    # script via an uncaught mktemp failure. Called as an
-                    # `if` condition, so even without that internal guarding
-                    # a nonzero return would not trip `set -e` here either —
-                    # belt-and-suspenders.
-                    if _xprb_write_err=$(write_secret_atomic "$CROSS_PROBE_TOKEN_FILE" "$_xprb_new_token" 0600 2>&1); then
-                        log "cross-probe token refreshed → $CROSS_PROBE_TOKEN_FILE (raw value redacted)"
-                    else
-                        log "WARN cross-probe token persist failed: $_xprb_write_err (existing file, if any, preserved)"
-                        emit_xprb_failure "write_failed"
-                    fi
-                    unset _xprb_write_err
-                else
-                    # HIGH-2: never log $_xprb_body verbatim — it may contain
-                    # a token-shaped string from a misbehaving/misauthed
-                    # response. A fixed-length sha256 prefix is enough to
-                    # correlate/dedup without leaking a credential to logs.
-                    _xprb_body_sha=$(printf '%s' "$_xprb_body" | sha256sum 2>/dev/null | cut -c1-16)
-                    log "WARN cross-probe token refresh: missing/malformed cross_probe_token in response (body sha256=${_xprb_body_sha:-unknown}...; existing file, if any, preserved)"
-                    emit_xprb_failure "malformed_response"
-                    unset _xprb_body_sha
-                fi
-                unset _xprb_new_token
-            fi
-            unset _xprb_code _xprb_body
-        fi
-        unset _xprb_curl_rc _xprb_curl_out
-    fi
-    unset _xprb_svc_token
-fi
-unset -f emit_xprb_failure xprb_curl_get_with_retry
-unset _xprb_needs_refresh
-unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTER_SECS
+# refresh_cross_probe_token (emit_xprb_failure / xprb_curl_get_with_retry) —
+# extracted to lib/xprb-refresh-lib.sh (P3 of the 2026-07-08
+# refresh-lib-extraction-strangler plan). See the lib's own header for the
+# 2026-07-01 MeshCrossProbeRejectionStorm root cause, the age-gated cadence,
+# the COALESCE-PRESERVE failure posture, and the CWE-214 bearer-off-argv fix
+# (P-sec1, PR #371) this move carries over unmodified.
+refresh_cross_probe_token
 
 # channels_version check — independent of Reality key rotation.
 # Skip when keys fetch failed (NEW_CHANNELS_VERSION will be empty).
@@ -526,114 +336,46 @@ unset CROSS_PROBE_TOKEN_FILE CROSS_PROBE_TOKEN_TTL_SECS CROSS_PROBE_REFRESH_AFTE
 # restarted. Healthy unchanged containers are left running. Failed channels
 # (from channels-status.env) are skipped entirely.
 
-# _restart_if_changed kind cfg_file sha_file compose_file container [apply_mode] [state_container] [skip_channel_status]
-# Restarts a single docker compose service only when its config file hash
-# differs from the last persisted hash. Updates the sha file on success.
-# Consults channels-status.env: skips channels that are not active — UNLESS the
-# 8th arg (skip_channel_status) is set. channels-status.env is written by the
-# backend's channel-provisioning surface (xray/naive/hysteria2/…) and has no
-# `sfu` vocabulary, so the sfu key-apply caller sets that flag to decouple its
-# lifecycle from a status file that was never designed for it (a stray `sfu=`
-# line there must NOT silently suppress a signing-key recreate).
+# _channel_restart_if_changed kind cfg_file sha_file compose_file container [apply_mode] [state_container]
 #
-# MAJOR 6 review-fix note: uses `docker compose restart` (not `up --force-recreate`).
-# This is intentional: the channels_version path re-renders only channel config
-# files (xray-client.json, etc.) — it does NOT re-render docker-compose.yml.
-# The compose service definitions are invariant under channels_version changes;
+# Thin CALLER-SIDE wrapper (ADR-9 of the 2026-07-08 refresh-lib-extraction-
+# strangler plan): consults channels-status.env — the channel-provisioning
+# surface's status vocabulary (written by the backend for xray/naive/
+# hysteria2/…) — and skips non-active channels, BEFORE delegating to the PURE
+# `_docker_restart_if_sha_changed` mechanism (lib/surgical-restart-lib.sh,
+# sourced fail-closed above). Channel callers below go through this wrapper.
+#
+# The SFU key-apply caller (further below) has no channels-status.env
+# vocabulary for `sfu` — a stray `sfu=` line there must NOT silently suppress
+# a signing-key recreate — so it calls `_docker_restart_if_sha_changed`
+# directly, SKIPPING this wrapper entirely, rather than the prior
+# `_restart_if_changed`'s 8th `skip_channel_status` bypass-flag arg (the
+# Fowler flag-argument smell the architecture council flagged: domain policy
+# leaking into what should be a pure infrastructure primitive).
+#
+# MAJOR 6 review-fix note (unchanged from pre-extraction): the channels_version
+# path uses `docker compose restart` (not `up --force-recreate`). This is
+# intentional: the channels_version path re-renders only channel config files
+# (xray-client.json, etc.) — it does NOT re-render docker-compose.yml. The
+# compose service definitions are invariant under channels_version changes;
 # only the mounted config files change. `restart` is therefore correct here.
 # If compose.yml drift is detected via `install.sh --check`, the operator must
 # run a full re-install. This assumption is CI-verified via test_install_sh_check_drift.sh.
 #
-# apply_mode (6th arg, default "restart"):
-#   restart  — `docker compose restart SVC`. Correct for BIND-MOUNTED config
-#              files (xray/naive/hy2): the container re-reads the mounted file on
-#              restart. `container` is the service name compose knows.
-#   recreate — `docker compose up -d --no-deps --force-recreate SVC`. Required
-#              for env_file consumers (sfu): env_file is injected at container
-#              CREATION, so a plain `restart` keeps the OLD environment — the new
-#              key would never take effect (verified: restart does not re-read
-#              env_file). --no-deps keeps the blast radius to the one service.
-#
-# state_container (7th arg, default = `container`): the CONTAINER NAME to verify
-#   post-apply via `docker inspect --format '{{.State.Running}}'`. Kept separate
-#   from `container` because compose targets a SERVICE name (`sfu`) while inspect
-#   needs the fixed container_name (`oxpulse-partner-sfu`). `docker inspect`'s
-#   `{{.State.Running}}` template is evaluated by the daemon and its output shape
-#   (`true`/`false`) is stable across Docker/Compose versions — unlike parsing
-#   `docker compose ps --format json`, whose object/array/JSONL shape has drifted
-#   between Compose releases. A fragile parse here would fall back to "not running"
-#   on a healthy container, never advance the sha, and re-trigger a live-media
-#   `force-recreate` on every daily cycle (review HIGH: cross-host recreate loop).
-_restart_if_changed() {
-    local kind="$1" cfg_file="$2" sha_file="$3" compose_file="$4" container="$5"
-    local apply_mode="${6:-restart}"
-    local state_container="${7:-$container}"
-    # 8th arg (default off): when non-empty, bypass the channels-status.env gate.
-    # The sfu key-apply caller sets it because that file's status vocabulary
-    # (written by the channel-provisioning surface) has no notion of `sfu`; a
-    # stray `sfu=` line must not silently suppress a signing-key recreate.
-    local skip_channel_status="${8:-}"
-
-    # Consult channels-status.env: skip non-active channels (channel callers only)
-    if [[ -z "$skip_channel_status" ]]; then
-        local _ch_status=""
-        local _chs_env="${PREFIX_LIB}/channels-status.env"
-        if [[ -f "$_chs_env" ]]; then
-            _ch_status=$(grep "^${kind}=" "$_chs_env" 2>/dev/null | cut -d= -f2 || true)
-        fi
-        if [[ -n "$_ch_status" && "$_ch_status" != "active" ]]; then
-            log "  [surgical] channel $kind status=$_ch_status — skipping restart"
-            return 0
-        fi
+# See lib/surgical-restart-lib.sh's header for apply_mode / state_container
+# semantics (unchanged by this split).
+_channel_restart_if_changed() {
+    local kind="$1"
+    local _ch_status=""
+    local _chs_env="${PREFIX_LIB}/channels-status.env"
+    if [[ -f "$_chs_env" ]]; then
+        _ch_status=$(grep "^${kind}=" "$_chs_env" 2>/dev/null | cut -d= -f2 || true)
     fi
-
-    [[ -f "$cfg_file" ]] || return 0
-    local _new_sha
-    _new_sha=$(sha256sum "$cfg_file" | awk '{print $1}')
-    local _old_sha
-    _old_sha=$(cat "$sha_file" 2>/dev/null || printf '')
-    if [[ "$_new_sha" != "$_old_sha" ]]; then
-        local _apply_ok=1
-        if [[ "$apply_mode" == "recreate" ]]; then
-            log "  [surgical] $kind config changed — recreating $container (env_file re-read)"
-            docker compose -f "$compose_file" up -d --no-deps --force-recreate "$container" \
-                2>>"$LOG_FILE" || _apply_ok=0
-        else
-            log "  [surgical] channel $kind config changed — restarting $container"
-            docker compose -f "$compose_file" restart "$container" 2>>"$LOG_FILE" || _apply_ok=0
-        fi
-        if [[ "$_apply_ok" -eq 1 ]]; then
-            # MAJOR 3 review-fix: write sha only after verifying the container
-            # is actually running. If the container is in CrashLoopBackOff /
-            # restarting state, writing the sha would suppress the next refresh
-            # cycle from retrying — leaving the container stuck on stale config.
-            # Allow ~5s for Docker to transition the state post-restart.
-            #
-            # Review HIGH (cross-host): verify liveness with `docker inspect
-            # --format '{{.State.Running}}' CONTAINER` (daemon-evaluated, stable
-            # `true`/`false` output) instead of parsing `docker compose ps
-            # --format json`, whose shape drifts across Compose versions on the
-            # partner fleet. A parse failure on a HEALTHY container would leave
-            # the sha unadvanced and re-fire `force-recreate` (a live-UDP session
-            # drop for the sfu) on every subsequent daily cycle.
-            sleep 5
-            local _running
-            _running=$(docker inspect --format '{{.State.Running}}' "$state_container" \
-                2>/dev/null || printf 'false')
-            if [[ "$_running" == "true" ]]; then
-                printf '%s\n' "$_new_sha" > "$sha_file"
-                log "  [surgical] $container restarted OK ($state_container running)"
-            else
-                log "WARNING: [surgical] $state_container State.Running=$_running after restart — sha not updated, next refresh will retry"
-            fi
-        elif [[ "$apply_mode" == "recreate" ]]; then
-            log "WARNING: [surgical] docker compose up -d --force-recreate $container failed — container may use stale config"
-        else
-            log "WARNING: [surgical] docker compose restart $container failed — container may use stale config"
-        fi
-    else
-        log "  [surgical] channel $kind unchanged — no restart"
+    if [[ -n "$_ch_status" && "$_ch_status" != "active" ]]; then
+        log "  [surgical] channel $kind status=$_ch_status — skipping restart"
+        return 0
     fi
+    _docker_restart_if_sha_changed "$@"
 }
 
 # _sfu_env_file_wired COMPOSE_FILE — true iff the live compose's `sfu` service
@@ -746,14 +488,16 @@ if [[ "$KEYS_OK" -eq 1 ]]; then
         # stays visible and alertable.
         log "WARNING: [sfu] live docker-compose.yml has no env_file wiring for sfu-keys.env — SFU signing-key refresh cannot apply on this node; run install.sh to re-render compose. Skipping recreate to avoid dropping live media"
     else
-        _restart_if_changed sfu \
+        # ADR-9: calls the PURE mechanism directly, bypassing
+        # _channel_restart_if_changed's channels-status.env gate entirely
+        # (that file has no `sfu` vocabulary — see the wrapper's own header).
+        _docker_restart_if_sha_changed sfu \
             "$SFU_KEYS_ENV" \
             "${PREFIX_LIB}/sfu-keys.sha" \
             "$_sfu_compose" \
             sfu \
             recreate \
-            "$SFU_CONTAINER_NAME" \
-            skip-channel-status
+            "$SFU_CONTAINER_NAME"
     fi
     _emit_sfu_applied_gauge "$_sfu_wired"
     unset _sfu_compose _sfu_wired
@@ -790,14 +534,14 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
     # rendered config file actually changed vs. the persisted sha.
     _compose="${PREFIX_ETC}/docker-compose.yml"
     if [[ -f "$_compose" ]]; then
-        _restart_if_changed xray \
+        _channel_restart_if_changed xray \
             "${PREFIX_ETC}/xray-client.json" \
             "${PREFIX_LIB}/xray-config.sha" \
             "$_compose" \
             oxpulse-partner-xray
         # Naive channel (CH5) — skip when not deployed
         if [[ -f "${PREFIX_ETC}/naive-client.json" ]]; then
-            _restart_if_changed naive \
+            _channel_restart_if_changed naive \
                 "${PREFIX_ETC}/naive-client.json" \
                 "${PREFIX_LIB}/naive-config.sha" \
                 "$_compose" \
@@ -806,7 +550,7 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
         # Hysteria2 channel (CH3) — restart existing or bootstrap from node-config
         _hy2_server=$(jq -r ".hysteria2_server // empty" "$NODE_CFG" 2>/dev/null || true)
         if [[ -f "${PREFIX_ETC}/hysteria2-client.yaml" ]]; then
-            _restart_if_changed hysteria2 \
+            _channel_restart_if_changed hysteria2 \
                 "${PREFIX_ETC}/hysteria2-client.yaml" \
                 "${PREFIX_LIB}/hysteria2-config.sha" \
                 "$_compose" \

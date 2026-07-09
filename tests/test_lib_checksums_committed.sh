@@ -42,6 +42,9 @@ setup() {
 		peer-ip-guard-lib.sh
 		channel-health-lib.sh
 		cross-probe-lib.sh
+		metric-sink-lib.sh
+		surgical-restart-lib.sh
+		xprb-refresh-lib.sh
 	)
 }
 

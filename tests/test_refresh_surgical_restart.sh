@@ -232,19 +232,23 @@ exit 0
 DOCKSHIM2
 	chmod +x "$TMP/shims/docker"
 
-	# Source the actual refresh.sh function and invoke it
+	# Source the actual production mechanism and invoke it. Pre-extraction this
+	# sed-extracted `_restart_if_changed` out of refresh.sh itself; the P2
+	# strangler-fig extraction (2026-07-08 plan, ADR-9) moved the pure
+	# sha-diff-gated restart/recreate mechanism to lib/surgical-restart-lib.sh
+	# under the name `_docker_restart_if_sha_changed` — source the lib
+	# directly instead of sed-range-extracting from refresh.sh (which would
+	# now silently source nothing, since the function no longer lives there).
 	run bash -c "
 		export PATH='$TMP/shims:/usr/bin:/bin'
 		PREFIX_ETC='$PREFIX_ETC'
 		PREFIX_LIB='$PREFIX_LIB'
 		LOG_FILE='/dev/null'
 
-		# Source only the _restart_if_changed function from refresh.sh
-		# We need to extract and test the actual production function.
-		# Extract _restart_if_changed by sourcing with a guard to prevent main body execution.
-		source <(sed -n '/^_restart_if_changed()/,/^}/p' '$REFRESH')
+		# shellcheck source=lib/surgical-restart-lib.sh
+		source '$REPO_ROOT/lib/surgical-restart-lib.sh'
 
-		_restart_if_changed xray \
+		_docker_restart_if_sha_changed xray \
 			'$PREFIX_ETC/xray-client.json' \
 			'$PREFIX_LIB/xray-config.sha' \
 			'$compose_file' \
