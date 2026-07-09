@@ -62,6 +62,26 @@ BACKEND_API="${BACKEND_API%/}"
 log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { while IFS= read -r _line; do printf '\033[31mERR\033[0m %s\n' "$_line" >&2; done <<< "$*"; exit 1; }
+
+# RETRY_OPTS (PR2 finding 4b, mirrors upgrade.sh) — curl-native retry for the
+# bootstrap-tier fetches below: the render-channel-lib.sh bootstrap fetch and
+# _install_lib_source's own tier-4 fetch, i.e. the fetches that load the FIRST
+# copy of any lib, so the retry logic cannot itself live in a synced lib for
+# these call sites. See upgrade.sh's RETRY_OPTS header comment (near its
+# log()/warn()/die() definitions) for the full curl-version-gating rationale
+# and the 3-way cross-reference against this repo's other, deliberately
+# different retry policies (xprb_curl_get_with_retry, the channel-health-lib.sh
+# / cross-probe-lib.sh 429/408 carve-out) — do not unify them.
+RETRY_OPTS=(--retry 3 --retry-delay 2 --retry-max-time 60)
+_curl_ver="$(curl --version 2>/dev/null | head -1 | awk '{print $2}')"
+if [[ "$_curl_ver" =~ ^([0-9]+)\.([0-9]+) ]]; then
+    _curl_maj="${BASH_REMATCH[1]}"; _curl_min="${BASH_REMATCH[2]}"
+    if (( _curl_maj > 7 || (_curl_maj == 7 && _curl_min >= 71) )); then
+        RETRY_OPTS+=(--retry-all-errors)
+    fi
+fi
+unset _curl_ver _curl_maj _curl_min
+
 # Phase 5.5 MAJOR 1: _in_array, CHANNELS_FAILED, render_channel_soft, and
 # compose_strip_failed_channels are now in lib/render-channel-lib.sh (extracted
 # so hydrate.sh, update.sh, and refresh.sh can share the same semantics).
@@ -90,7 +110,7 @@ else
 	install -d -m 0755 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}"
 	_rl_fetched="${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/render-channel-lib.sh"
 	_rl_tmp=$(mktemp)
-	if curl -fsSL "${REPO_RAW}/lib/render-channel-lib.sh" -o "$_rl_tmp" 2>/dev/null; then
+	if curl -fsSL "${RETRY_OPTS[@]}" "${REPO_RAW}/lib/render-channel-lib.sh" -o "$_rl_tmp" 2>/dev/null; then
 		cp "$_rl_tmp" "$_rl_fetched"
 		# shellcheck source=/dev/null
 		source "$_rl_tmp"
@@ -143,7 +163,7 @@ _install_lib_source() {
 	# Use ${tmp:-} so the trap is safe under `set -u` after the function
 	# returns and $tmp goes out of scope (RETURN trap fires post-return).
 	trap 'rm -f "${tmp:-}"' RETURN
-	if curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
+	if curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "${RETRY_OPTS[@]}" \
 		"${REPO_RAW}/lib/$name" -o "$tmp"; then
 		# Phase 5.7 Item 3: tamper-evident integrity check against lib-checksums.txt.
 		#
@@ -188,7 +208,7 @@ _install_lib_source() {
 			_ck_remote_tmp=$(mktemp)
 			trap 'rm -f "${tmp:-}" "${_ck_remote_tmp:-}"' RETURN
 			local _ck_fetch_ok=0
-			if curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 \
+			if curl -fsSL --proto '=https' --tlsv1.2 --max-time 15 "${RETRY_OPTS[@]}" \
 				"${REPO_RAW}/lib/lib-checksums.txt" -o "$_ck_remote_tmp" 2>/dev/null; then
 				_ck_file="$_ck_remote_tmp"
 				_ck_fetch_ok=1
