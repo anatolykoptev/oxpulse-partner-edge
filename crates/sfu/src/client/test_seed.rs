@@ -147,7 +147,8 @@ pub fn make_media_data(mid_tag: u8, rid: Option<Rid>) -> MediaData {
         time: MediaTime::from_90khz(0),
         network_time: Instant::now(),
         seq_range: seq..=seq,
-        data: vec![0xde, 0xad, 0xbe, 0xef],
+        // str0m 0.21: MediaData.data is now Arc<[u8]> (was Vec<u8>).
+        data: vec![0xde, 0xad, 0xbe, 0xef].into(),
         ext_vals: ExtensionValues::default(),
         codec_extra: CodecExtra::None,
         contiguous: true,
