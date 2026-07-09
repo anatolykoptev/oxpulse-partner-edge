@@ -1,15 +1,39 @@
 #!/bin/bash
 # Regression guard for Bug #4 (2026-05-28 ruoxp fresh install):
 # SFU metrics and relay-API listeners bind on the AWG mesh IP (SFU_METRICS_BIND /
-# SFU_RELAY_API_BIND = AWG_ALLOCATED_IP), NOT on 0.0.0.0. The docker-compose
-# healthcheck was probing 127.0.0.1 for those two planes -> connection refused ->
-# container marked unhealthy -> false positive operator alarm.
+# SFU_RELAY_API_BIND), NOT on 0.0.0.0. The docker-compose healthcheck was probing
+# 127.0.0.1 for those two planes -> connection refused -> container marked
+# unhealthy -> false positive operator alarm.
+#
+# 2026-07-08 RECONCILIATION (v0.14.5, PR1 of the installer/upgrade robustness
+# arc): the Bug #4 fix above substituted the raw {{AWG_ALLOCATED_IP}} template
+# placeholder directly into the healthcheck test: line. That placeholder
+# INTENTIONALLY keeps its /CIDR suffix (e.g. 10.9.0.7/24 -- needed elsewhere
+# for `ip addr add` / awg0.conf), which the environment: block does NOT use
+# (it derives the CIDR-stripped {{AWG_HOST_IP}} instead -- see install.sh:744
+# and tests/test_sfu_bind_strip_cidr.sh). Substituting the raw CIDR form into
+# a wget URL / nc target broke the healthcheck AGAIN, silently, for 6+ days on
+# production (ruoxp, failingstreak=19471+) -- while this file's former
+# Test 2/3/5 LOCKED IN the broken placeholder by grep-REQUIRING it.
+#
+# Those three assertions are RETIRED (removed below). The template now
+# references the container's own ${SFU_METRICS_BIND}/${SFU_RELAY_API_BIND}
+# runtime env vars -- the SAME CIDR-stripped source the environment: block
+# already sets (see tpl:153-154) -- eliminating the whole class of "two
+# independent placeholders that can drift" rather than swapping one drifted
+# value for a fresher one.
+#
+# tests/test_sfu_bind_strip_cidr.sh is now the SINGLE owner of the invariant
+# "healthcheck and environment: block trace to the same CIDR-stripped bind
+# source; never a raw {{AWG_ALLOCATED_IP}}; never literal 127.0.0.1." This
+# file keeps only the still-valid, orthogonal Bug #4 assertions: the
+# metrics/relay-API probes must not regress to hardcoded 127.0.0.1 (mesh-only
+# bind, loopback would always fail-closed), and client_ws must STAY on
+# 127.0.0.1 (it binds on 0.0.0.0, unlike the other two planes).
 #
 # Test 1: compose template has NO bare 127.0.0.1 for the metrics probe.
-# Test 2: compose template metrics probe uses {{AWG_ALLOCATED_IP}} placeholder.
-# Test 3: compose template relay-API probe uses {{AWG_ALLOCATED_IP}} placeholder.
 # Test 4: client_ws probe stays on 127.0.0.1 (SFU_BIND_ADDRESS is 0.0.0.0).
-# Test 5: rendered compose (sed substitution) probes the literal mesh IP, not 127.0.0.1.
+# (Former Test 2, 3, 5 -- grep-required {{AWG_ALLOCATED_IP}} -- retired above.)
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -36,27 +60,6 @@ else
     pass "metrics probe does not contain 127.0.0.1:{{SFU_METRICS_PORT}}"
 fi
 
-# Test 2: metrics probe must use {{AWG_ALLOCATED_IP}} placeholder
-echo "==> Test 2: metrics probe uses {{AWG_ALLOCATED_IP}} placeholder"
-if echo "$HC_LINE" | grep -qF '{{AWG_ALLOCATED_IP}}:{{SFU_METRICS_PORT}}'; then
-    pass "metrics probe uses {{AWG_ALLOCATED_IP}}:{{SFU_METRICS_PORT}}"
-else
-    fail "metrics probe does not use {{AWG_ALLOCATED_IP}}:{{SFU_METRICS_PORT}}"
-fi
-
-# Test 3: relay-API probe must use {{AWG_ALLOCATED_IP}} (not 127.0.0.1).
-# Pattern: extract the relay-API nc segment specifically (after RELAY_JWT_SECRET gate).
-# Use grep -oE to capture just the relay nc clause to avoid false match on client_ws.
-echo "==> Test 3: relay-API probe uses {{AWG_ALLOCATED_IP}} (not 127.0.0.1)"
-RELAY_CLAUSE=$(echo "$HC_LINE" | grep -oE 'RELAY_JWT_SECRET[^;]+' || true)
-if echo "$RELAY_CLAUSE" | grep -qF '127.0.0.1'; then
-    fail "relay-API probe still hardcodes 127.0.0.1 -- fix not applied"
-elif echo "$RELAY_CLAUSE" | grep -qF '{{AWG_ALLOCATED_IP}}'; then
-    pass "relay-API probe uses {{AWG_ALLOCATED_IP}}"
-else
-    fail "relay-API probe: neither 127.0.0.1 nor {{AWG_ALLOCATED_IP}} found -- unexpected format"
-fi
-
 # Test 4: client_ws probe MUST stay on 127.0.0.1 (SFU_BIND_ADDRESS is 0.0.0.0)
 echo "==> Test 4: client_ws probe stays on 127.0.0.1 (SFU_BIND_ADDRESS=0.0.0.0)"
 CLIENT_WS_CLAUSE=$(echo "$HC_LINE" | grep -oE 'SIGNALING_SFU_SECRET[^;]+' || true)
@@ -66,32 +69,9 @@ else
     fail "client_ws probe no longer uses 127.0.0.1 -- was it accidentally moved to mesh IP?"
 fi
 
-# Test 5: rendered compose substitutes literal IP (simulated via sed)
-echo "==> Test 5: rendered compose has literal mesh IP in healthcheck"
-RENDERED=$(sed \
-    -e 's|{{AWG_ALLOCATED_IP}}|10.9.0.7|g' \
-    -e 's|{{SFU_METRICS_PORT}}|9317|g' \
-    "$TPL")
-HC_RENDERED=$(echo "$RENDERED" | grep -A1 'healthcheck:' \
-    | awk '/wget.*metrics/{found=1} found{print; exit}')
-
-if echo "$HC_RENDERED" | grep -qF 'http://10.9.0.7:9317/metrics'; then
-    pass "rendered metrics probe = http://10.9.0.7:9317/metrics"
-else
-    fail "rendered metrics probe does not contain http://10.9.0.7:9317/metrics"
-fi
-if echo "$HC_RENDERED" | grep -qF 'nc -z 10.9.0.7'; then
-    pass "rendered relay-API probe = nc -z 10.9.0.7"
-else
-    fail "rendered relay-API probe does not contain literal 10.9.0.7"
-fi
-if echo "$HC_RENDERED" | grep -qF '127.0.0.1:9317'; then
-    fail "rendered output still has 127.0.0.1:9317 -- metrics fix not applied"
-fi
-
 # Result
 if [[ "$FAIL" -ne 0 ]]; then
-    echo "FAIL: SFU healthcheck bind address fix not fully applied"
+    echo "FAIL: SFU healthcheck bind address invariant violated"
     exit 1
 fi
-echo "PASS: SFU healthcheck probes mesh IP (AWG_ALLOCATED_IP) for metrics and relay-API"
+echo "PASS: SFU healthcheck client_ws stays loopback; metrics probe is not hardcoded loopback"
