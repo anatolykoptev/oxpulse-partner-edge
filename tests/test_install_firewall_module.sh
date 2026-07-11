@@ -35,6 +35,20 @@ esac
 EOF
 chmod +x "$TMP/mocks/awg"
 
+# docker mock: `docker network inspect <net> --format '{{.Id}}...{{.Subnet}}'`
+# returns "<network-id> <subnet>". Tests the dynamic derivation for the SFU
+# client WS (:8920) local-bridge allow rule (subnet 172.18.0.0/16, bridge iface
+# br-<id[:12]> = br-abcdef012345). Default: network present.
+cat >"$TMP/mocks/docker" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "network" ] && [ "$2" = "inspect" ]; then
+	printf 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789 172.18.0.0/16\n'
+	exit 0
+fi
+echo "docker $*"
+EOF
+chmod +x "$TMP/mocks/docker"
+
 PATH="$TMP/mocks:$PATH"
 . "$REPO_ROOT/lib/install-firewall.sh"
 
@@ -56,8 +70,15 @@ grep -q "ufw allow 18443/udp"                                                   
 grep -q "ufw allow 44321/udp"                                                    "$TMP/calls.log" || { echo "FAIL test1: AWG port"; exit 1; }
 grep -q "ufw allow from 10.9.0.0/24 to any port 9317 proto tcp"                  "$TMP/calls.log" || { echo "FAIL test1: mesh 9317"; exit 1; }
 grep -q "ufw allow from 10.9.0.0/24 to any port 8912 proto tcp"                  "$TMP/calls.log" || { echo "FAIL test1: mesh 8912"; exit 1; }
+# SFU client WS (:8920): allowed ONLY from the dynamically-derived docker edge
+# bridge — bound to BOTH the bridge INTERFACE (br-<id[:12]>) and the source
+# subnet (correct-by-construction; cannot match public-NIC traffic), never as a
+# public port.
+grep -q "ufw allow in on br-abcdef012345 from 172.18.0.0/16 to any port 8920 proto tcp" "$TMP/calls.log" || { echo "FAIL test1: sfu-ws 8920 must be interface+subnet scoped (in on br-<id>)"; cat "$TMP/calls.log"; exit 1; }
+grep -qE "ufw allow 8920/(tcp|udp)"                                              "$TMP/calls.log" && { echo "FAIL test1: 8920 must NOT be a public allow"; cat "$TMP/calls.log"; exit 1; }
+grep -qE "ufw allow from [0-9.]+/[0-9]+ to any port 8920"                        "$TMP/calls.log" && { echo "FAIL test1: 8920 must be interface-scoped, not source-only, on the docker-derived path"; cat "$TMP/calls.log"; exit 1; }
 grep -q "ufw --force enable"                                                     "$TMP/calls.log" || { echo "FAIL test1: enable"; exit 1; }
-echo "[ok] test1: ufw whitelist applied with awg=44321"
+echo "[ok] test1: ufw whitelist applied with awg=44321 (8920 interface+subnet scoped)"
 
 # ── Test 2: firewalld branch ─────────────────────────────────────────────────
 : >"$TMP/calls.log"
@@ -72,8 +93,12 @@ grep -q "firewall-cmd --permanent --zone=public --add-port=44322/udp"           
 grep -q "firewall-cmd --permanent --zone=public --remove-port=9317/tcp"          "$TMP/calls.log" || { echo "FAIL test2: strip 9317"; exit 1; }
 grep -q "firewall-cmd --permanent --zone=public --add-rich-rule rule family=ipv4 source address=10.9.0.0/24 port port=9317 protocol=tcp accept" \
                                                                                      "$TMP/calls.log" || { echo "FAIL test2: mesh 9317"; exit 1; }
+grep -q "firewall-cmd --permanent --zone=public --remove-port=8920/tcp"          "$TMP/calls.log" || { echo "FAIL test2: strip public 8920"; exit 1; }
+grep -q "firewall-cmd --permanent --zone=public --add-rich-rule rule family=ipv4 source address=172.18.0.0/16 port port=8920 protocol=tcp accept" \
+                                                                                     "$TMP/calls.log" || { echo "FAIL test2: sfu-ws local-bridge 8920 rich rule"; cat "$TMP/calls.log"; exit 1; }
+grep -q "firewall-cmd --permanent --zone=public --add-port=8920/tcp"             "$TMP/calls.log" && { echo "FAIL test2: 8920 must NOT be a public add-port"; cat "$TMP/calls.log"; exit 1; }
 grep -q "firewall-cmd --reload"                                                  "$TMP/calls.log" || { echo "FAIL test2: reload"; exit 1; }
-echo "[ok] test2: firewalld whitelist applied with awg=44322"
+echo "[ok] test2: firewalld whitelist applied with awg=44322 (8920 local-bridge only)"
 
 # ── Test 3: no firewall tool → warn + FAIL-LOUD (distinct rc=2), no commands ──
 # t14 fail-loud contract (lib/install-firewall.sh none|*) branch): this path
@@ -113,5 +138,49 @@ firewall_apply
 grep -q "cannot resolve AWG listen port" "$TMP/calls.log" || { echo "FAIL test4: skip warn"; cat "$TMP/calls.log"; exit 1; }
 grep -E '^ufw ' "$TMP/calls.log" >/dev/null && { echo "FAIL test4: should NOT have run ufw"; exit 1; }
 echo "[ok] test4: missing AWG port → skip without lock-out"
+
+# ── Test 5: edge network not up yet (first install, pre-`docker compose up`) ──
+# The edge bridge is created by the FIRST `docker compose up`, which install.sh
+# runs AFTER firewall_apply. So on a fresh install `docker network inspect`
+# fails: the 8920 rule must be silently skipped WITHOUT failing firewall_apply
+# (the public + mesh rules must still apply, and the exit code must be success).
+# reconcile_firewall_surface re-runs firewall_apply every converge and adds the
+# 8920 rule once the network exists — this proves the graceful-degrade half.
+: >"$TMP/calls.log"
+_firewall_detect_tool() { printf 'ufw'; }
+cat >"$TMP/mocks/docker" <<'EOF'
+#!/usr/bin/env bash
+# Network not created yet: inspect fails, no output.
+[ "$1" = "network" ] && [ "$2" = "inspect" ] && exit 1
+echo "docker $*"
+EOF
+chmod +x "$TMP/mocks/docker"
+
+_rc=0
+AWG_LISTEN_PORT=44324 firewall_apply || _rc=$?
+[ "$_rc" -eq 0 ]                                                                 || { echo "FAIL test5: firewall_apply must succeed even with edge net absent, got rc=$_rc"; cat "$TMP/calls.log"; exit 1; }
+grep -q "ufw allow from 10.9.0.0/24 to any port 9317 proto tcp"                  "$TMP/calls.log" || { echo "FAIL test5: mesh rules must still apply"; exit 1; }
+grep -q "ufw --force enable"                                                     "$TMP/calls.log" || { echo "FAIL test5: enable must still run"; exit 1; }
+grep -q "to any port 8920 proto tcp"                                             "$TMP/calls.log" && { echo "FAIL test5: no 8920 rule expected when edge net absent"; cat "$TMP/calls.log"; exit 1; }
+# MAJOR-2: docker present but resolver empty → a WARN breadcrumb must be logged so
+# a converged node with a vanished 8920 rule is diagnosable (not a silent gap).
+grep -q "SFU WS local-path rule (:8920) NOT applied"                             "$TMP/calls.log" || { echo "FAIL test5: missing warn breadcrumb for skipped 8920 rule"; cat "$TMP/calls.log"; exit 1; }
+echo "[ok] test5: edge net absent → 8920 rule skipped + WARN logged, firewall still applied"
+
+# ── Test 6: PE_FW_EDGE_SUBNETS override seam — multi-subnet + RFC1918 gate ────
+# The override seam (deterministic subnets, or a node with >1 edge subnet) emits
+# one source-only rule per VALID PRIVATE CIDR (iface unknown on this path) and
+# MUST drop junk AND any non-RFC1918 CIDR — an operator fat-fingering 0.0.0.0/0
+# can never open :8920 to the world (MINOR-2 security gate).
+: >"$TMP/calls.log"
+_firewall_detect_tool() { printf 'ufw'; }
+PE_FW_EDGE_SUBNETS="172.19.0.0/16 10.10.0.0/24 0.0.0.0/0 8.8.8.0/24 not-a-cidr" \
+	AWG_LISTEN_PORT=44325 firewall_apply
+grep -q "ufw allow from 172.19.0.0/16 to any port 8920 proto tcp"               "$TMP/calls.log" || { echo "FAIL test6: private subnet 1"; cat "$TMP/calls.log"; exit 1; }
+grep -q "ufw allow from 10.10.0.0/24 to any port 8920 proto tcp"                "$TMP/calls.log" || { echo "FAIL test6: private subnet 2"; exit 1; }
+grep -q "0.0.0.0/0"                                                             "$TMP/calls.log" && { echo "FAIL test6: 0.0.0.0/0 must be REJECTED by the RFC1918 gate"; cat "$TMP/calls.log"; exit 1; }
+grep -q "8.8.8.0/24"                                                            "$TMP/calls.log" && { echo "FAIL test6: public CIDR must be REJECTED by the RFC1918 gate"; cat "$TMP/calls.log"; exit 1; }
+grep -q "not-a-cidr"                                                             "$TMP/calls.log" && { echo "FAIL test6: junk token must be filtered out"; cat "$TMP/calls.log"; exit 1; }
+echo "[ok] test6: PE_FW_EDGE_SUBNETS override → one rule per valid PRIVATE CIDR, public/junk rejected"
 
 echo "[ok] all firewall-module tests passed"
