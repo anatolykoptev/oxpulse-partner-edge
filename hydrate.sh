@@ -128,6 +128,14 @@ fi
 EXTERNAL_IP_LINE="${PUBLIC_IP}"
 [[ -n "${PRIVATE_IP:-}" ]] && EXTERNAL_IP_LINE="${PUBLIC_IP}/${PRIVATE_IP}"
 
+# OCI-hairpin fix (2026-07-11): when behind NAT, permit coturn to relay to the
+# co-located SFU's private IP (the SFU advertises it as a host candidate via
+# SFU_LOCAL_IP). Empty on nodes with the public IP bound directly, so the
+# coturn.conf placeholder renders to nothing rather than an invalid
+# `allowed-peer-ip=` line. See coturn.conf.tpl / docker-compose.yml.tpl.
+ALLOWED_PEER_IP_LINE=""
+[[ -n "${PRIVATE_IP:-}" ]] && ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
+
 # ---------- Step 2: register with backend ----------
 log "[2/7] registering with $BACKEND_URL/api/partner/register"
 
@@ -319,7 +327,7 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        TURN_SECRET \
        REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
        REALITY_ENCRYPTION TURNS_SUBDOMAIN \
-       PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE \
+       PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE ALLOWED_PEER_IP_LINE \
        IMAGE_VERSION \
        RELAY_JWT_SECRET \
        HYSTERIA2_SERVER HYSTERIA2_PORT HYSTERIA2_AUTH HYSTERIA2_OBFS \

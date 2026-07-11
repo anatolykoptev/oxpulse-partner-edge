@@ -257,6 +257,24 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // OCI-hairpin fix (2026-07-11) — advertise the node's PRIVATE IP as an
+    // ADDITIONAL host candidate alongside `host_candidate_addr`. On providers
+    // with no NAT hairpin (Oracle Cloud), a co-located coturn cannot deliver
+    // relayed media to the SFU's public candidate (the packet leaves via the
+    // gateway and never returns), so relay-forced group calls fail ICE with
+    // `no_pair`. The private candidate lets the co-located coturn relay to the
+    // SFU entirely on private addressing. Shares the same kernel-assigned port
+    // (the SFU listens on a single `0.0.0.0:port` socket, reachable via both
+    // IPs). Deduped against the primary so a node whose SFU_LOCAL_IP is unset
+    // or equal to the primary advertises the primary candidate only.
+    let additional_host_candidates = config.additional_host_candidates(host_candidate_addr);
+    if let Some(addr) = additional_host_candidates.first() {
+        tracing::info!(
+            %addr, primary = %host_candidate_addr,
+            "SFU advertising additional private host candidate (SFU_LOCAL_IP, OCI-hairpin fix)"
+        );
+    }
+
     // Phase 7 M4.A1 — client-facing WebSocket API at /sfu/ws/{room_id}.
     // Browsers connect here directly with a room JWT in the
     // Sec-WebSocket-Protocol header. The endpoint is enabled when
@@ -286,6 +304,7 @@ async fn main() -> anyhow::Result<()> {
                 signing_pubkey: relay_signing_pubkey.clone(),
                 client_inject_tx,
                 local_udp_addr: host_candidate_addr,
+                additional_host_candidates,
                 metrics: metrics.clone(),
                 stats_interval_secs: config.stats_interval_secs,
                 hs256_fallback_enabled: config.relay_hs256_fallback_enabled,
