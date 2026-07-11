@@ -76,6 +76,14 @@ pub struct ClientWsState {
     /// `relay::client::connect_relay`, so cascade and browser paths emit
     /// matching candidates.
     pub local_udp_addr: SocketAddr,
+    /// Additional host-candidate addresses advertised in the SDP answer
+    /// alongside `local_udp_addr` (OCI-hairpin fix, 2026-07-11). Typically
+    /// the node's private IP (`SFU_LOCAL_IP`) at the same UDP port, so a
+    /// co-located coturn can relay client media to the SFU on private
+    /// addressing where the public candidate would hairpin. Empty on nodes
+    /// where the public candidate is directly reachable. See
+    /// [`crate::config::SfuConfig::local_ip`].
+    pub additional_host_candidates: Vec<SocketAddr>,
     /// Process-wide SFU metrics (M4.B1 client_ws verification). Increments
     /// happen at handshake-accept, handshake-reject (per reason), and
     /// session-end inside [`crate::client_ws::session::run`].
@@ -119,6 +127,10 @@ pub struct ClientWsApiConfig {
     pub client_inject_tx: Sender<PendingClient>,
     /// Address advertised in the SFU host candidate in the SDP answer.
     pub local_udp_addr: SocketAddr,
+    /// Additional host-candidate addresses (e.g. the private `SFU_LOCAL_IP`)
+    /// advertised alongside `local_udp_addr`. OCI-hairpin fix — see the
+    /// like-named [`ClientWsState`] field.
+    pub additional_host_candidates: Vec<SocketAddr>,
     /// Process-wide SFU metrics.
     pub metrics: Arc<SfuMetrics>,
     /// str0m built-in stats interval (seconds; 0 = disabled).
@@ -138,6 +150,7 @@ pub fn spawn_client_ws_api(
         signing_pubkey,
         client_inject_tx,
         local_udp_addr,
+        additional_host_candidates,
         metrics,
         stats_interval_secs,
         hs256_fallback_enabled,
@@ -147,6 +160,7 @@ pub fn spawn_client_ws_api(
         signing_pubkey,
         client_inject_tx,
         local_udp_addr,
+        additional_host_candidates,
         metrics,
         stats_interval_secs,
         hint_rate_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -340,6 +354,7 @@ pub async fn client_ws_upgrade(
     let peer_id = claims.sub;
     let inject_tx = state.client_inject_tx.clone();
     let local_udp_addr = state.local_udp_addr;
+    let additional_host_candidates = state.additional_host_candidates.clone();
     let metrics = state.metrics.clone();
     let stats_interval_secs = state.stats_interval_secs;
     let hint_rate_registry = state.hint_rate_registry.clone();
@@ -356,6 +371,7 @@ pub async fn client_ws_upgrade(
                 room_id.clone(),
                 peer_id,
                 local_udp_addr,
+                additional_host_candidates,
                 inject_tx,
                 metrics.clone(),
                 stats_interval_secs,
@@ -515,6 +531,7 @@ mod t4_3_client_ws_verify_tests {
             signing_pubkey,
             client_inject_tx,
             local_udp_addr: "127.0.0.1:0".parse().unwrap(),
+            additional_host_candidates: Vec::new(),
             metrics,
             stats_interval_secs: 0,
             hint_rate_registry: Arc::new(std::sync::Mutex::new(HashMap::new())),
