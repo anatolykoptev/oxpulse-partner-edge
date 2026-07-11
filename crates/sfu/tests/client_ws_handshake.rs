@@ -67,6 +67,7 @@ async fn start_test_handler_with_metrics() -> (String, Arc<SfuMetrics>) {
             signing_pubkey: None,
             client_inject_tx: inject_tx,
             local_udp_addr: local_udp,
+            additional_host_candidates: Vec::new(),
             metrics: metrics.clone(),
             stats_interval_secs: 0,       // stats disabled in tests
             hs256_fallback_enabled: true, // T4.3: HS256 fallback kill-switch (default-on)

@@ -1068,7 +1068,21 @@ _setup_coturn_render_env() {
         EXTERNAL_IP_LINE="${PUBLIC_IP:-}"
     fi
 
-    export PARTNER_DOMAIN TURNS_SUBDOMAIN TURN_SECRET PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE
+    # ALLOWED_PEER_IP_LINE: OCI-hairpin fix (2026-07-11) — permit coturn to relay
+    # to the co-located SFU's private IP (advertised as a host candidate via
+    # SFU_LOCAL_IP), overriding the RFC1918 denied-peer-ip block. Rendered only
+    # when behind NAT (distinct private IP); empty otherwise so the coturn.conf
+    # `{{ALLOWED_PEER_IP_LINE}}` placeholder becomes a no-op line rather than an
+    # invalid `allowed-peer-ip=`. Mirrors hydrate.sh so the install and converge
+    # renders stay byte-identical.
+    if [[ -n "${PUBLIC_IP:-}" && -n "${PRIVATE_IP:-}" && "$PUBLIC_IP" != "$PRIVATE_IP" ]]; then
+        ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
+    else
+        ALLOWED_PEER_IP_LINE=""
+    fi
+
+    export PARTNER_DOMAIN TURNS_SUBDOMAIN TURN_SECRET PUBLIC_IP PRIVATE_IP \
+        EXTERNAL_IP_LINE ALLOWED_PEER_IP_LINE
 }
 
 # ---------------------------------------------------------------------------
