@@ -267,12 +267,7 @@ async fn main() -> anyhow::Result<()> {
     // (the SFU listens on a single `0.0.0.0:port` socket, reachable via both
     // IPs). Deduped against the primary so a node whose SFU_LOCAL_IP is unset
     // or equal to the primary advertises the primary candidate only.
-    let additional_host_candidates: Vec<std::net::SocketAddr> = config
-        .local_ip
-        .filter(|ip| *ip != host_candidate_addr.ip())
-        .map(|ip| std::net::SocketAddr::new(ip, host_candidate_addr.port()))
-        .into_iter()
-        .collect();
+    let additional_host_candidates = config.additional_host_candidates(host_candidate_addr);
     if let Some(addr) = additional_host_candidates.first() {
         tracing::info!(
             %addr, primary = %host_candidate_addr,

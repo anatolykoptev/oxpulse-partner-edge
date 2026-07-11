@@ -462,17 +462,23 @@ async fn answer_sdp_advertises_additional_private_host_candidate() {
     let v: Value = serde_json::from_str(answer_text.as_str()).unwrap();
     let answer_sdp = v["sdp"].as_str().expect("answer.sdp present");
 
-    // BOTH candidates must appear as `a=candidate:` lines: without the
-    // private one the client never installs a coturn permission for it and
-    // the relay-forced pair cannot form on no-hairpin providers.
+    // BOTH candidates must appear as actual `a=candidate:...typ host` lines
+    // (not a stray substring): without the private one the client never installs
+    // a coturn permission for it and the relay-forced pair cannot form on
+    // no-hairpin providers.
+    let has_host_candidate = |ip: &str| {
+        answer_sdp
+            .lines()
+            .any(|l| l.starts_with("a=candidate:") && l.contains("typ host") && l.contains(ip))
+    };
     assert!(
-        answer_sdp.contains("203.0.113.42"),
-        "answer SDP must still advertise the primary (public) host candidate 203.0.113.42. SDP:\n{answer_sdp}"
+        has_host_candidate("203.0.113.42"),
+        "answer SDP must still carry the primary (public) host candidate on an a=candidate line. SDP:\n{answer_sdp}"
     );
     assert!(
-        answer_sdp.contains("198.51.100.7"),
-        "answer SDP must advertise the additional private host candidate 198.51.100.7 (SFU_LOCAL_IP) — \
-         the OCI-hairpin relay path depends on it. SDP:\n{answer_sdp}"
+        has_host_candidate("198.51.100.7"),
+        "answer SDP must carry the additional private host candidate (SFU_LOCAL_IP) on an a=candidate \
+         line — the OCI-hairpin relay path depends on it. SDP:\n{answer_sdp}"
     );
 }
 

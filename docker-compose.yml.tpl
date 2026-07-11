@@ -190,6 +190,8 @@ services:
       # (Oracle Cloud has no NAT hairpin → relay-forced group calls fail ICE).
       # Empty when the node is not behind NAT — the SFU treats "" as unset and
       # advertises only the public candidate (see config.rs::parse_local_ip_env).
+      # Rendered RAW (no !=PUBLIC_IP guard, unlike coturn's ALLOWED_PEER_IP_LINE):
+      # safe because SfuConfig::additional_host_candidates dedups local_ip==public.
       # Pairs with coturn `allowed-peer-ip={{PRIVATE_IP}}`.
       SFU_LOCAL_IP: "{{PRIVATE_IP}}"
     # 2026-05-06 post-mortem: probe all three planes (metrics, client_ws,

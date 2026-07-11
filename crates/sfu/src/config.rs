@@ -135,6 +135,24 @@ impl Default for SfuConfig {
 }
 
 impl SfuConfig {
+    /// Additional host-candidate addresses to advertise alongside the primary
+    /// (public) candidate — at most the private `local_ip` at the primary's
+    /// port (the SFU listens on a single `0.0.0.0:port` socket reachable via
+    /// both IPs). Deduped: `local_ip` unset OR equal to the primary's IP yields
+    /// an empty vec (advertise the primary only). Pure fn — unit-tested; this
+    /// dedup is the backstop that makes the unguarded compose
+    /// `SFU_LOCAL_IP: "{{PRIVATE_IP}}"` render safe when PRIVATE_IP == PUBLIC_IP.
+    pub fn additional_host_candidates(
+        &self,
+        primary: std::net::SocketAddr,
+    ) -> Vec<std::net::SocketAddr> {
+        self.local_ip
+            .filter(|ip| *ip != primary.ip())
+            .map(|ip| std::net::SocketAddr::new(ip, primary.port()))
+            .into_iter()
+            .collect()
+    }
+
     pub fn from_env() -> Self {
         let defaults = Self::default();
         Self {
@@ -282,18 +300,43 @@ fn parse_public_ip_env() -> Option<IpAddr> {
     }
 }
 
+/// True when `ip` is inside the RFC1918 / IPv6 unique-local space that the
+/// co-located coturn's `denied-peer-ip` block otherwise forbids. The
+/// `allowed-peer-ip` override this env drives is only ever meant to re-permit
+/// ONE private address; a public IP here would turn coturn into an open relay
+/// to that host (public IPs hit no `denied-peer-ip` range), so we refuse it.
+fn is_private_relay_target(ip: &IpAddr) -> bool {
+    match ip {
+        // 10/8, 172.16/12, 192.168/16.
+        IpAddr::V4(v4) => v4.is_private(),
+        // fc00::/7 unique-local.
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
 /// Parse `SFU_LOCAL_IP` into an `IpAddr` for the additional private host
 /// candidate (OCI-hairpin fix). Same lenient contract as
 /// [`parse_public_ip_env`]: empty/unset → `None`, garbage → `warn` + `None`
 /// so startup continues (the node just loses the private-candidate path and
-/// behaves as before). See [`SfuConfig::local_ip`] for the rationale.
+/// behaves as before). Additionally REFUSES a non-private address (SEC-CR-902):
+/// the value feeds coturn's `allowed-peer-ip`, and a public IP there would make
+/// coturn an open relay to that host. See [`SfuConfig::local_ip`].
 fn parse_local_ip_env() -> Option<IpAddr> {
     let raw = std::env::var("SFU_LOCAL_IP").ok()?;
     if raw.is_empty() {
         return None;
     }
     match raw.parse::<IpAddr>() {
-        Ok(ip) => Some(ip),
+        Ok(ip) if is_private_relay_target(&ip) => Some(ip),
+        Ok(ip) => {
+            tracing::warn!(
+                value = %ip,
+                "SFU_LOCAL_IP is not an RFC1918 / unique-local address — refusing it as a host \
+                 candidate (a public value would widen the co-located coturn allowed-peer-ip into \
+                 an open relay). The SFU will advertise only its public candidate."
+            );
+            None
+        }
         Err(e) => {
             tracing::warn!(
                 value = %raw, error = %e,
@@ -510,13 +553,13 @@ mod tests {
     #[test]
     fn local_ip_env_parses_ipv4() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        // RFC 5737 TEST-NET-2 — stand-in for a node's private/local IP.
-        std::env::set_var("SFU_LOCAL_IP", "198.51.100.7");
+        // Must be RFC1918 — parse_local_ip_env refuses public IPs (SEC-CR-902).
+        std::env::set_var("SFU_LOCAL_IP", "192.168.50.7");
         let cfg = SfuConfig::from_env();
         assert_eq!(
             cfg.local_ip,
-            Some("198.51.100.7".parse().unwrap()),
-            "valid IPv4 must round-trip through SFU_LOCAL_IP (OCI-hairpin private candidate)"
+            Some("192.168.50.7".parse().unwrap()),
+            "valid RFC1918 IPv4 must round-trip through SFU_LOCAL_IP (OCI-hairpin private candidate)"
         );
         std::env::remove_var("SFU_LOCAL_IP");
     }
@@ -543,6 +586,55 @@ mod tests {
             "garbage SFU_LOCAL_IP must yield None (warn + degrade), not panic"
         );
         std::env::remove_var("SFU_LOCAL_IP");
+    }
+
+    #[test]
+    fn local_ip_env_public_ip_refused() {
+        // SEC-CR-902: a public IP in SFU_LOCAL_IP would widen coturn's
+        // allowed-peer-ip into an open relay — it must be refused (warn + None).
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for public in ["8.8.8.8", "1.1.1.1", "203.0.113.42"] {
+            std::env::set_var("SFU_LOCAL_IP", public);
+            assert!(
+                SfuConfig::from_env().local_ip.is_none(),
+                "public SFU_LOCAL_IP={public} must be refused (not advertised, not relayed to)"
+            );
+        }
+        // Sanity: a private value is still accepted.
+        std::env::set_var("SFU_LOCAL_IP", "10.0.1.44");
+        assert_eq!(
+            SfuConfig::from_env().local_ip,
+            Some("10.0.1.44".parse().unwrap()),
+            "RFC1918 SFU_LOCAL_IP must still be accepted"
+        );
+        std::env::remove_var("SFU_LOCAL_IP");
+    }
+
+    #[test]
+    fn additional_host_candidates_dedup_and_derivation() {
+        let primary: std::net::SocketAddr = "203.0.113.42:7878".parse().unwrap();
+
+        // local_ip unset → no additional candidate.
+        let mut cfg = SfuConfig::default();
+        assert!(
+            cfg.additional_host_candidates(primary).is_empty(),
+            "unset local_ip must yield no additional candidate"
+        );
+
+        // local_ip equal to the primary's IP → deduped away.
+        cfg.local_ip = Some(primary.ip());
+        assert!(
+            cfg.additional_host_candidates(primary).is_empty(),
+            "local_ip == primary IP must be deduped (advertise primary only)"
+        );
+
+        // Distinct private local_ip → exactly one candidate, at the primary port.
+        cfg.local_ip = Some("10.0.1.44".parse().unwrap());
+        assert_eq!(
+            cfg.additional_host_candidates(primary),
+            vec!["10.0.1.44:7878".parse().unwrap()],
+            "distinct local_ip must be advertised at the primary's UDP port"
+        );
     }
 
     #[test]
