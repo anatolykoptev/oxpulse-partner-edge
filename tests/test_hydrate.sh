@@ -2,7 +2,7 @@
 # Structural sanity checks for hydrate.sh.
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/home/user/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SCRIPT="$REPO_ROOT/hydrate.sh"
 
 # 1. Script parses cleanly.

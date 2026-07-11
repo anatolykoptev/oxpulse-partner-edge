@@ -1,15 +1,15 @@
 # ru.oxpulse.chat partner-edge state snapshot @ v0.12.42 (2026-05-18)
 # Captured for production-readiness acceptance regression baseline.
 #
-# Observed gaps vs working partner zvonilka (older v0.12.31 template):
+# Observed gaps vs working partner edge-b (older v0.12.31 template):
 #   1. Missing container: oxpulse-partner-hysteria2 (hy2 daemon not deployed)
 #      - channels-status.env shows hysteria2=skipped, naive=skipped
 #      - Root cause: install.sh skipped hy2 — no credentials in manual-config
 #      - Symptom: HTTPS 503 on edge (no hy2 fallback wired)
 #   2. Caddy upstream pattern differs:
 #      - ru.oxpulse uses Docker DNS name `xray-client:3080` (new pattern)
-#      - zvonilka uses AWG mesh IP `10.9.0.2:8907` (legacy pattern via AWG)
-#   3. zvonilka's xray container is currently in restart loop (Restarting 23),
+#      - edge-b uses AWG mesh IP `10.9.0.2:8907` (legacy pattern via AWG)
+#   3. edge-b's xray container is currently in restart loop (Restarting 23),
 #      yet HTTPS still works because hy2 fallback handles traffic. ru.oxpulse
 #      has healthy xray but no hy2 → single point of failure.
 #

@@ -34,15 +34,15 @@ CONFD="$ETC/conf.d"
 mkdir -p "$CONFD"
 
 # Pre-populate conf.d/ with a sentinel vhost file (mirrors the real
-# cheburator-vhosts.caddy on a production edge).
-SENTINEL_PATH="$CONFD/cheburator-vhosts.caddy"
-printf '%s\n' 'cheburator.bot { respond "sentinel" }' > "$SENTINEL_PATH"
+# edge-a-vhosts.caddy on a production edge).
+SENTINEL_PATH="$CONFD/edge-a-vhosts.caddy"
+printf '%s\n' 'edge-a.example { respond "sentinel" }' > "$SENTINEL_PATH"
 SENTINEL_SHA=$(sha256sum "$SENTINEL_PATH" | awk '{print $1}')
 
 # Old Caddyfile on disk (will be swapped out by the converge).
 printf '# old Caddyfile\n' > "$ETC/Caddyfile"
 
-# compose with caddy service present → defeats the piter/SFU-only skip guard.
+# compose with caddy service present → defeats the relay-x/SFU-only skip guard.
 cat > "$ETC/docker-compose.yml" << 'COMPOSE'
 services:
   caddy:
@@ -114,7 +114,7 @@ echo "OK: Caddyfile converged (swap fired)"
 POST_SHA=$(sha256sum "$SENTINEL_PATH" | awk '{print $1}')
 [[ "$POST_SHA" == "$SENTINEL_SHA" ]] \
     || { echo "FAIL: sentinel sha256 changed: before=$SENTINEL_SHA after=$POST_SHA"; exit 1; }
-echo "OK: conf.d/cheburator-vhosts.caddy unchanged after converge (sha=$POST_SHA)"
+echo "OK: conf.d/edge-a-vhosts.caddy unchanged after converge (sha=$POST_SHA)"
 
 echo ""
 echo "PASS: conf.d/ survives a Caddyfile converge (reconcile_caddy_surface)"

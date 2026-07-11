@@ -130,8 +130,8 @@
 #                                           merge-gated on the xprb-refresh
 #                                           rollout soak — operator ack req.)
 #
-# See ~/deploy/server-config/plans/oxpulse-partner-edge/
-# 2026-07-08-health-report-lib-extraction.md for the full council-vetted plan.
+# See the operator's internal planning doc (2026-07-08, health-report-lib
+# extraction) for the full council-vetted plan.
 
 # Guard against double-sourcing.
 [[ "${_CHANNEL_HEALTH_LIB_LOADED:-0}" -eq 1 ]] && return 0
@@ -150,7 +150,7 @@ _elapsed_ms() {
 #
 # BEFORE this fix: `docker exec oxpulse-partner-xray ss -ltn | grep :3080`
 # only proved the xray-client PROCESS was listening. Live-verified on
-# zvonilka: ss -ltn stayed green the whole time ТСПУ was returning 502 on the
+# edge-b: ss -ltn stayed green the whole time ТСПУ was returning 502 on the
 # real VLESS-Reality path (canary/tunnel) — a silent healthy/blocked blind
 # spot with zero alerting, since nothing downstream ever saw a failure signal.
 probe_ch1() {

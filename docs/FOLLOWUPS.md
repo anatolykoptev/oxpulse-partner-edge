@@ -55,7 +55,7 @@ drops decrypted frames. WireGuard handshake still works (so
 `awg show awg0` looks healthy with recent handshake), but
 `ping -I awg0 <motherly_awg_ip>` returns 100% packet loss. Operator has
 no signal until end-user reports a connection failure. See
-`docs/AWG_PARAM_INVARIANT.md` and the 2026-05-20 zvonilka.net outage RCA.
+`docs/AWG_PARAM_INVARIANT.md` and the 2026-05-20 edge-b.example outage RCA.
 
 **Why it matters:** any future change to server-side `Jc/Jmin/S1..S4/H1..H4`
 that is not synchronously rolled to all partners re-introduces this class of
@@ -75,7 +75,7 @@ during an incident.
 **Files:** `install.sh` (Step 4 region) + new test
 `tests/test_install_mesh_reachability_check.sh`.
 
-**Discovered:** 2026-05-20 zvonilka.net mesh outage (S4 = 17 vs server S4 = 18).
+**Discovered:** 2026-05-20 edge-b.example mesh outage (S4 = 17 vs server S4 = 18).
 
 
 ---
@@ -228,7 +228,7 @@ to that IP — `openssl -connect <vetted-IP> -servername <host> -verify_hostname
 <host>` (TLS) and `turnutils_stunclient <vetted-IP>` (UDP). Neither tool
 re-resolves the hostname, so the resolve-then-dial window is closed. caddy-l4
 still routes by SNI and the cert SAN is still checked against the hostname
-(empirically verified on ruoxp: connect-IP + SNI + verify_hostname → exit 0;
+(empirically verified on edge-d: connect-IP + SNI + verify_hostname → exit 0;
 connect-IP without SNI → exit 1). `tests/test_cross_probe_loop.sh` test16 asserts
 the pin (-connect = vetted IP, -servername/-verify_hostname = hostname, hostname
 never in -connect). **No longer blocking — the loop may go default-ON fleetwide.**
@@ -236,9 +236,9 @@ never in -connect). **No longer blocking — the loop may go default-ON fleetwid
 ### R. SEC-CR-322-01 — coturn-tls probe must SAN-check (HIGH, FIXED in #322)
 
 `openssl s_client -verify_return_error` chain-verifies but does NOT match the
-cert SAN/hostname; krolik's rustls always SAN-checks
+cert SAN/hostname; hub's rustls always SAN-checks
 (`probe_tls_allocate_fails_on_sni_mismatch`). Without a SAN check a valid-chain /
 wrong-SAN cert (catch-all vhost, cert swap) reads UP at the edge but DOWN at
-krolik → the two coturn-tls probers disagree. **Fixed:** added `-verify_hostname
+hub → the two coturn-tls probers disagree. **Fixed:** added `-verify_hostname
 "$turns_host"`; `test15` asserts the flag is present (real wrong-SAN→exit1 is
-openssl's, validated on ruoxp). **Discovered:** PR #322 crypto review, 2026-06-16.
+openssl's, validated on edge-d). **Discovered:** PR #322 crypto review, 2026-06-16.

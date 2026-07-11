@@ -35,7 +35,7 @@ struct Cli {
 enum Command {
     /// Issue a new bootstrap token. Prints the raw value ONCE.
     IssueToken {
-        /// Partner identifier (e.g. `rvpn`, `piter`).
+        /// Partner identifier (e.g. `edge-c`, `relay-x`).
         #[arg(long)]
         partner: String,
         /// Token validity window (e.g. `30d`, `7d`, `48h`).

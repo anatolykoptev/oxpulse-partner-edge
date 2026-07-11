@@ -12,7 +12,7 @@
 #   8. install-args.sh usage text mentions --profile
 #
 # TDD ref: CL-4 deliverable (feat/split-routing-install-wiring)
-# Plan ref: ~/deploy/server-config/plans/oxpulse-partner-edge/2026-05-09-russia-profile-installer.md
+# Plan ref: the operator's internal Russia-profile installer plan (2026-05-09)
 
 setup() {
 	REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"

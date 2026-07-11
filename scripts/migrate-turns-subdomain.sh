@@ -3,7 +3,7 @@
 # coturn.conf were rendered with the legacy `TURNS_SUBDOMAIN=turns` default
 # instead of the server-generated `api-<6-hex>` value.
 #
-# ROOT CAUSE (2026-05-27 rvpn/zvonilka incident):
+# ROOT CAUSE (2026-05-27 edge-c/edge-b incident):
 #   install.sh pre-v0.12.48 wrote the POST *request* body to --out-json instead
 #   of the response body (opec regression fixed in PR #215, commit 634874f).
 #   As a result `json_get turns_subdomain "$tmp_cfg"` returned empty; the

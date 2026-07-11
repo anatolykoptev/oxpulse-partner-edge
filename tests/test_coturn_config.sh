@@ -1,7 +1,7 @@
 #!/bin/bash
 # Structural validation of coturn.conf.tpl for Phase 3A v0.2.0.
 set -euo pipefail
-REPO_ROOT="${REPO_ROOT:-/home/user/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TPL="$REPO_ROOT/coturn.conf.tpl"
 
 # TLS enablement + cert

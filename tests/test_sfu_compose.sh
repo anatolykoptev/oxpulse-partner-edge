@@ -30,7 +30,7 @@ for v in SFU_UDP_PORT SFU_METRICS_PORT SFU_BIND_ADDRESS; do
 done
 
 # 4b. SFU_EDGE_ID must be present in the sfu service block specifically.
-#     Regression: rvpn1 partner-edge emitted metrics with edge_id="local"
+#     Regression: edge-c1 partner-edge emitted metrics with edge_id="local"
 #     (SFU fallback default) causing label collision in the central Prom view.
 #     The Caddy service had SFU_EDGE_ID but the SFU service block was missing
 #     it entirely. Manual fix was wiped on every install.sh re-render.

@@ -18,8 +18,8 @@ setup() {
 set_frozen_vars() {
   # Plain shell vars — NOT exported. Mimics install.sh state after register +
   # autodetect + before the render_template call site.
-  PARTNER_ID=zvonilka
-  DOMAIN=zvonilka.net    # install.sh uses --domain flag → $DOMAIN; render maps to PARTNER_DOMAIN
+  PARTNER_ID=edge-b
+  DOMAIN=edge-b.example    # install.sh uses --domain flag → $DOMAIN; render maps to PARTNER_DOMAIN
   BACKEND_ENDPOINT=203.0.113.10:5349
   BACKEND_HOST=203.0.113.10
   BACKEND_PORT=5349
@@ -36,7 +36,7 @@ set_frozen_vars() {
   IMAGE_VERSION=stable
   SFU_UDP_PORT=7878
   SFU_METRICS_PORT=9317
-  SFU_EDGE_ID=zvonilka1
+  SFU_EDGE_ID=edge-b1
   OTEL_EXPORTER_OTLP_ENDPOINT=
   # install.sh:1380-1383 escapes real newlines to literal \n before render —
   # fixture uses literal-\n form to match install.sh behaviour.

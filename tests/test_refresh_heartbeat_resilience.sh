@@ -1,7 +1,7 @@
 #!/bin/bash
 # Behavioral regression tests for oxpulse-partner-edge-refresh.sh preflight checks.
 #
-# Incident 2026-05-09 root cause: cheburator1 had jq absent from systemd unit
+# Incident 2026-05-09 root cause: edge-a1 had jq absent from systemd unit
 # PATH. set -euo pipefail exits before the heartbeat POST, leaving last_seen_at
 # stale for 1 week.
 #

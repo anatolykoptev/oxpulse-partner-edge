@@ -68,7 +68,7 @@ preflight_run() {
 # orphan naive/xray-client/etc. containers consuming memory and network
 # resources; the operator has no easy signal they exist. The 2026-05-21
 # audit found 5 such ghost naive containers across the live fleet
-# (4 on zvonilka, 1 on rvpn).
+# (4 on edge-b, 1 on edge-c).
 #
 # Safe-by-construction filter:
 #   1. Image must be ghcr.io/anatolykoptev/partner-edge-* (one of ours).
@@ -155,7 +155,7 @@ _preflight_firewall() {
 
 _preflight_low_memory_swap() {
 	# On low-memory edges (<1.5 GiB total) dnf makecache + image pulls regularly
-	# OOM-kill mid-install (incident 2026-05-20 cheburator: 951 MiB RAM, dnf
+	# OOM-kill mid-install (incident 2026-05-20 edge-a: 951 MiB RAM, dnf
 	# anon-rss 502 MiB, no swap headroom -> killed at preflight). Add a 1 GiB
 	# temp swapfile if neither total RAM nor existing swap clears the floor.
 	[[ $DRY_RUN -ne 0 ]] && return 0

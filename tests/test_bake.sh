@@ -8,7 +8,7 @@
 # remain in install.sh. Assert each against the file that now owns it.
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/home/user/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 INSTALL="$REPO_ROOT/install.sh"
 ARGS_LIB="$REPO_ROOT/lib/install-args.sh"
 SYSTEMD_LIB="$REPO_ROOT/lib/install-systemd.sh"

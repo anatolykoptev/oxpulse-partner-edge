@@ -2,10 +2,10 @@
 # install.sh — one-command bootstrap for an oxpulse-chat partner edge node.
 #
 #   curl -fsSL https://install.oxpulse.chat/partner | sudo bash -s -- \
-#     --domain=call.rvpn.online --partner-id=rvpn --token=ptkn_xxx
+#     --domain=call.edge-c.example --partner-id=edge-c --token=ptkn_xxx
 #
 # Manual-config fallback (until /api/partner/register lands — Task 4):
-#   sudo bash install.sh --domain=call.rvpn.online --partner-id=rvpn \
+#   sudo bash install.sh --domain=call.edge-c.example --partner-id=edge-c \
 #        --manual-config=./node-config.json
 #
 # Phase 5.7 Item 5: pass --clean-sbin on upgrade to remove stale scripts
@@ -47,7 +47,7 @@ else
 	REPO_RAW="https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main"
 fi
 # OXPULSE_MIRROR_BASE: plain-TLS mirror for binaries + raw files, for edges
-# DPI-blocked from GitHub (e.g. install.krolik.tools / install.oxpulse.chat).
+# DPI-blocked from GitHub (e.g. install.hub.example / install.oxpulse.chat).
 # When set: binaries fetched from $OXPULSE_MIRROR_BASE/<asset> (GitHub releases
 # fallback); REPO_RAW defaults to $OXPULSE_MIRROR_BASE/raw unless OXPULSE_REPO_RAW set.
 OXPULSE_MIRROR_BASE="${OXPULSE_MIRROR_BASE:-}"
@@ -305,7 +305,7 @@ _ensure_opec_binary() {
 	# Install destination: /usr/bin/ is in CentOS/RHEL default sudoers secure_path
 	# (/sbin:/bin:/usr/sbin:/usr/bin) while /usr/local/bin/ is NOT. Placing opec in
 	# /usr/local/bin/ on RHEL-family edges makes it invisible to sudo invocations
-	# from the installer (incident 2026-05-20 cheburator).
+	# from the installer (incident 2026-05-20 edge-a).
 	local _dest=/usr/bin/opec
 	# Prefer the bundled opec-${arch} from the install bundle (same directory as
 	# this install.sh). Saves a GitHub round-trip and works on edges blocked from
@@ -513,8 +513,8 @@ fi
 #
 # File layout (under PREFIX_ETC = /etc/oxpulse-partner-edge/):
 #   reality.priv  0600  base64url x25519 private key (never leaves this host)
-#   reality.pub   0644  base64url x25519 public key  (sent to krolik on register)
-#   reality.uuid  0644  lowercase UUID               (sent to krolik on register)
+#   reality.pub   0644  base64url x25519 public key  (sent to hub on register)
+#   reality.uuid  0644  lowercase UUID               (sent to hub on register)
 #
 # Idempotency: re-registration with the same (partner_id, domain) is a safe
 # upsert — ON CONFLICT DO UPDATE with COALESCE keeps the existing pubkey when
@@ -726,7 +726,7 @@ REALITY_ENCRYPTION=$(json_get reality_encryption "$tmp_cfg")
 # without a log line. Catch the missing PARTNER_REALITY_ENCRYPTION
 # env on the operator side here, with an actionable hint, instead of
 # letting the operator chase tunnels for an hour.
-# Reproduced 2026-05-02 on call.cheburator.bot — operator's .env had
+# Reproduced 2026-05-02 on edge-a.example — operator's .env had
 # the var stripped, every fresh registration silently broke.
 if [[ -z "$REALITY_ENCRYPTION" && -n "$REALITY_PUBLIC_KEY" ]]; then
 	warn "  backend returned reality_encryption=\"\" but reality_public_key is set"
@@ -839,7 +839,7 @@ export NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT
 [[ -z "${NAIVE_SOCKS_PORT:-}" ]] && NAIVE_SOCKS_PORT=$(json_get naive_socks_port "$tmp_cfg")
 [[ -z "$NAIVE_SOCKS_PORT" ]] && NAIVE_SOCKS_PORT="1080"
 # Fix #2: fixture-host guard -- log early warning for test-fixture NAIVE_SERVER.
-# Operators have passed naive_server=naive-test.example.com in error (2026-05-17 ruoxp
+# Operators have passed naive_server=naive-test.example.com in error (2026-05-17 edge-d
 # incident); installer happily rendered the channel, container crashlooped.
 #
 # Pattern covers: localhost, (*.)?example.{com,net,org,invalid}, *.invalid, *.test,
@@ -873,7 +873,7 @@ CHANNELS_JSON=$(json_get_raw channels "$tmp_cfg")
 [[ -z "$NODE_ID" ]]            && NODE_ID="${PARTNER_ID}-$(hostname -s)"
 # SFU_EDGE_ID derives from PARTNER_ID once it is known. Convention is
 # `<partner>1` to leave room for `<partner>2` if the partner ever runs
-# more than one edge (rvpn1, piter1, motherly1, cheburator1).
+# more than one edge (edge-c1, relay-x1, motherly1, edge-a1).
 [[ -z "$SFU_EDGE_ID" ]]        && SFU_EDGE_ID="${PARTNER_ID}1"
 # Hard-fail when the central did not return a signaling_sfu_secret. With it
 # empty, docker-compose renders SIGNALING_SFU_SECRET= empty, the SFU disables
@@ -916,7 +916,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	# .channels[].id (e.g. "ch1") since the channels-id PR; older server
 	# versions omit the field. oxpulse-channels-health-report.sh dispatches
 	# probes by .channels[].id — without it, all health probes silently fail.
-	# Root cause: hot-patch on rvpn-seed 2026-05-28 confirmed: adding ids
+	# Root cause: hot-patch on edge-c-seed 2026-05-28 confirmed: adding ids
 	# caused partner_node_channel_heartbeat_total{channel_name=ch1} to appear.
 	# Mapping (canonical, matches probe_ch* function dispatch):
 	#   vless-reality → ch1   (probe_ch1 = xray dokodemo-door)
@@ -978,7 +978,7 @@ $SVC_TOKEN_FILE found. This usually means the volume was wiped after the
 original install.
 
 Recovery:
-  1. On krolik: docker exec oxpulse-chat partner-cli rotate-service-token \\
+  1. On hub: docker exec oxpulse-chat partner-cli rotate-service-token \\
         --node-id $NODE_ID_HINT --force
      (copy the printed stkn_ value)
   2. scp the value to this edge as $SVC_TOKEN_FILE
@@ -1350,7 +1350,7 @@ if [[ -n "${AWG_ALLOCATED_IP:-}" && -n "${AWG_MOTHERLY_PUBKEY:-}" && $DRY_RUN -e
 		# Host firewall hardening — must run AFTER awg0 is up so the AWG
 		# listen port is discoverable. Without this, partner hosts ship with
 		# :9317 (SFU /metrics) + :8912 (relay API) publicly reachable; see
-		# the 2026-05-21 zvonilka/rvpn/ruoxp audit. firewall_apply is
+		# the 2026-05-21 edge-b/edge-c/edge-d audit. firewall_apply is
 		# idempotent and supports ufw (Debian/Ubuntu) + firewalld (RHEL).
 		firewall_apply
 	else
@@ -1525,8 +1525,8 @@ File naming convention
 ----------------------
   <tenant>-<purpose>.caddy
 Examples:
-  cheburator-vhosts.caddy   — cheburator.bot + www.cheburator.bot vhosts
-  cheburator-webhook.caddy  — webhook proxy to internal service
+  edge-a-vhosts.caddy   — edge-a.example + www.edge-a.example vhosts
+  edge-a-webhook.caddy  — webhook proxy to internal service
   emergency-patch.caddy     — hotfix that must survive next upgrade
 
 Drift check
@@ -1599,7 +1599,7 @@ TURNS_SUBDOMAIN=$TURNS_SUBDOMAIN
 INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 	# Persist OXPULSE_MIRROR_BASE so upgrade.sh can route host-script fetches
-	# through the same mirror on DPI-blocked edges (e.g. zvonilka RU relays).
+	# through the same mirror on DPI-blocked edges (e.g. edge-b RU relays).
 	# Written as a separate append so it is omitted on non-mirror installs and
 	# does not break existing upgrade.sh readers that don't expect the key.
 	if [[ -n "${OXPULSE_MIRROR_BASE:-}" ]]; then

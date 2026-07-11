@@ -5,10 +5,10 @@
 //! before starting the container, not silently produce a config that will
 //! crashloop.
 //!
-//! Evidence: ruoxp shipped naive_server=naive-test.example.com on 2026-05-17
+//! Evidence: edge-d shipped naive_server=naive-test.example.com on 2026-05-17
 //! and the container crashed because real DNS doesn't resolve.
 //!
-//! See: reports/partner-edge/investigations/2026-05-17-ruoxp-naive-fixture-crashloop.md
+//! See: reports/partner-edge/investigations/2026-05-17-edge-d-naive-fixture-crashloop.md
 
 use opec::render::{naive, RenderError};
 use serial_test::serial;
@@ -27,8 +27,8 @@ fn set_fixture_env(naive_server: &str) {
     env::set_var("NAIVE_USER", "testuser");
     env::set_var("NAIVE_PASS", "testpass");
     env::set_var("NAIVE_SOCKS_PORT", "1080");
-    env::set_var("PARTNER_ID", "zvonilka");
-    env::set_var("PARTNER_DOMAIN", "zvonilka.net");
+    env::set_var("PARTNER_ID", "edge-b");
+    env::set_var("PARTNER_DOMAIN", "edge-b.example");
 }
 
 // Helper: assert err is RenderError::Validation for "naive"
@@ -53,7 +53,7 @@ fn assert_validation_err(result: anyhow::Result<()>, host: &str) {
     }
 }
 
-/// naive-test.example.com is the exact host from the ruoxp crashloop incident.
+/// naive-test.example.com is the exact host from the edge-d crashloop incident.
 #[test]
 #[serial]
 fn naive_render_rejects_example_com_fixture() {
@@ -108,7 +108,7 @@ fn naive_render_rejects_example_net() {
 #[test]
 #[serial]
 fn naive_render_allows_real_host() {
-    set_fixture_env("naive.zvonilka.net");
+    set_fixture_env("naive.edge-b.example");
     let tpl = fixture_dir().join("naive.tpl");
     let out = tempfile::NamedTempFile::new().unwrap();
     naive::render(&tpl, out.path()).expect("real host should render without error");

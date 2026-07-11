@@ -3,7 +3,7 @@
 #
 # Regression guards for three changes in fix/upgrade-zero-downtime:
 #
-#   (A) Unbound OXPULSE_MIRROR_BASE — zvonilka repro: upgrade.sh --help (and
+#   (A) Unbound OXPULSE_MIRROR_BASE — edge-b repro: upgrade.sh --help (and
 #       any invocation) crash with "unbound variable" when OXPULSE_MIRROR_BASE
 #       is absent from env AND install.env lacks the key.
 #
@@ -58,7 +58,7 @@ else
 fi
 
 # A3: functional — invoke upgrade.sh in an env where OXPULSE_MIRROR_BASE is
-# unset and install.env does NOT contain the key (the zvonilka case).
+# unset and install.env does NOT contain the key (the edge-b case).
 # Expect: no "unbound variable" error.  The script will die with a state-file
 # error ("no installed bundle" / "missing install.env"), which is expected on
 # a bare system without the edge installed.
@@ -78,7 +78,7 @@ A3_OUT=$(
 if echo "$A3_OUT" | grep -q 'unbound variable'; then
     fail "A3: got 'unbound variable' error — fix not effective; output: $A3_OUT"
 else
-    pass "A3: no 'unbound variable' error (zvonilka no-mirror repro clean)"
+    pass "A3: no 'unbound variable' error (edge-b no-mirror repro clean)"
 fi
 
 # The script should die with a state/compose error, not an unbound-var crash.
@@ -98,7 +98,7 @@ grep -q 'OXPULSE_MIRROR_BASE="${OXPULSE_MIRROR_BASE%/' "$UPGRADE" \
     || fail "A4: trailing-slash strip removed — unintended change"
 
 # A5: a no-mirror install.env (key absent) must not cause unbound var in a
-# subshell sourcing the top-level globals.  Simulates the exact state on zvonilka.
+# subshell sourcing the top-level globals.  Simulates the exact state on edge-b.
 A5_STATEDIR=$(mktemp -d)
 printf 'IMAGE_VERSION=v0.12.57\n' > "$A5_STATEDIR/install.env"
 
@@ -507,7 +507,7 @@ rm -rf "$C4_TMPDIR"
 #
 # THE MISSING GUARD: a dry-run full upgrade must NEVER invoke docker compose
 # pull, docker compose up, or the rollback logic.  This is the test that would
-# have prevented the ruoxp prod recreate incident (dry-run of upgrade
+# have prevented the edge-d prod recreate incident (dry-run of upgrade
 # v0.12.45→v0.12.61 caused real container recreation and ~49s downtime).
 # ===========================================================================
 echo ""
@@ -523,7 +523,7 @@ apply_dry_section=$(awk '/^resolve_default_target$/{found=1} found{print} found 
 
 echo "$apply_dry_section" | grep -q 'DRY_RUN' \
     && pass "D1a: DRY_RUN check present in plain apply path" \
-    || fail "D1a: DRY_RUN check MISSING from plain apply path — the ruoxp incident guard is absent"
+    || fail "D1a: DRY_RUN check MISSING from plain apply path — the edge-d incident guard is absent"
 
 # The DRY_RUN block must print a "[dry-run]" plan line.
 echo "$apply_dry_section" | grep -q '\[dry-run\]' \
@@ -621,7 +621,7 @@ D3_OUT=$(
 # Exit 99 = pull called (forbidden); exit 98 = up called (forbidden).
 # Both are hard failures; distinguish them for diagnostic clarity.
 if [[ $D3_RC -eq 99 ]]; then
-    fail "D3a: docker compose PULL was called during --dry-run (plain apply) — exit 99 from docker mock (ruoxp incident bug)"
+    fail "D3a: docker compose PULL was called during --dry-run (plain apply) — exit 99 from docker mock (edge-d incident bug)"
 elif echo "$D3_OUT" | grep -q 'FORBIDDEN-PULL'; then
     fail "D3a: FORBIDDEN-PULL marker in plain apply --dry-run output"
 elif [[ $D3_RC -eq 98 ]]; then
@@ -636,9 +636,9 @@ fi
 
 # docker compose pull must NOT have been called.
 if grep -q ' pull' "$D3_DOCKER_LOG" 2>/dev/null; then
-    fail "D3b: docker compose pull was called during --dry-run plain apply — THIS IS THE RUOXP INCIDENT BUG"
+    fail "D3b: docker compose pull was called during --dry-run plain apply — THIS IS THE EDGE-D INCIDENT BUG"
 else
-    pass "D3b: docker compose pull NOT called in --dry-run plain apply (ruoxp incident prevented)"
+    pass "D3b: docker compose pull NOT called in --dry-run plain apply (edge-d incident prevented)"
 fi
 
 # docker compose up must NOT have been called.
@@ -847,7 +847,7 @@ rm -rf "$E2_TMPDIR"
 #
 # Guards the fix for the racy post-recreate healthcheck: a single `sleep 10`
 # with a one-shot healthcheck fails on edges where xray Reality establishment
-# takes the documented ~8s, leaving only a 2s slack (the v0.12.20 rvpn
+# takes the documented ~8s, leaving only a 2s slack (the v0.12.20 edge-c
 # rollback incident root cause).
 #
 # Tests:

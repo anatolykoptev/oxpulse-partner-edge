@@ -22,8 +22,8 @@ mod schema_tests {
         assert_eq!(file.schema_version, 1);
         assert_eq!(file.tenants.len(), 1);
         let t = &file.tenants[0];
-        assert_eq!(t.id, "cheburator");
-        assert_eq!(t.domains, vec!["cheburator.bot", "www.cheburator.bot"]);
+        assert_eq!(t.id, "edge-a");
+        assert_eq!(t.domains, vec!["edge-a.example", "www.edge-a.example"]);
         assert!(t.enabled);
         assert_eq!(t.routes.len(), 4);
         assert_eq!(t.redirects.len(), 1);

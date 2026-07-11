@@ -67,7 +67,7 @@ TURNS_SUBDOMAIN="$TURNS_SUB" bash "$INSTALL" \
   --manual-config=<(cat <<EOF
 {
   "node_id": "test-e2e-$(date +%s)",
-  "backend_endpoint": "krolik.oxpulse.chat:5349",
+  "backend_endpoint": "hub.example:5349",
   "turn_secret": "test-secret-not-for-prod",
   "reality_uuid": "00000000-0000-0000-0000-000000000000",
   "reality_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",

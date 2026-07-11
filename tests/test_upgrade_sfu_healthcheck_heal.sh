@@ -10,7 +10,7 @@
 #   directly into the wget URL host and nc -z relay-API host. That /CIDR
 #   suffix makes wget/nc target resolution fail permanently -> docker reports
 #   "unhealthy" forever even though the SFU itself is healthy (confirmed live
-#   on ruoxp, failingstreak=19471+, 6+ days). The TEMPLATE fix (this PR)
+#   on edge-d, failingstreak=19471+, 6+ days). The TEMPLATE fix (this PR)
 #   references ${SFU_METRICS_BIND}/${SFU_RELAY_API_BIND} instead — but
 #   upgrade.sh never re-renders docker-compose.yml from the template on an
 #   existing box, only sed-patches image tags in place, so the template fix

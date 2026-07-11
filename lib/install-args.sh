@@ -32,7 +32,7 @@ _args_usage() {
 
 Required:
   --domain=<fqdn>            Partner edge domain (must resolve to this host's public IP)
-  --partner-id=<id>          Short partner identifier (e.g. rvpn, piter)
+  --partner-id=<id>          Short partner identifier (e.g. edge-c, relay-x)
 
 Registration (pick one):
   --token=<ptkn_...>         Fetch node config from $BACKEND_API/api/partner/register
@@ -70,7 +70,7 @@ assembles a minimal BrandingConfig payload from whichever flags are set):
   --brand-logo-dark=<url>          Dark-theme logo
   --brand-favicon=<url>            Favicon URL
   --brand-og-image=<url>           OG image (1200x630 PNG)
-  --brand-co-brand=<name>          Co-brand label, e.g. "Cheburator"
+  --brand-co-brand=<name>          Co-brand label, e.g. "Edge-a"
   --brand-canonical=<url>          Canonical override (default https://oxpulse.chat/)
   --brand-wordmark=<url>           Partner wordmark image (rendered next to OxPulse logo)
   --brand-hero-title=<text>        Sets hero_title_ru + hero_title_en at once
@@ -114,7 +114,7 @@ args_parse() {
 	# .github/workflows/promote-stable.yml) rather than `latest` (mutable on
 	# every merge). stable still drifts on promotion, but only after a human
 	# pushed the channel forward — `latest` floats on every CI green and is
-	# how cheburator wound up running an unpinned partner-edge-sfu on prod.
+	# how edge-a wound up running an unpinned partner-edge-sfu on prod.
 	# Operators can pin further via --image-version=v0.12.7.
 	IMAGE_VERSION="${OXPULSE_IMAGE_VERSION:-stable}"
 	# v0.2.0-rc1 placeholder: real per-clone value comes from /api/partner/register
@@ -143,7 +143,7 @@ args_parse() {
 	PROFILE="${PROFILE:-}"
 	# Step 7 healthcheck loop deadline (seconds). ACME first-issuance can
 	# legitimately take 2–4 minutes when DNS is slow to propagate or the LE
-	# rate limiter throttles; 120 was too tight on call.cheburator.bot and
+	# rate limiter throttles; 120 was too tight on edge-a.example and
 	# left the operator staring at a `still red after 120s` warn.
 	HEALTHCHECK_TIMEOUT="${HEALTHCHECK_TIMEOUT:-300}"
 	# Optional path to a BrandingConfig JSON the operator wants to ship to

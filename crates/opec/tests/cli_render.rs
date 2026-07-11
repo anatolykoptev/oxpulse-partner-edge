@@ -22,8 +22,8 @@ fn fixture_dir_install_render() -> PathBuf {
 
 fn frozen_env() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("PARTNER_ID", "zvonilka"),
-        ("PARTNER_DOMAIN", "zvonilka.net"),
+        ("PARTNER_ID", "edge-b"),
+        ("PARTNER_DOMAIN", "edge-b.example"),
         ("BACKEND_ENDPOINT", "203.0.113.10:5349"),
         ("BACKEND_HOST", "203.0.113.10"),
         ("BACKEND_PORT", "5349"),
@@ -40,7 +40,7 @@ fn frozen_env() -> Vec<(&'static str, &'static str)> {
         ("IMAGE_VERSION", "stable"),
         ("SFU_UDP_PORT", "7878"),
         ("SFU_METRICS_PORT", "9317"),
-        ("SFU_EDGE_ID", "zvonilka1"),
+        ("SFU_EDGE_ID", "edge-b1"),
         ("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
         (
             "SFU_SIGNING_PUBLIC_KEY",

@@ -8,16 +8,16 @@ setup() {
 }
 
 @test "render_template substitutes single-line vars" {
-  export PARTNER_ID=zvonilka
-  export PARTNER_DOMAIN=zvonilka.net
+  export PARTNER_ID=edge-b
+  export PARTNER_DOMAIN=edge-b.example
   export BACKEND_HOST=203.0.113.10
   export BACKEND_PORT=5349
   export SFU_SIGNING_PUBLIC_KEY="some-key"
   unset NONEXISTENT_VAR
   out=$(mktemp)
   render_template tests/fixtures/render-template/input.tpl "$out"
-  grep -q "^partner_id: zvonilka$" "$out"
-  grep -q "^domain: zvonilka.net$" "$out"
+  grep -q "^partner_id: edge-b$" "$out"
+  grep -q "^domain: edge-b.example$" "$out"
   grep -q "^backend: 203.0.113.10:5349$" "$out"
   grep -q "^pem: some-key$" "$out"
   grep -q "^empty: $" "$out"

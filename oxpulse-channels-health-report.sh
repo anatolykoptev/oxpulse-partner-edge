@@ -12,7 +12,7 @@
 # to the central backend's lightweight /api/health (or the local canary
 # route that fronts it) — NOT a local container-liveness check. A relay
 # whose process is up but whose tunnel is DPI-blocked end-to-end (live-
-# verified on zvonilka: xray listening, VLESS-Reality 502 on the real path)
+# verified on edge-b: xray listening, VLESS-Reality 502 on the real path)
 # now reports channel_handshake_ok=false instead of a false-healthy local
 # check. ch1-ch3 run CONCURRENTLY (backgrounded, each bounded by its own
 # curl --max-time via OXPULSE_CHANNEL_PROBE_TIMEOUT) so one blocked channel
@@ -183,7 +183,7 @@ unset _chl_cand
 # warn but MUST NOT abort the script. A top-level `die` here would make
 # `--serveability --dry-run` exit non-zero; upgrade.sh's settle gate would then
 # read no `^ch[0-9]+=(OK|DOWN)$` lines, verdict SERVING_LOST, and AUTO-ROLLBACK a
-# healthy box fleet-wide (the "cheburator" chicken-and-egg class, upgrade.sh:771).
+# healthy box fleet-wide (the "edge-a" chicken-and-egg class, upgrade.sh:771).
 # This lib is a mesh-probe FEATURE, not the SSRF guard (that is peer-ip-guard),
 # so skipping it degrades a feature, not security. Unlike peer-ip-guard-lib.sh
 # and channel-health-lib.sh above (both sourced fail-CLOSED — a missing SSRF
@@ -272,7 +272,7 @@ declare -a _CHAN_OUT=()
 _chan_idx=0
 
 for _chan in "${_PROVISIONED[@]}"; do
-    # Channel ids in node-config may carry a node-specific suffix (e.g. "ch1-zvonilka").
+    # Channel ids in node-config may carry a node-specific suffix (e.g. "ch1-edge-b").
     # Match on prefix: ch1* = Reality/VLESS, ch2* = AmneziaWG, ch3* = Hysteria2.
     # The server expects canonical names ch1/ch2/ch3, not the local variant.
     case "$_chan" in

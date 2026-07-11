@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fix #2/#3 — fixture-host guard in install.sh.
 #
-# Evidence: ruoxp operator passed naive_server=naive-test.example.com on 2026-05-17.
+# Evidence: edge-d operator passed naive_server=naive-test.example.com on 2026-05-17.
 # Installer rendered and started the channel; container crashed (DNS doesn't resolve).
 #
 # MAJOR #2: regex extended to cover RFC2606 *.invalid, RFC5737 doc IP ranges,
@@ -76,7 +76,7 @@ fi
 
 # ── Case 4: real host not matched ────────────────────────────────────────────
 echo "==> Case 4: real host passes guard"
-NAIVE_SERVER_REAL="naive.zvonilka.net"
+NAIVE_SERVER_REAL="naive.edge-b.example"
 NAIVE_SERVER_REAL_LC="${NAIVE_SERVER_REAL,,}"
 if [[ "$NAIVE_SERVER_REAL_LC" =~ ^(localhost|(.*\.)?example\.(com|net|org|invalid)|.*\.invalid|invalid|.*\.test|0\.0\.0\.0|127\.[0-9]+\.[0-9]+\.[0-9]+|169\.254\.[0-9]+\.[0-9]+|192\.0\.2\.[0-9]+|198\.51\.100\.[0-9]+|203\.0\.113\.[0-9]+|::1?|::)$ ]]; then
     fail "guard regex incorrectly matches real host '$NAIVE_SERVER_REAL'"

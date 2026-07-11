@@ -15,8 +15,8 @@ fn body_required_fields_only() {
     fs::write(tmp.path().join("awg.pub"), "AWG_PUB_KEY_BASE64\n").unwrap();
 
     let body = register::build_body(&register::BodyInputs {
-        partner_id: "zvonilka",
-        domain: "zvonilka.net",
+        partner_id: "edge-b",
+        domain: "edge-b.example",
         token: "test-token",
         public_ip: "1.2.3.4",
         region: None,
@@ -29,8 +29,8 @@ fn body_required_fields_only() {
     .expect("body builds");
 
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["partner_id"], "zvonilka");
-    assert_eq!(v["domain"], "zvonilka.net");
+    assert_eq!(v["partner_id"], "edge-b");
+    assert_eq!(v["domain"], "edge-b.example");
     assert_eq!(v["token"], "test-token");
     assert_eq!(v["public_ip"], "1.2.3.4");
     assert_eq!(v["reality_public_key"], "REALITY_PUB_44_CHARS=");

@@ -26,10 +26,10 @@ pub struct SfuConfig {
     /// Caddy `/sfu/ws/*` reverse_proxy. Env: `SFU_CLIENT_WS_PORT`.
     /// Default: 8920.
     ///
-    /// Note: 8911 was the original choice but is squatted on krolik
+    /// Note: 8911 was the original choice but is squatted on hub
     /// (San Jose) by an unrelated go-imagine process. 8920 was picked
     /// to avoid a fleet-wide eviction; the value is partner-edge-wide
-    /// (rvpn / piter / krolik all bind 8920) so the same Caddy
+    /// (edge-c / relay-x / hub all bind 8920) so the same Caddy
     /// template ships everywhere.
     pub client_ws_port: u16,
     /// Shared secret for verifying room JWTs issued by oxpulse-chat signaling.

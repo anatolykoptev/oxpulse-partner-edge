@@ -1,7 +1,7 @@
 #!/bin/bash
 # Structural + behavioral regression test: rotation branch must skip
 # systemctl reload gracefully when oxpulse-partner-edge.service is not
-# installed (custom-stack nodes such as piter that run their own
+# installed (custom-stack nodes such as relay-x that run their own
 # xray-reality + coturn + SFU compose).
 #
 # Two levels:

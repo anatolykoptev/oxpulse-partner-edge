@@ -11,8 +11,8 @@
 # Historical regression (PR #158, 571e4de): primary upstream was set to
 # {{AWG_MOTHERLY_IP}}:{{BACKEND_PORT}} which rendered as 10.9.0.2:5349 — the
 # VLESS-Reality TLS port, NOT HTTP. Result: every HTTPS request returned 503.
-# The :5349 ban remains. Port 8907 is the socat-bridged HTTP path on krolik —
-# verified 2026-05-21 returning 200 OK on rvpn/ruoxp/cheburator.
+# The :5349 ban remains. Port 8907 is the socat-bridged HTTP path on hub —
+# verified 2026-05-21 returning 200 OK on edge-c/edge-d/edge-a.
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -31,7 +31,7 @@ render_tpl() {
 }
 
 @test "tunnel_upstream snippet: primary upstream is AWG mesh 10.9.0.2:8907 (CH2 socat bridge)" {
-  # The primary upstream MUST be the AWG mesh address on :8907 — krolik's
+  # The primary upstream MUST be the AWG mesh address on :8907 — hub's
   # oxpulse-awg-bridge.service socat that forwards to docker-proxy of oxpulse-chat.
   # CH2 is the fastest path (~300 ms RTT) and bypasses the 16 KB TCP cap that
   # kills CH1 reality on RU mobile ISPs.

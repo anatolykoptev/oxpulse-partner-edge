@@ -1,12 +1,12 @@
-# Piter Topology Normalization Plan
+# Relay-x Topology Normalization Plan
 
 ## Current State (as of 2026-05-13)
 
-Piter uses a **hybrid topology** where xray config is managed manually:
+Relay-x uses a **hybrid topology** where xray config is managed manually:
 
 - `/opt/xray-config.json` — manually maintained xray server config. This file
   is the live config used by the xray container. It was set up before the
-  partner-edge stack was deployed on piter and has never been migrated to the
+  partner-edge stack was deployed on relay-x and has never been migrated to the
   standard control plane.
 - `/etc/oxpulse-partner-edge/node-config.json` — **stub only**. Contains
   only the node identity fields:
@@ -14,9 +14,9 @@ Piter uses a **hybrid topology** where xray config is managed manually:
   ```json
   {
     "node_id": "<id>",
-    "partner_id": "piter",
-    "edge_id": "piter1",
-    "public_ip": "<piter public IP>",
+    "partner_id": "relay-x",
+    "edge_id": "relay-x1",
+    "public_ip": "<relay-x public IP>",
     "awg_ip": "<awg tunnel IP>"
   }
   ```
@@ -24,41 +24,41 @@ Piter uses a **hybrid topology** where xray config is managed manually:
   **Missing**: `reality_uuid`, `reality_public_key`, `reality_encryption`,
   `reality_short_id`, `reality_server_name(s)`, `backend_endpoint`.
 
-Because the `reality_*` fields are absent, `update.sh` cannot manage piter's
-xray config and will exit with an error if run on piter without first
+Because the `reality_*` fields are absent, `update.sh` cannot manage relay-x's
+xray config and will exit with an error if run on relay-x without first
 normalizing the node-config.json.
 
 The daily refresh script (`oxpulse-partner-edge-refresh.sh`) and `update.sh`
 both read secrets exclusively from `node-config.json`. The manual
 `/opt/xray-config.json` file is invisible to both scripts.
 
-This is what caused the 2026-05-12 incident: when the krolik server switched
-to `packet-up` + `xmux`, piter's manual config was not updated because the
+This is what caused the 2026-05-12 incident: when the hub server switched
+to `packet-up` + `xmux`, relay-x's manual config was not updated because the
 control plane had no visibility into it.
 
 ## Target State (standard partner-edge topology)
 
-After normalization, piter will work identically to rvpn and cheburator:
+After normalization, relay-x will work identically to edge-c and edge-a:
 
-- `node-config.json` contains all `reality_*` fields sourced from the krolik
+- `node-config.json` contains all `reality_*` fields sourced from the hub
   backend at registration time and kept current by the daily refresh script.
 - `xray-client.json` is rendered by `update.sh` / `oxpulse-partner-edge-refresh.sh`
   from `xray-client.json.tpl` using the secrets in `node-config.json`.
 - The manually maintained `/opt/xray-config.json` becomes the rendered artifact,
   not the source of truth.
 
-This means running `update.sh` on any partner edge (including piter) will
+This means running `update.sh` on any partner edge (including relay-x) will
 self-heal xray config drift within minutes — no SSH required.
 
 ## Migration Steps
 
-### Step 1: Gather current xray secrets from piter
+### Step 1: Gather current xray secrets from relay-x
 
-SSH into piter and extract the current xray client parameters from
+SSH into relay-x and extract the current xray client parameters from
 `/opt/xray-config.json`:
 
 ```bash
-ssh piter
+ssh relay-x
 cat /opt/xray-config.json | python3 -m json.tool
 ```
 
@@ -75,10 +75,10 @@ Also verify the current mode in `outbounds[].streamSettings.xhttpSettings.mode`.
 After normalization, `update.sh` will render the template (currently `packet-up`)
 and override whatever mode was in the manual file.
 
-### Step 2: Write full node-config.json on piter
+### Step 2: Write full node-config.json on relay-x
 
 ```bash
-ssh piter
+ssh relay-x
 # Backup the stub
 cp /etc/oxpulse-partner-edge/node-config.json \
    /etc/oxpulse-partner-edge/node-config.json.bak.stub
@@ -87,9 +87,9 @@ cp /etc/oxpulse-partner-edge/node-config.json \
 cat > /etc/oxpulse-partner-edge/node-config.json <<'EOF'
 {
   "node_id": "<existing node_id>",
-  "partner_id": "piter",
-  "edge_id": "piter1",
-  "public_ip": "<piter public IP>",
+  "partner_id": "relay-x",
+  "edge_id": "relay-x1",
+  "public_ip": "<relay-x public IP>",
   "awg_ip": "<awg tunnel IP>",
   "reality_uuid": "<uuid from /opt/xray-config.json>",
   "reality_public_key": "U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk",
@@ -97,13 +97,13 @@ cat > /etc/oxpulse-partner-edge/node-config.json <<'EOF'
   "reality_short_id": "<shortId from /opt/xray-config.json>",
   "reality_server_name": "www.samsung.com",
   "reality_server_names": ["www.samsung.com"],
-  "backend_endpoint": "krolik.example.com:5349"
+  "backend_endpoint": "hub.example.com:5349"
 }
 EOF
 chmod 0600 /etc/oxpulse-partner-edge/node-config.json
 ```
 
-**Note on publicKey**: use the current krolik server public key
+**Note on publicKey**: use the current hub server public key
 `U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk` (the 2026-05-12 key). This is
 the correct key even if the old `/opt/xray-config.json` has the pre-rotation
 key `gV5XA0q27mWGyJxRID0P88Sn0jVap7yO-pfe4pLlA3w` — that key is what caused
@@ -115,7 +115,7 @@ Before running `update.sh`, verify that `node-config.json` will produce a
 valid `xray-client.json` by running the render in a temp location:
 
 ```bash
-ssh piter
+ssh relay-x
 # Copy the template locally if not present
 cp /usr/local/sbin/channel-render-lib.sh /tmp/  # or from the repo
 
@@ -152,10 +152,10 @@ xmux: {'maxConcurrency': 1, 'cMaxReuseTimes': 64, 'cMaxLifetimeMs': 15000}
 
 ### Step 4: Run update.sh
 
-Once dry-run looks correct, run `update.sh` on piter:
+Once dry-run looks correct, run `update.sh` on relay-x:
 
 ```bash
-ssh piter
+ssh relay-x
 # Place a token file if one exists for API re-fetch (optional)
 # echo 'ptkn_...' > /etc/oxpulse-partner-edge/token
 # chmod 0600 /etc/oxpulse-partner-edge/token
@@ -171,7 +171,7 @@ cd /usr/local/sbin  # or wherever the repo is deployed
 bash /path/to/update.sh
 ```
 
-If update.sh exits 0 with "smoke test PASSED", piter is normalized and the
+If update.sh exits 0 with "smoke test PASSED", relay-x is normalized and the
 xray tunnel is working with the new `packet-up` + xmux config.
 
 ### Step 5: Verify traffic
@@ -186,12 +186,12 @@ docker logs --tail 20 xray-client
 ss -tlnH | grep 3080
 
 # Optional: check a web request routes through the tunnel
-# (from a browser client pointed at piter, verify oxpulse.chat loads)
+# (from a browser client pointed at relay-x, verify oxpulse.chat loads)
 ```
 
 ### Step 6: Update the daily refresh cron entry
 
-Ensure `oxpulse-partner-edge-refresh.sh` is scheduled on piter so future
+Ensure `oxpulse-partner-edge-refresh.sh` is scheduled on relay-x so future
 key rotations are applied automatically without manual intervention:
 
 ```bash
@@ -224,11 +224,8 @@ tail -50 /var/log/oxpulse-partner-edge-update.log
 
 ## Why This Normalization Matters
 
-The 2026-05-12 incident showed that any node with a manually maintained xray
-config is a single point of failure: when the krolik server config changes
-(mode, xmux, publicKey), the manual configs drift silently. The daily refresh
-script only acts on `channels_version` hash changes — a manual server config
-edit that doesn't bump the version leaves all partners broken.
-
-After normalization, `update.sh` can be run on any partner edge to heal drift
-in under 30 seconds, without knowing which fields changed on the server.
+The daily refresh script only acts on `channels_version` hash changes — a
+manual server config edit that doesn't bump the version leaves all partners
+silently broken (see the 2026-05-12 incident above). After normalization,
+`update.sh` can heal drift on any partner edge in under 30 seconds, without
+knowing which fields changed on the server.

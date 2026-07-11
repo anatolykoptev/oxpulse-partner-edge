@@ -26,7 +26,7 @@ use super::{render_to_file, RenderError};
 ///   - 203.0.113.x                          — TEST-NET-3 (RFC5737)
 ///   - :: / ::1                             — IPv6 unspecified / loopback
 ///
-/// Evidence: ruoxp crashloop 2026-05-17 -- naive_server=naive-test.example.com
+/// Evidence: edge-d crashloop 2026-05-17 -- naive_server=naive-test.example.com
 /// was rendered and started; container crashed because real DNS doesn't resolve.
 ///
 /// Bash guard (install.sh) mirrors this regex. Rust render::naive is

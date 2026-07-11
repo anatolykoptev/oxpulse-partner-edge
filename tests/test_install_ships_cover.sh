@@ -1,7 +1,7 @@
 #!/bin/bash
 # Regression: install.sh + hydrate.sh must ship cover/cover.html and the
 # healthcheck must include a live probe of GET / so a root-URL misconfig is
-# loud (rvpn outage 2026-04-20 = silent 404 on partner root URL).
+# loud (edge-c outage 2026-04-20 = silent 404 on partner root URL).
 #
 # NOTE: the @probe cover *decoy* was removed 2026-04-20 (it interacted badly
 # with the Service Worker) — GET / now serves the SPA directly (healthcheck
@@ -9,7 +9,7 @@
 # /etc/oxpulse-partner-edge/cover bind mount, so this test still guards that
 # the asset is fetched + placed and that GET / is probed.
 set -euo pipefail
-REPO_ROOT="${REPO_ROOT:-/home/user/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 INSTALL="$REPO_ROOT/install.sh"
 HYDRATE="$REPO_ROOT/hydrate.sh"
 HEALTH="$REPO_ROOT/healthcheck.sh"

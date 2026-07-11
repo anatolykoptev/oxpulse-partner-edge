@@ -1,6 +1,6 @@
 #!/bin/bash
 # tests/test_migrate_bak.sh
-# Tests scripts/migrate-bak-to-confd.sh with a cheburator-like .bak file.
+# Tests scripts/migrate-bak-to-confd.sh with a edge-a-like .bak file.
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -16,7 +16,7 @@ T_CONFD="$T_ETC/conf.d"
 mkdir -p "$T_ETC" "$T_CONFD"
 trap 'rm -rf "$TMPDIR_ROOT"' EXIT
 
-BAK_FILE="$T_ETC/Caddyfile.bak.pre-cheburator-20260508"
+BAK_FILE="$T_ETC/Caddyfile.bak.pre-edge-a-20260508"
 cat > "$BAK_FILE" << 'BAKEOF'
 # Rendered by install.sh
 
@@ -24,12 +24,12 @@ cat > "$BAK_FILE" << 'BAKEOF'
     admin localhost:2019 {
         origins localhost 127.0.0.1
     }
-    email admin@cheburator.bot
+    email admin@edge-a.example
     servers {
         protocols h1 h2
         listener_wrappers {
             layer4 {
-                @turns tls sni turns.cheburator.bot
+                @turns tls sni turns.edge-a.example
                 route @turns {
                     proxy tcp/host.docker.internal:5349
                 }
@@ -40,13 +40,13 @@ cat > "$BAK_FILE" << 'BAKEOF'
     log { format json; level INFO }
 }
 
-cheburator.bot {
+edge-a.example {
     encode gzip zstd
     handle /relay/* { reverse_proxy host.docker.internal:8912 }
     handle { import tunnel_upstream_default }
 }
 
-turns.cheburator.bot {
+turns.edge-a.example {
     tls { issuer acme { disable_tlsalpn_challenge } }
     respond 421
 }
@@ -65,21 +65,21 @@ http://127.0.0.1:9080 {
 }
 
 # Operator additions
-cheburator.bot.ru {
-    root * /srv/cheburator-static
+edge-a.example.ru {
+    root * /srv/edge-a-static
     file_server
     encode gzip
 }
 
-www.cheburator.bot {
-    redir https://cheburator.bot{uri} permanent
+www.edge-a.example {
+    redir https://edge-a.example{uri} permanent
 }
 BAKEOF
 
 echo "==> Test 1: dry-run — output shown, no files written"
 DRY_OUT=$(PREFIX_ETC="$T_ETC" bash "$MIGRATE" "$BAK_FILE" 2>&1 || true)
-echo "$DRY_OUT" | grep -qi "cheburator" \
-    || { echo "FAIL: no cheburator content in dry-run output"; echo "$DRY_OUT"; exit 1; }
+echo "$DRY_OUT" | grep -qi "edge-a" \
+    || { echo "FAIL: no edge-a content in dry-run output"; echo "$DRY_OUT"; exit 1; }
 echo "$DRY_OUT" | grep -qi "dry.run" \
     || { echo "FAIL: dry-run notice missing"; echo "$DRY_OUT"; exit 1; }
 CADDY_FILES=$(find "$T_CONFD" -name "*.caddy" 2>/dev/null | wc -l)
@@ -93,13 +93,13 @@ MIGRATED_FILE=$(find "$T_CONFD" -name "migrated-*.caddy" 2>/dev/null | head -1)
 [[ -n "$MIGRATED_FILE" ]] || { echo "FAIL: no migrated-*.caddy created"; exit 1; }
 echo "OK: migrated file: $MIGRATED_FILE"
 
-grep -q "cheburator.bot.ru" "$MIGRATED_FILE" \
-    || { echo "FAIL: cheburator.bot.ru missing from extracted content"; cat "$MIGRATED_FILE"; exit 1; }
-grep -q "www.cheburator.bot" "$MIGRATED_FILE" \
-    || { echo "FAIL: www.cheburator.bot missing from extracted content"; cat "$MIGRATED_FILE"; exit 1; }
+grep -q "edge-a.example.ru" "$MIGRATED_FILE" \
+    || { echo "FAIL: edge-a.example.ru missing from extracted content"; cat "$MIGRATED_FILE"; exit 1; }
+grep -q "www.edge-a.example" "$MIGRATED_FILE" \
+    || { echo "FAIL: www.edge-a.example missing from extracted content"; cat "$MIGRATED_FILE"; exit 1; }
 echo "OK: extracted content has operator vhosts"
 
-if grep -q "turns.cheburator.bot" "$MIGRATED_FILE"; then
+if grep -q "turns.edge-a.example" "$MIGRATED_FILE"; then
     echo "FAIL: auto-generated turns vhost leaked into extracted content"
     cat "$MIGRATED_FILE"
     exit 1

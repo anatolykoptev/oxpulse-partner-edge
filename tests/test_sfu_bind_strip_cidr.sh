@@ -14,7 +14,7 @@
 # "Healthcheck fitness function" section below). A prior fix wired the
 # healthcheck's host tokens to the raw {{AWG_ALLOCATED_IP}} placeholder
 # (independently of the environment: block's {{AWG_HOST_IP}}), which
-# reintroduced the /CIDR bug for the healthcheck specifically (ruoxp,
+# reintroduced the /CIDR bug for the healthcheck specifically (edge-d,
 # failingstreak=19471+) while this file's CIDR-stripping tests kept passing
 # — because they only ever checked the environment: block, not the
 # healthcheck. See tests/test_sfu_healthcheck_uses_bind.sh for the
@@ -146,11 +146,11 @@ _sfu_healthcheck_line() {
 @test "docker-compose.yml.tpl: SFU healthcheck does NOT hardcode literal 127.0.0.1 for metrics/relay-API host" {
     hc_line=$(_sfu_healthcheck_line)
     if echo "$hc_line" | grep -qF 'http://127.0.0.1'; then
-        echo "REGRESSION: metrics probe hardcodes 127.0.0.1 (Bug #4, 2026-05-28 ruoxp): $hc_line"; return 1
+        echo "REGRESSION: metrics probe hardcodes 127.0.0.1 (Bug #4, 2026-05-28 edge-d): $hc_line"; return 1
     fi
     relay_clause=$(echo "$hc_line" | grep -oE 'RELAY_JWT_SECRET[^;]+' || true)
     if echo "$relay_clause" | grep -qF '127.0.0.1'; then
-        echo "REGRESSION: relay-API probe hardcodes 127.0.0.1 (Bug #4, 2026-05-28 ruoxp): $relay_clause"; return 1
+        echo "REGRESSION: relay-API probe hardcodes 127.0.0.1 (Bug #4, 2026-05-28 edge-d): $relay_clause"; return 1
     fi
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # tests/test_healthcheck_sfu_metrics_uses_mesh_bind.sh
 #
-# Regression guard for Bug #7 (2026-05-28 ruoxp fresh install v0.12.71):
+# Regression guard for Bug #7 (2026-05-28 edge-d fresh install v0.12.71):
 # healthcheck.sh check #12 ("SFU /metrics → 200") probed 127.0.0.1:9317
 # instead of SFU_METRICS_BIND from compose file. On post-#288 edges the SFU
 # metrics socket is mesh-only (10.9.0.x), so 127.0.0.1 → connection refused.

@@ -2,7 +2,7 @@
 # DO NOT EDIT DIRECTLY — regenerated on reinstall / upgrade.
 #
 # Placeholders (all substituted at install time):
-#   zvonilka zvonilka.net 203.0.113.10:5349
+#   edge-b edge-b.example 203.0.113.10:5349
 #   test-turn-secret-deadbeef d529dee6-3cdd-4079-95d1-f8801722147c U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk abcd1234
 #   www.samsung.com 157.22.204.190  stable
 #   7878 9317 -----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAZiwaWp+FJ1sGprGGS69mq+sB6nhwOMi24xGSGfgdXNo=\n-----END PUBLIC KEY-----\n
@@ -21,8 +21,8 @@ services:
       # Phase 1 canary endpoints: host-only bind so healthcheck.sh can reach them.
       - "127.0.0.1:9080:9080"
     environment:
-      PARTNER_DOMAIN: "zvonilka.net"
-      PARTNER_ID: "zvonilka"
+      PARTNER_DOMAIN: "edge-b.example"
+      PARTNER_ID: "edge-b"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -82,10 +82,10 @@ services:
     network_mode: host        # TURN needs real public IP + UDP relay ports
     environment:
       TURN_SECRET: "test-turn-secret-deadbeef"
-      REALM: "zvonilka.net"
+      REALM: "edge-b.example"
       PUBLIC_IPV4: "157.22.204.190"
       PRIVATE_IPV4: ""
-      PARTNER_ID: "zvonilka"
+      PARTNER_ID: "edge-b"
     volumes:
       - ./coturn.conf:/etc/coturn/turnserver.conf:ro
       - coturn-log:/var/log/turnserver
@@ -122,7 +122,7 @@ services:
       # host firewall state. Audit 2026-05-21 found these were leaking on the
       # public NIC across all 3 production partners. AWG_HOST_IP is the
       # partner's own mesh IP without CIDR prefix (e.g. 10.9.0.6 for
-      # zvonilka), stripped from AWG_ALLOCATED_IP (e.g. 10.9.0.6/24) which
+      # edge-b), stripped from AWG_ALLOCATED_IP (e.g. 10.9.0.6/24) which
       # central returns with prefix for awg0.conf. SFU v0.12.67+ strict
       # getaddrinfo rejects the /24 form. Empty when mesh disabled — SFU
       # then falls back to bind_address.
@@ -134,7 +134,7 @@ services:
       # Per-edge label baked into every Prometheus series via the SFU's
       # const_label registry. Empty → "local" (default), which collides
       # with other edges in the central Prom view. Convention: <partner>1.
-      SFU_EDGE_ID: "zvonilka1"
+      SFU_EDGE_ID: "edge-b1"
       # OpenTelemetry trace export — empty / unset = exporter disabled at SFU
       # init (zero overhead). When set by install.sh from the central's awg
       # response (typical: http://10.9.0.2:4317), spans flow through awg0
@@ -143,7 +143,7 @@ services:
       RUST_LOG: "info"
       RELAY_JWT_SECRET: "test-relay-jwt-secret"
       SFU_RELAY_API_PORT: "8912"
-      PARTNER_ID: "zvonilka"
+      PARTNER_ID: "edge-b"
       # Phase 2: Ed25519 public key for asymmetric relay JWT verification.
       # Fetched from /api/partner/keys at install time; refreshed daily by
       # oxpulse-partner-edge-refresh.sh (written to sfu-keys.env).

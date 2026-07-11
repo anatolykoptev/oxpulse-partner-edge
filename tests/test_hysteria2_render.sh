@@ -18,7 +18,7 @@ source "$REPO_ROOT/channel-render-lib.sh"
 [[ -f "$REPO_ROOT/config/defaults.conf" ]] && source "$REPO_ROOT/config/defaults.conf"
 
 # Set fixture values — pin explicit literals for byte-identical golden comparison.
-KROLIK_SERVER="${OXPULSE_HY2_SERVER:-203.0.113.10:51822}"
+HUB_SERVER="${OXPULSE_HY2_SERVER:-203.0.113.10:51822}"
 HY2_AUTH_PASS="GOLDEN_AUTH_PASS_FIXTURE"
 HY2_OBFS_PASS="GOLDEN_OBFS_PASS_FIXTURE"
 HY2_LOCAL_LISTEN="${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
@@ -26,7 +26,7 @@ HY2_REMOTE_BACKEND="${OXPULSE_HY2_REMOTE_BACKEND:-127.0.0.1:8907}"
 
 # Render
 _render_hysteria2_to "$TPL" "$RENDERED" \
-    "$KROLIK_SERVER" "$HY2_AUTH_PASS" "$HY2_OBFS_PASS" \
+    "$HUB_SERVER" "$HY2_AUTH_PASS" "$HY2_OBFS_PASS" \
     "$HY2_LOCAL_LISTEN" "$HY2_REMOTE_BACKEND"
 
 # Compare

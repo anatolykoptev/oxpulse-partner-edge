@@ -22,8 +22,8 @@ fn unset_test_vars() {
 #[serial]
 fn substitutes_single_line_vars() {
     unset_test_vars();
-    env::set_var("PARTNER_ID", "zvonilka");
-    env::set_var("PARTNER_DOMAIN", "zvonilka.net");
+    env::set_var("PARTNER_ID", "edge-b");
+    env::set_var("PARTNER_DOMAIN", "edge-b.example");
     env::set_var("BACKEND_HOST", "203.0.113.10");
     env::set_var("BACKEND_PORT", "5349");
     env::set_var("SFU_SIGNING_PUBLIC_KEY", "some-key");
@@ -31,7 +31,7 @@ fn substitutes_single_line_vars() {
     let out = substitute_from_env(tpl);
     assert_eq!(
         out,
-        "p=zvonilka d=zvonilka.net b=203.0.113.10:5349 k=some-key e="
+        "p=edge-b d=edge-b.example b=203.0.113.10:5349 k=some-key e="
     );
 }
 
