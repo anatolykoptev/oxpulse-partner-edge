@@ -498,4 +498,3 @@ fn mark_relay_source_excludes_client_from_speaker_election() {
         );
     }
 }
-
