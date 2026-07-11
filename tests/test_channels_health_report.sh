@@ -152,7 +152,7 @@ rm -rf "$T1"
 # ── Test 2: ch1 real end-to-end tunnel (canary/tunnel 2xx) → handshake_ok=true
 # Regression guard for the local-liveness blind spot: probe_ch1 no longer
 # checks `docker exec ... ss -ltn` (which stays green even when the real
-# VLESS-Reality path is ТСПУ-blocked — the zvonilka incident this rewrite
+# VLESS-Reality path is ТСПУ-blocked — the edge-b incident this rewrite
 # fixes, see Test 2b). It now curls the Phase 1 canary route
 # (http://127.0.0.1:9080/canary/tunnel) that proxies through xray-client to
 # the central backend end-to-end.
@@ -202,7 +202,7 @@ rm -rf "$T2"
 
 # ── Test 2b: ch1 real end-to-end tunnel BLOCKED (canary/tunnel 502) ──────────
 # THE regression guard for the bug this whole rewrite exists to fix: live-
-# verified on zvonilka, xray was ТСПУ-blocked (502 on canary/tunnel, the real
+# verified on edge-b, xray was ТСПУ-blocked (502 on canary/tunnel, the real
 # path) while the OLD local-liveness probe (docker exec ss -ltn) stayed green
 # the entire time. probe_ch1 must now report handshake_ok=false when the real
 # tunnel path fails, even though nothing here checks local container state at
@@ -214,7 +214,7 @@ make_bin "$T2B"
 mkdir -p "$T2B/etc"
 write_node_config "$T2B/etc" '{"id":"ch1"}'
 
-# curl stub: canary/tunnel → 502 (ТСПУ-blocked real tunnel path — zvonilka).
+# curl stub: canary/tunnel → 502 (ТСПУ-blocked real tunnel path — edge-b).
 cat > "$T2B/curl" <<'STUB'
 #!/bin/bash
 for a in "$@"; do
@@ -236,7 +236,7 @@ OUTPUT2B=$(PATH="$T2B:/usr/bin:/bin" \
 set -e
 
 if printf '%s\n' "$OUTPUT2B" | jq -e 'select(.channel_name=="ch1" and .channel_handshake_ok==false)' >/dev/null 2>&1; then
-    ok "test2b: ZVONILKA REGRESSION GUARD — 502 on real tunnel path → handshake_ok=false"
+    ok "test2b: EDGE-B REGRESSION GUARD — 502 on real tunnel path → handshake_ok=false"
 else
     fail "test2b: REGRESSION — 502 on canary/tunnel must report handshake_ok=false; got: $OUTPUT2B"
 fi
@@ -739,7 +739,7 @@ rm -rf "$T11"
 # Regression guard for the anti-SSRF-vs-loopback collision: the -y self-test
 # relayed peer is reached via the server-address argument; pointing it at
 # 127.0.0.1 trips denied-peer-ip=127.0.0.0-127.255.255.255 → timeout → false
-# negative + leaked allocations (7-day RU media outage, zvonilka 2026-06-11).
+# negative + leaked allocations (7-day RU media outage, edge-b 2026-06-11).
 #
 # NOTE on fixture IPs: stubs below use 203.0.113.77 (TEST-NET-3, RFC 5737) and
 # elsewhere 198.51.100.9 (TEST-NET-2, RFC 5737) as placeholder "public" IPs.

@@ -467,7 +467,7 @@ mod tests {
     /// on which IDs are valid.
     #[test]
     fn validate_partner_id_accepts_spec_cases() {
-        for ok in ["rvpn", "piter", "a1b", "partner-ops"] {
+        for ok in ["edge-c", "relay-x", "a1b", "partner-ops"] {
             assert!(validate_partner_id(ok).is_ok(), "expected accept: {ok}");
         }
     }
@@ -478,9 +478,9 @@ mod tests {
             "",
             "ab",
             "AB",
-            "-rvpn",
-            "rvpn-",
-            "rvpn/xxx",
+            "-edge-c",
+            "edge-c-",
+            "edge-c/xxx",
             "super_partner",
         ] {
             assert!(

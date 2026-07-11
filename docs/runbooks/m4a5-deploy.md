@@ -47,7 +47,7 @@
 
 ---
 
-## Deploy: per node (rvpn / piter / krolik)
+## Deploy: per node (edge-c / relay-x / hub)
 
 > The bundle install path (`install.sh`) handles this end-to-end if the
 > backend `/api/partner/config` returns the new `signaling_sfu_secret`
@@ -56,7 +56,7 @@
 
 ```bash
 # 0. SSH to the node
-ssh <node>            # rvpn / piter / krolik
+ssh <node>            # edge-c / relay-x / hub
 
 # 1. Pull the new image (built by CI on tag push)
 docker pull ghcr.io/anatolykoptev/partner-edge-sfu:v0.12.1
@@ -66,7 +66,7 @@ docker stop oxpulse-partner-sfu
 docker rm   oxpulse-partner-sfu
 
 # 3. Restart with the new env vars (SFU_CLIENT_WS_PORT + SIGNALING_SFU_SECRET).
-#    Replace <piter|krolik|rvpn>, the secrets, and the public IP.
+#    Replace <relay-x|hub|edge-c>, the secrets, and the public IP.
 docker run -d \
   --name oxpulse-partner-sfu \
   --restart unless-stopped \
@@ -76,7 +76,7 @@ docker run -d \
   -e SFU_METRICS_PORT=9317 \
   -e SFU_RELAY_API_PORT=8912 \
   -e SFU_CLIENT_WS_PORT=8920 \
-  -e PARTNER_ID=<piter|krolik|rvpn> \
+  -e PARTNER_ID=<relay-x|hub|edge-c> \
   -e RUST_LOG=info \
   -e RELAY_JWT_SECRET=<32+ byte hex> \
   -e SFU_SIGNING_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----' \
@@ -142,7 +142,7 @@ docker run -d \
   -e SFU_UDP_PORT=7878 \
   -e SFU_METRICS_PORT=9317 \
   -e SFU_RELAY_API_PORT=8912 \
-  -e PARTNER_ID=<piter|krolik|rvpn> \
+  -e PARTNER_ID=<relay-x|hub|edge-c> \
   -e RUST_LOG=info \
   -e RELAY_JWT_SECRET=<32+ byte hex> \
   -e SFU_SIGNING_PUBLIC_KEY='...' \
@@ -158,8 +158,8 @@ and the SFU falls back to the historical bind-address candidate behavior.)
 
 ## Port-allocation note
 
-8911 was the original choice for the client_ws endpoint. On krolik
+8911 was the original choice for the client_ws endpoint. On hub
 (arm-max-1768977332, San Jose), 8911 is squatted by an unrelated
 go-imagine process and would require fleet-wide eviction to free up.
 8920 was picked instead so the same Caddy template ships uniformly to
-rvpn / piter / krolik without per-node port juggling.
+edge-c / relay-x / hub without per-node port juggling.

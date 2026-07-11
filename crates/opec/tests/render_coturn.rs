@@ -11,8 +11,8 @@ fn fixture_dir() -> PathBuf {
 }
 
 fn set_frozen_env() {
-    env::set_var("PARTNER_ID", "zvonilka");
-    env::set_var("PARTNER_DOMAIN", "zvonilka.net");
+    env::set_var("PARTNER_ID", "edge-b");
+    env::set_var("PARTNER_DOMAIN", "edge-b.example");
     env::set_var("TURN_SECRET", "test-turn-secret-deadbeef");
     env::set_var("PUBLIC_IP", "157.22.204.190");
     env::set_var("PRIVATE_IP", "");

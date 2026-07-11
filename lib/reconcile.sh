@@ -185,7 +185,7 @@ _setup_caddy_render_env() {
 # TPL_PATH is the local copy of Caddyfile.tpl (fetched by caller, or live repo).
 # CADDY_INSTALLED_PATH defaults to $PREFIX_ETC/Caddyfile.
 #
-# Piter (SFU-only) guard: if caddy service absent from COMPOSE_FILE, skip gracefully.
+# relay-x (SFU-only) guard: if caddy service absent from COMPOSE_FILE, skip gracefully.
 #
 # DRY_RUN=1: log what would happen, skip write.
 # ---------------------------------------------------------------------------
@@ -195,7 +195,7 @@ reconcile_caddy_surface() {
     local _out_path="${_candidate_dir}/Caddyfile"
     local _installed_path="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/Caddyfile"
 
-    # Piter guard: no caddy service → skip.
+    # relay-x guard: no caddy service → skip.
     if ! grep -qE '^\s+caddy:' "${COMPOSE_FILE:-}" 2>/dev/null; then
         warn "reconcile_caddy: caddy service not found in compose — skipping (SFU-only node?)"
         return 0
@@ -320,7 +320,7 @@ reconcile_caddy_surface() {
 #       TURNS_SUBDOMAIN    → turns_subdomain field in node-config.json.
 #   - BACKEND_API: fleet constant = https://api.oxpulse.chat (install.sh:58).
 #       NOT derived from node-config backend_endpoint (that is the scheme-less
-#       host:port TURN/SFU endpoint, e.g. krolik.oxpulse.chat:5349 — completely
+#       host:port TURN/SFU endpoint, e.g. hub.example:5349 — completely
 #       different field).  If missing from state, default to the fleet constant.
 #   - NEVER derive or write secrets (reality.priv, awg-private.key, token,
 #     service_token_hash, signaling keys — those live in their own files).
@@ -406,10 +406,10 @@ except Exception: pass
     # Phase 2c: BACKEND_API — fleet constant, NOT derived from node-config.
     #
     # IMPORTANT: node-config.json's backend_endpoint is the scheme-less
-    # host:port TURN/SFU endpoint (e.g. krolik.oxpulse.chat:5349 or
+    # host:port TURN/SFU endpoint (e.g. hub.example:5349 or
     # api.oxpulse.chat:443).  It is NOT the registration API base URL.
     # Stripping the port from that field produces a wrong, scheme-less
-    # value (e.g. "krolik.oxpulse.chat") — not a valid BACKEND_API.
+    # value (e.g. "hub.example") — not a valid BACKEND_API.
     #
     # BACKEND_API is a fleet constant: every production edge uses
     # https://api.oxpulse.chat (mirrors are handled via OXPULSE_MIRROR_BASE,

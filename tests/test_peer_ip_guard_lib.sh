@@ -3,7 +3,7 @@
 # lib/peer-ip-guard-lib.sh (SSRF / internal-IP classification guard).
 #
 # P1 of the 2026-07-08 health-report-lib-extraction plan
-# (~/deploy/krolik-server/plans/oxpulse-partner-edge/2026-07-08-health-report-lib-extraction.md):
+# (the operator's internal health-report-lib extraction plan (2026-07-08)):
 # extract _ip_is_internal / _host_is_internal / _ipv4_literal_is_suspect /
 # _ipv6_embedded_v4 out of oxpulse-channels-health-report.sh (was lines 610-784)
 # into their own lib. This file ports EVERY SEC-CR assertion the inline

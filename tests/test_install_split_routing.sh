@@ -10,7 +10,7 @@
 #   6. Unit enabled (is-enabled check logged)
 #   7. Idempotent re-run — no error, no dup
 #   8. DRY_RUN=1 performs no mutations
-# Ref: canon §8 ~/deploy/krolik-server/plans/oxpulse-partner-edge/2026-05-27-split-routing-settings-canon.md
+# Ref: canon §8 the operator's internal split-routing settings canon (2026-05-27)
 
 setup() {
 	REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -166,7 +166,7 @@ ENVEOF
 		_split_routing_install_unit
 	"
 	[ "$status" -eq 0 ]
-	# Static file has hard-coded /usr/local/sbin (default PREFIX_SBIN, verified on cheburator).
+	# Static file has hard-coded /usr/local/sbin (default PREFIX_SBIN, verified on edge-a).
 	grep -q "ExecStart=/usr/local/sbin/oxpulse-partner-edge-split-routing" \
 		"$DEST_SYSTEMD/oxpulse-partner-edge-split-routing.service"
 }

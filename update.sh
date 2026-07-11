@@ -165,7 +165,7 @@ if [[ $_has_flat_fields -eq 0 ]]; then
     _ch_count=$(jq '.channels // [] | length' "$NODE_CFG" 2>/dev/null || echo 0)
     if [[ "$_ch_count" -eq 0 ]]; then
         die "node-config.json is missing required fields (reality_uuid, reality_public_key, backend_endpoint)
-  and has no channels[] array. See docs/piter-normalization.md."
+  and has no channels[] array. See docs/relay-x-normalization.md."
     fi
     log "channels[] schema detected — fields will be read from channels[0]"
 fi
@@ -272,8 +272,8 @@ fi
 if [[ $_smoke_ok -eq 0 ]]; then
     die "smoke test FAILED: ${_smoke_details}
   xray tunnel is NOT working after update. Possible causes:
-    - reality_public_key in node-config.json does not match krolik server
-    - krolik server privateKey changed and /api/partner/keys not yet updated
+    - reality_public_key in node-config.json does not match hub server
+    - hub server privateKey changed and /api/partner/keys not yet updated
     - xray-client container image is incompatible with new protocol settings
   Operator action required. Backup config at: ${XRAY_CFG}.bak.* (see ls ${XRAY_CFG}.bak.*)"
 fi

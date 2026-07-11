@@ -13,7 +13,7 @@
 #   (b) the compose bind mount is still present, and
 #   (c) the @probe decoy stays REMOVED (regression guard on the SW-bug fix).
 set -euo pipefail
-REPO_ROOT="${REPO_ROOT:-/home/krolik/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CF="$REPO_ROOT/Caddyfile.tpl"
 CV="$REPO_ROOT/cover/cover.html"
 CP="$REPO_ROOT/docker-compose.yml.tpl"

@@ -3,8 +3,8 @@ name: promote-stable
 # Manual operator gate that retags an existing :vX.Y.Z release as :stable on
 # GHCR. Once promoted, the SFU-pool hosts (partner_nodes WHERE in_sfu_pool AND
 # healthy — the registry is the source of truth, NOT a list here) auto-pull the
-# new version on their next updater-timer fire. See the oxpulse SFU auto-update
-# canon: piter-server/docs/oxpulse-sfu-auto-update.md.
+# new version on their next updater-timer fire. See the operator's internal
+# SFU auto-update runbook for the full canon.
 #
 # Why a separate workflow (not auto in release.yml):
 #   release.yml runs on every tag push, which means every patch release would
@@ -93,8 +93,8 @@ jobs:
             echo "SFU-pool hosts — \`partner_nodes WHERE in_sfu_pool = true AND"
             echo "healthy = true\` (the registry is the source of truth; this"
             echo "workflow does NOT enumerate edges) — auto-pull the new"
-            echo "\`:stable\` on their next updater-timer fire. See the oxpulse"
-            echo "SFU auto-update canon in piter-server."
+            echo "\`:stable\` on their next updater-timer fire. See the"
+            echo "operator's internal SFU auto-update runbook for the canon."
             echo ""
             echo "Components retagged: sfu, coturn, caddy, xray, naive"
           } >> "$GITHUB_STEP_SUMMARY"

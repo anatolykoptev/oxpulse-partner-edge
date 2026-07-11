@@ -4,7 +4,7 @@
 # Asserts:
 # 1. systemd/oxpulse-partner-edge-split-routing.service exists and is correct.
 # 2. Its content matches what _split_routing_install_unit() previously rendered
-#    (byte-identical to cheburator's installed unit with PREFIX_SBIN=/usr/local/sbin).
+#    (byte-identical to edge-a's installed unit with PREFIX_SBIN=/usr/local/sbin).
 # 3. lib/install-split-routing.sh no longer contains the heredoc render path.
 # 4. lib/install-split-routing.sh installs the file from systemd/ (static path).
 
@@ -66,8 +66,8 @@ setup() {
   [ "$status" -ne 0 ] || [ "$output" = "0" ]
 }
 
-@test "static unit content matches cheburator installed unit (byte check on key fields)" {
-  # Verify ExecStart is exactly the value cheburator has (verified live 2026-05-27).
+@test "static unit content matches edge-a installed unit (byte check on key fields)" {
+  # Verify ExecStart is exactly the value edge-a has (verified live 2026-05-27).
   grep -qF "ExecStart=/usr/local/sbin/oxpulse-partner-edge-split-routing" \
     "$REPO_ROOT/systemd/oxpulse-partner-edge-split-routing.service"
   # No variable placeholders remain (e.g. ${PREFIX_SBIN} must not appear).

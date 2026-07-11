@@ -1,8 +1,7 @@
 #!/usr/bin/env bats
 # tests/test_channel_health_lib_fitness.sh — fitness functions for the P2
 # strangler-fig extraction (2026-07-08 plan:
-# ~/deploy/krolik-server/plans/oxpulse-partner-edge/
-# 2026-07-08-health-report-lib-extraction.md).
+# the operator's internal health-report-lib extraction plan (2026-07-08)).
 #
 # Extracted probe_ch1-4, _resolve_coturn_probe_target, _elapsed_ms,
 # _write_probe_mode_state, _post_channel, _check_upstream_transitions,

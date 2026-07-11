@@ -162,7 +162,7 @@ check_migration() {
 
     # Test G: VALUE assertion — BACKEND_API must be the fleet constant.
     # Falsification: old (wrong) code stripped port from node-config.backend_endpoint
-    # and wrote e.g. "krolik.oxpulse.chat" (scheme-less, wrong host).
+    # and wrote e.g. "hub.example" (scheme-less, wrong host).
     # The correct value is always the fleet constant https://api.oxpulse.chat.
     local post_ba
     post_ba=$(grep '^BACKEND_API=' "$state_file" | cut -d= -f2 || true)
@@ -215,7 +215,7 @@ mkdir -p "$ETC_50"
 cat > "$ETC_50/node-config.json" << 'NCEOF'
 {
   "node_id": "partner-abc123-node",
-  "backend_endpoint": "krolik.oxpulse.chat:5349",
+  "backend_endpoint": "hub.example:5349",
   "turn_secret": "secret-not-exposed",
   "turns_subdomain": "api-1a2b3c"
 }

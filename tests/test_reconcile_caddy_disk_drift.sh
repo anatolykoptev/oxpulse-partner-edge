@@ -71,7 +71,7 @@ export TURNS_SUBDOMAIN="turns.test.example.com"
 export NAIVE_SOCKS_PORT="1080"     # tier-1 resolution → no docker inspect
 export PARTNER_EDGE_TEXTFILE_DIR="$TMP/textfile"
 
-# caddy service present → defeats the piter/SFU-only skip guard.
+# caddy service present → defeats the relay-x/SFU-only skip guard.
 cat > "$COMPOSE_FILE" << 'COMPOSE'
 services:
   caddy:

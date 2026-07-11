@@ -9,7 +9,7 @@
 #   5. Healthy node → exits 0
 #   6. Idempotency: run 3× → same final xray-client.json
 #
-# All tests run without touching a real partner edge or real krolik backend.
+# All tests run without touching a real partner edge or real hub backend.
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -62,8 +62,8 @@ write_full_node_config() {
     cat > "$path" <<'EOF'
 {
   "node_id": "test-node-001",
-  "partner_id": "rvpn",
-  "edge_id": "rvpn1",
+  "partner_id": "edge-c",
+  "edge_id": "edge-c1",
   "public_ip": "192.0.2.1",
   "awg_ip": "10.0.0.1",
   "reality_uuid": "00000000-0000-0000-0000-000000000001",
@@ -72,7 +72,7 @@ write_full_node_config() {
   "reality_short_id": "abcd1234",
   "reality_server_name": "www.samsung.com",
   "reality_server_names": ["www.samsung.com"],
-  "backend_endpoint": "krolik.example.com:5349"
+  "backend_endpoint": "hub.example.com:5349"
 }
 EOF
 }
@@ -105,9 +105,9 @@ rendered=$(sed \
     -e 's/{{REALITY_PUBLIC_KEY}}/U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk/g' \
     -e 's/{{REALITY_SHORT_ID}}/abcd1234/g' \
     -e 's/{{REALITY_SERVER_NAME}}/www.samsung.com/g' \
-    -e 's/{{BACKEND_HOST}}/krolik.example.com/g' \
+    -e 's/{{BACKEND_HOST}}/hub.example.com/g' \
     -e 's/{{BACKEND_PORT}}/5349/g' \
-    -e 's/{{BACKEND_ENDPOINT}}/krolik.example.com:5349/g' \
+    -e 's/{{BACKEND_ENDPOINT}}/hub.example.com:5349/g' \
     "$TPL")
 
 if ! echo "$rendered" | python3 -m json.tool >/dev/null 2>&1; then
@@ -163,7 +163,7 @@ for ob in d.get('outbounds', []):
 print('NO_XMUX')
 ")
     if [[ "$xmux_vals" == "OK" ]]; then
-        pass "test1c: xmux values match krolik server (maxConcurrency=1, cMaxReuseTimes=64, cMaxLifetimeMs=15000)"
+        pass "test1c: xmux values match hub server (maxConcurrency=1, cMaxReuseTimes=64, cMaxLifetimeMs=15000)"
     else
         fail "test1c: xmux values mismatch: $xmux_vals"
     fi

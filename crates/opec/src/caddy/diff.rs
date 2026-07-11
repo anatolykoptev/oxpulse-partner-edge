@@ -1,6 +1,6 @@
 //! Pure-function diff between two Caddy route arrays.
 //!
-//! Routes are matched by their `@id` field (e.g. `"tenant:cheburator"`).
+//! Routes are matched by their `@id` field (e.g. `"tenant:edge-a"`).
 //! Comparison is shallow `==` on the `serde_json::Value` — exact byte
 //! equality after deserialization, not semantic equivalence.
 

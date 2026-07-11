@@ -6,7 +6,7 @@
 # Strategy: PATH-shim system binaries (nft, ip, sysctl, awg, getent) as
 # argv+stdin recorders. Run the scripts against fixture files. Assert the
 # 14 эталон invariants from the spec
-# (~/deploy/krolik-server/plans/oxpulse-partner-edge/2026-05-27-split-routing-settings-canon.md §10).
+# (the operator's internal split-routing settings canon (2026-05-27) §10).
 #
 # All file paths are overridden via env vars so the test runs without root.
 
@@ -70,7 +70,7 @@ MOCK
 echo "getent $*" >> "$CALLS_DIR/argv.log"
 # ahostsv4 <host> → return fixture IP
 if [[ "$1" == "ahostsv4" ]]; then
-    echo "192.9.243.148 STREAM krolik.example.com"
+    echo "192.9.243.148 STREAM hub.example.com"
 fi
 exit 0
 MOCK

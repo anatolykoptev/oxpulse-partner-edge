@@ -4,7 +4,7 @@
 # lib/install-systemd.sh (installer modularization); assert against the lib
 # module that now owns it.
 set -euo pipefail
-REPO_ROOT="${REPO_ROOT:-/home/krolik/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SYSTEMD_LIB="$REPO_ROOT/lib/install-systemd.sh"
 
 grep -q 'TURNS_SUBDOMAIN' "$SYSTEMD_LIB" \

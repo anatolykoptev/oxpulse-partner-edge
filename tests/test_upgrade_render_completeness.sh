@@ -102,7 +102,7 @@ PARTNER_DOMAIN="t6.example.com"
 TURNS_SUBDOMAIN="turns"
 export PARTNER_DOMAIN TURNS_SUBDOMAIN  # block guards on ${PARTNER_DOMAIN:-} / ${TURNS_SUBDOMAIN:-}
 
-# caddy service present → defeats the piter/SFU-only skip guard in the block.
+# caddy service present → defeats the relay-x/SFU-only skip guard in the block.
 cat > "$COMPOSE_FILE" << 'COMPOSE'
 services:
   caddy:

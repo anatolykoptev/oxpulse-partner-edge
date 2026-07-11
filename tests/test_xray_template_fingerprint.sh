@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regression guard for the v0.12.20 rvpn rollback incident (2026-05-09).
+# Regression guard for the v0.12.20 edge-c rollback incident (2026-05-09).
 #
 # Incident: upgrade to v0.12.20 triggered an auto-rollback to v0.11.8 because
 #   healthcheck checks 2 (API /api/health) and 10 (SPA GET /) failed after the

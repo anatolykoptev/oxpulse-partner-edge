@@ -15,10 +15,10 @@
 #   RU8  Both sources fail; last-good file preserved; exit non-zero
 #   RU9  Both sources fail with no last-good file; exit non-zero
 #   RU10 Hardened curl flags (--proto --tlsv1.2 --max-time)
-#   RU11 No piter-specific seed CIDRs hardcoded in script
-#   RU12 Default OUTFILE is /etc/oxpulse-partner-edge/ru-subnets.txt (not piter path)
+#   RU11 No relay-x-specific seed CIDRs hardcoded in script
+#   RU12 Default OUTFILE is /etc/oxpulse-partner-edge/ru-subnets.txt (not relay-x path)
 #
-# Canon §1: ~/deploy/krolik-server/plans/oxpulse-partner-edge/2026-05-27-split-routing-settings-canon.md
+# Canon §1: the operator's internal split-routing settings canon (2026-05-27)
 # Compat: bats < 1.5 — no bats_require_minimum_version, no 'run !'
 
 setup() {
@@ -385,12 +385,12 @@ STUB
     }
 }
 
-# ─── RU11: no piter seed CIDRs ───────────────────────────────────────────────
+# ─── RU11: no relay-x seed CIDRs ───────────────────────────────────────────────
 
-@test "RU11: no piter-specific seed CIDRs hardcoded in script (feed-only)" {
+@test "RU11: no relay-x-specific seed CIDRs hardcoded in script (feed-only)" {
     run grep -E '77\.88\.8|81\.90\.180|82\.202\.224|95\.142\.192|87\.240\.128|94\.100\.176' "$SCRIPT"
     [ "$status" -ne 0 ] || {
-        echo "Piter seed CIDRs found — must be removed"
+        echo "Relay-x seed CIDRs found — must be removed"
         echo "$output"
         false
     }
@@ -398,7 +398,7 @@ STUB
 
 # ─── RU12: default OUTFILE path ──────────────────────────────────────────────
 
-@test "RU12: default OUTFILE is /etc/oxpulse-partner-edge/ru-subnets.txt (not piter path)" {
+@test "RU12: default OUTFILE is /etc/oxpulse-partner-edge/ru-subnets.txt (not relay-x path)" {
     run grep -E 'OUTFILE.*:-' "$SCRIPT"
     [ "$status" -eq 0 ] || { echo "OUTFILE default not found"; false; }
     echo "$output" | grep -q "oxpulse-partner-edge" || {
@@ -406,10 +406,10 @@ STUB
         echo "$output"
         false
     }
-    # Must NOT have old piter path
-    run grep -E 'OUTFILE.*:-.*(/etc/ru-subnets|piter)' "$SCRIPT"
+    # Must NOT have old relay-x path
+    run grep -E 'OUTFILE.*:-.*(/etc/ru-subnets|relay-x)' "$SCRIPT"
     [ "$status" -ne 0 ] || {
-        echo "Piter path in OUTFILE default"
+        echo "Relay-x path in OUTFILE default"
         echo "$output"
         false
     }

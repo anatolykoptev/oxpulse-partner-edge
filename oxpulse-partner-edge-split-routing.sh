@@ -2,15 +2,14 @@
 # oxpulse-partner-edge-split-routing.sh — selective split-routing apply.
 #
 # Routes foreign TCP/UDP from user.slice processes (box mgmt: ssh, apt,
-# windsurf) through the AWG mesh to krolik, leaving docker containers and
+# windsurf) through the AWG mesh to hub, leaving docker containers and
 # .ru traffic on the direct WAN path.
 #
 # Idempotent. Re-asserts federation-volatile settings (AllowedIPs, FwMark)
 # LIVE every run — the awg-params-agent overwrites the conf; live re-assert
 # is the load-bearing mechanism.
 #
-# Spec: ~/deploy/krolik-server/plans/oxpulse-partner-edge/
-#       2026-05-27-split-routing-settings-canon.md §10
+# Spec: the operator's internal split-routing settings canon (2026-05-27) §10
 #
 # Parameterized for fleet portability (no per-node manual steps):
 #   --vpn-if       VPN interface  (default: awg0)
@@ -152,7 +151,7 @@ if [[ -n "$_ru_elements" ]]; then
 fi
 
 # ── 4. masquerade scoped to FOREIGN dst (§4) ──────────────────────────────────
-# mesh-internal ${MESH_SUBNET} is NOT SNAT'd — protects container→krolik SFU relay.
+# mesh-internal ${MESH_SUBNET} is NOT SNAT'd — protects container→hub SFU relay.
 # Dedicated table ip split_nat (srcnat priority) — never touches docker's ip nat.
 nft delete table ip split_nat 2>/dev/null || true
 nft -f - <<NFT2

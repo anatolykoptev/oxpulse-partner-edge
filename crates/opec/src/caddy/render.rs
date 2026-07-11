@@ -415,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn render_cheburator_fixture() {
+    fn render_edge_a_fixture() {
         let src = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/valid_single_tenant.yaml"

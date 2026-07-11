@@ -2,7 +2,7 @@
 # Verify docker-compose.yml.tpl wires caddy-data into coturn read-only
 # + confirms UDP 443 (H3) removal from Task 0.2.
 set -euo pipefail
-REPO_ROOT="${REPO_ROOT:-/home/krolik/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TPL="$REPO_ROOT/docker-compose.yml.tpl"
 
 # caddy-data volume mounted read-only in coturn service

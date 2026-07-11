@@ -2,7 +2,7 @@
 # Structural sanity checks for v0.1→v0.2 transition preflight in upgrade.sh.
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/home/krolik/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SCRIPT="$REPO_ROOT/upgrade.sh"
 
 # 1. Script parses cleanly.

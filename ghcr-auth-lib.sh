@@ -13,7 +13,7 @@
 #   re-login or rotation path. When the PAT expired (or a new install
 #   was performed without prior manual login), pulls silently failed
 #   with "denied: denied" and upgrade.sh aborted before recreating
-#   containers. Diagnosed 2026-05-15 on rvpn (token expired between
+#   containers. Diagnosed 2026-05-15 on edge-c (token expired between
 #   v0.12.26 and v0.12.27 release).
 #
 # After this lib:

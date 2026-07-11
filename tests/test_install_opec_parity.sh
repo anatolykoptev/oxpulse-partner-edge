@@ -10,8 +10,8 @@ setup() {
 }
 
 set_frozen_vars() {
-  PARTNER_ID=zvonilka
-  DOMAIN=zvonilka.net
+  PARTNER_ID=edge-b
+  DOMAIN=edge-b.example
   BACKEND_ENDPOINT=192.9.243.148:5349
   BACKEND_HOST=192.9.243.148
   BACKEND_PORT=5349
@@ -28,7 +28,7 @@ set_frozen_vars() {
   IMAGE_VERSION=stable
   SFU_UDP_PORT=7878
   SFU_METRICS_PORT=9317
-  SFU_EDGE_ID=zvonilka1
+  SFU_EDGE_ID=edge-b1
   OTEL_EXPORTER_OTLP_ENDPOINT=
   SFU_SIGNING_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAZiwaWp+FJ1sGprGGS69mq+sB6nhwOMi24xGSGfgdXNo=\n-----END PUBLIC KEY-----\n'
   RELAY_JWT_SECRET=test-relay-jwt-secret

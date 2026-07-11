@@ -163,7 +163,7 @@ jobs:
 
   # Fuse per-arch tags into a single multi-arch manifest per component.
   # Clients pulling e.g. `partner-edge-sfu:v0.10.0` get the right arch
-  # selected automatically (amd64 on piter+rvpn, arm64 on krolik).
+  # selected automatically (amd64 on relay-x+edge-c, arm64 on hub).
   merge-manifests:
     needs: [extract-version, build-and-push]
     runs-on: ubuntu-latest

@@ -2,37 +2,37 @@
 # Used by caddy renderer tests in sub-phase 4.1.
 schema_version: 1
 tenants:
-  - id: cheburator
+  - id: edge-a
     domains:
-      - cheburator.bot
-      - www.cheburator.bot
+      - edge-a.example
+      - www.edge-a.example
     enabled: true
     routes:
       - path: /api/landing-chat*
         action: proxy
-        upstream: https://webhooks.cheburator.rvpn.space
-        host_header: webhooks.cheburator.rvpn.space
+        upstream: https://webhooks.edge-a.edge-c.example
+        host_header: webhooks.edge-a.edge-c.example
         sse: true
       - path: /static/*
         action: file_server
-        root: /srv/cheburator-static
+        root: /srv/edge-a-static
         cache_control: "public, max-age=86400"
         strip_path_prefix: /static
       - path: /favicon.ico
         action: file_server
-        root: /srv/cheburator-static
+        root: /srv/edge-a-static
         try_files:
           - /favicon.ico
       - path: /
         action: file_server
-        root: /srv/cheburator-landing
+        root: /srv/edge-a-landing
         try_files:
           - "{path}"
           - /index.html
         cache_control: "public, max-age=300"
     redirects:
-      - from_host: www.cheburator.bot
-        to: "https://cheburator.bot{uri}"
+      - from_host: www.edge-a.example
+        to: "https://edge-a.example{uri}"
         permanent: true
 
   - id: alpha-bot
