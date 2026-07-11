@@ -83,6 +83,11 @@ impl Registry {
                 let _ = metrics
                     .client_delivered_media_count
                     .remove_label_values(&[&peer_label]);
+                // Task #18: drop pacer_tick_throttled_total{peer_id} series so
+                // SFU_PACER_FLOOR reconnect churn doesn't grow cardinality.
+                let _ = metrics
+                    .pacer_tick_throttled_total
+                    .remove_label_values(&[&peer_label]);
                 for rid_label in PACER_RID_LABELS {
                     let _ = metrics
                         .pacer_layer_total
@@ -204,7 +209,12 @@ impl Registry {
     /// emitting (see [`crate::client::Client::active_rids`]); the
     /// origin themselves still runs so the pacer state and metrics
     /// stay in sync across self-fanout passes.
-    pub(super) fn update_pacer_layers(&mut self, origin: ClientId) {
+    ///
+    /// `now` is threaded in from [`super::poll::Registry::fanout_pending`]
+    /// (one clock read per drain pass) so the task #18 min-tick floor below
+    /// is deterministic under test, mirroring the kit's own
+    /// `update_pacer_layers` (`oxpulse_sfu_kit::registry::drive`).
+    pub(super) fn update_pacer_layers(&mut self, origin: ClientId, now: std::time::Instant) {
         // Snapshot the publisher's currently-emitted RIDs before the
         // mut-loop so the borrow checker lets us index other clients.
         // Empty ⇒ bootstrap / non-simulcast; substitute the full ladder
@@ -222,6 +232,8 @@ impl Registry {
             &publisher_rids
         };
 
+        let floor_enabled = crate::pacer_floor::pacer_floor_enabled();
+
         for client in self.clients.iter_mut() {
             // CAST INVARIANT: same u64-backed `ClientId` rule as in
             // `reap_dead` above. Update both sides if kit changes the
@@ -231,14 +243,35 @@ impl Registry {
                 std::time::Instant::now(),
             );
             let prev_layer = client.desired_layer;
-            // GoogCC is now embedded in BandwidthEstimator::PerSubscriber and
-            // applied as a ceiling inside combined_bps() → estimate_bps().
-            // A separate merge gate here would double-count GoogCC. Trust
-            // the kit (anatolykoptev/oxpulse-sfu-kit issue #17 resolved in
-            // v0.11.4). The `budget` value from estimate_bps() already
-            // incorporates the GoogCC ceiling alongside Kalman + native + hint.
-            let chosen = client.pacer_select_layer(budget, available);
             let peer_label = (*client.id).to_string();
+
+            // Task #18 (ADR-13-style min-tick floor): this loop runs on every
+            // ~20-30ms MediaData. Without a floor, two below-threshold ticks
+            // land inside that window and collapse the kit's SUSPEND_STREAK
+            // debounce (intended ~200ms horizon) down to ~40ms, so a brief
+            // loss burst forces a spurious SuspendVideo. Gate the FSM-
+            // advancing call at most once per PACER_MIN_TICK_INTERVAL (100ms)
+            // per subscriber; a throttled tick keeps last tick's chosen layer
+            // and skips straight to the metrics snapshot below, so gauges
+            // stay fresh even on a throttled pass. Behind SFU_PACER_FLOOR,
+            // default off (see `crate::pacer_floor`).
+            let chosen = if floor_enabled
+                && !client.pacer_tick_ready(now, oxpulse_sfu_kit::bwe::PACER_MIN_TICK_INTERVAL)
+            {
+                self.metrics
+                    .pacer_tick_throttled_total
+                    .with_label_values(&[&peer_label])
+                    .inc();
+                Some(client.desired_layer)
+            } else {
+                // GoogCC is now embedded in BandwidthEstimator::PerSubscriber and
+                // applied as a ceiling inside combined_bps() → estimate_bps().
+                // A separate merge gate here would double-count GoogCC. Trust
+                // the kit (anatolykoptev/oxpulse-sfu-kit issue #17 resolved in
+                // v0.11.4). The `budget` value from estimate_bps() already
+                // incorporates the GoogCC ceiling alongside Kalman + native + hint.
+                client.pacer_select_layer(budget, available)
+            };
 
             // Phase 2c: emit PeerSuspended when pacer tier changes.
             // `pending_tier_emit` is set by pacer_select_layer based on PacerAction;

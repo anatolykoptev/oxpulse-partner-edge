@@ -14,6 +14,14 @@
 //! | `medium_min_bps`   | 500_000     | 350_000     | avoids h-layer on weak 3G links  |
 //! | `high_min_bps`     | 1_500_000   | 700_000     | requires solid 4G for f-layer    |
 //! | others             | kit default | kit default | no observed deviation in prod    |
+//!
+//! # `SFU_PACER_FLOOR` softened suspend (task #18)
+//!
+//! When [`crate::pacer_floor::pacer_floor_enabled`] returns `true`,
+//! `suspend_streak` is raised from the kit default (2) to
+//! [`crate::pacer_floor::SOFTENED_SUSPEND_STREAK`] (3) -- see
+//! `crate::pacer_floor` module docs for the fix + research rationale.
+//! Default off; unaffected callers keep the kit default.
 
 use oxpulse_sfu_kit::bwe::PacerConfig;
 
@@ -22,12 +30,16 @@ use oxpulse_sfu_kit::bwe::PacerConfig;
 /// Used by [`crate::client::Client::new`] to seed every
 /// [`oxpulse_sfu_kit::SubscriberPacer`] with the battle-tested thresholds.
 pub fn oxpulse_partner_edge_pacer_config() -> PacerConfig {
-    PacerConfig {
+    let mut cfg = PacerConfig {
         audio_only_bps: 100_000,
         medium_min_bps: 500_000,
         high_min_bps: 1_500_000,
         ..PacerConfig::default()
+    };
+    if crate::pacer_floor::pacer_floor_enabled() {
+        cfg.suspend_streak = crate::pacer_floor::SOFTENED_SUSPEND_STREAK;
     }
+    cfg
 }
 
 #[cfg(test)]

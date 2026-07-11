@@ -10,6 +10,7 @@ pub mod config;
 pub mod fanout;
 pub mod metrics;
 pub mod pacer;
+pub mod pacer_floor;
 pub mod propagate;
 pub mod registry;
 pub mod relay;
