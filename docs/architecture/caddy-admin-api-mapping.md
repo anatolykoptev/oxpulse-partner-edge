@@ -44,9 +44,9 @@ Full example (SSE proxy with TLS):
   "match": [{"path": ["/api/landing-chat*"]}],
   "handle": [{
     "handler": "reverse_proxy",
-    "upstreams": [{"dial": "webhooks.cheburator.rvpn.space:443"}],
+    "upstreams": [{"dial": "webhooks.edge-a.edge-c.example:443"}],
     "transport": {"protocol": "http", "tls": {}},
-    "headers": {"request": {"set": {"Host": ["webhooks.cheburator.rvpn.space"]}}},
+    "headers": {"request": {"set": {"Host": ["webhooks.edge-a.edge-c.example"]}}},
     "flush_interval": -1
   }]
 }
@@ -87,7 +87,7 @@ Full example (static assets with strip):
   "match": [{"path": ["/static/*"]}],
   "handle": [
     {"handler": "rewrite", "strip_path_prefix": "/static"},
-    {"handler": "file_server", "root": "/srv/cheburator-static",
+    {"handler": "file_server", "root": "/srv/edge-a-static",
      "try_files": ["/favicon.ico"]},
     {"handler": "headers", "response": {"set": {"Cache-Control": ["public, max-age=86400"]}}}
   ]

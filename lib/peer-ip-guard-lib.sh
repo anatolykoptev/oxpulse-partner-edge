@@ -20,7 +20,7 @@
 #
 # Extracted from oxpulse-channels-health-report.sh (was lines 610-784, moved
 # verbatim — behavior-preserving) per the strangler-fig plan:
-#   ~/deploy/server-config/plans/oxpulse-partner-edge/2026-07-08-health-report-lib-extraction.md
+#   the operator's internal health-report-lib extraction plan (2026-07-08)
 #   ADR-3 / ADR-7: leaf-first extraction — pure, no side effects beyond the
 #   documented reads above, highest security value, smallest blast radius.
 #

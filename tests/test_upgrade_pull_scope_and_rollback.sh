@@ -1,7 +1,7 @@
 #!/bin/bash
 # tests/test_upgrade_pull_scope_and_rollback.sh
 #
-# Two real bugs found during the v0.13.0 fleet rollout, live incident on rvpn
+# Two real bugs found during the v0.13.0 fleet rollout, live incident on edge-c
 # (2026-07):
 #
 # BUG A — dead rollback under `set -e`. The plain-apply and --with-templates
@@ -9,17 +9,17 @@
 # plain top-level statement is NOT exempt from `set -e`; a failing pull
 # killed the WHOLE script right there, before the failure branch below
 # (print output, ghcr_pull_diagnose, restore_host_scripts, restore
-# compose+state, die) ever ran. Observed on rvpn: script died mid-upgrade —
+# compose+state, die) ever ran. Observed on edge-c: script died mid-upgrade —
 # compose + host-scripts already rewritten to v0.13.0, containers still on
 # v0.12.72, no rollback, no error beyond the last log line "pulling new
 # images". Fix: `if ! pull_out=$(...); then` (assignment-inside-if IS the
 # `set -e` exemption).
 #
 # BUG B — pull/digest/recreate scope covered FOREIGN services. Partners add
-# their own services to the same compose file (live example: `all-rvpn-gate`
-# on rvpn — a local-only image). `docker compose pull` with no service args
+# their own services to the same compose file (live example: `all-edge-c-gate`
+# on edge-c — a local-only image). `docker compose pull` with no service args
 # tries to pull EVERY service, foreign ones included, and fails the WHOLE
-# pull with "pull access denied for all-rvpn-gate, repository does not
+# pull with "pull access denied for all-edge-c-gate, repository does not
 # exist". This script only manages ghcr.io/anatolykoptev/partner-edge-*
 # images — pull, digest comparison, and recreate must be scoped to those.
 #
@@ -254,7 +254,7 @@ D_CURRENT=v0.12.72
 D_TARGET=v0.13.0
 
 printf 'IMAGE_VERSION=%s\nSIGNALING_SFU_SECRET=testsecret\n' "$D_CURRENT" > "$D_TMPDIR/var/install.env"
-printf 'services:\n  sfu:\n    image: ghcr.io/anatolykoptev/partner-edge-sfu:%s\n    environment:\n      SIGNALING_SFU_SECRET: "testsecret"\n  all-rvpn-gate:\n    image: local/all-rvpn-gate:latest\n' \
+printf 'services:\n  sfu:\n    image: ghcr.io/anatolykoptev/partner-edge-sfu:%s\n    environment:\n      SIGNALING_SFU_SECRET: "testsecret"\n  all-edge-c-gate:\n    image: local/all-edge-c-gate:latest\n' \
     "$D_CURRENT" > "$D_TMPDIR/etc/docker-compose.yml"
 
 D_FAKE_DOCKER="$D_TMPDIR/docker"
@@ -262,7 +262,7 @@ cat > "$D_FAKE_DOCKER" << 'DFAKE'
 #!/bin/bash
 printf '%s\n' "$*" >> "${DOCKER_CALL_LOG}"
 if [[ "$*" == *"config --services"* ]]; then
-    printf 'sfu\nall-rvpn-gate\n'
+    printf 'sfu\nall-edge-c-gate\n'
     exit 0
 fi
 if [[ "$*" == *"compose config"* && "$*" != *"--services"* ]]; then
@@ -280,15 +280,15 @@ fi
 if [[ "$*" == *"compose pull"* ]]; then
     # Old (unscoped) invocation: bare 'compose pull' with no service args —
     # tries to pull EVERYTHING, including the foreign local-only image, and
-    # fails exactly like the rvpn incident.
+    # fails exactly like the edge-c incident.
     if [[ "$*" =~ compose\ pull$ ]]; then
-        echo "Error response from daemon: pull access denied for all-rvpn-gate, repository does not exist or may require 'docker login'" >&2
+        echo "Error response from daemon: pull access denied for all-edge-c-gate, repository does not exist or may require 'docker login'" >&2
         exit 1
     fi
     # Scoped invocation with the foreign service still in the arg list —
     # must also fail (defence in depth for this test).
-    if [[ "$*" == *"all-rvpn-gate"* ]]; then
-        echo "Error response from daemon: pull access denied for all-rvpn-gate, repository does not exist or may require 'docker login'" >&2
+    if [[ "$*" == *"all-edge-c-gate"* ]]; then
+        echo "Error response from daemon: pull access denied for all-edge-c-gate, repository does not exist or may require 'docker login'" >&2
         exit 1
     fi
     exit 0
@@ -303,8 +303,8 @@ D_OUT=$(_run_upgrade "$D_TMPDIR" "$D_FAKE_DOCKER" "$D_CURRENT" "$D_TARGET" "$D_L
 
 D_PULL_LINE=$(grep 'compose pull' "$D_LOG" | head -1 || true)
 
-if [[ -n "$D_PULL_LINE" && "$D_PULL_LINE" != *"all-rvpn-gate"* ]]; then
-    pass "D1: pull command never mentions the foreign service (all-rvpn-gate); recorded: '$D_PULL_LINE'"
+if [[ -n "$D_PULL_LINE" && "$D_PULL_LINE" != *"all-edge-c-gate"* ]]; then
+    pass "D1: pull command never mentions the foreign service (all-edge-c-gate); recorded: '$D_PULL_LINE'"
 else
     fail "D1: pull command included the foreign service or was never recorded; recorded: '$D_PULL_LINE'; output: $D_OUT"
 fi
@@ -321,7 +321,7 @@ else
     fail "D3: upgrade did not exit 0 despite a correctly scoped pull (exit $D_RC); output: $D_OUT"
 fi
 
-if grep -qE 'compose up.*all-rvpn-gate|compose up -d --no-deps.*all-rvpn-gate' "$D_LOG"; then
+if grep -qE 'compose up.*all-edge-c-gate|compose up -d --no-deps.*all-edge-c-gate' "$D_LOG"; then
     fail "D4: a recreate ('compose up') call included the foreign service"
 else
     pass "D4: no recreate ('compose up') call ever mentions the foreign service"
@@ -433,7 +433,7 @@ printf 'IMAGE_VERSION=%s\nSIGNALING_SFU_SECRET=testsecret\nSCHEMA_VERSION=1\n' "
 # partner-edge-* images. This is the "config parsed but zero partner-edge
 # images" failure mode (MAJOR-2), distinct from a compose-config parse
 # failure but exercising the SAME early-guard call site.
-printf 'services:\n  all-rvpn-gate:\n    image: local/all-rvpn-gate:latest\n    environment:\n      SIGNALING_SFU_SECRET: "testsecret"\n' \
+printf 'services:\n  all-edge-c-gate:\n    image: local/all-edge-c-gate:latest\n    environment:\n      SIGNALING_SFU_SECRET: "testsecret"\n' \
     > "$F_TMPDIR/etc/docker-compose.yml"
 
 F_FAKE_DOCKER="$F_TMPDIR/docker"
@@ -441,7 +441,7 @@ cat > "$F_FAKE_DOCKER" << 'FFAKE'
 #!/bin/bash
 printf '%s\n' "$*" >> "${DOCKER_CALL_LOG}"
 if [[ "$*" == *"config --services"* ]]; then
-    printf 'all-rvpn-gate\n'
+    printf 'all-edge-c-gate\n'
     exit 0
 fi
 if [[ "$*" == *"compose config"* && "$*" != *"--services"* ]]; then

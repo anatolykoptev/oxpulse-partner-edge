@@ -62,9 +62,9 @@ Exit 0 = clean. Exit 1 = errors printed. Fix all before reconciling.
 
 ```bash
 opec tenant list
-# ID                   DOMAINS                                  ENABLED  ROUTES
+# ID       DOMAINS                                  ENABLED  ROUTES
 # -----------------------------------------------------------------------
-# cheburator            cheburator.bot, www.cheburator.bot       true     4
+# edge-a   edge-a.example, www.edge-a.example       true     4
 
 opec tenant list --format json
 ```
@@ -74,7 +74,7 @@ opec tenant list --format json
 ```bash
 opec tenant diff /etc/oxpulse-partner-edge/tenants.yaml tenants.yaml.new
 # + beta-org  (added)
-# ~ cheburator  (changed)
+# ~ edge-a  (changed)
 #     1 changed route(s): /api/landing-chat*
 ```
 

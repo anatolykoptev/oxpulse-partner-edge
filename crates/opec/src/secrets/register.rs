@@ -60,7 +60,7 @@ struct RegisterBody {
     branding: Option<serde_json::Value>,
     /// Operator-declared countries this edge serves.
     /// When absent, omitted from the POST body so the backend can COALESCE-preserve
-    /// any prior operator declaration (e.g. migration-set ruoxp={RU}).
+    /// any prior operator declaration (e.g. migration-set edge-d={RU}).
     #[serde(skip_serializing_if = "Option::is_none")]
     serve_countries: Option<Vec<String>>,
 }

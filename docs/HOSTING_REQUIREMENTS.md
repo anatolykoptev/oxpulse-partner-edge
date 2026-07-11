@@ -41,7 +41,7 @@ else. No website, no mail server, no other VPN.
 
 ## RAM sizing
 
-**Empirical baseline (2026-05-22, zvonilka partner-edge under light load):**
+**Empirical baseline (2026-05-22, edge-b partner-edge under light load):**
 
 | Component | RSS |
 |---|---|
@@ -55,7 +55,7 @@ else. No website, no mail server, no other VPN.
 | **Stack overhead**        | **~270 MiB** |
 
 Total RAM at idle / light traffic: ~700 MiB used out of 1.8 GiB on
-zvonilka. **2 GiB is sufficient for 1:1 calls and small rooms (the
+edge-b. **2 GiB is sufficient for 1:1 calls and small rooms (the
 current production workload across all 4 partners as of 2026-05-22).**
 
 **4 GiB is the comfortable choice** for:

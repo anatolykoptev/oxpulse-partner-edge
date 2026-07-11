@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-REPO_ROOT="${REPO_ROOT:-/home/user/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HC="$REPO_ROOT/healthcheck.sh"
 INST="$REPO_ROOT/install.sh"
 

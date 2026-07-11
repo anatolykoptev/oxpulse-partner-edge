@@ -33,7 +33,7 @@ This forces reinstall on an otherwise-healthy box just because one metadata key 
 | `CADDYFILE_SHA` | sha256 of live `/etc/oxpulse-partner-edge/Caddyfile` | No — left absent; set on next reconcile |
 | `TURNS_SUBDOMAIN` | `turns_subdomain` field in node-config.json | No — left absent if not parseable |
 | `NAIVE_SOCKS_PORT` | docker inspect `oxpulse-partner-naive` (println fix); default 1080 | No — defaults to 1080 |
-| `BACKEND_API` | Fleet constant `https://api.oxpulse.chat` (install.sh:58 default). NOT derived from node-config `backend_endpoint` (that is the scheme-less `host:port` TURN endpoint, e.g. `krolik.oxpulse.chat:5349`). | No — defaults to fleet constant |
+| `BACKEND_API` | Fleet constant `https://api.oxpulse.chat` (install.sh:58 default). NOT derived from node-config `backend_endpoint` (that is the scheme-less `host:port` TURN endpoint, e.g. `hub.example:5349`). | No — defaults to fleet constant |
 | `OXPULSE_MIRROR_BASE` | Optional; absent on non-mirror installs is correct. Not derived — left absent if missing from state. | No |
 
 #### One-actionable-die rule

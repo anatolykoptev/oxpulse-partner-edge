@@ -122,7 +122,7 @@ services:
       # host firewall state. Audit 2026-05-21 found these were leaking on the
       # public NIC across all 3 production partners. AWG_HOST_IP is the
       # partner's own mesh IP without CIDR prefix (e.g. 10.9.0.6 for
-      # zvonilka), stripped from AWG_ALLOCATED_IP (e.g. 10.9.0.6/24) which
+      # edge-b), stripped from AWG_ALLOCATED_IP (e.g. 10.9.0.6/24) which
       # central returns with prefix for awg0.conf. SFU v0.12.67+ strict
       # getaddrinfo rejects the /24 form. Empty when mesh disabled — SFU
       # then falls back to bind_address.

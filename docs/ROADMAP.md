@@ -10,7 +10,7 @@
 - oxpulse-sfu-kit migration: -1,881 lines of inlined code replaced by audited library
 - Cascade relay client: `POST /relay/connect`, str0m offerer, `relay_source` DC
 - release-please automated CHANGELOG + CI
-- Initial 3-node deployment: krolik (SJC), rvpn (R-VPN partner), piter (SPB)
+- Initial 3-node deployment: hub (SJC), edge-c (R-VPN partner), relay-x (SPB)
 - Subsequent fleet growth to five active partner-edge source-domains on `partner-edge-sfu:v0.12.48` as of 2026-05-19
 
 ---

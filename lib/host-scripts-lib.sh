@@ -17,7 +17,7 @@
 # extraction: manifest.yaml's host_scripts/systemd_units surfaces stay
 # wired:false — wiring sync_host_scripts into reconcile_all (Step 6) would
 # move host-script delivery AFTER the health baseline (Step 5), reintroducing
-# the cheburator phantom-regression that tests/test_baseline_before_reconcile.sh
+# the edge-a phantom-regression that tests/test_baseline_before_reconcile.sh
 # B2 guards against (sync_host_scripts must run BEFORE health_snapshot). A
 # live cutover onto the reconcile engine needs its own ADR (Phase 5,
 # alongside the self-update + flock-cluster work) — not this task.
@@ -309,7 +309,7 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 			# xray-update and geoip-refresh: staged without scripts/ prefix
 			oxpulse-xray-update.sh)        sha256_asset_name="oxpulse-xray-update.sh" ;;
 			oxpulse-geoip-refresh)         sha256_asset_name="oxpulse-geoip-refresh.sh" ;;
-			# healthcheck.sh staged as partner-edge-healthcheck.sh (cheburator incident fix).
+			# healthcheck.sh staged as partner-edge-healthcheck.sh (edge-a incident fix).
 			oxpulse-partner-edge-healthcheck) sha256_asset_name="partner-edge-healthcheck.sh" ;;
 		esac
 

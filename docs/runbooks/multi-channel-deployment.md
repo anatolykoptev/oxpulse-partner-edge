@@ -118,7 +118,8 @@ See also: [`channels-health.md`](channels-health.md) for full metric exposition 
 ### Circuit breaker (future Phase 5.8.x)
 
 Not yet implemented. Tracking in plan: separate watchdog timer caps repeated alerts on
-cascading failure. Reference impl: `piter-server/deploy/piter/vpn-watchdog.sh`.
+cascading failure. Reference impl: the operator's internal relay watchdog script (same
+rate-limited alert pattern).
 State file (when implemented): `/var/lib/oxpulse-partner-edge/circuit-breaker.state`.
 
 ## Channel deployment matrix
@@ -183,7 +184,7 @@ systemctl start oxpulse-partner-edge-refresh.service
   backend restarts, ML-KEM 0rtt blob in edge's stored encryption may expire/mismatch.
   Symptom: xray container healthy but caddy `/api/health` falls back to hy2 fallback.
   Mitigation: `systemctl start oxpulse-partner-edge-refresh.service` to refetch a fresh blob.
-- **Circuit breaker** — not implemented. If all channels go down simultaneously, alerts fire
-  indefinitely (rate-limited but no auto-park). Phase 5.8.x roadmap.
+- **Circuit breaker** — not implemented (see above); simultaneous all-channel
+  failure alerts indefinitely with no auto-park.
 - **UC2 AmneziaWG-direct user channel** — not exposed. AWG today = control plane only.
   Native mobile app requires an architectural decision (see `ARCHITECTURE.md` §Channel Layers).

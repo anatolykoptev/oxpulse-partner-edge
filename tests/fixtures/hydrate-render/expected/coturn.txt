@@ -2,12 +2,12 @@
 # DO NOT EDIT DIRECTLY — regenerated on reinstall / upgrade.
 #
 # Placeholders (substituted at render time):
-#   test-turn-secret-deadbeef zvonilka.net api-test01
+#   test-turn-secret-deadbeef edge-b.example api-test01
 #   157.22.204.190 157.22.204.190
 #
 # Architecture (v0.2.0+):
 # - TLS enabled on 5349 — caddy-l4 proxies TURNS:443 → 127.0.0.1:5349 (host network)
-# - Cert issued by Caddy via ACME HTTP-01 for api-test01.zvonilka.net,
+# - Cert issued by Caddy via ACME HTTP-01 for api-test01.edge-b.example,
 #   shared with coturn via read-only docker volume mount (see docker-compose.yml.tpl)
 # - SIGUSR2 reloads cert without session drop (verified in coturn source
 #   mainrelay.c:3422 → reload_ssl_certs handler)
@@ -22,7 +22,7 @@ fingerprint
 lt-cred-mech
 use-auth-secret
 static-auth-secret=test-turn-secret-deadbeef
-realm=zvonilka.net
+realm=edge-b.example
 
 # ─── Capacity / rate limits (R1 §5.3) ───────────────────────────────────
 # Sized for ~100 concurrent calls. Each call has ~2 TURN channels.
@@ -46,8 +46,8 @@ no-rfc5780
 # Cert path inside the coturn container — Caddy's named volume mounted read-only
 # at /data/caddy (see docker-compose.yml.tpl in Task 2A.4). Caddy's cert storage
 # layout for ACME HTTP-01 issuer is documented + stable across Caddy 2.x.
-cert=/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/api-test01.zvonilka.net/api-test01.zvonilka.net.crt
-pkey=/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/api-test01.zvonilka.net/api-test01.zvonilka.net.key
+cert=/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/api-test01.edge-b.example/api-test01.edge-b.example.crt
+pkey=/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/api-test01.edge-b.example/api-test01.edge-b.example.key
 # TLS version floor: drop 1.0/1.1 (R1 §5.5).
 no-tlsv1
 no-tlsv1_1

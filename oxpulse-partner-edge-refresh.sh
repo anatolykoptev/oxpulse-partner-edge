@@ -5,7 +5,7 @@
 # + compose_strip_failed_channels sourced from lib/render-channel-lib.sh.
 # channels_version re-render now uses render_channel_soft (fail-soft).
 #
-# Operator backend (krolik) rotates Reality x25519 + ML-KEM-768 keypair
+# Operator backend (hub) rotates Reality x25519 + ML-KEM-768 keypair
 # quarterly via rotate-reality-keys.timer. Without auto-refresh, partner
 # edges installed before the rotation keep running with old keys and
 # their xray-client TLS handshakes fail until manual re-registration.
@@ -136,7 +136,7 @@ suggest_install() {
 }
 
 # Dependency check: jq is required for JSON parsing throughout this script.
-# On cheburator1 (2026-05-09 incident): jq was absent from the systemd unit
+# On edge-a1 (2026-05-09 incident): jq was absent from the systemd unit
 # PATH, causing set -euo pipefail to exit at line 39 (NODE_ID extraction)
 # silently — the heartbeat POST was never reached, leaving last_seen_at stale
 # for 1 week. Die here with a clear message so systemd logs are actionable.
@@ -294,7 +294,7 @@ if [[ "$KEYS_OK" -eq 1 ]]; then
 fi
 
 # Heartbeat — обновляет partner_nodes.last_seen_at. Без этого вызова
-# piter-server видит нас "мёртвыми" и staleness canary срабатывает
+# relay-x видит нас "мёртвыми" и staleness canary срабатывает
 # ложно (инцидент 2026-04-23, root cause: last_seen_at был только
 # registration timestamp, не liveness). Endpoint публичный без auth,
 # единственная запись — last_seen_at = NOW(). Идемпотентный.
@@ -606,7 +606,7 @@ jq \
     "$BACKUP" > "$NODE_CFG"
 
 # Reload services so xray-client picks up new keys.
-# Custom-stack nodes (e.g. piter: own xray-reality + coturn + SFU compose)
+# Custom-stack nodes (e.g. relay-x: own xray-reality + coturn + SFU compose)
 # do NOT install oxpulse-partner-edge.service — skip gracefully so the
 # script exits 0 and rotation is still committed to VERSION_FILE.
 if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/null \

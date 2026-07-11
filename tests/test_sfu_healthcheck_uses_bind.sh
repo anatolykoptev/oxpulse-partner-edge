@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regression guard for Bug #4 (2026-05-28 ruoxp fresh install):
+# Regression guard for Bug #4 (2026-05-28 edge-d fresh install):
 # SFU metrics and relay-API listeners bind on the AWG mesh IP (SFU_METRICS_BIND /
 # SFU_RELAY_API_BIND), NOT on 0.0.0.0. The docker-compose healthcheck was probing
 # 127.0.0.1 for those two planes -> connection refused -> container marked
@@ -13,7 +13,7 @@
 # (it derives the CIDR-stripped {{AWG_HOST_IP}} instead -- see install.sh:744
 # and tests/test_sfu_bind_strip_cidr.sh). Substituting the raw CIDR form into
 # a wget URL / nc target broke the healthcheck AGAIN, silently, for 6+ days on
-# production (ruoxp, failingstreak=19471+) -- while this file's former
+# production (edge-d, failingstreak=19471+) -- while this file's former
 # Test 2/3/5 LOCKED IN the broken placeholder by grep-REQUIRING it.
 #
 # Those three assertions are RETIRED (removed below). The template now

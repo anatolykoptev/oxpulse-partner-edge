@@ -3,7 +3,7 @@
 #
 # The runtime deps installation loop was extracted from install.sh into
 # lib/install-deps.sh (installer modularization, Phase 4.1). It confirms jq is
-# listed in the deps block introduced after the cheburator1 incident
+# listed in the deps block introduced after the edge-a1 incident
 # (2026-05-09). Assert against the lib module that now owns it.
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"

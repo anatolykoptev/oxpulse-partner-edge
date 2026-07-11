@@ -25,8 +25,8 @@ setup() {
 # vars not provided by the backend (SFU_*, OTEL_*, SIGNALING_*, HY2_*)
 # are exported empty so they become "" in both baseline and post-refactor.
 set_frozen_vars() {
-  PARTNER_ID=zvonilka
-  PARTNER_DOMAIN=zvonilka.net
+  PARTNER_ID=edge-b
+  PARTNER_DOMAIN=edge-b.example
   BACKEND_ENDPOINT=203.0.113.10:5349
   BACKEND_HOST=203.0.113.10
   BACKEND_PORT=5349

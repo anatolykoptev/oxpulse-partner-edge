@@ -13,8 +13,8 @@ fn fixture_dir() -> PathBuf {
 }
 
 fn set_frozen_env() {
-    env::set_var("PARTNER_ID", "zvonilka");
-    env::set_var("PARTNER_DOMAIN", "zvonilka.net");
+    env::set_var("PARTNER_ID", "edge-b");
+    env::set_var("PARTNER_DOMAIN", "edge-b.example");
     env::set_var("BACKEND_ENDPOINT", "203.0.113.10:5349");
     env::set_var("BACKEND_HOST", "203.0.113.10");
     env::set_var("BACKEND_PORT", "5349");
@@ -37,7 +37,7 @@ fn set_frozen_env() {
     env::set_var("IMAGE_VERSION", "stable");
     env::set_var("SFU_UDP_PORT", "7878");
     env::set_var("SFU_METRICS_PORT", "9317");
-    env::set_var("SFU_EDGE_ID", "zvonilka1");
+    env::set_var("SFU_EDGE_ID", "edge-b1");
     env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "");
     env::set_var(
         "SFU_SIGNING_PUBLIC_KEY",

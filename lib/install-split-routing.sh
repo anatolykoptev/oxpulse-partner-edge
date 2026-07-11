@@ -13,7 +13,7 @@
 #   log warn die     functions (install.sh provides)
 #
 # Canon reference: §8 "Durability" + §1 "RU-subnets feed" in
-#   ~/deploy/server-config/plans/oxpulse-partner-edge/2026-05-27-split-routing-settings-canon.md
+#   the operator's internal split-routing settings canon (2026-05-27)
 #
 # Design notes:
 #   CL-2:
@@ -79,7 +79,7 @@ _split_routing_install_scripts() {
 # The static file (systemd/oxpulse-partner-edge-split-routing.service) is the
 # source of truth; its content was extracted from the rendered heredoc so that
 # the upgrade pipeline can install/update it without re-running install.sh.
-# ExecStart hard-codes /usr/local/sbin (default PREFIX_SBIN) — matches cheburator
+# ExecStart hard-codes /usr/local/sbin (default PREFIX_SBIN) — matches edge-a
 # and all standard partner-edge deployments.
 #
 # After= ordering (canon §8): awg-quick@awg0.service THEN oxpulse-awg-params-agent.service

@@ -7,7 +7,7 @@
 # A frozen back-compat duplicate remains at lib/install-firewall.sh for one
 # release — see that file's own header for the removal criteria.)
 #
-# Closes the 2026-05-21 audit finding: zvonilka.net + rvpn + ruoxp shipped
+# Closes the 2026-05-21 audit finding: edge-b.example + edge-c + edge-d shipped
 # with no host firewall, exposing :9317 (SFU /metrics), :8912 (SFU relay
 # API), :8920 (SFU client WS), and :18443 (hysteria2) on the public IP.
 # The SFU code uses a single SFU_BIND_ADDRESS for ALL its sockets
@@ -40,7 +40,7 @@ _PE_FW_PUB_UDP=(443 18443 3478 5349 7878)
 # RTP and RFC 7675 STUN consent-freshness traffic. Without this, peer-edge
 # consent packets (~104-128 byte UDP) get dropped at our INPUT chain,
 # causing silent mid-call disconnect at 25-35s on RU↔diaspora cross-TURN
-# routes. Evidence: zvonilka /var/log/ufw.log* (2026-06-05 investigation,
+# routes. Evidence: edge-b /var/log/ufw.log* (2026-06-05 investigation,
 # reports/oxpulse-chat/research/2026-06-05-partner-edge-relay-disconnect-class.md).
 # Range matches coturn defaults (min-port=49152 max-port=65535).
 _PE_FW_PUB_UDP_RANGES=(49152:65535)

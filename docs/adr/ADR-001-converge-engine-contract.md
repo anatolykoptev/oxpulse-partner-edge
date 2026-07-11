@@ -68,5 +68,5 @@ The reconcile lib is the **Expand step** of an Expand-Contract refactor. The Con
 - Adding a placeholder to `Caddyfile.tpl` without an env export fails CI at `test_render_completeness.sh` before merge. The class #1 failure (CI-vs-runtime render-map drift) is structurally eliminated.
 - The CI golden test exercises the exact runtime render path. Golden drift = rendering bug, not test fidelity gap.
 - A render that leaves any `{{X}}` in the Caddyfile never reaches an atomic_swap — the guard fires first and preserves the installed file.
-- A piter-class node (no caddy service in compose) gets a graceful skip, not a die.
+- A relay-x-class node (no caddy service in compose) gets a graceful skip, not a die.
 - The NAIVE_SOCKS_PORT die-loud behavior (PR #308 invariant) is preserved and centralized.

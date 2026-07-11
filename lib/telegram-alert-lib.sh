@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lib/telegram-alert-lib.sh — shared rate-limited Telegram alert primitive.
-# Mirrors /home/user/src/piter-server/deploy/piter/vpn-watchdog.sh alert()
-# pattern: 600s interval between non-CRITICAL alerts; force= bypasses limit.
+# Mirrors the operator's internal relay watchdog alert() pattern: 600s
+# interval between non-CRITICAL alerts; force= bypasses limit.
 # Sourceable from any partner-edge script.
 #
 # Env overrides:

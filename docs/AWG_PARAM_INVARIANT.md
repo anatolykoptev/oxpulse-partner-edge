@@ -32,14 +32,14 @@ on even one byte, the decoded frame is rejected as malformed and
 ## Empirical reproduction (2026-05-20)
 
 - Server (`motherly`) awg0: `S4 = 18`.
-- Partner (zvonilka.net) awg0: `S4 = 17` (drifted at install time).
+- Partner (edge-b.example) awg0: `S4 = 17` (drifted at install time).
 - WireGuard handshake: refreshing every 25s (PersistentKeepalive).
 - Encrypted bytes transferred: 16 MiB motherly→partner, 274 KiB ←.
 - Plaintext on partner `/proc/net/dev awg0`: rx_packets = **0** since boot.
 - `ping 10.9.0.6 -I awg0` from motherly: 100% loss for 24+ hours.
 
 Fix: `sed -i 's/^S4 = 17$/S4 = 18/'` + `awg-quick down/up awg0` on
-zvonilka. Ping recovered immediately to 0% loss, 175ms RTT.
+edge-b. Ping recovered immediately to 0% loss, 175ms RTT.
 
 ## What MUST be true
 
@@ -113,4 +113,4 @@ update pipeline.
 - `cmd/orchestrator/awg_params.go` — the rotation pipeline this
   document's invariant is the constraint on.
 - `lib/install-awg.sh` — caller-globals contract for `AWG_S4` etc.
-- 2026-05-20 zvonilka.net mesh outage post-mortem (private deploy-config repo, `~/deploy/server-config/plans/oxpulse-partner-edge/`).
+- 2026-05-20 edge-b.example mesh outage post-mortem (operator's internal ops runbook).

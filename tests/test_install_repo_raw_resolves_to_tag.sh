@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # tests/test_install_repo_raw_resolves_to_tag.sh — regression guard for Bug #6.
 #
-# Bug #6 ROOT CAUSE (discovered 2026-05-28 on ruoxp nuke+install):
+# Bug #6 ROOT CAUSE (discovered 2026-05-28 on edge-d nuke+install):
 #   release.yml runs:  sed -i "s|@RELEASE_TAG@|${TAG}|g" partner-edge-installer.sh
 #   This substitutes ALL occurrences of @RELEASE_TAG@, including:
 #     L37  OXPULSE_RELEASE_TAG="${OXPULSE_RELEASE_TAG:-@RELEASE_TAG@}"   <- intended
@@ -124,9 +124,9 @@ _repo_raw_for() {
 # Case 5 — OXPULSE_MIRROR_BASE set → REPO_RAW = mirror/raw
 # ---------------------------------------------------------------------------
 @test "OXPULSE_MIRROR_BASE set → REPO_RAW equals mirror/raw" {
-    result=$(_repo_raw_for "@RELEASE_TAG@" "" "http://install.krolik.tools")
-    [[ "$result" == "http://install.krolik.tools/raw" ]] || {
-        echo "expected REPO_RAW=http://install.krolik.tools/raw"
+    result=$(_repo_raw_for "@RELEASE_TAG@" "" "http://install.hub.example")
+    [[ "$result" == "http://install.hub.example/raw" ]] || {
+        echo "expected REPO_RAW=http://install.hub.example/raw"
         echo "got: $result"
         false
     }

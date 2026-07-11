@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Phase 5.8 Task 5 — verify _check_upstream_transitions detects Caddy upstream
 # state transitions and fires Telegram alert via lib/telegram-alert-lib.sh.
-# Mirrors piter-server vpn-watchdog alert pattern.
+# Mirrors relay-x's vpn-watchdog alert pattern.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

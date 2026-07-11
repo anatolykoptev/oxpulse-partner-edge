@@ -1,11 +1,11 @@
 #!/bin/bash
 # tests/test_upgrade_tag_form.sh
 #
-# Regression guard for the tag-form split bug (2026-05-26 boevoy incident on
-# v0.12.59 zvonilka RU relay prod run) AND the subsequent tag-form unification
+# Regression guard for the tag-form split bug (2026-05-26 edge-e incident on
+# v0.12.59 edge-b RU relay prod run) AND the subsequent tag-form unification
 # (v0.12.60+: all tags are vX.Y.Z — no release-please component prefix).
 #
-# ROOT CAUSE (boevoy): upgrade.sh accepted TARGET=vX.Y.Z (docker image tag
+# ROOT CAUSE (edge-e): upgrade.sh accepted TARGET=vX.Y.Z (docker image tag
 # form) but used that same value to build RELEASES_BASE + REPO_RAW URLs.
 # GitHub releases for v0.12.59 lived under
 #   .../releases/download/partner-edge-v0.12.59/...
@@ -28,7 +28,7 @@
 #      release.yml Stage artifacts must have TAG= in its env.
 #   C  Fail-loud: pinned tag + SHA256SUMS 404 → sync exits non-zero.
 #      --allow-unverified → warn + proceed (for dev/test runs).
-#   D  Boevoy repro: fixture layout matching the NEW release format (assets under
+#   D  Edge-e repro: fixture layout matching the NEW release format (assets under
 #      vX.Y.Z/ per the unification) — assert SHA256SUMS fetch succeeds and files
 #      install verified.  This is the test the CI suite lacked that would have
 #      caught the unbound/ghcr-lib/tag-sentinel/tag-form regression chain.
@@ -289,7 +289,7 @@ FAIL_HTTP_PID=$!
 # Set initial cleanup; will be replaced when D section starts more servers.
 cleanup_all() {
     kill "${FAIL_HTTP_PID:-}" "${RAW_HTTP_PID:-}" "${REL_HTTP_PID:-}" 2>/dev/null || true
-    rm -rf "${TMPDIR_FAIL:-}" "${TMPDIR_BOEVOY:-}"
+    rm -rf "${TMPDIR_FAIL:-}" "${TMPDIR_EDGE_E:-}"
 }
 # shellcheck disable=SC2064
 trap "cleanup_all; rm -f '$PREAMBLE_TAG' '$PREAMBLE_SYNC'" EXIT
@@ -371,12 +371,12 @@ echo "$OUT_C5" | grep -qi 'latest.*SHA256SUMS.*not available\|floating tag' \
     || fail "C-6: expected floating-tag warning for 'latest'; got: $OUT_C5"
 
 # ---------------------------------------------------------------------------
-# Fix D: Boevoy repro — new release layout (vX.Y.Z, no partner-edge- prefix)
+# Fix D: Edge-e repro — new release layout (vX.Y.Z, no partner-edge- prefix)
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Fix D: boevoy repro — new release layout vX.Y.Z/SHA256SUMS ==="
+echo "=== Fix D: edge-e repro — new release layout vX.Y.Z/SHA256SUMS ==="
 #
-# The boevoy incident (v0.12.59 zvonilka) was caused by upgrade.sh using the
+# The edge-e incident (v0.12.59 edge-b) was caused by upgrade.sh using the
 # docker image tag form (vX.Y.Z) but releases living at partner-edge-vX.Y.Z/.
 #
 # The fix: unify tag forms starting at v0.12.60.  GitHub releases now live at
@@ -386,35 +386,35 @@ echo "=== Fix D: boevoy repro — new release layout vX.Y.Z/SHA256SUMS ==="
 # This test exercises the post-fix layout to assert:
 #   - SHA256SUMS fetch returns 200 (not 404)
 #   - Files install verified (not "proceeding without checksum guard")
-#   - The boevoy WARNs are absent
+#   - The edge-e WARNs are absent
 #
 # Fixture layout (matching new release format):
-#   TMPDIR_BOEVOY/
+#   TMPDIR_EDGE_E/
 #     v0.12.59/          ← RELEASES_BASE/v0.12.59/ (new format, no partner-edge- prefix)
 #       SHA256SUMS
 #       partner-edge-upgrade.sh (substituted release asset)
 #   REPO_ROOT/           ← REPO_RAW (raw file bytes from checkout)
 
-TMPDIR_BOEVOY=$(mktemp -d)
-BOEVOY_RELEASE_DIR="$TMPDIR_BOEVOY/v0.12.59"
-mkdir -p "$BOEVOY_RELEASE_DIR"
+TMPDIR_EDGE_E=$(mktemp -d)
+EDGE_E_RELEASE_DIR="$TMPDIR_EDGE_E/v0.12.59"
+mkdir -p "$EDGE_E_RELEASE_DIR"
 
 # Serve raw files from repo root (as REPO_RAW).
 RAW_PORT=18772
 python3 -m http.server "$RAW_PORT" --directory "$REPO_ROOT" \
-    >/tmp/test-boevoy-raw.log 2>&1 &
+    >/tmp/test-edge-e-raw.log 2>&1 &
 RAW_HTTP_PID=$!
 
 # Build SHA256SUMS with correct hashes for files that sync_host_scripts fetches.
 # Extract the remote_name for each managed file from the preamble.
-declare -A BOEVOY_SHAS
+declare -A EDGE_E_SHAS
 while IFS= read -r remote_name; do
     [[ -z "$remote_name" ]] && continue
     fpath="$REPO_ROOT/$remote_name"
     fname=$(basename "$remote_name")
     if [[ -f "$fpath" ]]; then
         sha=$(sha256sum "$fpath" | awk '{print $1}')
-        BOEVOY_SHAS["$fname"]="$sha"
+        EDGE_E_SHAS["$fname"]="$sha"
     fi
 done < <(
     bash -c "
@@ -427,24 +427,24 @@ done < <(
 
 # Stage partner-edge-upgrade.sh (self-update asset) in the release dir.
 # sync_host_scripts fetches it from RELEASES_BASE (substituted bytes).
-BOEVOY_UPGRADE_CONTENT='#!/bin/bash
-# BOEVOY FIXTURE: partner-edge-upgrade.sh (tag-form test release asset)
-echo "boevoy-fixture-upgrade-v0.12.59"
+EDGE_E_UPGRADE_CONTENT='#!/bin/bash
+# EDGE-E FIXTURE: partner-edge-upgrade.sh (tag-form test release asset)
+echo "edge-e-fixture-upgrade-v0.12.59"
 '
-printf '%s' "$BOEVOY_UPGRADE_CONTENT" > "$BOEVOY_RELEASE_DIR/partner-edge-upgrade.sh"
-BOEVOY_UPGRADE_SHA=$(sha256sum "$BOEVOY_RELEASE_DIR/partner-edge-upgrade.sh" | awk '{print $1}')
+printf '%s' "$EDGE_E_UPGRADE_CONTENT" > "$EDGE_E_RELEASE_DIR/partner-edge-upgrade.sh"
+EDGE_E_UPGRADE_SHA=$(sha256sum "$EDGE_E_RELEASE_DIR/partner-edge-upgrade.sh" | awk '{print $1}')
 
 # Build SHA256SUMS with all correct hashes.
 {
-    for fname in "${!BOEVOY_SHAS[@]}"; do
-        printf '%s  %s\n' "${BOEVOY_SHAS[$fname]}" "$fname"
+    for fname in "${!EDGE_E_SHAS[@]}"; do
+        printf '%s  %s\n' "${EDGE_E_SHAS[$fname]}" "$fname"
     done
-    printf '%s  partner-edge-upgrade.sh\n' "$BOEVOY_UPGRADE_SHA"
-} > "$BOEVOY_RELEASE_DIR/SHA256SUMS"
+    printf '%s  partner-edge-upgrade.sh\n' "$EDGE_E_UPGRADE_SHA"
+} > "$EDGE_E_RELEASE_DIR/SHA256SUMS"
 
 RELEASE_PORT=18773
-python3 -m http.server "$RELEASE_PORT" --directory "$TMPDIR_BOEVOY" \
-    >/tmp/test-boevoy-release.log 2>&1 &
+python3 -m http.server "$RELEASE_PORT" --directory "$TMPDIR_EDGE_E" \
+    >/tmp/test-edge-e-release.log 2>&1 &
 REL_HTTP_PID=$!
 
 sleep 1
@@ -465,7 +465,7 @@ curl -fsSL --max-time 5 "http://127.0.0.1:$RELEASE_PORT/v0.12.59/SHA256SUMS" >/d
 old_url_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 5 \
     "http://127.0.0.1:$RELEASE_PORT/partner-edge-v0.12.59/SHA256SUMS" 2>/dev/null || echo "000")
 [[ "$old_url_status" == "404" ]] \
-    && pass "D-2: old partner-edge-v0.12.59/ URL returns 404 (boevoy bug fixture validated)" \
+    && pass "D-2: old partner-edge-v0.12.59/ URL returns 404 (edge-e bug fixture validated)" \
     || pass "D-2: old URL returned $old_url_status (404 expected, but not critical for fix validation)"
 
 # D-3: sync with new release tag form → exits 0 (verified install).
@@ -519,15 +519,15 @@ else
     fail "D-7: cannot verify sha256 — source or installed file missing"
 fi
 
-# D-8: the boevoy WARN "could not fetch SHA256SUMS" is gone.
+# D-8: the edge-e WARN "could not fetch SHA256SUMS" is gone.
 echo "$OUT_D3" | grep -qi 'could not fetch SHA256SUMS' \
-    && fail "D-8: 'could not fetch SHA256SUMS' STILL in output — boevoy WARN not fixed" \
-    || pass "D-8: no 'could not fetch SHA256SUMS' warning (boevoy SHA256SUMS bug fixed)"
+    && fail "D-8: 'could not fetch SHA256SUMS' STILL in output — edge-e WARN not fixed" \
+    || pass "D-8: no 'could not fetch SHA256SUMS' warning (edge-e SHA256SUMS bug fixed)"
 
-# D-9: the boevoy WARN "skipping oxpulse-partner-edge-upgrade" is gone.
+# D-9: the edge-e WARN "skipping oxpulse-partner-edge-upgrade" is gone.
 echo "$OUT_D3" | grep -qi 'skipping oxpulse-partner-edge-upgrade' \
-    && fail "D-9: 'skipping oxpulse-partner-edge-upgrade' STILL in output — boevoy bug not fixed" \
-    || pass "D-9: no 'skipping oxpulse-partner-edge-upgrade' warning (boevoy self-update bug fixed)"
+    && fail "D-9: 'skipping oxpulse-partner-edge-upgrade' STILL in output — edge-e bug not fixed" \
+    || pass "D-9: no 'skipping oxpulse-partner-edge-upgrade' warning (edge-e self-update bug fixed)"
 
 rm -rf "$TD_SBIN" "$TD_BIN" "$TD_LIBDIR" "$TD_SYSTEMD"
 
