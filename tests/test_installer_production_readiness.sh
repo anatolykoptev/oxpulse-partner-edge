@@ -11,10 +11,25 @@
 # Driven by: docs/superpowers/plans/2026-05-19-production-ready-installer-multi-channel.md
 #
 # Usage: EDGE=<hostname> bash tests/test_installer_production_readiness.sh
+#
+# This is a LIVE integration/smoke test: it SSHes into a provisioned partner
+# edge and asserts its running-container + metrics state. It is NOT a unit test.
+# It requires an explicitly-targeted, reachable edge and self-skips (no-op) when
+# no EDGE is set or the edge is unreachable, so it is inert in the generic unit
+# sweep. (There is deliberately no default host — a "unit test" that SSHes into
+# a production edge by default is a footgun.)
 set -euo pipefail
 
-EDGE="${EDGE:-ru.oxpulse.chat}"
-ssh_root() { ssh -o BatchMode=yes "root@$EDGE" "$@"; }
+EDGE="${EDGE:-}"
+if [ -z "$EDGE" ]; then
+  echo "SKIP: no EDGE set — live smoke test (run: EDGE=<host> bash $0)" >&2
+  exit 0
+fi
+ssh_root() { ssh -o BatchMode=yes -o ConnectTimeout=10 "root@$EDGE" "$@"; }
+if ! ssh_root true 2>/dev/null; then
+  echo "SKIP: edge $EDGE unreachable over SSH (BatchMode) — live smoke test" >&2
+  exit 0
+fi
 
 # Acceptance 1: every active channel has a running container.
 # Tuple format: container_name:channels_status_key:required|optional

@@ -1,36 +1,38 @@
 #!/bin/bash
-# Verify install.sh runtime deps block includes jq.
+# Verify the installer runtime deps block includes jq.
 #
-# This test greps install.sh source to confirm jq is listed in the runtime
-# deps installation block introduced after the cheburator1 incident (2026-05-09).
+# The runtime deps installation loop was extracted from install.sh into
+# lib/install-deps.sh (installer modularization, Phase 4.1). It confirms jq is
+# listed in the deps block introduced after the cheburator1 incident
+# (2026-05-09). Assert against the lib module that now owns it.
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-INSTALL="$REPO_ROOT/install.sh"
+DEPS_LIB="$REPO_ROOT/lib/install-deps.sh"
 
-[[ -f "$INSTALL" ]] || { echo "FAIL: install.sh not found at $INSTALL"; exit 1; }
+[[ -f "$DEPS_LIB" ]] || { echo "FAIL: lib/install-deps.sh not found at $DEPS_LIB"; exit 1; }
 
 pass() { echo "OK: $*"; }
 fail() { echo "FAIL: $*"; exit 1; }
 
-# ── Test: jq present in install.sh runtime deps block ────────────────────────
-grep -q 'jq' "$INSTALL" \
-    || fail "install.sh does not mention 'jq' — add jq to the runtime deps block"
+# ── Test: jq present in runtime deps block ───────────────────────────────────
+grep -q 'jq' "$DEPS_LIB" \
+    || fail "lib/install-deps.sh does not mention 'jq' — add jq to the runtime deps block"
 
 # More specific: the OS-aware install loop must reference jq
-grep -q 'for _pkg in jq' "$INSTALL" \
-    || fail "install.sh runtime deps loop 'for _pkg in jq' not found — block missing or renamed"
+grep -q 'for _pkg in jq' "$DEPS_LIB" \
+    || fail "lib/install-deps.sh runtime deps loop 'for _pkg in jq' not found — block missing or renamed"
 
-pass "install.sh: jq present in runtime deps installation loop"
+pass "lib/install-deps.sh: jq present in runtime deps installation loop"
 
 # ── Test: block installs via both dnf and apt-get ────────────────────────────
-grep -q 'OS_FAMILY == rhel' "$INSTALL" \
-    || fail "install.sh deps block must branch on OS_FAMILY == rhel (for dnf)"
+grep -q 'OS_FAMILY == rhel' "$DEPS_LIB" \
+    || fail "lib/install-deps.sh deps block must branch on OS_FAMILY == rhel (for dnf)"
 
-pass "install.sh: deps block is OS-family-aware (rhel/debian branches present)"
+pass "lib/install-deps.sh: deps block is OS-family-aware (rhel/debian branches present)"
 
 # ── Syntax check ──────────────────────────────────────────────────────────────
-bash -n "$INSTALL" \
-    || fail "install.sh has syntax errors"
+bash -n "$DEPS_LIB" \
+    || fail "lib/install-deps.sh has syntax errors"
 pass "syntax check clean"
 
 echo ""

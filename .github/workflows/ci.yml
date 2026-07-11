@@ -123,41 +123,18 @@ jobs:
           sudo apt-get install -y -qq bats
 
       - name: Run plain-bash tests
-        # Excluded (require external dependencies not available in CI):
-        #   test_caddy_image.sh         — needs pre-built local Docker image
-        #   test_e2e_a_prime.sh         — live provisioned VM e2e
-        #   test_bake.sh                — references deploy/partner-edge/ path (pre-reorganization)
-        #   test_cert_watch_units.sh    — needs deployed systemd units
-        #   test_coturn_config.sh       — references deploy/partner-edge/ path
-        #   test_cover_page.sh          — needs live Caddy image + cover.html
-        #   test_headers.sh             — requires positional <domain> argument
-        #   test_healthcheck_turns443.sh — tests probe logic, fails pre-existing
-        #   test_hydrate.sh             — references deploy/partner-edge/ path
-        #   test_install_deps.sh        — checks deprecated for-loop syntax
-        #   test_install_ships_cover.sh — references deploy/partner-edge/ path
-        #   test_install_wires_cert_watch.sh — references deploy/partner-edge/ path
-        #   test_sfu_compose.sh         — checks preflight pattern not yet in install.sh
-        #   test_update_sh.sh           — requires local HTTP fallback server
-        #   test_upgrade_v01_to_v02.sh  — references deploy/partner-edge/ path
-        #   test_xray_template_fingerprint.sh — checks sleep pattern not yet in upgrade.sh
-        # Docker-using tests (caddyfile_template, caddyfile_golden, canary_endpoints)
-        # self-SKIP when daemon is unreachable (exit 0).
+        # Only test_update_sh.sh is excluded — it needs a local HTTP fallback
+        # server not available in CI. Every other plain-bash test either passes
+        # or self-SKIPs (exit 0) when a live prerequisite is absent: a <domain>
+        # arg / running edge (test_headers, test_e2e_a_prime,
+        # test_installer_production_readiness), a locally-built Docker image or a
+        # reachable daemon (test_caddy_image, test_cover_page, caddyfile_template,
+        # caddyfile_golden, canary_endpoints), or the opec binary
+        # (test_install_ships_cover's dry-run block).
         run: |
           set +e
           PASS=0; FAIL=0
-          SKIP_LIST="test_caddy_image.sh test_e2e_a_prime.sh \
-            test_bake.sh test_cert_watch_units.sh \
-            test_coturn_config.sh test_cover_page.sh test_headers.sh \
-            test_healthcheck_turns443.sh test_hydrate.sh test_install_deps.sh \
-            test_install_ships_cover.sh test_install_wires_cert_watch.sh \
-            test_sfu_compose.sh test_update_sh.sh test_upgrade_v01_to_v02.sh \
-            test_xray_template_fingerprint.sh \
-            test_install_compose_strip.sh test_installer_production_readiness.sh"
-          # NOTE: test_install_compose_strip + test_installer_production_readiness
-          # are stale assertions about install.sh internals (Case 4 expects a
-          # compose-strip invocation that was refactored out). Pre-existing
-          # FAIL on origin/main; tracked for rewrite. Excluded so PR gate
-          # surfaces NEW regressions, not historical drift.
+          SKIP_LIST="test_update_sh.sh"
           # Guard: every SKIP_LIST entry must exist; stale entries fail the job.
           for entry in $SKIP_LIST; do
             if [ ! -f "tests/$entry" ]; then
