@@ -128,6 +128,7 @@ async fn start_handler_with_metrics() -> (
             signing_pubkey: None,
             client_inject_tx: inject_tx,
             local_udp_addr: local_udp,
+            additional_host_candidates: Vec::new(),
             metrics: metrics.clone(),
             stats_interval_secs: 0,       // stats disabled in tests
             hs256_fallback_enabled: true, // T4.3: HS256 fallback kill-switch (default-on)
@@ -340,6 +341,7 @@ async fn answer_sdp_advertises_public_ip_host_candidate() {
             signing_pubkey: None,
             client_inject_tx: inject_tx,
             local_udp_addr: public_addr,
+            additional_host_candidates: Vec::new(),
             metrics,
             stats_interval_secs: 0,
             hs256_fallback_enabled: true,
@@ -394,6 +396,86 @@ async fn answer_sdp_advertises_public_ip_host_candidate() {
     );
 }
 
+/// OCI-hairpin fix (2026-07-11): when `additional_host_candidates` carries
+/// the node's private IP (`SFU_LOCAL_IP`), the answer SDP must advertise BOTH
+/// the public host candidate AND the private one, so a co-located coturn can
+/// relay client media to the SFU on private addressing where the public
+/// candidate would hairpin and drop. RFC 5737 TEST-NET IPs stand in for the
+/// public (`203.0.113.42`, TEST-NET-3) and private (`198.51.100.7`,
+/// TEST-NET-2) addresses.
+#[tokio::test]
+async fn answer_sdp_advertises_additional_private_host_candidate() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let secret: Arc<[u8]> = Arc::from(HS256_SECRET);
+    let (inject_tx, _inject_rx) = mpsc::channel::<PendingClient>(8);
+
+    // Primary = "public" candidate; additional = "private" candidate at the
+    // same UDP port (the SFU listens on one socket reachable via both IPs).
+    let public_addr: std::net::SocketAddr = "203.0.113.42:7878".parse().unwrap();
+    let private_addr: std::net::SocketAddr = "198.51.100.7:7878".parse().unwrap();
+    let metrics = Arc::new(SfuMetrics::default());
+    let _handle = spawn_client_ws_api(
+        listener,
+        ClientWsApiConfig {
+            secret,
+            signing_pubkey: None,
+            client_inject_tx: inject_tx,
+            local_udp_addr: public_addr,
+            additional_host_candidates: vec![private_addr],
+            metrics,
+            stats_interval_secs: 0,
+            hs256_fallback_enabled: true,
+        },
+    )
+    .unwrap();
+
+    let token = make_token(ROOM_ID, 12, HS256_SECRET, 3600);
+    let url = format!("ws://{addr}/sfu/ws/{ROOM_ID}");
+    let req = build_request(&url, &token);
+    let (mut ws, _resp) = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio_tungstenite::connect_async(req),
+    )
+    .await
+    .expect("ws handshake within 2s")
+    .expect("ws handshake OK");
+
+    let (offer_sdp, _pending, _rtc) = build_browser_offer();
+    ws.send(Message::Text(
+        serde_json::json!({"kind":"offer","sdp":offer_sdp})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+
+    let answer_msg = tokio::time::timeout(Duration::from_millis(500), ws.next())
+        .await
+        .expect("answer arrives")
+        .expect("stream open")
+        .expect("frame OK");
+    let answer_text = match answer_msg {
+        Message::Text(t) => t,
+        other => panic!("expected text answer, got {other:?}"),
+    };
+    let v: Value = serde_json::from_str(answer_text.as_str()).unwrap();
+    let answer_sdp = v["sdp"].as_str().expect("answer.sdp present");
+
+    // BOTH candidates must appear as `a=candidate:` lines: without the
+    // private one the client never installs a coturn permission for it and
+    // the relay-forced pair cannot form on no-hairpin providers.
+    assert!(
+        answer_sdp.contains("203.0.113.42"),
+        "answer SDP must still advertise the primary (public) host candidate 203.0.113.42. SDP:\n{answer_sdp}"
+    );
+    assert!(
+        answer_sdp.contains("198.51.100.7"),
+        "answer SDP must advertise the additional private host candidate 198.51.100.7 (SFU_LOCAL_IP) — \
+         the OCI-hairpin relay path depends on it. SDP:\n{answer_sdp}"
+    );
+}
+
 /// In-process end-to-end variant: drive a real `udp_loop::serve` task
 /// alongside the WS handler and assert the browser client lands in the
 /// Registry (visible via `metrics.active_participants`).
@@ -428,6 +510,7 @@ async fn end_to_end_browser_client_lands_in_registry() {
             signing_pubkey: None,
             client_inject_tx: client_inject_tx.clone(),
             local_udp_addr: local_udp,
+            additional_host_candidates: Vec::new(),
             metrics: metrics.clone(),
             stats_interval_secs: 0,       // stats disabled in tests
             hs256_fallback_enabled: true, // T4.3: HS256 fallback kill-switch (default-on)
@@ -590,6 +673,7 @@ async fn second_joiner_receives_tracks_map_with_first_peer() {
             signing_pubkey: None,
             client_inject_tx: client_inject_tx.clone(),
             local_udp_addr: local_udp,
+            additional_host_candidates: Vec::new(),
             metrics: metrics.clone(),
             stats_interval_secs: 0,       // stats disabled in tests
             hs256_fallback_enabled: true, // T4.3: HS256 fallback kill-switch (default-on)

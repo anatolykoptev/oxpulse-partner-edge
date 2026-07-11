@@ -184,6 +184,14 @@ services:
       # ipify → ifconfig.me). Operators may override at compose render
       # time via OXPULSE_PUBLIC_IP. Falls back to bind address when empty.
       SFU_PUBLIC_IP: "{{PUBLIC_IP}}"
+      # OCI-hairpin fix (2026-07-11): the node's PRIVATE IP, advertised as a
+      # SECOND host candidate so a co-located coturn can relay client media to
+      # the SFU on private addressing where the public candidate would hairpin
+      # (Oracle Cloud has no NAT hairpin → relay-forced group calls fail ICE).
+      # Empty when the node is not behind NAT — the SFU treats "" as unset and
+      # advertises only the public candidate (see config.rs::parse_local_ip_env).
+      # Pairs with coturn `allowed-peer-ip={{PRIVATE_IP}}`.
+      SFU_LOCAL_IP: "{{PRIVATE_IP}}"
     # 2026-05-06 post-mortem: probe all three planes (metrics, client_ws,
     # relay API). Previously only /metrics on {{SFU_METRICS_PORT}} was
     # checked; that listener starts independently of feature gates so

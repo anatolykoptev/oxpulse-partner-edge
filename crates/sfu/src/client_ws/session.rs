@@ -246,6 +246,7 @@ pub async fn run(
     room_id: String,
     peer_id: u64,
     local_udp_addr: SocketAddr,
+    additional_host_candidates: Vec<SocketAddr>,
     inject_tx: Sender<PendingClient>,
     metrics: Arc<SfuMetrics>,
     stats_interval_secs: u64,
@@ -301,6 +302,26 @@ pub async fn run(
             guard.set_close_code(close_code::SDP_INTERNAL);
             close_with_code(socket, close_code::SDP_INTERNAL, "internal").await;
             return Ok(());
+        }
+    }
+
+    // OCI-hairpin fix (2026-07-11): advertise additional host candidates (the
+    // node's private `SFU_LOCAL_IP`) so a co-located coturn can relay client
+    // media to the SFU on private addressing where the public candidate would
+    // hairpin and drop. Unlike the primary candidate above, a failure here is
+    // NON-fatal — the primary candidate is already installed, so we log and
+    // continue rather than tear down the session over a best-effort extra.
+    for extra in &additional_host_candidates {
+        match Candidate::host(*extra, "udp") {
+            Ok(cand) => {
+                rtc.add_local_candidate(cand);
+                tracing::debug!(target: "sfu::client_ws", peer_id, %room_id, %extra,
+                    "client_ws: added additional host candidate (SFU_LOCAL_IP)");
+            }
+            Err(e) => {
+                tracing::warn!(target: "sfu::client_ws", peer_id, %room_id, %extra, error = %e,
+                    "client_ws: skipped invalid additional host candidate — continuing with primary");
+            }
         }
     }
 

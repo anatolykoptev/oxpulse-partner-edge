@@ -82,6 +82,12 @@ denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255
 denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 
+# ─── Allow relaying to the co-located SFU's PRIVATE IP (OCI-hairpin fix) ──
+# Overrides the RFC1918 block above for the ONE private IP the SFU advertises
+# as a host candidate (SFU_LOCAL_IP), so relay-forced group calls complete on
+# private addressing where the public candidate would hairpin. Behind-NAT only.
+{{ALLOWED_PEER_IP_LINE}}
+
 # ─── Relay port range (must match firewall rules in install.sh) ─────────
 min-port=49152
 max-port=65535

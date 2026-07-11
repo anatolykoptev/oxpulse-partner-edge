@@ -58,6 +58,22 @@ pub struct SfuConfig {
     /// public IPv4 in production (rendered by install.sh / docker-compose
     /// from the `$PUBLIC_IP` autodetect).
     pub public_ip: Option<IpAddr>,
+    /// Private/local IP advertised as a SECOND WebRTC host candidate,
+    /// alongside `public_ip`. Env: `SFU_LOCAL_IP`.
+    ///
+    /// OCI-hairpin fix (2026-07-11): on providers whose instances cannot
+    /// route to their own public/floating IP (Oracle Cloud has no NAT
+    /// hairpin), a co-located coturn relaying client media to the SFU's
+    /// public host candidate sends the packet out the gateway and it never
+    /// returns → relay-forced group calls fail with ICE `no_pair`. Emitting
+    /// the node's PRIVATE IP as an additional host candidate lets the
+    /// co-located coturn relay to the SFU entirely on private addressing
+    /// (the client installs a TURN CreatePermission for this IP, and coturn
+    /// must allow it via `allowed-peer-ip`). Set to the same private IP that
+    /// coturn binds its relay sockets to (the PRIV half of coturn's
+    /// `external-ip=PUB/PRIV`). Unset in dev/test and on nodes where the
+    /// public candidate is directly reachable from the co-located coturn.
+    pub local_ip: Option<IpAddr>,
     /// Interval in seconds for str0m built-in peer/media stats events
     /// (`Event::PeerStats`, `Event::MediaEgressStats`, `Event::MediaIngressStats`).
     /// Set to 0 to disable. Env: `STR0M_STATS_INTERVAL_SECS`. Default: 2.
@@ -107,6 +123,7 @@ impl Default for SfuConfig {
             fips_mode: false,
             sfu_signing_public_key: None,
             public_ip: None,
+            local_ip: None,
             stats_interval_secs: 2,
             solo_kick_after_secs: 120,
             metrics_bind: None,
@@ -142,6 +159,7 @@ impl SfuConfig {
             fips_mode: std::env::var("SFU_FIPS").as_deref() == Ok("1"),
             sfu_signing_public_key: std::env::var("SFU_SIGNING_PUBLIC_KEY").ok(),
             public_ip: parse_public_ip_env(),
+            local_ip: parse_local_ip_env(),
             stats_interval_secs: std::env::var("STR0M_STATS_INTERVAL_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -258,6 +276,29 @@ fn parse_public_ip_env() -> Option<IpAddr> {
                 value = %raw, error = %e,
                 "SFU_PUBLIC_IP failed to parse as an IP address — falling back to bind address \
                  for host candidates (off-box ICE will likely fail)"
+            );
+            None
+        }
+    }
+}
+
+/// Parse `SFU_LOCAL_IP` into an `IpAddr` for the additional private host
+/// candidate (OCI-hairpin fix). Same lenient contract as
+/// [`parse_public_ip_env`]: empty/unset → `None`, garbage → `warn` + `None`
+/// so startup continues (the node just loses the private-candidate path and
+/// behaves as before). See [`SfuConfig::local_ip`] for the rationale.
+fn parse_local_ip_env() -> Option<IpAddr> {
+    let raw = std::env::var("SFU_LOCAL_IP").ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    match raw.parse::<IpAddr>() {
+        Ok(ip) => Some(ip),
+        Err(e) => {
+            tracing::warn!(
+                value = %raw, error = %e,
+                "SFU_LOCAL_IP failed to parse as an IP address — the SFU will advertise only its \
+                 public host candidate (co-located relay on no-hairpin providers may fail)"
             );
             None
         }
@@ -455,6 +496,53 @@ mod tests {
             "empty SFU_PUBLIC_IP must be treated as unset (compose passes empty string when var unset)"
         );
         std::env::remove_var("SFU_PUBLIC_IP");
+    }
+
+    #[test]
+    fn local_ip_default_is_none() {
+        let cfg = SfuConfig::default();
+        assert!(
+            cfg.local_ip.is_none(),
+            "local_ip must default to None (nodes without SFU_LOCAL_IP advertise only the primary candidate)"
+        );
+    }
+
+    #[test]
+    fn local_ip_env_parses_ipv4() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // RFC 5737 TEST-NET-2 — stand-in for a node's private/local IP.
+        std::env::set_var("SFU_LOCAL_IP", "198.51.100.7");
+        let cfg = SfuConfig::from_env();
+        assert_eq!(
+            cfg.local_ip,
+            Some("198.51.100.7".parse().unwrap()),
+            "valid IPv4 must round-trip through SFU_LOCAL_IP (OCI-hairpin private candidate)"
+        );
+        std::env::remove_var("SFU_LOCAL_IP");
+    }
+
+    #[test]
+    fn local_ip_env_empty_is_none() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("SFU_LOCAL_IP", "");
+        let cfg = SfuConfig::from_env();
+        assert!(
+            cfg.local_ip.is_none(),
+            "empty SFU_LOCAL_IP must be treated as unset (compose passes empty string when var unset)"
+        );
+        std::env::remove_var("SFU_LOCAL_IP");
+    }
+
+    #[test]
+    fn local_ip_env_garbage_falls_back_to_none() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("SFU_LOCAL_IP", "not-an-ip");
+        let cfg = SfuConfig::from_env();
+        assert!(
+            cfg.local_ip.is_none(),
+            "garbage SFU_LOCAL_IP must yield None (warn + degrade), not panic"
+        );
+        std::env::remove_var("SFU_LOCAL_IP");
     }
 
     #[test]
