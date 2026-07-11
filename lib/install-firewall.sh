@@ -99,27 +99,54 @@ _firewall_resolve_awg_port() {
 	return 1
 }
 
-# Resolve the local docker `edge` bridge subnet(s) so the co-located Caddy
-# container can reach the host-networked SFU's client WS port (:8920). Caddy
-# reverse_proxies /sfu/ws/* to host.docker.internal:8920 (see Caddyfile.tpl);
-# the `edge` network pins NO ipam in docker-compose.yml.tpl, so its subnet is
-# docker-assigned and DYNAMIC per install — we read it live rather than
-# hardcoding 172.18.0.0/16. Prints one CIDR per line; prints nothing (rc 0)
-# when docker or the network is not up yet (first install, before the initial
-# `docker compose up` creates the net) — reconcile_firewall_surface re-runs
-# firewall_apply every converge and picks the subnet up once the network exists.
-_firewall_resolve_edge_subnets() {
-	# Test seam / operator override (space- or newline-separated CIDR list).
+# RFC1918-only CIDR filter (stdin → stdout). Docker bridge subnets are always
+# private; on the operator-override path this is the cheap insurance that a
+# fat-fingered PE_FW_EDGE_SUBNETS=0.0.0.0/0 can never open :8920 to the world.
+# Accepts 10/8, 172.16/12, 192.168/16; drops everything else (incl. malformed).
+_firewall_rfc1918_cidrs() {
+	grep -E '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)[0-9.]+/[0-9]+$' || true
+}
+
+# Resolve the local docker `edge` bridge(s) so the co-located Caddy container can
+# reach the host-networked SFU's client WS port (:8920). Caddy reverse_proxies
+# /sfu/ws/* to host.docker.internal:8920 (see Caddyfile.tpl); the `edge` network
+# pins NO ipam in docker-compose.yml.tpl, so BOTH its subnet and its bridge
+# interface (docker names it br-<network-id[:12]>) are docker-assigned and
+# DYNAMIC per install — read live, never hardcoded. Emits one "<iface> <cidr>"
+# row per subnet (iface "-" = unknown, override path → source-only fallback).
+# Emits nothing (rc 0) when docker or the network is not up yet (first install,
+# before the initial `docker compose up` creates the net) — the caller warns and
+# reconcile_firewall_surface re-runs firewall_apply every converge, picking the
+# bridge up once the network exists. All emitted CIDRs are RFC1918-filtered.
+_firewall_resolve_edge_bridges() {
+	# Test seam / operator override (space- or newline-separated CIDR list). The
+	# iface is unknown here, so rows are source-only ("-"); still RFC1918-gated.
 	if [[ -n "${PE_FW_EDGE_SUBNETS:-}" ]]; then
 		printf '%s\n' "$PE_FW_EDGE_SUBNETS" | tr ' ' '\n' \
-			| grep -E '^[0-9.]+/[0-9]+$' || true
+			| _firewall_rfc1918_cidrs | sed 's/^/- /'
 		return 0
 	fi
 	command -v docker >/dev/null 2>&1 || return 0
+	# NOTE: this default MIRRORS docker-compose's own project-name derivation
+	# (compose top-level `name: oxpulse-partner-edge` → network
+	# `oxpulse-partner-edge_edge`; hydrate.sh runs compose without a `-p` flag).
+	# A change to EITHER side alone silently breaks resolution — keep in sync, or
+	# set PE_FW_EDGE_NETWORK explicitly.
 	local net="${PE_FW_EDGE_NETWORK:-${COMPOSE_PROJECT_NAME:-oxpulse-partner-edge}_edge}"
-	docker network inspect "$net" \
-		--format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' 2>/dev/null \
-		| grep -E '^[0-9.]+/[0-9]+$' || true
+	local raw id iface
+	raw=$(docker network inspect "$net" \
+		--format '{{.Id}}{{range .IPAM.Config}} {{.Subnet}}{{end}}' 2>/dev/null) || return 0
+	[[ -n "$raw" ]] || return 0
+	local -a parts
+	read -ra parts <<<"$raw"
+	id=${parts[0]}
+	# Docker's default bridge-name convention; no com.docker.network.bridge.name
+	# override is set on this network (docker-compose.yml.tpl uses driver: bridge).
+	iface="br-${id:0:12}"
+	local sub
+	for sub in "${parts[@]:1}"; do
+		printf '%s\n' "$sub" | _firewall_rfc1918_cidrs | sed "s|^|${iface} |"
+	done
 	return 0
 }
 
@@ -151,17 +178,47 @@ _firewall_apply_ufw() {
 	# Caddy reverse_proxies /sfu/ws/* to host.docker.internal:8920; browsers reach
 	# it exclusively through Caddy's :443 TLS front, never :8920 directly. Without
 	# this rule `default deny incoming` drops Caddy→host:8920 ("no route to host")
-	# → 502 on every group call (live incident us_zvonilka 2026-07-09). This is NOT
-	# public exposure: the source is a docker-internal RFC1918 bridge subnet,
-	# unreachable and unspoofable from the internet (a public-iface packet with a
-	# 172.x source is martian-dropped). 8920 stays off the public whitelist.
-	local edge_subnet
-	while read -r edge_subnet; do
+	# → 502 on every group call (live incident us_zvonilka 2026-07-09).
+	#
+	# SCOPING (correct-by-construction): the rule is bound to the docker bridge
+	# INTERFACE (`in on br-<id>`) AND the bridge source subnet, so it can only
+	# match traffic that actually arrived on that bridge — never the public NIC.
+	# Source-IP alone is NOT sufficient: RFC1918 is not martian (RFC1812) and
+	# rp_filter defaults to loose (=2) on these distros, so a spoofed 172.x source
+	# on the public interface would pass a source-only check; the interface match
+	# is the real guard. (This TCP port's return path also can't reach a spoofer,
+	# but we do not rely on that.) 8920 stays off the public whitelist — not
+	# public exposure. If the bridge iface is unknown (override seam, iface "-"),
+	# we fall back to source-only, still RFC1918-gated.
+	local edge_iface edge_subnet had_bridge=0
+	while read -r edge_iface edge_subnet; do
 		[[ -n "$edge_subnet" ]] || continue
-		ufw allow from "$edge_subnet" to any port 8920 proto tcp \
-			comment 'partner-edge sfu-ws local-bridge' >/dev/null
-	done < <(_firewall_resolve_edge_subnets)
+		had_bridge=1
+		if [[ "$edge_iface" == "-" || -z "$edge_iface" ]]; then
+			ufw allow from "$edge_subnet" to any port 8920 proto tcp \
+				comment 'partner-edge sfu-ws local-bridge' >/dev/null
+		else
+			ufw allow in on "$edge_iface" from "$edge_subnet" to any port 8920 proto tcp \
+				comment 'partner-edge sfu-ws local-bridge' >/dev/null
+		fi
+	done < <(_firewall_resolve_edge_bridges)
+	_firewall_warn_if_no_bridge "$had_bridge"
 	ufw --force enable >/dev/null
+}
+
+# Shared breadcrumb: if docker is present and no override is set but the resolver
+# yielded ZERO bridges, the :8920 local-path rule did NOT land this run. On a
+# converged node (docker transiently down mid-converge, network vanished, wrong
+# project-name derivation) that is a diagnosable silent gap — the exact class
+# that caused the 2026-07-09 incident — so log it (repo convention: write-
+# failures must log or bump a metric). Pre-first-`compose up` this is expected;
+# we still warn (cheap, and the next converge clears it). Non-fatal by design.
+_firewall_warn_if_no_bridge() {
+	local had_bridge="$1"
+	[[ "$had_bridge" == "1" ]] && return 0
+	[[ -n "${PE_FW_EDGE_SUBNETS:-}" ]] && return 0
+	command -v docker >/dev/null 2>&1 || return 0
+	warn "[firewall] docker edge-network subnet not found — SFU WS local-path rule (:8920) NOT applied this run; Caddy to :8920 may 502 until the network exists (self-heals next converge)."
 }
 
 _firewall_apply_firewalld() {
@@ -197,17 +254,26 @@ _firewall_apply_firewalld() {
 			"rule family=ipv4 source address=10.9.0.0/24 port port=$p protocol=tcp accept" >/dev/null
 	done
 
-	# SFU client WS (:8920) — local docker `edge` bridge only (see the ufw path
-	# comment for the full rationale; 8920 was already stripped from the public
-	# zone in the legacy-strip loop above). Source subnet derived live.
-	local edge_subnet
-	while read -r edge_subnet; do
+	# SFU client WS (:8920) — local docker `edge` bridge only (8920 was already
+	# stripped from the public zone in the legacy-strip loop above; this re-adds it
+	# for the bridge subnet). SCOPING CAVEAT: firewalld rich rules CANNOT match an
+	# ingress interface (interface scoping is zone-level), so — unlike the ufw path
+	# — this is source-subnet-scoped only. The subnet is RFC1918 (helper-filtered).
+	# A future NON-TCP service MUST NOT copy this source-only pattern without zone
+	# or interface scoping: a spoofed RFC1918 source on the public NIC would match
+	# (for this TCP port a spoofer gets no return path; UDP has no such guard).
+	# The bridge iface from the resolver is unused here (rich rules can't consume
+	# it) — read into the `_` throwaway.
+	local edge_subnet had_bridge=0
+	while read -r _ edge_subnet; do
 		[[ -n "$edge_subnet" ]] || continue
+		had_bridge=1
 		firewall-cmd --permanent --zone=$zone --remove-rich-rule \
 			"rule family=ipv4 source address=$edge_subnet port port=8920 protocol=tcp accept" 2>/dev/null || true
 		firewall-cmd --permanent --zone=$zone --add-rich-rule \
 			"rule family=ipv4 source address=$edge_subnet port port=8920 protocol=tcp accept" >/dev/null
-	done < <(_firewall_resolve_edge_subnets)
+	done < <(_firewall_resolve_edge_bridges)
+	_firewall_warn_if_no_bridge "$had_bridge"
 
 	firewall-cmd --reload >/dev/null
 }
