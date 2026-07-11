@@ -131,11 +131,14 @@ PYEOF
 pass "Case 3: depends_on dict (long form) refs to stripped xray removed from caddy"
 
 # ---------------------------------------------------------------------------
-# Case 4 — install.sh compose strip block is wired
+# Case 4 — install.sh compose strip is wired
+# The strip logic was extracted to compose_strip_failed_channels() in
+# lib/render-channel-lib.sh (Phase 5.5 MAJOR 1); install.sh invokes it after
+# channel statuses are final. Assert the call site, not the old log string.
 # ---------------------------------------------------------------------------
-grep -q 'stripping failed channels from compose' "$REPO_ROOT/install.sh" \
-    || fail "Case 4: install.sh does not contain compose strip invocation"
-pass "Case 4: install.sh contains compose strip invocation"
+grep -qE 'compose_strip_failed_channels[[:space:]]+"\$compose_out"' "$REPO_ROOT/install.sh" \
+    || fail "Case 4: install.sh does not invoke compose_strip_failed_channels"
+pass "Case 4: install.sh invokes compose_strip_failed_channels"
 
 # ---------------------------------------------------------------------------
 # Case 5 — python3-yaml dep ensured in lib/install-deps.sh

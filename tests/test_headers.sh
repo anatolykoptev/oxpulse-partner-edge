@@ -1,7 +1,13 @@
 #!/bin/bash
-# Test: partner-edge Caddy does NOT leak Via or Alt-Svc headers
+# Test: partner-edge Caddy does NOT leak Via or Alt-Svc headers.
+# Live probe — requires a running partner edge; pass its domain as $1.
+# Self-skips (no-op) in the generic unit sweep where no domain is given.
 set -eu
-DOMAIN="${1:?partner domain required}"
+if [ "$#" -lt 1 ] || [ -z "${1:-}" ]; then
+  echo "SKIP: no partner domain argument — live-probe test (usage: $0 <domain>)" >&2
+  exit 0
+fi
+DOMAIN="$1"
 resp=$(curl -sI "https://${DOMAIN}/" --max-time 10)
 
 if echo "$resp" | grep -qi '^via:'; then

@@ -2,7 +2,7 @@
 # Structural validation of cert-reload systemd units.
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-/home/krolik/src/oxpulse-partner-edge}"
-UNITS="$REPO_ROOT/deploy/partner-edge/systemd"
+UNITS="$REPO_ROOT/systemd"
 
 [ -f "$UNITS/oxpulse-partner-cert-watch.path" ] \
   || { echo "FAIL: .path unit missing"; exit 1; }
