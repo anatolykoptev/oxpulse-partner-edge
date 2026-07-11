@@ -160,7 +160,32 @@ impl Registry {
     /// still exercise the full-simulcast code path.
     #[doc(hidden)]
     pub fn force_pacer_refresh_for_tests(&mut self, origin: crate::propagate::ClientId) {
-        self.update_pacer_layers(origin);
+        self.update_pacer_layers(origin, Instant::now());
+    }
+
+    /// Test-only: same as [`Self::force_pacer_refresh_for_tests`] but with an
+    /// explicit `now`, so task #18 min-tick-floor tests can drive precisely
+    /// spaced ticks (e.g. `t0`, `t0 + Duration::from_millis(10)`,
+    /// `t0 + PACER_MIN_TICK_INTERVAL`) instead of relying on wall-clock
+    /// `Instant::now()` calls that land microseconds apart.
+    #[doc(hidden)]
+    pub fn force_pacer_refresh_at_for_tests(
+        &mut self,
+        origin: crate::propagate::ClientId,
+        now: Instant,
+    ) {
+        self.update_pacer_layers(origin, now);
+    }
+
+    /// Test-only: read a subscriber's last-emitted `SuspendTier` by index.
+    /// `None` means no tier has been emitted yet (boot assumption: peer
+    /// starts at `VideoMax`, which never emits on first tick). Used to
+    /// observe whether `update_pacer_layers` actually drove the pacer into
+    /// `SuspendVideo` / `GoAudioOnly` / `RestoreVideo` without draining
+    /// `to_propagate` through a full `fanout_pending` pass.
+    #[doc(hidden)]
+    pub fn last_emitted_tier_for_tests(&self, idx: usize) -> Option<crate::propagate::SuspendTier> {
+        self.clients[idx].last_emitted_tier.clone()
     }
 
     /// Test-only: seed an `active_rid` on a client by id, bypassing

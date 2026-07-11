@@ -90,6 +90,13 @@ pub struct SfuMetrics {
     pub pacer_layer_total: IntCounterVec,
     /// M6.1: simulcast layer transitions per subscriber (from/to/peer labels).
     pub layer_transitions_total: IntCounterVec,
+    /// Task #18: pacer FSM advances skipped by the `SFU_PACER_FLOOR` min-tick
+    /// floor. Label: `peer_id`. Only increments while the floor is enabled
+    /// (`SFU_PACER_FLOOR=1`); always-zero on an edge with the flag off.
+    /// Rising rate confirms the floor is throttling a fast `MediaData`
+    /// cadence as designed. Scrubbed on disconnect alongside
+    /// `pacer_layer_total` (see `Registry::reap_dead` / `evict_for_steal`).
+    pub pacer_tick_throttled_total: IntCounterVec,
     /// M6.1: E2E handshake failures (SFU-side placeholder, always 0 — M6.3).
     pub e2e_handshake_failures_total: IntCounter,
     /// M6.1: histogram of inter-change intervals as dominant-speaker hysteresis proxy.
@@ -599,6 +606,19 @@ impl SfuMetrics {
             &["peer_id", "rid"],
         )
         .context("pacer_layer_total")?);
+
+        // Task #18: SFU_PACER_FLOOR min-tick floor throttle counter.
+        let pacer_tick_throttled_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "pacer_tick_throttled_total",
+                "Pacer FSM advances skipped by the SFU_PACER_FLOOR min-tick floor \
+                 (task #18). Label: peer_id. Only increments while \
+                 SFU_PACER_FLOOR=1; always-zero with the flag off. Scrubbed on \
+                 disconnect alongside pacer_layer_total.",
+            ),
+            &["peer_id"],
+        )
+        .context("pacer_tick_throttled_total")?);
 
         let (
             layer_transitions_total,
@@ -1336,6 +1356,7 @@ impl SfuMetrics {
             sfu_admission_rejected_total,
             relay_connect_success_total,
             relay_candidate_exhausted_total,
+            pacer_tick_throttled_total,
         })
     }
 

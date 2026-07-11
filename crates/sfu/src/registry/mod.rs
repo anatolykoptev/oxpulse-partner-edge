@@ -257,6 +257,11 @@ impl Registry {
             .metrics
             .client_delivered_media_count
             .remove_label_values(&[&peer_label]);
+        // Task #18: mirror reap_dead's pacer_tick_throttled_total scrub.
+        let _ = self
+            .metrics
+            .pacer_tick_throttled_total
+            .remove_label_values(&[&peer_label]);
         for rid_label in PACER_RID_LABELS {
             let _ = self
                 .metrics
