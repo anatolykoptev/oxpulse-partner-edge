@@ -111,7 +111,13 @@ pub fn reset_pacer_floor_for_tests() {
     *ENABLED_OVERRIDE.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
-#[cfg(test)]
+// These unit tests exercise the `test-utils`-only override machinery
+// (`set_pacer_floor_for_tests` / the `ENABLED_OVERRIDE` path), so they must be
+// gated behind `test-utils` as well — otherwise the featureless
+// `cargo test --workspace` CI job compiles them and fails to find the helpers
+// (E0425). The featured CI job (`cargo test -p oxpulse-sfu --features
+// test-utils,vfm`) compiles and runs them, so this is not skip-to-green.
+#[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::*;
 
