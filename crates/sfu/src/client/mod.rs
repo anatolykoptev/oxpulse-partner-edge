@@ -275,12 +275,40 @@ pub struct Client {
     /// SubscriberPacer instance so lifecycle (drop-on-disconnect) is
     /// automatic and the registry needs no separate cleanup path.
     pub(crate) pacer: oxpulse_sfu_kit::SubscriberPacer,
+    /// ADR-13-style min-tick floor state (task #18), behind `SFU_PACER_FLOOR`.
+    /// Last `Instant` this subscriber's pacer FSM was actually advanced by
+    /// `registry::bwe::update_pacer_layers`. `None` means never advanced
+    /// (first tick always runs). Mirrors
+    /// `oxpulse_sfu_kit::client::Client::last_pacer_drive`, which this fork's
+    /// separate `Client` type does not inherit (fork-collapse verdict).
+    pub(crate) last_pacer_tick: Option<std::time::Instant>,
 }
 
 impl Client {
     /// This subscriber's desired simulcast layer.
     pub fn desired_layer(&self) -> Rid {
         self.desired_layer
+    }
+
+    /// ADR-13-style min-tick floor (task #18): `true` at most once per
+    /// `min_interval` per subscriber. `registry::bwe::update_pacer_layers`
+    /// calls this before advancing the pacer FSM so a burst of below-100ms
+    /// ticks can't collapse `SUSPEND_STREAK`'s intended debounce window.
+    /// Mirrors `oxpulse_sfu_kit::client::accessors::Client::pacer_tick_ready`
+    /// exactly (same semantics), reimplemented here because this fork's
+    /// `Client` is a distinct type from the kit's (fork-collapse verdict).
+    pub(crate) fn pacer_tick_ready(
+        &mut self,
+        now: std::time::Instant,
+        min_interval: std::time::Duration,
+    ) -> bool {
+        match self.last_pacer_tick {
+            Some(last) if now.saturating_duration_since(last) < min_interval => false,
+            _ => {
+                self.last_pacer_tick = Some(now);
+                true
+            }
+        }
     }
 
     /// Whether this client is an upstream SFU relay (connected as a cascade

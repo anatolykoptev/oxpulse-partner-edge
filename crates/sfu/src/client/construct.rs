@@ -92,6 +92,7 @@ impl Client {
             pacer: oxpulse_sfu_kit::SubscriberPacer::with_config(
                 crate::pacer::oxpulse_partner_edge_pacer_config(),
             ),
+            last_pacer_tick: None,
             // Phase 2c: populated by with_sfu_events_dc(); relay clients leave None.
             sfu_events_cid: None,
             last_emitted_tier: None,
