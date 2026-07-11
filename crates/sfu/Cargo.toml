@@ -92,6 +92,13 @@ required-features = ["test-utils"]
 name = "hard_red_migration"
 required-features = ["test-utils"]
 
+# Isolated to its own binary: it flips the process-global SFU_PACER_FLOOR
+# override at runtime, which would corrupt concurrent flag-reading neighbours
+# if co-located (each tests/*.rs is a separate process). See the file header.
+[[test]]
+name = "pacer_floor_test"
+required-features = ["test-utils"]
+
 [[test]]
 name = "ice_stun_destination_mismatch"
 required-features = ["test-utils"]

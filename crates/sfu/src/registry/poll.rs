@@ -217,6 +217,11 @@ impl Registry {
     /// `BandwidthEstimate` and `ClientBudgetHint` are consumed here and
     /// never fan out to other clients.
     pub fn fanout_pending(&mut self) {
+        // Task #18: one clock read per drain pass, threaded into
+        // `update_pacer_layers` so its min-tick floor is deterministic and
+        // consistent across every MediaData event drained this pass. Mirrors
+        // the kit's own `fanout_pending` (`oxpulse_sfu_kit::registry::drive`).
+        let now = Instant::now();
         while let Some(p) = self.to_propagate.pop_front() {
             match &p {
                 Propagated::BandwidthEstimate(cid, bps) => {
@@ -314,7 +319,7 @@ impl Registry {
                 // M5.3 fix-round: the publisher's active RIDs drive the
                 // pacer's `available_rids` input — pass the origin through
                 // so update_pacer_layers can look them up.
-                Propagated::MediaData(origin, _) => self.update_pacer_layers(*origin),
+                Propagated::MediaData(origin, _) => self.update_pacer_layers(*origin, now),
                 // Phase 8 T10: increment rx bytes for the sender before
                 // fan-out to subscribers. This is the authoritative
                 // receive-side counter — emitted once per frame regardless
