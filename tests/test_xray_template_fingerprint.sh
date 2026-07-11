@@ -61,30 +61,34 @@ print('FAIL: no realitySettings block found in outbounds')
 sys.exit(1)
 " || exit 1
 
-# 3. upgrade.sh post-up sleep must be ≥10s.
-#    xray 26.5.3 with randomized fingerprint takes up to 8s to establish
-#    the Reality tunnel on first connection. 5s was insufficient (v0.12.20
-#    rollback incident). Any value <10s risks a false-negative on check 10.
-#
-#    The 'sleep N' after 'docker compose up -d --force-recreate' (post-upgrade
-#    path) is the critical one. Check both occurrences of sleep in the upgrade
-#    path (post-upgrade AND rollback) are ≥10.
-post_upgrade_sleep=$(awk '
-    /docker compose up -d --force-recreate/ { found=1 }
-    found && /^sleep / { match($0, /[0-9]+/); print substr($0, RSTART, RLENGTH); found=0 }
-' "$UPGRADE" | tail -1)
+# 3. Cold-start settle margin before the post-upgrade healthcheck gate.
+#    xray with a randomized fingerprint takes up to 8s to establish the Reality
+#    tunnel on first connection; a fixed 5s sleep was insufficient (v0.12.20
+#    rollback incident). That fragile fixed post-up `sleep` was REPLACED by
+#    settle_healthcheck_with_retry() (upgrade.sh), which POLLS healthcheck every
+#    3s up to a total budget (OXPULSE_UPGRADE_HEALTH_TIMEOUT, default 30s) — the
+#    actual fix, strictly more robust than any fixed sleep. Assert the polling
+#    settle gate is defined, invoked, and its total budget is ≥10s (the minimum
+#    margin the old fixed-sleep guard demanded).
+grep -qE '^settle_healthcheck_with_retry\(\)' "$UPGRADE" \
+    || { echo "FAIL: settle_healthcheck_with_retry() not defined — cold-start settle gate missing"; exit 1; }
+grep -qE 'settle_healthcheck_with_retry[[:space:]]+"' "$UPGRADE" \
+    || { echo "FAIL: settle_healthcheck_with_retry not invoked (no call site) — post-upgrade gate not wired"; exit 1; }
+settle_budget=$(grep -oE 'OXPULSE_UPGRADE_HEALTH_TIMEOUT:-[0-9]+' "$UPGRADE" | head -1 | grep -oE '[0-9]+$')
+[[ "${settle_budget:-0}" -ge 10 ]] \
+    || { echo "FAIL: settle budget is ${settle_budget:-missing}s (need ≥10s); xray Reality tunnel startup takes up to 8s"; exit 1; }
 
-[[ "${post_upgrade_sleep:-0}" -ge 10 ]] \
-    || { echo "FAIL: upgrade.sh post-up sleep is ${post_upgrade_sleep:-missing}s (need ≥10s); xray 26.5.3 Reality tunnel startup takes up to 8s"; exit 1; }
-
-# 4. The rollback path sleep must also be ≥10s (same xray startup concern).
+# 4. The rollback path must also give a ≥10s settle before its healthcheck
+#    (same xray startup concern). The rollback-mode block still uses a fixed
+#    sleep; anchor on the rollback-mode marker and read the first NUMERIC sleep
+#    (ignoring poll-loop `sleep "$interval"` lines).
 rollback_sleep=$(awk '
-    /--rollback/ { in_rollback=1 }
-    in_rollback && /^[[:space:]]*sleep / { match($0, /[0-9]+/); print substr($0, RSTART, RLENGTH); exit }
+    /---- --rollback mode ----/ { in_rollback=1 }
+    in_rollback && /^[[:space:]]*sleep [0-9]/ { match($0, /[0-9]+/); print substr($0, RSTART, RLENGTH); exit }
 ' "$UPGRADE")
 
 [[ "${rollback_sleep:-0}" -ge 10 ]] \
-    || { echo "FAIL: upgrade.sh rollback sleep is ${rollback_sleep:-missing}s (need ≥10s)"; exit 1; }
+    || { echo "FAIL: upgrade.sh rollback settle sleep is ${rollback_sleep:-missing}s (need ≥10s)"; exit 1; }
 
 # 5. Sanity: upgrade.sh still parses.
 bash -n "$UPGRADE" || { echo "FAIL: upgrade.sh has syntax errors"; exit 1; }
