@@ -82,6 +82,30 @@ _firewall_resolve_awg_port() {
 	return 1
 }
 
+# Resolve the local docker `edge` bridge subnet(s) so the co-located Caddy
+# container can reach the host-networked SFU's client WS port (:8920). Caddy
+# reverse_proxies /sfu/ws/* to host.docker.internal:8920 (see Caddyfile.tpl);
+# the `edge` network pins NO ipam in docker-compose.yml.tpl, so its subnet is
+# docker-assigned and DYNAMIC per install — we read it live rather than
+# hardcoding 172.18.0.0/16. Prints one CIDR per line; prints nothing (rc 0)
+# when docker or the network is not up yet (first install, before the initial
+# `docker compose up` creates the net) — reconcile_firewall_surface re-runs
+# firewall_apply every converge and picks the subnet up once the network exists.
+_firewall_resolve_edge_subnets() {
+	# Test seam / operator override (space- or newline-separated CIDR list).
+	if [[ -n "${PE_FW_EDGE_SUBNETS:-}" ]]; then
+		printf '%s\n' "$PE_FW_EDGE_SUBNETS" | tr ' ' '\n' \
+			| grep -E '^[0-9.]+/[0-9]+$' || true
+		return 0
+	fi
+	command -v docker >/dev/null 2>&1 || return 0
+	local net="${PE_FW_EDGE_NETWORK:-${COMPOSE_PROJECT_NAME:-oxpulse-partner-edge}_edge}"
+	docker network inspect "$net" \
+		--format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' 2>/dev/null \
+		| grep -E '^[0-9.]+/[0-9]+$' || true
+	return 0
+}
+
 _firewall_apply_ufw() {
 	local awg_port="$1"
 	ufw --force reset >/dev/null
@@ -106,6 +130,20 @@ _firewall_apply_ufw() {
 		ufw allow from 10.9.0.0/24 to any port "$p" proto tcp \
 			comment 'partner-edge mesh-only' >/dev/null
 	done
+	# SFU client WS (:8920) — reachable ONLY from the local docker `edge` bridge.
+	# Caddy reverse_proxies /sfu/ws/* to host.docker.internal:8920; browsers reach
+	# it exclusively through Caddy's :443 TLS front, never :8920 directly. Without
+	# this rule `default deny incoming` drops Caddy→host:8920 ("no route to host")
+	# → 502 on every group call (live incident us_zvonilka 2026-07-09). This is NOT
+	# public exposure: the source is a docker-internal RFC1918 bridge subnet,
+	# unreachable and unspoofable from the internet (a public-iface packet with a
+	# 172.x source is martian-dropped). 8920 stays off the public whitelist.
+	local edge_subnet
+	while read -r edge_subnet; do
+		[[ -n "$edge_subnet" ]] || continue
+		ufw allow from "$edge_subnet" to any port 8920 proto tcp \
+			comment 'partner-edge sfu-ws local-bridge' >/dev/null
+	done < <(_firewall_resolve_edge_subnets)
 	ufw --force enable >/dev/null
 }
 
@@ -141,6 +179,18 @@ _firewall_apply_firewalld() {
 		firewall-cmd --permanent --zone=$zone --add-rich-rule \
 			"rule family=ipv4 source address=10.9.0.0/24 port port=$p protocol=tcp accept" >/dev/null
 	done
+
+	# SFU client WS (:8920) — local docker `edge` bridge only (see the ufw path
+	# comment for the full rationale; 8920 was already stripped from the public
+	# zone in the legacy-strip loop above). Source subnet derived live.
+	local edge_subnet
+	while read -r edge_subnet; do
+		[[ -n "$edge_subnet" ]] || continue
+		firewall-cmd --permanent --zone=$zone --remove-rich-rule \
+			"rule family=ipv4 source address=$edge_subnet port port=8920 protocol=tcp accept" 2>/dev/null || true
+		firewall-cmd --permanent --zone=$zone --add-rich-rule \
+			"rule family=ipv4 source address=$edge_subnet port port=8920 protocol=tcp accept" >/dev/null
+	done < <(_firewall_resolve_edge_subnets)
 
 	firewall-cmd --reload >/dev/null
 }
