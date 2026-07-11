@@ -2,7 +2,7 @@
 # Structural validation of coturn.conf.tpl for Phase 3A v0.2.0.
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-/home/krolik/src/oxpulse-partner-edge}"
-TPL="$REPO_ROOT/deploy/partner-edge/coturn.conf.tpl"
+TPL="$REPO_ROOT/coturn.conf.tpl"
 
 # TLS enablement + cert
 grep -qE '^no-tls\b' "$TPL" && { echo "FAIL: no-tls still present — TLS disabled"; exit 1; }

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-/home/krolik/src/oxpulse-partner-edge}"
-SCRIPT="$REPO_ROOT/deploy/partner-edge/upgrade.sh"
+SCRIPT="$REPO_ROOT/upgrade.sh"
 
 # 1. Script parses cleanly.
 bash -n "$SCRIPT" || { echo "FAIL: bash -n failed on upgrade.sh" >&2; exit 1; }
