@@ -23,7 +23,7 @@
 #   frames (WireGuard handshake still works; ping fails 100%). Do NOT
 #   randomize, compute, or default these values here — write them
 #   verbatim from the registration response. See docs/AWG_PARAM_INVARIANT.md
-#   for the full failure mode and the 2026-05-20 zvonilka.net outage RCA.
+#   for the full failure mode and the 2026-05-20 edge-b.example outage RCA.
 #   AWG_H1 AWG_H2 AWG_H3 AWG_H4         packet-header hashes
 #   log warn die                        functions (install.sh provides)
 #

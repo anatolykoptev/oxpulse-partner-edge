@@ -119,7 +119,7 @@ removal of the hardcoded path.
 
 **Severity:** P1 — install completes "successfully" with empty `AWG_*` vars and a dead `awg-quick@awg0` service. No surfacing log; operator sees install OK but the edge is non-functional until they tail journalctl.
 
-**Investigation report:** `/home/krolik/deploy/krolik-server/reports/oxpulse-chat/investigations/2026-05-18-mesh-bridge-online-drop.md` (item 6).
+**Investigation report:** operator's internal investigation log, 2026-05-18 "mesh-bridge online-drop" (item 6).
 
 **Original code-quality-reviewer claim:** "`awg_extract` under `set -euo pipefail` aborts the install silently if JSON is malformed or python3 missing." → **REFUTED in letter, CONFIRMED in spirit.**
 
@@ -368,7 +368,7 @@ PR1 of the v0.14.5 installer/upgrade robustness arc fixed
 `${SFU_METRICS_BIND}`/`${SFU_RELAY_API_BIND}` runtime env vars instead of the
 raw `{{AWG_ALLOCATED_IP}}` template placeholder (which kept its `/CIDR`
 suffix, breaking the wget/nc probes and causing a permanent false
-"unhealthy" — confirmed on ruoxp, failingstreak=19471+). Because
+"unhealthy" — confirmed on edge-d, failingstreak=19471+). Because
 `upgrade.sh` never re-renders `docker-compose.yml` from the template on an
 existing box (only `image_tags` are sed-patched in place per
 `manifest.yaml`'s `compose` surface `patch_only` list), the template fix

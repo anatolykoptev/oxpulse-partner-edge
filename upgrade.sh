@@ -81,11 +81,11 @@ OXPULSE_UPGRADE_TAG="${OXPULSE_UPGRADE_TAG:-@RELEASE_TAG@}"
 OXPULSE_ABSOLUTE_HEALTH_GATE="${OXPULSE_ABSOLUTE_HEALTH_GATE:-0}"
 # Initialize OXPULSE_MIRROR_BASE to empty string so the strip at line 92 and
 # the -n checks below are safe under set -u on edges with no mirror configured
-# (e.g. zvonilka GitHub-direct edges where install.env lacks OXPULSE_MIRROR_BASE).
+# (e.g. edge-b GitHub-direct edges where install.env lacks OXPULSE_MIRROR_BASE).
 OXPULSE_MIRROR_BASE="${OXPULSE_MIRROR_BASE:-}"
 
 # Mirror awareness: OXPULSE_MIRROR_BASE is the plain-TLS mirror used by edges
-# DPI-blocked from GitHub (e.g. zvonilka RU relays).  install.sh sets
+# DPI-blocked from GitHub (e.g. edge-b RU relays).  install.sh sets
 # REPO_RAW=$MIRROR_BASE/raw when the mirror is set; upgrade.sh reads the
 # persisted OXPULSE_MIRROR_BASE from install.env (written at install time) and
 # applies the same polarity so that all host-script fetches work on mirror-
@@ -858,7 +858,7 @@ if [[ "$MODE" == templates ]]; then
 	exit 0
 fi
 
-# re_render_healthcheck() was removed (cheburator chicken-and-egg incident
+# re_render_healthcheck() was removed (edge-a chicken-and-egg incident
 # fix, 2026-07): it was the ONLY thing that ever updated healthcheck.sh, and
 # it only ran on --with-templates — the plain apply path never delivered
 # healthcheck.sh at all. It also ran AFTER the --with-templates baseline
@@ -916,7 +916,7 @@ _HOST_SCRIPT_SBIN_FILES=(
 	# header). Must ship here or an upgraded-but-not-freshly-installed edge
 	# dies on its next health-report tick with "channel-health-lib.sh not
 	# found" — the exact partially-upgraded-fleet-node risk this sync exists
-	# to close (see the cheburator incident note above this array).
+	# to close (see the edge-a incident note above this array).
 	channel-health-lib.sh
 	# Cross-probe (P3b mesh peer-probe) lib: sourced by
 	# oxpulse-channels-health-report at runtime. MUST sync here or a
@@ -956,7 +956,7 @@ _HOST_SCRIPT_SBIN_FILES=(
 	oxpulse-partner-edge-ru-subnets-update
 	# Hysteria2 CH3 activation helper (Phase 1.7 standalone entry point).
 	oxpulse-partner-edge-enable-hy2
-	# healthcheck.sh (cheburator chicken-and-egg incident, 2026-07): previously
+	# healthcheck.sh (edge-a chicken-and-egg incident, 2026-07): previously
 	# updated ONLY by re_render_healthcheck() on --with-templates. The plain
 	# apply path (sync_host_scripts, this array) never delivered it, so a
 	# plain-upgraded edge kept running its ORIGINAL healthcheck forever —
@@ -1151,12 +1151,12 @@ restore_host_scripts() {
 # PARTNER-EDGE SERVICE SCOPING
 #
 # Partners may add their OWN services to the SAME compose file (live example,
-# rvpn v0.13.0 incident 2026-07: `all-rvpn-gate`, a local-only image with no
+# edge-c v0.13.0 incident 2026-07: `all-edge-c-gate`, a local-only image with no
 # ghcr.io upstream). This script only manages ghcr.io/anatolykoptev/
 # partner-edge-* images (see the tag-rewrite sed a few hundred lines down) —
 # a blanket `docker compose pull` with no service args tries to pull EVERY
 # service, foreign ones included, and fails the WHOLE pull with "pull access
-# denied for all-rvpn-gate, repository does not exist". Every pull, digest
+# denied for all-edge-c-gate, repository does not exist". Every pull, digest
 # comparison, and recreate below must be scoped to services we actually own;
 # a foreign service must never be pulled OR recreated.
 #
@@ -1443,7 +1443,7 @@ recreate_changed_services() {
 #   - If OXPULSE_ABSOLUTE_HEALTH_GATE=0 (default): gate passes when no
 #     REGRESSION is detected (GREEN in baseline → RED in post).  Pre-existing
 #     reds (RED in both baseline and post) are reported as drift but do NOT
-#     block the upgrade.  This fixes the cheburator loop where permanent reds
+#     block the upgrade.  This fixes the edge-a loop where permanent reds
 #     on check 12 (SFU /metrics mesh-IP false-negative) and checks 13/14
 #     (xray canary tunnel/upstream degraded) caused every --with-templates
 #     upgrade to auto-rollback even when the change was correct.
@@ -1456,7 +1456,7 @@ recreate_changed_services() {
 # test stub), falls back to the absolute --local gate transparently.
 #
 # Background: xray Reality tunnel establishment on first connection takes up to
-# 8s (uTLS cipher randomisation per connection, measured on rvpn during the
+# 8s (uTLS cipher randomisation per connection, measured on edge-c during the
 # v0.12.20 upgrade incident 2026-05-09).  A single `sleep 10` leaves only a 2s
 # slack margin, which is exceeded on a loaded edge, producing a false-negative
 # healthcheck failure and an automatic rollback.
@@ -1665,7 +1665,7 @@ settle_healthcheck_with_retry() {
 		# by reusing the honest end-to-end probes. The xray-only canary (check_13/14)
 		# or check_07 going RED is NOT a serve-ability loss on a multi-homed box:
 		# Caddy's tunnel_upstream fails over to awg/hy2 and real users keep being
-		# served (live-verified on zvonilka). This can only SUPPRESS a false rollback,
+		# served (live-verified on edge-b). This can only SUPPRESS a false rollback,
 		# never create one — INDETERMINATE (no serve data / reporter absent / the
 		# awk-extracted isolation harness) and LOST (every serving channel went dark)
 		# both fall through to the real rollback below, preserving single-homed and
@@ -2158,7 +2158,7 @@ do_rollback_templates() {
 	# the image may still be present from the original pull.
 	#
 	# Scoped to partner-edge-* services only (foreign-service pull-scope fix,
-	# rvpn v0.13.0 incident) — COMPOSE_FILE was JUST restored from .prev above,
+	# edge-c v0.13.0 incident) — COMPOSE_FILE was JUST restored from .prev above,
 	# so re-derive the service list against the restored file.
 	local -a _rollback_edge_svcs
 	mapfile -t _rollback_edge_svcs < <(list_partner_edge_services)
@@ -2229,7 +2229,7 @@ if [[ "$MODE" == rollback ]]; then
 
 	if [[ "$DRY_RUN" -eq 0 ]]; then
 		# Scoped to partner-edge-* services only (foreign-service pull-scope
-		# fix, rvpn v0.13.0 incident) — do_rollback_templates already restored
+		# fix, edge-c v0.13.0 incident) — do_rollback_templates already restored
 		# COMPOSE_FILE from .prev above.
 		mapfile -t _rollback_mode_edge_svcs < <(list_partner_edge_services)
 		if [[ "${#_rollback_mode_edge_svcs[@]}" -eq 0 ]]; then
@@ -2705,7 +2705,7 @@ run_conflict_checks() {
 # AWG_HOST_IP="${AWG_ALLOCATED_IP%%/*}"). Substituted raw into a wget URL /
 # nc target, that suffix makes the healthcheck fail permanently: docker
 # reports the container "unhealthy" even though the SFU itself is fine
-# (confirmed live on ruoxp, failingstreak=19471+, 6+ days).
+# (confirmed live on edge-d, failingstreak=19471+, 6+ days).
 #
 # v0.14.5 fixes the TEMPLATE (docker-compose.yml.tpl now references the
 # container's own ${SFU_METRICS_BIND}/${SFU_RELAY_API_BIND} runtime env vars,
@@ -2935,7 +2935,7 @@ if [[ "$MODE" == with_templates ]]; then
 	# for both apply paths; the legacy re_render_caddy shell renderer was deleted (Phase 5
 	# strangler completion — it had 0 production callers once this became the live path).
 	#
-	# healthcheck.sh is NOT re-rendered here anymore (cheburator incident fix):
+	# healthcheck.sh is NOT re-rendered here anymore (edge-a incident fix):
 	# sync_host_scripts (Step 4, above) now delivers it — that call already
 	# runs BEFORE the Step 5 baseline snapshot, so the standalone
 	# re_render_healthcheck() call that used to live here was not just
@@ -2961,7 +2961,7 @@ if [[ "$MODE" == with_templates ]]; then
 	# BUG FIX (dead rollback under set -e): `if ! var=$(...); then` — a bare
 	# `var=$(...)` assignment as a plain top-level statement is NOT exempt
 	# from `set -e`; a failing pull killed the WHOLE script right here,
-	# before the rollback branch below ever ran (rvpn v0.13.0 incident: the
+	# before the rollback branch below ever ran (edge-c v0.13.0 incident: the
 	# script died mid-upgrade with compose+host-scripts already rewritten to
 	# the new version, containers still on the old one, no rollback, no
 	# diagnostic beyond the last log line). Wrapping the assignment as an
@@ -3041,7 +3041,7 @@ fi
 # BUG FIX: The plain apply path previously ran every mutating operation
 # (compose tag rewrite, host-script sync, compose pull, container recreate,
 # healthcheck, rollback) unconditionally even with --dry-run, causing a real
-# prod recreate + rollback cycle on ruoxp during a dry-run upgrade v0.12.45→v0.12.61
+# prod recreate + rollback cycle on edge-d during a dry-run upgrade v0.12.45→v0.12.61
 # (~49s downtime). The --with-templates path already exited early at its own
 # dry-run block above; this gate covers the plain apply path.
 #
@@ -3150,7 +3150,7 @@ log "pulling new images (tag=$TARGET): ${_edge_svcs[*]}"
 # BUG FIX (dead rollback under set -e): `if ! var=$(...); then` — see the
 # --with-templates pull above for the full rationale. A bare `pull_out=$(...)`
 # assignment as a plain statement is NOT exempt from `set -e`; a failing pull
-# killed the WHOLE script right here on rvpn, before this rollback branch
+# killed the WHOLE script right here on edge-c, before this rollback branch
 # ever ran — compose+host-scripts ended up at v0.13.0, containers stuck on
 # v0.12.72, no rollback, no diagnostic beyond the last log line.
 if ! pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_edge_svcs[@]}" 2>&1); then
@@ -3198,7 +3198,7 @@ fi
 # Wait for services to stabilize after container recreation, with retry.
 # settle_healthcheck_with_retry polls every 3s up to OXPULSE_UPGRADE_HEALTH_TIMEOUT
 # seconds (default 30s = 10 attempts × 3s).  The budget is 4× the documented
-# worst-case xray Reality establishment time (~8s on rvpn v0.12.20 incident),
+# worst-case xray Reality establishment time (~8s on edge-c v0.12.20 incident),
 # with added margin for a loaded edge.  A single sleep 10 was replaced because
 # the 2s slack was insufficient on loaded edges (see function definition comment).
 # Phase 3: pass baseline snapshot for regression-aware gate.

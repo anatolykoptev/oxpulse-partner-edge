@@ -14,7 +14,7 @@
 #           back when every serving channel went dark (real serve-ability loss)
 #           or when no serve data is available (INDETERMINATE -> current behavior).
 #
-# Live-verified motivating case (zvonilka, 2026-07): xray ТСПУ-blocked (canary
+# Live-verified motivating case (edge-b, 2026-07): xray ТСПУ-blocked (canary
 # 502) while AmneziaWG + Hysteria2 served real users at 200 via Caddy's
 # multi-homed tunnel_upstream — the xray-only canary alone must NOT roll back.
 #
@@ -157,7 +157,7 @@ _adj() {
 V=$(_adj $'ch1=OK\nch2=OK\nch3=OK' $'ch1=DOWN\nch2=DOWN\nch3=DOWN')
 if [[ "$V" == LOST* ]]; then ok "B1: all-regressed -> LOST ($V)"; else bad "B1: expected LOST*, got '$V'"; fi
 
-# B2/zvonilka: xray down, awg+hy2 serve -> SERVING_PARTIAL (suppress + warn).
+# B2/edge-b: xray down, awg+hy2 serve -> SERVING_PARTIAL (suppress + warn).
 V=$(_adj $'ch1=OK\nch2=OK\nch3=OK' $'ch1=DOWN\nch2=OK\nch3=OK')
 if [[ "$V" == SERVING_PARTIAL* && "$V" == *ch1* ]]; then ok "B2: xray-only-down -> SERVING_PARTIAL regressed=ch1 ($V)"; else bad "B2: expected 'SERVING_PARTIAL ... ch1', got '$V'"; fi
 
@@ -240,7 +240,7 @@ _run_settle() {
     echo "$_rc"
 }
 
-# C1 — zvonilka: xray canary (check_13, a channel check) regresses; honest probes
+# C1 — edge-b: xray canary (check_13, a channel check) regresses; honest probes
 # show ch1 DOWN but ch2/ch3 OK → SUPPRESS rollback + WARNING alert.
 RC=$(_run_settle 'check_13_canary_tunnel=GREEN' 'check_13_canary_tunnel=RED' \
     $'ch1=OK\nch2=OK\nch3=OK' $'ch1=DOWN\nch2=OK\nch3=OK')

@@ -12,7 +12,7 @@ Files inside conf.d/ survive every `install.sh`, `update.sh`, and
 ## When to use it
 
 - Per-tenant vhosts not covered by the core partner-edge template (e.g.
-  `cheburator.bot`, `www.cheburator.bot` with static file serving)
+  `edge-a.example`, `www.edge-a.example` with static file serving)
 - Webhook proxy routes to internal services on the same host
 - Emergency patches that must survive the next scheduled upgrade cycle
 - Any hand-crafted Caddy config that previously lived in a `.bak` file
@@ -25,18 +25,18 @@ Files inside conf.d/ survive every `install.sh`, `update.sh`, and
 
 Examples:
 ```
-cheburator-vhosts.caddy     cheburator.bot + www.cheburator.bot vhosts
-cheburator-webhook.caddy    webhook proxy to internal service
+edge-a-vhosts.caddy     edge-a.example + www.edge-a.example vhosts
+edge-a-webhook.caddy    webhook proxy to internal service
 emergency-ratelimit.caddy   hotfix rate-limit rule
 ```
 
-## Worked example: cheburator.bot vhosts
+## Worked example: edge-a.example vhosts
 
-Create `/etc/oxpulse-partner-edge/conf.d/cheburator-vhosts.caddy`:
+Create `/etc/oxpulse-partner-edge/conf.d/edge-a-vhosts.caddy`:
 
 ```caddyfile
-cheburator.bot {
-    root * /srv/cheburator-static
+edge-a.example {
+    root * /srv/edge-a-static
     file_server
     encode gzip
 
@@ -45,8 +45,8 @@ cheburator.bot {
     }
 }
 
-www.cheburator.bot {
-    redir https://cheburator.bot{uri} permanent
+www.edge-a.example {
+    redir https://edge-a.example{uri} permanent
 }
 ```
 

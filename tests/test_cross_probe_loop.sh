@@ -898,8 +898,8 @@ trap - EXIT; rm -rf "$T14"
 # ── Test 15: coturn-tls probe sends SNI (-servername) + verifies cert ──────────
 # Regression guard for the #306 root cause: turnutils_uclient -S did NOT send SNI,
 # so caddy-l4's SNI-mux returned a TLS "internal error" on every probe (verified
-# on ruoxp 2026-06-16). The leg MUST invoke openssl with -servername <host> AND
-# -verify_return_error (mirrors krolik's probe_tls_allocate webpki verification).
+# on edge-d 2026-06-16). The leg MUST invoke openssl with -servername <host> AND
+# -verify_return_error (mirrors hub's probe_tls_allocate webpki verification).
 T15=$(mktemp -d)
 trap 'rm -rf "$T15"' EXIT
 make_bin "$T15"; mkdir -p "$T15/etc" "$T15/var"
@@ -946,11 +946,11 @@ else
     fail "test15: openssl invocation missing -verify_return_error; argv: $(cat "$ARGV15" 2>/dev/null)"
 fi
 # SEC-CR-322-01 regression guard: WITHOUT -verify_hostname, openssl chain-verifies
-# but accepts a valid-chain / wrong-SAN cert (exit 0) while krolik's rustls rejects
+# but accepts a valid-chain / wrong-SAN cert (exit 0) while hub's rustls rejects
 # it. The flag MUST be present (and match the host) for the two probers to agree.
-# Real wrong-SAN→exit1 behaviour is openssl's, validated empirically on ruoxp.
+# Real wrong-SAN→exit1 behaviour is openssl's, validated empirically on edge-d.
 if grep -q -- '-verify_hostname api-sni.example.com' "$ARGV15" 2>/dev/null; then
-    ok "test15: coturn-tls probe checks cert SAN (-verify_hostname <host>, mirrors krolik rustls)"
+    ok "test15: coturn-tls probe checks cert SAN (-verify_hostname <host>, mirrors hub rustls)"
 else
     fail "test15: openssl invocation missing -verify_hostname <host>; argv: $(cat "$ARGV15" 2>/dev/null)"
 fi

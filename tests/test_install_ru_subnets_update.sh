@@ -13,7 +13,7 @@
 #   8. Idempotent re-run
 #   9. EXPECTED_SBIN_FILES includes the new script
 #
-# Canon reference §1: ~/deploy/krolik-server/plans/oxpulse-partner-edge/2026-05-27-split-routing-settings-canon.md
+# Canon reference §1: the operator's internal split-routing settings canon (2026-05-27)
 # Compat: bats < 1.5 — no bats_require_minimum_version, no 'run !'
 
 setup() {

@@ -69,11 +69,11 @@ _run_args_parse() {
 }
 
 @test "args_parse --dry-run --partner-id --domain --token sets expected globals" {
-	run _run_args_parse --dry-run --partner-id=zvonilka --domain=zvonilka.net --token=abc
+	run _run_args_parse --dry-run --partner-id=edge-b --domain=edge-b.example --token=abc
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"DRY_RUN=1"* ]]
-	[[ "$output" == *"PARTNER_ID=zvonilka"* ]]
-	[[ "$output" == *"DOMAIN=zvonilka.net"* ]]
+	[[ "$output" == *"PARTNER_ID=edge-b"* ]]
+	[[ "$output" == *"DOMAIN=edge-b.example"* ]]
 	[[ "$output" == *"TOKEN=abc"* ]]
 }
 
@@ -102,7 +102,7 @@ _run_args_parse() {
 
 		# Fake install.env so --check mode can source it
 		_fake_dir=\$(mktemp -d)
-		echo 'PARTNER_DOMAIN=zvonilka.net' > \"\$_fake_dir/install.env\"
+		echo 'PARTNER_DOMAIN=edge-b.example' > \"\$_fake_dir/install.env\"
 		PREFIX_LIB=\"\$_fake_dir\"
 
 		# Override exit so the drift check block doesn't terminate the subshell —

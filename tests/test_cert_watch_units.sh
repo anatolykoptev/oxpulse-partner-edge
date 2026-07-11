@@ -1,7 +1,7 @@
 #!/bin/bash
 # Structural validation of cert-reload systemd units.
 set -euo pipefail
-REPO_ROOT="${REPO_ROOT:-/home/krolik/src/oxpulse-partner-edge}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 UNITS="$REPO_ROOT/systemd"
 
 [ -f "$UNITS/oxpulse-partner-cert-watch.path" ] \

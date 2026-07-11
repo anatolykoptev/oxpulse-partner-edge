@@ -17,7 +17,7 @@
 # (wrong network, missing volume, etc.) and is non-idempotent; compose prevents
 # that class of bug.
 #
-# OVERRIDES (for nodes that run a differently-named xray container, e.g. piter):
+# OVERRIDES (for nodes that run a differently-named xray container, e.g. relay-x):
 #   Create /etc/oxpulse-partner-edge/xray-update.env with:
 #     OXPULSE_XRAY_SERVICE=xray-client          # compose service name
 #     OXPULSE_XRAY_CONTAINER=xray-reality       # container name (for inspect)
@@ -37,7 +37,6 @@ SERVICE="${OXPULSE_XRAY_SERVICE:-xray-client}"
 CONTAINER="${OXPULSE_XRAY_CONTAINER:-oxpulse-partner-xray}"
 IMAGE="${OXPULSE_XRAY_IMAGE:-ghcr.io/anatolykoptev/partner-edge-xray:stable}"
 COMPOSE_DIR="${OXPULSE_COMPOSE_DIR:-/etc/oxpulse-partner-edge}"
-source /etc/piter-monitor.env 2>/dev/null || true
 
 ts()    { date -Iseconds; }
 log()   { echo "$(ts) $*" | tee -a "$LOG"; }

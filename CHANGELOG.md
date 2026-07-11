@@ -85,7 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* **upgrade:** dead rollback under set -e + foreign-service pull scope (rvpn v0.13.0 incident) ([#333](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/333)) ([26b66af](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/26b66af178b12b91e6dd4e0a0525ca937d17f555))
+* **upgrade:** dead rollback under set -e + foreign-service pull scope (edge-c v0.13.0 incident) ([#333](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/333)) ([26b66af](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/26b66af178b12b91e6dd4e0a0525ca937d17f555))
 * **upgrade:** sync healthcheck.sh in plain apply + repair CI test fragility ([#335](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/335)) ([204e506](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/204e50684fda7bcfc27e178fe629d7411872e4c1))
 
 ## [0.13.0](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.12.79...v0.13.0) (2026-07-01)
@@ -361,7 +361,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **sfu,M4.A2:** browser-client SDP exchange + Registry registration ([9805082](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/98050827b103b9932d1bae8b26533c0e837fea6c))
 * **sfu,M4.A3:** integration tests for browser-to-browser media + simulcast layer selection ([267e529](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/267e5294c0b4ed99543ea70a3d162ec536404a7b))
 * **sfu,M4.A4:** integration test for active speaker — wire format + skip-self + cross-client isolation via test-utils seam ([9aaa9f2](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/9aaa9f2db599319e246cf099be7a786e1e4de283))
-* **sfu,M4.A5:** SFU_CLIENT_WS_PORT default 8911 → 8920 (8911 squat on krolik) ([a404758](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a4047583afa7c8d9afe2f8e8f916911ebe964b88))
+* **sfu,M4.A5:** SFU_CLIENT_WS_PORT default 8911 → 8920 (8911 squat on hub) ([a404758](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a4047583afa7c8d9afe2f8e8f916911ebe964b88))
 * **sfu,M4.B1:** client_ws verification metrics + bump VERSION 0.12.1 -&gt; 0.12.2 ([e61baf3](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e61baf3dde2172596807c3a1bc41fc35dc79f6b1))
 * **sfu/A1:** peer_id-keyed session steal — close 4031 on duplicate /sfu/ws upgrade ([1b50ac5](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1b50ac58938093f58fb9cb40242fe42f5238393d))
 * **sfu/metrics:** observability follow-ups — sub-second buckets + per-peer media gauge + Phase 2 reserve annotations ([#22](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/22)) ([7b521fb](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7b521fb0368971c14f29c6525d8af38d5bbc7a41))
@@ -390,7 +390,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **upgrade:** --with-templates for atomic Caddyfile+healthcheck+image lockstep ([#124](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/124)) ([c45d805](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c45d805e3f3d11cf542ba2bbf1e3b4665fc291f2))
 * **upgrade:** re-render xray config from upstream template on upgrade ([16d603e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/16d603ee29fda8b20e4019eb4bb8d374dcfd7f0c))
 * **upgrade:** sync host-scripts (health-report, units, lib) on upgrade, not just images ([#257](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/257)) ([867285c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/867285cbf1800204d73237540628f0da679fe4b6))
-* **xray-update:** env-overridable CONTAINER and IMAGE for piter reuse ([#85](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/85)) ([4b5e646](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4b5e6467cad2d52f2f406e14e42e00aec69f88c4))
+* **xray-update:** env-overridable CONTAINER and IMAGE for relay-x reuse ([#85](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/85)) ([4b5e646](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4b5e6467cad2d52f2f406e14e42e00aec69f88c4))
 * **xray:** enable XTLS Vision flow + stream-one mode + padding ([ac8295a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ac8295afadd764a505416113315670c0ab56c92a))
 * **xray:** pin xray-core to v26.5.3 + weekly auto-update timer ([#80](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/80)) ([1bd7656](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1bd7656a01842eb3d3b835463ca978c2732a76b4))
 
@@ -836,7 +836,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 - Phase 1 uses fleet-shared hy2 credentials. Per-edge identity = Phase 7 (`partner_nodes.hy2_auth_hash` schema migration TBD).
-- CH5 NaiveProxy deferred — caddy-forwardproxy `forbidden_zones` blocks RFC1918+loopback at krolik server-side; needs external relay (Phase 2).
+- CH5 NaiveProxy deferred — caddy-forwardproxy `forbidden_zones` blocks RFC1918+loopback at hub server-side; needs external relay (Phase 2).
 - CH1 Reality reinstall blocked on oxpulse-chat PR #971 (XRAY_XHTTP_MODE env extraction).
 
 ## [0.12.27](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.26...partner-edge-v0.12.27) (2026-05-15)
@@ -910,7 +910,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 * **sfu:** adopt str0m built-in stats API for RTT/loss/jitter observability ([#87](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/87)) ([5ebe30a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/5ebe30a0a52dddbbaf7460373e3644e49a2e9d44))
-* **xray-update:** env-overridable CONTAINER and IMAGE for piter reuse ([#85](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/85)) ([4b5e646](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4b5e6467cad2d52f2f406e14e42e00aec69f88c4))
+* **xray-update:** env-overridable CONTAINER and IMAGE for relay-x reuse ([#85](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/85)) ([4b5e646](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4b5e6467cad2d52f2f406e14e42e00aec69f88c4))
 
 
 ### Bug Fixes
@@ -1179,7 +1179,7 @@ prove which step works and which is blocked.
   bundle install path get the fix automatically on the next refresh.
 - For manual deploys (recipe in `docs/runbooks/m4a5-deploy.md`), add
   `-e SFU_PUBLIC_IP=<node public IPv4>` to the `docker run` line.
-- v0.12.0 nodes (rvpn) keep working without the env var — they retain
+- v0.12.0 nodes (edge-c) keep working without the env var — they retain
   the v0.12.0 broken-for-off-box behavior until the env is supplied;
   there is no regression from the upgrade.
 
@@ -1231,7 +1231,7 @@ prove which step works and which is blocked.
 ### Added
 
 - Initial partner-edge bundle: Caddy + xray-client + coturn + oxpulse-sfu.
-- VLESS + ML-KEM + Reality + XHTTP tunnel to krolik backbone.
+- VLESS + ML-KEM + Reality + XHTTP tunnel to hub backbone.
 - TURNS-on-:443 via Caddy l4 SNI multiplexing.
 - HMAC-SHA1 TURN credentials (`static-auth-secret`).
 - One-command bootstrap installer (`bootstrap.sh` → `install.sh`).

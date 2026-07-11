@@ -172,10 +172,10 @@ _write_peer_probe_state() {
 #   -verify_hostname <host>  check the cert SAN matches the hostname (rustls always
 #       SAN-checks; -verify_return_error ALONE does chain-but-not-hostname, so
 #       without this a valid-chain / wrong-SAN cert would pass here yet fail at
-#       krolik → the two probers disagree, SEC-CR-322-01).
+#       hub → the two probers disagree, SEC-CR-322-01).
 #   -verify_return_error  hard-fail (non-zero exit) on any verification error,
 #       trusting the host system CA store. Together with -verify_hostname this
-#       MIRRORS krolik's probe_tls_allocate (rustls + webpki-roots: chain AND SAN,
+#       MIRRORS hub's probe_tls_allocate (rustls + webpki-roots: chain AND SAN,
 #       never danger_accept_invalid_certs) so the two probers agree on coturn-tls.
 #   -brief </dev/null  one handshake, no interactive stdin, concise output.
 #
@@ -183,14 +183,14 @@ _write_peer_probe_state() {
 # turnutils_uclient does NOT send SNI when dialing TURNS over TLS, so caddy-l4's
 # SNI-mux cannot pick a route and answers EVERY probe — even the edge's OWN :443
 # — with a TLS "internal error" alert (exit 255). The 30/30 bash tests mocked
-# turnutils so never caught it; ruoxp (first real bash prober, 2026-06-16)
+# turnutils so never caught it; edge-d (first real bash prober, 2026-06-16)
 # surfaced it: host openssl/curl complete TLS1.3+SNI to the same endpoints while
 # in-container turnutils fails. openssl is the host tool that drives the SNI-mux.
 #
-# Signal difference vs krolik: krolik additionally does a TURN Allocate (auth)
+# Signal difference vs hub: hub additionally does a TURN Allocate (auth)
 # after the TLS handshake; this leg stops at TLS+cert. The only divergence is a
 # peer whose TLS is up but coturn auth is broken (rare; shared TURN_SECRET is
-# stable) — krolik would report it down, this leg up, the quorum then DISAGREES
+# stable) — hub would report it down, this leg up, the quorum then DISAGREES
 # → no withdrawal (conservative/safe). All other failure modes (down/blackholed
 # :443, expired/mismatched cert, non-coturn backend) agree.
 #
@@ -239,7 +239,7 @@ _probe_peer_coturn() {
     t0="${EPOCHREALTIME}"
     # TLS handshake + public-CA chain verification + hostname/SAN match against the
     # peer's caddy-l4 :443 with SNI = hostname (caddy-l4 SNI-muxes :443 → routes to
-    # the peer's coturn). This MIRRORS krolik's probe_tls_allocate TLS layer
+    # the peer's coturn). This MIRRORS hub's probe_tls_allocate TLS layer
     # (rustls + webpki-roots: chain AND SAN, never danger_accept_invalid_certs) so
     # the two probers make the SAME trust decision on coturn-tls:
     #   -verify_return_error  hard-fail (non-zero exit) on any verification error
@@ -263,7 +263,7 @@ _probe_peer_coturn() {
     # exit 0 == TLS handshake completed AND the peer cert chained to a trusted
     # public CA (system store) AND SNI matched. A down/blackholed :443, an
     # expired/mismatched cert, or a non-TLS backend all exit non-zero → false.
-    # Empirically verified on ruoxp 2026-06-16: up→0, bogus→1, wrong-SNI→1.
+    # Empirically verified on edge-d 2026-06-16: up→0, bogus→1, wrong-SNI→1.
     if [[ "$exit_code" -eq 0 ]]; then
         printf 'true\t%d' "$rtt_ms"
     else
@@ -289,7 +289,7 @@ _probe_peer_coturn() {
 # RU-edge note: a RU edge probing peers over UDP can only be advisory — it
 # cannot unilaterally withdraw a peer (central requires ≥2 distinct probers).
 # Worst-case a compromised RU edge reports false negatives; the quorum still
-# needs krolik + at least one other clean edge to agree.  This is the same
+# needs hub + at least one other clean edge to agree.  This is the same
 # §P4-SEC-CR-301 self-declared-geo caveat already accepted for the TLS leg;
 # the UDP leg does NOT widen it.
 #
@@ -627,7 +627,7 @@ _run_peer_probe_loop() {
         # 5xx/000 transient path which returns 0. Without this the `|| true`
         # swallows the 4xx and a revoked token loops forever invisibly.
         # Channel is "coturn-tls" (NOT "coturn"): the per-transport carve-out
-        # (#2064) + krolik's probe_tls_allocate both key on coturn-tls; sending the
+        # (#2064) + hub's probe_tls_allocate both key on coturn-tls; sending the
         # bare "coturn" self-channel name here defeats the cross-vantage quorum.
         if [[ "$handshake_ok" != "skip" ]]; then
             if ! _post_cross_probe "$node_id" "$handshake_ok" "$rtt" "$token" "coturn-tls"; then

@@ -24,7 +24,7 @@ FIXTURES="$REPO_ROOT/tests/fixtures"
 GOLDEN_JSON="$FIXTURES/caddyfile-golden-v0.13.0.json"
 IMAGE="${CADDY_IMAGE:-ghcr.io/anatolykoptev/partner-edge-caddy:latest}"
 
-# Locate opec: OPEC_BIN env override → PATH → cargo target (krolik dev box).
+# Locate opec: OPEC_BIN env override → PATH → cargo target (hub dev box).
 if [[ -n "${OPEC_BIN:-}" ]]; then
   OPEC="$OPEC_BIN"
 elif command -v opec >/dev/null 2>&1; then

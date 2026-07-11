@@ -1,12 +1,12 @@
 # Rendered by install.sh → /etc/oxpulse-partner-edge/Caddyfile
-# Placeholders: zvonilka.net, api-test01
+# Placeholders: edge-b.example, api-test01
 #
 # Traffic split on partner edge:
 #   / (SPA)         → xray-client:3080 (backend renders branded index.html)
 #   /_app/immutable → xray-client:3080 BUT cached 1 year at Caddy
 #   /api/*          → xray-client:3080 with X-Forwarded-Host header
 #   /ws/*           → xray-client:3080 (WebSocket upgrade preserved by Caddy)
-#   api-test01.zvonilka.net TLS passthrough → coturn:5349
+#   api-test01.edge-b.example TLS passthrough → coturn:5349
 #
 # caddy-l4 TURNS SNI mux: listener_wrappers peeks TLS ClientHello BEFORE Caddy
 # HTTP app sees it. Matching SNI → raw TCP to coturn (coturn terminates own TLS).
@@ -21,7 +21,7 @@
     admin localhost:2019 {
         origins localhost 127.0.0.1
     }
-    email admin@zvonilka.net
+    email admin@edge-b.example
 
     # M2b.2: DB-IP country lookup — DISABLED 2026-05-16.
     # The aksdb fork registered maxmind_geolocation as a global option;
@@ -40,7 +40,7 @@
         protocols h1 h2
         listener_wrappers {
             layer4 {
-                @turns tls sni api-test01.zvonilka.net
+                @turns tls sni api-test01.edge-b.example
                 route @turns {
                     # coturn runs in network_mode: host and binds 5349 on every
                     # host interface. From this Caddy container's perspective
@@ -85,7 +85,7 @@
         health_status 2xx
         health_passes 2
         health_fails 3
-        header_up X-Forwarded-Host zvonilka.net
+        header_up X-Forwarded-Host edge-b.example
         header_up X-Forwarded-Proto https
         header_up Host oxpulse.chat
         header_up X-Geo-Country {vars.maxmind_country_code}
@@ -103,14 +103,14 @@
         health_status 2xx
         health_passes 2
         health_fails 3
-        header_up X-Forwarded-Host zvonilka.net
+        header_up X-Forwarded-Host edge-b.example
         header_up X-Forwarded-Proto https
         header_up Host oxpulse.chat
         header_up X-Geo-Country {vars.maxmind_country_code}
     }
 }
 
-zvonilka.net {
+edge-b.example {
     encode gzip zstd
 
     header {
@@ -150,7 +150,7 @@ zvonilka.net {
     # reverse_proxy upstream (Connection/Upgrade headers preserved).
     # `handle` (not `handle_path`) keeps the full /sfu/ws/{room_id} path
     # so the SFU's axum router matches.
-    # Port 8920 chosen because 8911 is squatted on krolik (San Jose).
+    # Port 8920 chosen because 8911 is squatted on hub (San Jose).
     handle /sfu/ws/* {
         reverse_proxy host.docker.internal:8920
     }
@@ -181,7 +181,7 @@ zvonilka.net {
 # Actual :443 traffic for this SNI is routed by caddy-l4 above → coturn
 # before this handler ever sees it — so this respond only fires for
 # ACME-challenge + any stray request that bypassed the l4 mux.
-api-test01.zvonilka.net {
+api-test01.edge-b.example {
     tls {
         issuer acme {
             # CRITICAL: once l4 routes :443 for this SNI to coturn, Caddy can
@@ -245,12 +245,12 @@ http://127.0.0.1:9080 {
 # because those scripts never touch files inside conf.d/.
 #
 # Use cases:
-#   - Per-tenant vhosts (e.g. cheburator.bot + www.cheburator.bot static sites)
+#   - Per-tenant vhosts (e.g. edge-a.example + www.edge-a.example static sites)
 #   - Hand-crafted route additions (webhook proxies, emergency overrides)
 #   - Emergency patches that must survive the next scheduled upgrade
 #
 # File naming convention: <tenant>-<purpose>.caddy
-#   Example: cheburator-vhosts.caddy
+#   Example: edge-a-vhosts.caddy
 #
 # Empty directory: Caddy emits a warning but exits 0 (validated 2026-05-15).
 # Do NOT place secrets in conf.d/ files — they are world-readable by default.

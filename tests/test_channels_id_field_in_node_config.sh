@@ -11,7 +11,7 @@
 #   response before the ids PR had NO id field, so node-config.json lacked it.
 #   oxpulse-channels-health-report.sh dispatches probes by reading .channels[].id;
 #   without the field, all channels fall back to "unknown" and health reporting
-#   breaks. The hot-patch on rvpn-seed (2026-05-28) added ids via jq after the
+#   breaks. The hot-patch on edge-c-seed (2026-05-28) added ids via jq after the
 #   fact; this PR makes the installer inject them durably.
 #
 # Mapping (canonical):

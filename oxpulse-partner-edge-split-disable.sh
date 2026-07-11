@@ -13,8 +13,7 @@
 # or inet firewalld. Does NOT restore AllowedIPs (the awg-params-agent owns
 # the conf; re-installing or restarting the agent will normalise it).
 #
-# Spec: ~/deploy/krolik-server/plans/oxpulse-partner-edge/
-#       2026-05-27-split-routing-settings-canon.md §10
+# Spec: the operator's internal split-routing settings canon (2026-05-27) §10
 #
 # Options (same as apply):
 #   --vpn-if       VPN interface  (default: awg0)

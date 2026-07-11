@@ -164,7 +164,7 @@
     # reverse_proxy upstream (Connection/Upgrade headers preserved).
     # `handle` (not `handle_path`) keeps the full /sfu/ws/{room_id} path
     # so the SFU's axum router matches.
-    # Port 8920 chosen because 8911 is squatted on krolik (San Jose).
+    # Port 8920 chosen because 8911 is squatted on hub (San Jose).
     handle /sfu/ws/* {
         reverse_proxy host.docker.internal:8920
     }
@@ -278,7 +278,7 @@
 # =============================================================================
 # www → non-www redirect (single hop, 301 permanent).
 #
-# Same pattern as ssh zvonilka (operator added 2026-05-23) — codified here so
+# Same pattern as ssh edge-b (operator added 2026-05-23) — codified here so
 # every new partner-edge install gets it automatically.
 #
 # Caddy auto-issues a Let's Encrypt cert for www.{{PARTNER_DOMAIN}} via
@@ -376,12 +376,12 @@ http://127.0.0.1:9080 {
 # because those scripts never touch files inside conf.d/.
 #
 # Use cases:
-#   - Per-tenant vhosts (e.g. cheburator.bot + www.cheburator.bot static sites)
+#   - Per-tenant vhosts (e.g. edge-a.example + www.edge-a.example static sites)
 #   - Hand-crafted route additions (webhook proxies, emergency overrides)
 #   - Emergency patches that must survive the next scheduled upgrade
 #
 # File naming convention: <tenant>-<purpose>.caddy
-#   Example: cheburator-vhosts.caddy
+#   Example: edge-a-vhosts.caddy
 #
 # Empty directory: Caddy emits a warning but exits 0 (validated 2026-05-15).
 # Do NOT place secrets in conf.d/ files — they are world-readable by default.

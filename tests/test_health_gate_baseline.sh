@@ -20,7 +20,7 @@
 #   G5  fresh install  (no baseline)               → skip diff, treat as first-run
 #       (no rollback for pre-existing reds when baseline absent)
 #   G6  OXPULSE_ABSOLUTE_HEALTH_GATE=1 + any red  → rollback (legacy behavior)
-#   G7  cheburator simulation: checks 12+13+14 red in BOTH baseline+post → no rollback
+#   G7  edge-a simulation: checks 12+13+14 red in BOTH baseline+post → no rollback
 #
 # Falsification note (anti-vacuous):
 #   G2 specifically puts a check GREEN in baseline and RED in post.
@@ -108,7 +108,7 @@ grep -q 'health_regressions\|_health_regressions' "$UPGRADE" \
 # Falsification: the OLD code captured baseline BEFORE sync_host_scripts (before Step 1),
 # so this line would be earlier than the sync line — making this assertion FAIL.
 #
-# Structural (not a hardcoded line-number window — PR review, cheburator
+# Structural (not a hardcoded line-number window — PR review, edge-a
 # healthcheck-sync arc: upgrade.sh has MULTIPLE 'sync_host_scripts
 # "$RELEASE_TAG"' call sites (--host-scripts-only mode, an opec-probe
 # fallback inside the --with-templates block, and the actual --with-templates
@@ -285,7 +285,7 @@ else
     fail "U4: all-green baseline+post incorrectly detected as regression; output: $U4_OUT"
 fi
 
-# U5: cheburator simulation — checks 12+13+14 red in both baseline AND post.
+# U5: edge-a simulation — checks 12+13+14 red in both baseline AND post.
 # Gate must NOT roll back (pre-existing reds, not regressions).
 U5_DIR="$TMPDIR_ROOT/u5"
 mkdir -p "$U5_DIR"
@@ -333,9 +333,9 @@ health_regressions '$U5_DIR/baseline.snap' '$U5_DIR/post.snap'
 " 2>&1) && U5_RC=0 || U5_RC=$?
 
 if [[ $U5_RC -eq 0 ]]; then
-    pass "U5: cheburator simulation (checks 12+13+14 pre-existing red) → no regression, exit 0"
+    pass "U5: edge-a simulation (checks 12+13+14 pre-existing red) → no regression, exit 0"
 else
-    fail "U5: cheburator stale reds incorrectly treated as regression (Phase 3 exit criterion); output: $U5_OUT"
+    fail "U5: edge-a stale reds incorrectly treated as regression (Phase 3 exit criterion); output: $U5_OUT"
 fi
 
 # ---------------------------------------------------------------------------
@@ -640,7 +640,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# G7: cheburator exit criterion — checks 12+13+14 red in both → no rollback.
+# G7: edge-a exit criterion — checks 12+13+14 red in both → no rollback.
 # This is the explicit Phase 3 exit criterion from the spec.
 # Falsification: if code reverts to absolute gate, G7 fails (rollback triggered).
 # ---------------------------------------------------------------------------
@@ -656,7 +656,7 @@ die()  { echo \"[DIE] \$*\" >&2; exit 1; }
 # shellcheck source=/dev/null
 source '$RECONCILE_LIB'
 
-# Cheburator's stale reds (check 12 = sfu_metrics mesh-IP false-negative,
+# Edge-a's stale reds (check 12 = sfu_metrics mesh-IP false-negative,
 # checks 13+14 = xray canary tunnel/upstream degraded).
 BASELINE_SNAP_FILE='$G7_DIR/baseline.snap'
 cat > \"\$BASELINE_SNAP_FILE\" << 'SNAP'
@@ -696,19 +696,19 @@ check_14_canary_upstream=RED
 SNAP
 
 if health_regressions \"\$BASELINE_SNAP_FILE\" \"\$POST_SNAP_FILE\"; then
-    echo 'GATE_PASS: cheburator stale reds not treated as regression — Phase 3 exit criterion MET'
+    echo 'GATE_PASS: edge-a stale reds not treated as regression — Phase 3 exit criterion MET'
     exit 0
 else
-    echo 'GATE_ROLLBACK: cheburator stale reds treated as regression — Phase 3 exit criterion FAILED'
+    echo 'GATE_ROLLBACK: edge-a stale reds treated as regression — Phase 3 exit criterion FAILED'
     exit 1
 fi
 " 2>&1
 ) && G7_RC=0 || G7_RC=$?
 
 if [[ $G7_RC -eq 0 ]] && echo "$G7_OUT" | grep -q 'GATE_PASS'; then
-    pass "G7: cheburator stale reds (12+13+14 RED in both) → no rollback (Phase 3 exit criterion)"
+    pass "G7: edge-a stale reds (12+13+14 RED in both) → no rollback (Phase 3 exit criterion)"
 else
-    fail "G7: cheburator stale reds incorrectly rolled back — Phase 3 exit criterion NOT met; output: $G7_OUT"
+    fail "G7: edge-a stale reds incorrectly rolled back — Phase 3 exit criterion NOT met; output: $G7_OUT"
 fi
 
 # ---------------------------------------------------------------------------
@@ -816,9 +816,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# G9: cheburator stale reds through real path — baseline-present + no rollback.
+# G9: edge-a stale reds through real path — baseline-present + no rollback.
 #
-# Exercises the actual HEALTHCHECK path with cheburator's stale reds in BOTH
+# Exercises the actual HEALTHCHECK path with edge-a's stale reds in BOTH
 # baseline and post.  Asserts: gate PRESENT (non-empty baseline) AND no rollback.
 #
 # Falsification: if health_regressions reverts to absolute gate (no baseline
@@ -829,10 +829,10 @@ fi
 G9_DIR="$TMPDIR_ROOT/g9"
 mkdir -p "$G9_DIR"
 
-CHEB_HC="$G9_DIR/healthcheck_cheburator.sh"
-cat > "$CHEB_HC" << 'CHEBHC'
+EDGE_A_HC="$G9_DIR/healthcheck_edge-a.sh"
+cat > "$EDGE_A_HC" << 'EDGEAHC'
 #!/bin/bash
-# Cheburator edge healthcheck: checks 12+13+14 permanently RED.
+# Edge-a edge healthcheck: checks 12+13+14 permanently RED.
 if [[ "$*" == *"--snapshot"* ]]; then
     printf 'check_1_containers=GREEN\n'
     printf 'check_2_api=GREEN\n'
@@ -851,23 +851,23 @@ if [[ "$*" == *"--snapshot"* ]]; then
     exit 0
 fi
 exit 1
-CHEBHC
-chmod +x "$CHEB_HC"
+EDGEAHC
+chmod +x "$EDGE_A_HC"
 
-# Capture baseline using cheburator healthcheck (post-sync, as fix ensures).
+# Capture baseline using edge-a healthcheck (post-sync, as fix ensures).
 G9_BASELINE="$G9_DIR/baseline.snap"
-"$CHEB_HC" --snapshot > "$G9_BASELINE" 2>/dev/null || true
+"$EDGE_A_HC" --snapshot > "$G9_BASELINE" 2>/dev/null || true
 G9_BASELINE_LINES=$(wc -l < "$G9_BASELINE" | tr -d ' ')
 
 if [[ "$G9_BASELINE_LINES" -gt 0 ]]; then
-    pass "G9: cheburator baseline non-empty ($G9_BASELINE_LINES lines) — gate present"
+    pass "G9: edge-a baseline non-empty ($G9_BASELINE_LINES lines) — gate present"
 else
-    fail "G9: cheburator baseline is empty — gate absent (fix did not take effect)"
+    fail "G9: edge-a baseline is empty — gate absent (fix did not take effect)"
 fi
 
 # Post snapshot: same stale reds (no new regression introduced by upgrade).
 G9_POST="$G9_DIR/post.snap"
-"$CHEB_HC" --snapshot > "$G9_POST" 2>/dev/null || true
+"$EDGE_A_HC" --snapshot > "$G9_POST" 2>/dev/null || true
 
 G9_OUT=$(
     bash -c "
@@ -878,19 +878,19 @@ die()  { echo \"DIE: \$*\" >&2; exit 1; }
 # shellcheck source=/dev/null
 source '$RECONCILE_LIB'
 if health_regressions '$G9_BASELINE' '$G9_POST'; then
-    echo 'GATE_PASS: cheburator stale reds not a regression — Phase 3 exit criterion via real path'
+    echo 'GATE_PASS: edge-a stale reds not a regression — Phase 3 exit criterion via real path'
     exit 0
 else
-    echo 'GATE_ROLLBACK: cheburator stale reds treated as regression — WRONG'
+    echo 'GATE_ROLLBACK: edge-a stale reds treated as regression — WRONG'
     exit 1
 fi
 " 2>&1
 ) && G9_RC=0 || G9_RC=$?
 
 if [[ $G9_RC -eq 0 ]] && echo "$G9_OUT" | grep -q 'GATE_PASS'; then
-    pass "G9: cheburator stale reds through real path — gate present + no rollback (Phase 3 exit criterion)"
+    pass "G9: edge-a stale reds through real path — gate present + no rollback (Phase 3 exit criterion)"
 else
-    fail "G9: cheburator stale reds: gate rolled back via real path; rc=$G9_RC output: $G9_OUT"
+    fail "G9: edge-a stale reds: gate rolled back via real path; rc=$G9_RC output: $G9_OUT"
 fi
 
 # G6_FUNC: OXPULSE_ABSOLUTE_HEALTH_GATE=1 functional test — rolls back on pre-existing red.

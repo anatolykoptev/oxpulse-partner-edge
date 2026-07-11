@@ -5,7 +5,7 @@
 # healthcheck.sh, and the health-gate must measure with the SYNCED version —
 # not a stale pre-upgrade copy.
 #
-# Cheburator incident (2026-07, hit 4 of 5 edges): healthcheck.sh was only
+# Edge-a incident (2026-07, hit 4 of 5 edges): healthcheck.sh was only
 # ever updated by re_render_healthcheck(), which ran ONLY on --with-templates.
 # sync_host_scripts() (the plain path) never included it. Consequence chain:
 #   1. An edge stuck at an old healthcheck (e.g. hardcoded 127.0.0.1:9317 for
