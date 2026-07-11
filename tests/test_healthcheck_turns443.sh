@@ -1,10 +1,15 @@
 #!/bin/bash
 set -euo pipefail
-HC="/home/user/src/oxpulse-partner-edge/healthcheck.sh"
-INST="/home/user/src/oxpulse-partner-edge/install.sh"
+REPO_ROOT="${REPO_ROOT:-/home/user/src/oxpulse-partner-edge}"
+HC="$REPO_ROOT/healthcheck.sh"
+INST="$REPO_ROOT/install.sh"
 
 grep -q 'TURNS-443 handshake' "$HC" || { echo "FAIL: 9th probe label missing"; exit 1; }
-grep -qE 'openssl s_client.*servername.*TURNS_SUBDOMAIN' "$HC" || { echo "FAIL: probe command wrong"; exit 1; }
+# The probe uses `openssl s_client` with SNI (-servername) targeting the TURNS
+# subdomain. The command is split across two lines (line continuation), so
+# assert the two elements separately rather than with a single-line regex.
+grep -q 'openssl s_client' "$HC" || { echo "FAIL: openssl s_client probe missing"; exit 1; }
+grep -qE -- '-servername .*TURNS_SUBDOMAIN' "$HC" || { echo "FAIL: probe SNI (-servername TURNS_SUBDOMAIN) missing"; exit 1; }
 grep -q 'Verify return code: 0' "$HC" || { echo "FAIL: TLS verify check missing"; exit 1; }
 grep -q 'SKIP.*TURNS_SUBDOMAIN' "$HC" || { echo "FAIL: skip branch for upgrade-from-v0.1.x missing"; exit 1; }
 
