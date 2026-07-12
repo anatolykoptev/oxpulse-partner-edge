@@ -83,10 +83,11 @@ pub struct SfuConfig {
     /// the feature. Env: `SFU_SOLO_KICK_AFTER_SECS`. Default: 120.
     pub solo_kick_after_secs: u64,
     /// Optional per-socket bind override for the Prometheus `/metrics` HTTP
-    /// server. When `None`, falls back to `bind_address`. Set to the AWG mesh
-    /// IP (e.g. `10.9.0.6`) on partner-edge deployments so the metrics socket
-    /// is not reachable from the public NIC even if the host firewall is
-    /// misconfigured. Env: `SFU_METRICS_BIND`.
+    /// server. When `None`, defaults to loopback (`127.0.0.1`) so the metrics
+    /// socket is never exposed on the public NIC by default (#404). Set to the
+    /// AWG mesh IP (e.g. `10.9.0.6`) on partner-edge deployments to expose it
+    /// on a reachable-but-private interface for remote scrape. Env:
+    /// `SFU_METRICS_BIND`.
     pub metrics_bind: Option<String>,
     /// Optional per-socket bind override for the relay-API HTTP server
     /// (`POST /relay/connect`). When `None`, falls back to `bind_address`.
@@ -202,9 +203,14 @@ impl SfuConfig {
 
 impl SfuConfig {
     /// Resolved bind address for the Prometheus /metrics socket.
-    /// Returns `metrics_bind` if set, otherwise falls back to `bind_address`.
+    ///
+    /// Returns `metrics_bind` if set, otherwise defaults to loopback
+    /// (`127.0.0.1`): `/metrics` is an internal observability surface and must
+    /// not be reachable on the public NIC by default (#404). Set
+    /// `SFU_METRICS_BIND` (e.g. the AWG mesh IP `10.9.0.6`) to expose it on a
+    /// reachable-but-private interface for remote scrape.
     pub fn metrics_bind_addr(&self) -> &str {
-        self.metrics_bind.as_deref().unwrap_or(&self.bind_address)
+        self.metrics_bind.as_deref().unwrap_or("127.0.0.1")
     }
 
     /// Resolved bind address for the relay-API socket. See `metrics_bind_addr`.
@@ -415,6 +421,31 @@ mod tests {
         assert_ne!(cfg.metrics_port, cfg.relay_api_port);
         assert_ne!(cfg.udp_port, cfg.relay_api_port);
         assert!(!cfg.fips_mode);
+    }
+
+    #[test]
+    fn metrics_bind_addr_defaults_to_loopback() {
+        // #404: /metrics is an internal observability surface — with no
+        // SFU_METRICS_BIND override it must resolve to loopback, NOT the
+        // 0.0.0.0 `bind_address` that carries the media/signaling sockets.
+        let cfg = SfuConfig::default();
+        assert_eq!(cfg.metrics_bind, None);
+        assert_eq!(cfg.metrics_bind_addr(), "127.0.0.1");
+        assert_ne!(
+            cfg.metrics_bind_addr(),
+            cfg.bind_address,
+            "regression #404: /metrics fell back to the public bind_address"
+        );
+    }
+
+    #[test]
+    fn metrics_bind_addr_honors_explicit_override() {
+        // An operator scoping /metrics to the private AWG mesh IP still works.
+        let cfg = SfuConfig {
+            metrics_bind: Some("10.9.0.6".to_string()),
+            ..SfuConfig::default()
+        };
+        assert_eq!(cfg.metrics_bind_addr(), "10.9.0.6");
     }
 
     #[test]
@@ -639,11 +670,13 @@ mod tests {
 
     #[test]
     fn split_bind_defaults_to_bind_address() {
-        // Backward compat — if operator hasn't set the new override env vars,
-        // the resolved bind addr for metrics/relay/WS must be `bind_address`.
-        // This is what existing partner-edge deployments rely on.
+        // Backward compat — if the operator hasn't set the override env vars,
+        // the FUNCTIONAL relay/WS sockets still default to `bind_address` (what
+        // existing partner-edge deployments rely on). The observability
+        // `/metrics` socket instead defaults to loopback (#404) — asserted in
+        // `metrics_bind_addr_defaults_to_loopback`, not here, so there is a
+        // single authoritative expectation for that default.
         let cfg = SfuConfig::default();
-        assert_eq!(cfg.metrics_bind_addr(), cfg.bind_address);
         assert_eq!(cfg.relay_api_bind_addr(), cfg.bind_address);
         assert_eq!(cfg.client_ws_bind_addr(), cfg.bind_address);
         assert!(cfg.metrics_bind.is_none());
@@ -678,7 +711,9 @@ mod tests {
         assert!(cfg.metrics_bind.is_none());
         assert!(cfg.relay_api_bind.is_none());
         assert!(cfg.client_ws_bind.is_none());
-        assert_eq!(cfg.metrics_bind_addr(), "0.0.0.0");
+        // Empty env is treated as unset → `/metrics` still resolves to its
+        // secure loopback default (#404), not the public `bind_address`.
+        assert_eq!(cfg.metrics_bind_addr(), "127.0.0.1");
         std::env::remove_var("SFU_METRICS_BIND");
         std::env::remove_var("SFU_RELAY_API_BIND");
         std::env::remove_var("SFU_CLIENT_WS_BIND");
