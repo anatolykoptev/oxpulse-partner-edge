@@ -223,7 +223,8 @@ impl SfuConfig {
         self.client_ws_bind.as_deref().unwrap_or(&self.bind_address)
     }
 
-    /// Build a fresh `str0m::Rtc` with the stats interval from config.
+    /// Build a fresh subscriber-facing `str0m::Rtc` with the stats interval
+    /// from config and native BWE armed (see [`subscriber_rtc_config`]).
     ///
     /// Use this instead of bare `Rtc::new(Instant::now())` in all production
     /// paths so `Event::PeerStats` / `Event::MediaEgressStats` /
@@ -235,10 +236,45 @@ impl SfuConfig {
         } else {
             Some(Duration::from_secs(self.stats_interval_secs))
         };
-        str0m::Rtc::builder()
-            .set_stats_interval(interval)
-            .build(Instant::now())
+        subscriber_rtc_config(interval).build(Instant::now())
     }
+}
+
+/// Initial GoogCC estimate (bits/s) applied when native str0m BWE is armed on a
+/// subscriber-facing (browser) leg. Conservative per the kit's guidance —
+/// GoogCC ramps up from here on TWCC feedback rather than starting high and
+/// backing off. See [`subscriber_rtc_config`] (T1: native BWE arming).
+pub const SUBSCRIBER_BWE_INITIAL_BPS: u64 = 600_000;
+
+/// Cap on a subscriber leg's *desired* send bitrate. str0m gates upward probing
+/// on `desired_bitrate`, which defaults to `Bitrate::ZERO` (no probing → the
+/// estimate is pinned to the current send rate and never discovers headroom).
+/// A fixed cap arms probing so `EgressBitrateEstimate` reflects real available
+/// bandwidth, while bounding the padding cost (LiveKit StreamAllocator pattern;
+/// uncapped probing = padding-bandwidth waste, an anti-censorship cost). Sized
+/// to ~one high simulcast video layer plus headroom.
+///
+/// ARC 2 replaces this static cap with a per-tick target
+/// (`current allocated bps + one-layer headroom`) recomputed in the registry
+/// allocation loop once the native estimate is actually consumed by the
+/// allocator. Until then the frozen-300k base dominates `min()`, so this value
+/// changes no forwarding behavior — it only lets the estimate become truthful.
+pub const SUBSCRIBER_BWE_DESIRED_CAP_BPS: u64 = 2_500_000;
+
+/// Build the [`str0m::RtcConfig`] for a subscriber-facing (browser) leg with
+/// native str0m BWE armed (TWCC + GoogCC). Returned as the *config* (not a
+/// built `Rtc`) so callers can add ICE candidates / `accept_offer` on the
+/// result and tests can assert `bwe_initial_bitrate()` — str0m exposes no
+/// BWE-enabled accessor on a built `Rtc`.
+///
+/// Arming is the whole point of T1: partner-edge previously built the answerer
+/// `Rtc` via a bare `Rtc::builder()` and never called `.enable_bwe()`, so str0m
+/// emitted no `EgressBitrateEstimate` and `native_estimate` stayed `None`. RELAY
+/// (SFU↔SFU) legs deliberately do NOT use this helper — see `relay/client.rs`.
+pub fn subscriber_rtc_config(stats_interval: Option<Duration>) -> str0m::RtcConfig {
+    str0m::Rtc::builder()
+        .set_stats_interval(stats_interval)
+        .enable_bwe(Some(str0m::bwe::Bitrate::bps(SUBSCRIBER_BWE_INITIAL_BPS)))
 }
 
 fn env(key: &str, default: &str) -> String {
@@ -411,6 +447,36 @@ mod tests {
     /// a poisoned mutex (a sibling test panicked while holding it) —
     /// we want "sequential access to env", not "trust prior state".
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// T1 regression guard (REAL-CODE): the subscriber-facing builder that
+    /// `build_rtc` and `client_ws::session` both use MUST arm native BWE.
+    /// Removing `.enable_bwe(..)` from `subscriber_rtc_config` reverts
+    /// `bwe_initial_bitrate()` to `None`, which is exactly the pre-T1 bug —
+    /// str0m emits no `EgressBitrateEstimate` and `native_estimate` stays
+    /// `None`. This assertion goes RED on that revert.
+    #[test]
+    fn subscriber_rtc_config_arms_native_bwe() {
+        let cfg = subscriber_rtc_config(Some(Duration::from_secs(2)));
+        assert_eq!(
+            cfg.bwe_initial_bitrate(),
+            Some(str0m::bwe::Bitrate::bps(SUBSCRIBER_BWE_INITIAL_BPS)),
+            "subscriber Rtc must have native BWE armed with the configured initial estimate"
+        );
+    }
+
+    /// The desired-bitrate cap that arms upward probing must stay above the
+    /// frozen-300k base (else probing never lifts the estimate past it) and
+    /// remain finite/capped (uncapped probing = padding waste — an
+    /// anti-censorship cost).
+    #[test]
+    fn subscriber_bwe_desired_cap_is_bounded_and_above_base() {
+        // Inline `const {}` blocks evaluate these at compile time (strictly
+        // stronger than a runtime assert, and clippy-clean: a plain
+        // `assert!` on consts trips `clippy::assertions_on_constants`).
+        const { assert!(SUBSCRIBER_BWE_DESIRED_CAP_BPS > 300_000) };
+        const { assert!(SUBSCRIBER_BWE_DESIRED_CAP_BPS >= SUBSCRIBER_BWE_INITIAL_BPS) };
+        const { assert!(SUBSCRIBER_BWE_DESIRED_CAP_BPS <= 10_000_000) };
+    }
 
     #[test]
     fn default_is_sensible() {
