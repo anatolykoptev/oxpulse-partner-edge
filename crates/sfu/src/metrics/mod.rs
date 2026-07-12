@@ -86,6 +86,22 @@ pub struct SfuMetrics {
     pub client_disconnect_total: IntCounter,
     /// M5.3: current GCC bandwidth estimate per subscriber (bps).
     pub bandwidth_estimate_bps: IntGaugeVec,
+    /// V0 (issue #2310): which ceiling term is currently *binding* the kit's
+    /// `combined_bps` min()-chain. Label: `term` ∈
+    /// `{delay, loss, native, googcc, client_hint}` — NO peer_id (federated
+    /// edges: no per-client fingerprinting; only the registry-wide `edge_id`
+    /// const label is inherited). Incremented once per subscriber per
+    /// `update_pacer_layers` pass with the winning [`BindingTerm`], so a
+    /// shaped-dip canary (V4) can read
+    /// `rate(...{term="client_hint"}) / sum(rate(...))` staying ~1.0 as the
+    /// "video pinned low, never recovers" signature. Aggregated across all
+    /// subscribers by term only → 5 series/edge, no reap-scrub needed.
+    ///
+    /// Boot note: a fresh subscriber reports `term="delay"` until the first
+    /// TWCC sample (delay and loss both boot at the same INITIAL_BITRATE_BPS
+    /// and the kit's argmin keeps the earlier term on a tie) — expected noise,
+    /// not a signal.
+    pub combined_bps_binding_term: IntCounterVec,
     /// M5.3: pacer layer selections per subscriber and RID.
     pub pacer_layer_total: IntCounterVec,
     /// M6.1: simulcast layer transitions per subscriber (from/to/peer labels).
@@ -597,6 +613,29 @@ impl SfuMetrics {
             &["peer_id"],
         )
         .context("bandwidth_estimate_bps")?);
+
+        // V0 (issue #2310): binding-term of the kit's combined_bps min()-chain.
+        // Label `term` only (no peer_id) — federated-safe, bounded to 5 series.
+        let combined_bps_binding_term = reg!(IntCounterVec::new(
+            Opts::new(
+                "combined_bps_binding_term",
+                "Which ceiling term is binding the kit combined_bps min()-chain \
+                 (issue #2310 V0). Label: term ∈ {delay, loss, native, googcc, \
+                 client_hint}. No peer_id (federated: no per-client fingerprint). \
+                 Incremented per subscriber per update_pacer_layers pass. V4 reads \
+                 rate(...{term=\"client_hint\"}) / sum(rate(...)) ~ 1.0 as the \
+                 video-pinned-low-never-recovers signature.",
+            ),
+            &["term"],
+        )
+        .context("combined_bps_binding_term")?);
+        // Pre-touch every term series (via the kit enum, so the vocabulary can
+        // never drift) so alert rules + V4 see a baseline of 0 from startup.
+        for term in oxpulse_sfu_kit::bwe::BindingTerm::ALL {
+            let _ = combined_bps_binding_term
+                .with_label_values(&[term.as_str()])
+                .get();
+        }
 
         let pacer_layer_total = reg!(IntCounterVec::new(
             Opts::new(
@@ -1294,6 +1333,7 @@ impl SfuMetrics {
             client_connect_total,
             client_disconnect_total,
             bandwidth_estimate_bps,
+            combined_bps_binding_term,
             pacer_layer_total,
             layer_transitions_total,
             e2e_handshake_failures_total,

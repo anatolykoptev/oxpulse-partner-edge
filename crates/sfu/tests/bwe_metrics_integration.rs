@@ -403,3 +403,56 @@ async fn evict_for_steal_drops_reactions_dc_gauge() {
         "chat_relay_active_channels{{dc=\"reactions\"}} must be 0 after steal"
     );
 }
+
+/// V0 (issue #2310): `sfu_combined_bps_binding_term{term="client_hint"}` must
+/// increment when a fresh, lower client hint binds the kit's `combined_bps`
+/// min()-chain. Proves the additive observability wiring end-to-end (kit
+/// `estimate_with_term` → `update_pacer_layers` emit → `/metrics` scrape), with
+/// a term-only label (no per-peer fingerprint).
+#[tokio::test]
+async fn combined_bps_binding_term_reports_client_hint() {
+    let (port, _handle, metrics) = bind_metrics_server();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut registry = Registry::new(metrics.clone());
+    let mut a = new_client(ClientId(300));
+    let _arc = seed_track_in(&mut a, 1, MediaKind::Video);
+    registry.insert(a);
+
+    // Delay + loss high; a fresh, lower client hint (400k) must bind the min().
+    registry.drive_subscriber_bandwidth_for_tests(ClientId(300), 2_000_000);
+    registry.bandwidth_mut().record_client_hint(
+        oxpulse_sfu_kit::propagate::ClientId(300),
+        400_000,
+        std::time::Instant::now(),
+    );
+    registry.force_pacer_refresh_for_tests(ClientId(300));
+
+    let body = timeout(Duration::from_secs(3), scrape(port))
+        .await
+        .expect("scrape timeout")
+        .expect("scrape");
+
+    let value = |term: &str| -> u64 {
+        body.lines()
+            .find(|l| {
+                l.starts_with("sfu_combined_bps_binding_term{")
+                    && l.contains(&format!("term=\"{term}\""))
+            })
+            .and_then(|l| l.rsplit(' ').next())
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|f| f as u64)
+            .unwrap_or_else(|| panic!("missing binding_term series for {term} in:\n{body}"))
+    };
+
+    // All 5 term series exist (pre-touched at registration); client_hint binds.
+    assert!(
+        value("client_hint") >= 1,
+        "expected client_hint to bind: client_hint={} delay={} loss={} native={} googcc={}",
+        value("client_hint"),
+        value("delay"),
+        value("loss"),
+        value("native"),
+        value("googcc"),
+    );
+}
