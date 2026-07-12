@@ -312,6 +312,8 @@ mod tests {
     use std::sync::Arc;
 
     fn make_pending() -> PendingRelay {
+        // T1: this is a RELAY (PendingRelay) test fixture — left unarmed to
+        // mirror `relay/client.rs`, which deliberately does not enable BWE.
         let mut rtc = str0m::Rtc::new(std::time::Instant::now());
         let dc_id = rtc
             .direct_api()
@@ -360,7 +362,9 @@ mod tests {
 
     #[test]
     fn new_browser_client_has_no_pending() {
-        let rtc = str0m::Rtc::new(std::time::Instant::now());
+        // T1: build the browser (subscriber) test Rtc through the same armed
+        // helper production uses, so this fixture mirrors the real leg.
+        let rtc = crate::config::subscriber_rtc_config(None).build(std::time::Instant::now());
         let client = Client::new(rtc, Arc::new(crate::metrics::SfuMetrics::default()));
         assert!(!client.is_relay());
         assert!(client.relay_source_pending.is_none());
@@ -371,7 +375,8 @@ mod tests {
         // MAJOR 2: gauge must NOT be incremented at construction — it defers
         // to Event::ChannelOpen so that v0.12.22 browser clients that never
         // complete SCTP DCEP don't inflate the gauge with phantom entries.
-        let rtc = str0m::Rtc::new(std::time::Instant::now());
+        // T1: browser (subscriber) fixture built through the armed helper.
+        let rtc = crate::config::subscriber_rtc_config(None).build(std::time::Instant::now());
         let metrics = Arc::new(crate::metrics::SfuMetrics::default());
         let client = Client::new(rtc, metrics.clone())
             .with_chat_dcs()

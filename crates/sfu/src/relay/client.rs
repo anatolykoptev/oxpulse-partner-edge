@@ -87,6 +87,11 @@ pub async fn connect_relay(
 
     // 3. Create str0m Rtc as offerer with stats enabled.
     //    stats_interval_secs == 0 disables stats (same as Rtc::new).
+    // T1: native BWE is deliberately NOT armed on RELAY (SFU↔SFU) legs — only
+    // the subscriber-facing browser legs (see `config::subscriber_rtc_config`)
+    // arm it. There is no per-subscriber allocation consumer on the relay
+    // transport, so arming here would only add TWCC/probing padding cost with
+    // no benefit. Leave this a bare builder.
     let stats_interval =
         (stats_interval_secs > 0).then(|| Duration::from_secs(stats_interval_secs));
     let mut rtc = Rtc::builder()
