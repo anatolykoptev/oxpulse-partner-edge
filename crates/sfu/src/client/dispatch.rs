@@ -236,6 +236,22 @@ impl Client {
             Event::EgressBitrateEstimate(BweKind::Twcc(bitrate)) => {
                 Propagated::BandwidthEstimate(self.id, bitrate.as_u64())
             }
+            // REMB (Receiver Estimated Maximum Bitrate): str0m emits this
+            // unconditionally when the remote sends an REMB packet — no
+            // `enable_bwe()` required. It is a receiver-side downlink estimate,
+            // so feed it to the shared `BandwidthEstimator` exactly like TWCC
+            // instead of dropping it. The `Mid` identifies the reporting media
+            // stream; the estimate is keyed by subscriber, so it is unused.
+            //
+            // Assumes TWCC and REMB do not need reconciliation: both write the
+            // single last-write-wins `native_estimate_bps` slot, which is
+            // harmless while the frozen-300k base dominates `combined_bps`
+            // (additive Arc 1). Once native drives the estimate AND `enable_bwe`
+            // is armed, server GoogCC (TWCC) and coarse REMB would flap that
+            // slot — reconcile then (prefer TWCC, REMB advisory). See #408.
+            Event::EgressBitrateEstimate(BweKind::Remb(_mid, bitrate)) => {
+                Propagated::BandwidthEstimate(self.id, bitrate.as_u64())
+            }
             // M5.4.1: browser-reported bandwidth budget from DC id:2.
             // Resolve the label first (requires &mut Rtc) before calling
             // the pure dc handler, to avoid a simultaneous mut+shared borrow.
@@ -626,6 +642,32 @@ mod tests {
             1,
             "RecvOnly MediaAdded must call track_in_added"
         );
+    }
+
+    /// REMB free-signal: `Event::EgressBitrateEstimate(BweKind::Remb(mid, br))`
+    /// must forward a `BandwidthEstimate` to the registry — identically to TWCC
+    /// — instead of being silently dropped. str0m emits REMB unconditionally
+    /// (no `enable_bwe()`), so this is a free receiver-side downlink estimate.
+    #[test]
+    fn egress_bitrate_estimate_remb_forwards_bandwidth_estimate() {
+        use crate::client::test_seed::new_client;
+        use crate::propagate::{ClientId, Propagated};
+        use str0m::bwe::{Bitrate, BweKind};
+        use str0m::media::Mid;
+
+        let mut client = new_client(ClientId(902));
+        let out = client.handle_event(Event::EgressBitrateEstimate(BweKind::Remb(
+            Mid::from("m1"),
+            Bitrate::bps(1_234_000),
+        )));
+
+        match out {
+            Propagated::BandwidthEstimate(cid, bps) => {
+                assert_eq!(*cid, 902, "REMB estimate must be keyed by subscriber");
+                assert_eq!(bps, 1_234_000, "REMB bitrate must pass through unchanged");
+            }
+            other => panic!("REMB must forward BandwidthEstimate, got {other:?}"),
+        }
     }
 
     /// B2 regression: `Event::MediaAdded { direction: SendOnly }` must NOT
