@@ -238,10 +238,19 @@ impl Registry {
             // CAST INVARIANT: same u64-backed `ClientId` rule as in
             // `reap_dead` above. Update both sides if kit changes the
             // representation.
-            let budget = self.bandwidth.estimate_bps(
+            //
+            // V0 (issue #2310): fetch the estimate AND which ceiling term binds
+            // the kit's combined_bps min()-chain in ONE lookup. `budget` (`.0`)
+            // is bit-identical to the previous `estimate_bps` result, so the
+            // pacer decision and the bandwidth_estimate_bps gauge are unchanged
+            // — purely additive observability.
+            let (budget, binding_term) = match self.bandwidth.estimate_with_term(
                 oxpulse_sfu_kit::propagate::ClientId(*client.id),
                 std::time::Instant::now(),
-            );
+            ) {
+                Some((bps, term)) => (Some(bps), Some(term)),
+                None => (None, None),
+            };
             let prev_layer = client.desired_layer;
             let peer_label = (*client.id).to_string();
 
@@ -265,11 +274,12 @@ impl Registry {
                 Some(client.desired_layer)
             } else {
                 // GoogCC is now embedded in BandwidthEstimator::PerSubscriber and
-                // applied as a ceiling inside combined_bps() → estimate_bps().
+                // applied as a ceiling inside combined_bps() → estimate_with_term().
                 // A separate merge gate here would double-count GoogCC. Trust
                 // the kit (anatolykoptev/oxpulse-sfu-kit issue #17 resolved in
-                // v0.11.4). The `budget` value from estimate_bps() already
-                // incorporates the GoogCC ceiling alongside Kalman + native + hint.
+                // v0.11.4). The `budget` value from estimate_with_term() already
+                // incorporates the GoogCC ceiling alongside Kalman + native + hint
+                // (its `.0` is bit-identical to the former estimate_bps() result).
                 client.pacer_select_layer(budget, available)
             };
 
@@ -299,6 +309,17 @@ impl Registry {
                     .bandwidth_estimate_bps
                     .with_label_values(&[&peer_label])
                     .set(bps as i64);
+            }
+            // V0 (issue #2310): record which term is binding combined_bps this
+            // pass. term-only label (no peer_id) — federated-safe, aggregated
+            // across all subscribers. Emitted on EVERY pass, including
+            // pacer-throttled ones, because the ceiling is binding regardless of
+            // whether the pacer FSM advanced this tick.
+            if let Some(term) = binding_term {
+                self.metrics
+                    .combined_bps_binding_term
+                    .with_label_values(&[term.as_str()])
+                    .inc();
             }
             // Per-peer media-throughput snapshot — diagnoses
             // 'connected but no media' cases. Cheap (atomic load
