@@ -285,9 +285,23 @@ pub async fn run(
     //    socket — see spike line 173.
     let stats_interval =
         (stats_interval_secs > 0).then(|| Duration::from_secs(stats_interval_secs));
-    let mut rtc = Rtc::builder()
-        .set_stats_interval(stats_interval)
-        .build(Instant::now());
+    // T1: build the browser subscriber leg with native str0m BWE armed
+    // (TWCC + GoogCC). Reuses `config::subscriber_rtc_config` so the single
+    // arming point (and its initial-estimate const) is shared with `build_rtc`
+    // and the regression guard in `config`'s tests. Without this the answerer
+    // Rtc emitted no `EgressBitrateEstimate` and `native_estimate` stayed None.
+    let mut rtc = crate::config::subscriber_rtc_config(stats_interval).build(Instant::now());
+    // T1 (b): lift `desired_bitrate` off `Bitrate::ZERO` so str0m actually
+    // probes upward — otherwise the estimate is pinned to the current send
+    // rate and never discovers headroom. Capped to bound padding bandwidth
+    // (LiveKit StreamAllocator pattern). ARC 2 replaces this static cap with a
+    // per-tick target driven from the registry allocation loop once the
+    // estimate is consumed by the allocator; a fixed cap and a dynamic target
+    // produce the same (zero) forwarding difference until then, so this stays
+    // in-scope here rather than reaching into the out-of-scope drive loop.
+    rtc.bwe().set_desired_bitrate(str0m::bwe::Bitrate::bps(
+        crate::config::SUBSCRIBER_BWE_DESIRED_CAP_BPS,
+    ));
     match Candidate::host(local_udp_addr, "udp") {
         Ok(cand) => {
             rtc.add_local_candidate(cand);
@@ -370,6 +384,20 @@ pub async fn run(
     //    Reordering inject-then-answer closes that race window. (See
     //    M4.A2 follow-up.)
     let answer_sdp = answer.to_sdp_string();
+    // T1 (c): the native BWE estimator armed above is fed by transport-wide
+    // congestion control (TWCC). str0m only answers `a=rtcp-fb:<pt> transport-cc`
+    // when the browser offer negotiated it; a silent absence makes the armed
+    // estimator as dead as before (no feedback → no `EgressBitrateEstimate`).
+    // Log-only: a metric would cascade into the out-of-scope `metrics` module,
+    // and this is per-session (not per-tick) so a Loki log is the right surface.
+    if answer_sdp.contains("transport-cc") {
+        tracing::debug!(target: "sfu::client_ws", peer_id, %room_id,
+            "client_ws: transport-cc negotiated in answer SDP — native BWE has feedback");
+    } else {
+        tracing::warn!(target: "sfu::client_ws", peer_id, %room_id,
+            "client_ws: answer SDP has NO transport-cc — native BWE will emit no estimate for \
+             this peer (audio-only offer is benign; a video peer here is a negotiation regression)");
+    }
     // Phase A1: inject a=msid so the browser's RTCPeerConnection.ontrack
     // sets ev.streams correctly. Without this, str0m answer SDP has no
     // msid lines and the browser fires ev.streams = [], causing
