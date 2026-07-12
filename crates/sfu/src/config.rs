@@ -464,9 +464,12 @@ mod tests {
     /// anti-censorship cost).
     #[test]
     fn subscriber_bwe_desired_cap_is_bounded_and_above_base() {
-        assert!(SUBSCRIBER_BWE_DESIRED_CAP_BPS > 300_000);
-        assert!(SUBSCRIBER_BWE_DESIRED_CAP_BPS >= SUBSCRIBER_BWE_INITIAL_BPS);
-        assert!(SUBSCRIBER_BWE_DESIRED_CAP_BPS <= 10_000_000);
+        // Inline `const {}` blocks evaluate these at compile time (strictly
+        // stronger than a runtime assert, and clippy-clean: a plain
+        // `assert!` on consts trips `clippy::assertions_on_constants`).
+        const { assert!(SUBSCRIBER_BWE_DESIRED_CAP_BPS > 300_000) };
+        const { assert!(SUBSCRIBER_BWE_DESIRED_CAP_BPS >= SUBSCRIBER_BWE_INITIAL_BPS) };
+        const { assert!(SUBSCRIBER_BWE_DESIRED_CAP_BPS <= 10_000_000) };
     }
 
     #[test]
