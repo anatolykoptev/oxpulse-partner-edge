@@ -5,6 +5,22 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.15.1...v0.16.0) (2026-07-13)
+
+
+### Features
+
+* **sfu:** arm str0m native BWE on subscriber legs (T1) ([#405](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/405)) ([c811425](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c8114252b01c43a9f6f09c4c1227fcb202113d4f))
+* **sfu:** emit sfu_combined_bps_binding_term metric ([#2310](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/2310) V0) ([#409](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/409)) ([d679a49](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/d679a491799ba5144339a6b644c092abf13de72c))
+* **sfu:** forward REMB as a receiver-side downlink BWE signal ([#407](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/407)) ([835a397](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/835a3973c22c37cd8fee11ada5c9b92bbbeabe46))
+
+
+### Bug Fixes
+
+* **sfu:** advertise private IP as second ICE candidate (OCI-hairpin fix for group calls) ([#396](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/396)) ([ac03c0b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ac03c0b52ea7d4b583037977538a22003db4bdfc))
+* **sfu:** bind /metrics to loopback by default ([#404](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/404)) ([#406](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/406)) ([aef6dfe](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/aef6dfe6ad68b9c99d1a068391edbbda4e02741b))
+* **sfu:** min-tick pacer floor + softened suspend to stop spurious video drops ([#399](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/399)) ([fbd0f7e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/fbd0f7e81221af6f9d192f77a1a1ff4099442834))
+
 ## [0.15.1](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.15.0...v0.15.1) (2026-07-11)
 
 
