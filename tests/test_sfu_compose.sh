@@ -20,7 +20,10 @@ grep -qE 'image:[[:space:]]+ghcr\.io/anatolykoptev/partner-edge-sfu:\{\{IMAGE_VE
     || { echo "FAIL: sfu image tag does not match GHCR pattern"; exit 1; }
 
 # 3. sfu runs in host networking (co-located media port, like coturn).
-awk '/^[[:space:]]+sfu:/,/^[[:space:]]*$/' "$TPL" | grep -q 'network_mode: host' \
+# Range anchored on the next top-level service key (2-space indent + name:),
+# not the first blank line — intra-block blank lines can truncate the awk
+# range and flake under CI.
+awk '/^  sfu:/{f=1;next} /^  [a-z_-]+:/{f=0} f' "$TPL" | grep -q 'network_mode: host' \
     || { echo "FAIL: sfu must use network_mode: host"; exit 1; }
 
 # 4. sfu exposes the documented env surface.
@@ -41,7 +44,7 @@ done
 #     re-template compose from docker-compose.yml.tpl. SFU_EDGE_ID correctness
 #     in upgrade.sh is therefore guaranteed at install time by install.sh and
 #     this check — no separate check 4c needed for upgrade.sh.
-awk '/^[[:space:]]+sfu:/,/^[[:space:]]*$/' "$TPL" | grep -q 'SFU_EDGE_ID.*{{SFU_EDGE_ID}}' \
+awk '/^  sfu:/{f=1;next} /^  [a-z_-]+:/{f=0} f' "$TPL" | grep -q 'SFU_EDGE_ID.*{{SFU_EDGE_ID}}' \
     || { echo "FAIL: SFU_EDGE_ID placeholder missing from sfu service block in docker-compose.yml.tpl"; exit 1; }
 grep -q 'SFU_EDGE_ID' "$INSTALL" \
     || { echo "FAIL: SFU_EDGE_ID not derived/substituted in install.sh"; exit 1; }
