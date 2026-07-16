@@ -288,6 +288,16 @@ firewall_apply() {
 		return 0
 	}
 
+	# Purge rogue raw-iptables REJECT/DROP rules that sit BEFORE the UFW chain
+	# in INPUT, bypassing UFW's allowlist. These accumulate from manual
+	# iptables edits, legacy pre-ufw configs, or distro default rules left
+	# behind when ufw was adopted. Symptoms: UFW allows a port (e.g. AWG
+	# listen port) but traffic is still blocked because a REJECT at a lower
+	# line number fires first. The 2026-07-16 awg mesh outage was caused by
+	# exactly this — pillow's UFW had 43938/udp ALLOW but a raw REJECT at
+	# line 17 (before the UFW chain at line 18) blocked it. See issue #416.
+	_firewall_purge_rogue_rejects
+
 	case "$tool" in
 		ufw)
 			log "[firewall] applying ufw rules (awg=${awg_port}/udp)"
@@ -322,4 +332,48 @@ firewall_apply() {
 			;;
 	esac
 	log "[firewall] applied. SFU mesh-only sockets (:9317,:8912) and SFU WS (:8920) no longer publicly reachable."
+}
+
+# Purge rogue raw-iptables REJECT/DROP rules in the INPUT chain that sit
+# BEFORE the UFW before-chain (ufw-before-logging-input). These rules bypass
+# UFW's allowlist entirely — UFW may allow a port, but a raw REJECT at a
+# lower line number fires first and blocks the traffic. Idempotent: only
+# removes rules whose target is REJECT or DROP and whose position is before
+# the first ufw-* chain reference. Preserves ESTABLISHED/RELATED rules and
+# explicit ACCEPT rules (those are legitimate pre-UFW rules, not rogue).
+# No-op when UFW is not the active firewall tool (no ufw-* chain to find).
+_firewall_purge_rogue_rejects() {
+	command -v iptables >/dev/null 2>&1 || return 0
+	# Find the line number of the first ufw-* chain in INPUT — rogue rules
+	# are those BEFORE this line.
+	local ufw_line
+	ufw_line=$(iptables -L INPUT --line-numbers -n 2>/dev/null | grep -n 'ufw-' | head -1 | cut -d: -f1)
+	[[ "$ufw_line" =~ ^[0-9]+$ ]] || return 0  # no UFW chain — not our problem
+
+	# Walk INPUT rules from top, collect rogue REJECT/DROP rule numbers
+	# (before the ufw line). We collect in reverse order so deletion doesn't
+	# shift line numbers of rules we haven't processed yet.
+	local -a rogue_nums=()
+	local num target rest
+	while IFS=$' \t' read -r num target rest; do
+		[[ "$num" =~ ^[0-9]+$ ]] || continue
+		[[ "$num" -ge "$ufw_line" ]] && break  # past UFW chain — stop
+		case "$target" in
+			REJECT|DROP)
+				rogue_nums=("$num" "${rogue_nums[@]}")
+				;;
+		esac
+	done < <(iptables -L INPUT --line-numbers -n 2>/dev/null)
+
+	[[ ${#rogue_nums[@]} -gt 0 ]] || return 0  # no rogue rules
+
+	warn "[firewall] found ${#rogue_nums[@]} rogue raw-iptables REJECT/DROP rule(s) before UFW chain — purging"
+	for num in "${rogue_nums[@]}"; do
+		# Delete by line number (reverse order keeps remaining numbers stable).
+		if iptables -D INPUT "$num" 2>/dev/null; then
+			log "[firewall] purged rogue INPUT rule #${num}"
+		else
+			warn "[firewall] could not purge INPUT rule #${num} (may have shifted) — manual cleanup needed"
+		fi
+	done
 }
