@@ -130,12 +130,49 @@ impl AgentLoop {
         let last_epoch = state.as_ref().map(|s| s.last_applied_epoch).unwrap_or(0);
 
         if response.epoch <= last_epoch {
-            debug!(
-                epoch = response.epoch,
-                last_applied = last_epoch,
-                "up to date — skipping"
-            );
-            return Ok(());
+            // Same epoch — but verify the conf file wasn't manually overwritten
+            // (operator sed, awg-quick restart re-reading a stale conf, etc.).
+            // The 2026-07-16 incident: operator manually sed-ed awg0.conf to OLD
+            // params during recovery, then restarted awg-quick — the agent's state
+            // still said "epoch 55 applied" so it skipped every tick, leaving the
+            // mesh desynced for hours. Fix: read the conf, merge the expected
+            // params, and if the merged result differs from the current conf,
+            // re-apply. merge_obfuscation_params is idempotent — if params are
+            // already correct, merged == original and we skip as before.
+            if response.epoch < last_epoch {
+                debug!(
+                    epoch = response.epoch,
+                    last_applied = last_epoch,
+                    "central epoch lower than local — skipping"
+                );
+                return Ok(());
+            }
+            // response.epoch == last_epoch — verify conf integrity
+            match self.conf_params_match(&response.params).await {
+                Ok(true) => {
+                    debug!(
+                        epoch = response.epoch,
+                        "up to date — conf params match, skipping"
+                    );
+                    return Ok(());
+                }
+                Ok(false) => {
+                    warn!(
+                        epoch = response.epoch,
+                        conf = ?self.cfg.awg_conf_path,
+                        "conf params drift detected — re-applying epoch (manual conf overwrite?)"
+                    );
+                    // Fall through to the merge+write+apply path below.
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        conf = ?self.cfg.awg_conf_path,
+                        "could not verify conf params — skipping drift check"
+                    );
+                    return Ok(());
+                }
+            }
         }
 
         info!(
@@ -345,6 +382,23 @@ impl AgentLoop {
 
         // `_lock` drops here → flock released before apply_to_kernel.
         Ok(Some(identity))
+    }
+
+    /// Verify that the obfuscation params in the on-disk awg0.conf match the
+    /// expected `params`. Used by the same-epoch drift check in `tick()` to
+    /// detect manual conf overwrites (operator sed, awg-quick restart reading
+    /// a stale conf, etc.) that revert the params without bumping the epoch.
+    ///
+    /// Reads the conf WITHOUT the lock (this is a read-only check — the actual
+    /// re-apply goes through `merge_and_write_conf_locked` which takes the lock).
+    /// Uses `merge_obfuscation_params` idempotence: if the params are already
+    /// correct, the merged output equals the input.
+    async fn conf_params_match(&self, params: &AwgParams) -> Result<bool> {
+        let conf_text = tokio::fs::read_to_string(&self.cfg.awg_conf_path)
+            .await
+            .with_context(|| format!("read {:?}", self.cfg.awg_conf_path))?;
+        let merged = merge_obfuscation_params(&conf_text, params)?;
+        Ok(merged == conf_text)
     }
 
     /// Re-stat `awg_conf_path` and report whether it differs from the identity
@@ -1127,5 +1181,60 @@ mod conf_lock_tests {
             agent.conf_changed_since(&written).unwrap(),
             "conf_changed_since must detect the installer supersede so the apply is skipped"
         );
+    }
+
+    /// Regression: conf_params_match detects when the conf file's params have
+    /// been manually overwritten (operator sed, awg-quick restart with stale
+    /// conf) even though the agent's state says the epoch was already applied.
+    /// The 2026-07-16 incident: operator sed-ed awg0.conf to OLD params during
+    /// recovery, agent skipped every tick because epoch hadn't changed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conf_params_match_detects_manual_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let conf_path = cfg.awg_conf_path.clone();
+
+        // Seed conf with params matching params(7)
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 7);
+
+        let agent = AgentLoop::new(cfg).unwrap();
+
+        // Params match → conf_params_match returns true
+        assert!(
+            agent.conf_params_match(&params(7)).await.unwrap(),
+            "conf params match expected params — should return true"
+        );
+
+        // Simulate manual overwrite: operator seds Jc to 99 (different from 7)
+        let conf_text = std::fs::read_to_string(&conf_path).unwrap();
+        let overwritten = conf_text.replace("Jc = 7", "Jc = 99");
+        std::fs::write(&conf_path, overwritten).unwrap();
+
+        // Params no longer match → conf_params_match returns false
+        assert!(
+            !agent.conf_params_match(&params(7)).await.unwrap(),
+            "conf params drifted (Jc=99 vs expected 7) — should return false"
+        );
+    }
+
+    /// conf_params_match returns true when params are already correct (idempotent
+    /// merge produces identical output). This is the normal steady-state path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conf_params_match_true_when_params_correct() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let conf_path = cfg.awg_conf_path.clone();
+
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 7);
+
+        let agent = AgentLoop::new(cfg).unwrap();
+
+        // Multiple calls with same params → always true (idempotent)
+        for _ in 0..3 {
+            assert!(
+                agent.conf_params_match(&params(7)).await.unwrap(),
+                "conf params should match on every check when nothing changed"
+            );
+        }
     }
 }
