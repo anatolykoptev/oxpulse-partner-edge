@@ -49,6 +49,20 @@ echo "docker $*"
 EOF
 chmod +x "$TMP/mocks/docker"
 
+# iptables mock: _firewall_purge_rogue_rejects calls `iptables -L INPUT
+# --line-numbers -n` to find rogue REJECT/DROP rules before the UFW chain.
+# In CI (no root, no CAP_NET_ADMIN) the real iptables fails with permission
+# denied — and under `set -euo pipefail` the grep-in-pipeline aborts the
+# test. Mock returns an empty INPUT chain (no rogue rules → purge is a no-op).
+cat >"$TMP/mocks/iptables" <<'EOF'
+#!/usr/bin/env bash
+case "$1 $2" in
+	"-L INPUT") echo "Chain INPUT (policy ACCEPT)" ;;
+	*) echo "iptables $*" ;;
+esac
+EOF
+chmod +x "$TMP/mocks/iptables"
+
 PATH="$TMP/mocks:$PATH"
 . "$REPO_ROOT/lib/install-firewall.sh"
 
