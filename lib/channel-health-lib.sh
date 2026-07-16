@@ -431,7 +431,7 @@ probe_ch4() {
         #       at Allocate; quota exhaustion → 486 → 255.)
         #   -n 1  one test-data message burst, then exit
         #   -p  TURN server port (honours OXPULSE_COTURN_PORT)
-        turn_username="$(( $(date +%s) + 600 )):healthprobe"
+        turn_username="$(( $(date +%s) + 600 )):healthprobe-$$-$(date +%s%N)"
         # HMAC binary chosen at runtime so the leak-resistance test can stub it.
         local hmac_bin="${OXPULSE_HMAC_BIN:-python3}"
         turn_password=$(K="$turn_secret" "$hmac_bin" -c \
