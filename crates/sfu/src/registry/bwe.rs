@@ -271,7 +271,29 @@ impl Registry {
                     .pacer_tick_throttled_total
                     .with_label_values(&[&peer_label])
                     .inc();
-                Some(client.desired_layer)
+                // Issue #400: if the subscriber is currently suspended (video
+                // off — AudioNormal or AudioLow tier), desired_layer still
+                // holds the pre-suspend video RID. Returning it here would
+                // emit phantom pacer_layer_total{peer,rid} counts for a video
+                // layer the peer is not receiving. Return None instead —
+                // matches the non-throttled SuspendVideo/GoAudioOnly arms
+                // (which return None) and suppresses the phantom counter.
+                let is_suspended = client
+                    .last_emitted_tier
+                    .as_ref()
+                    .map(|t| {
+                        matches!(
+                            t,
+                            crate::propagate::SuspendTier::AudioNormal
+                                | crate::propagate::SuspendTier::AudioLow
+                        )
+                    })
+                    .unwrap_or(false);
+                if is_suspended {
+                    None
+                } else {
+                    Some(client.desired_layer)
+                }
             } else {
                 // GoogCC is now embedded in BandwidthEstimator::PerSubscriber and
                 // applied as a ceiling inside combined_bps() → estimate_with_term().
