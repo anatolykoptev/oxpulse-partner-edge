@@ -691,13 +691,36 @@ async fn park_until_close_or_steal(
                                         sdp: sdp.to_string(),
                                         mid: mid.to_string(),
                                     };
+                                    // Bounded retry: try_send first (fast path), then
+                                    // await with a short timeout (backpressure without
+                                    // dropping the answer). A full channel means the UDP
+                                    // loop is draining previous controls — the answer will
+                                    // be consumed, just not instantly.
                                     if ws_ctrl_tx.try_send(ctrl).is_err() {
-                                        tracing::warn!(target: "sfu::client_ws", peer_id,
-                                            %room_id, "ws_ctrl_tx full — answer-renegotiate dropped");
-                                        metrics
-                                            .sfu_renegotiation_answers_total
-                                            .with_label_values(&["ctrl_tx_full"])
-                                            .inc();
+                                        let ctrl2 = WsClientCtrl::AnswerRenegotiate {
+                                            sdp: sdp.to_string(),
+                                            mid: mid.to_string(),
+                                        };
+                                        match tokio::time::timeout(
+                                            std::time::Duration::from_millis(500),
+                                            ws_ctrl_tx.send(ctrl2),
+                                        ).await {
+                                            Ok(Ok(())) => {
+                                                metrics
+                                                    .sfu_renegotiation_answers_total
+                                                    .with_label_values(&["ctrl_tx_retry_ok"])
+                                                    .inc();
+                                            }
+                                            _ => {
+                                                tracing::warn!(target: "sfu::client_ws", peer_id,
+                                                    %room_id,
+                                                    "ws_ctrl_tx full + retry timeout — answer-renegotiate dropped");
+                                                metrics
+                                                    .sfu_renegotiation_answers_total
+                                                    .with_label_values(&["ctrl_tx_full"])
+                                                    .inc();
+                                            }
+                                        }
                                     }
                                 } else {
                                     tracing::warn!(target: "sfu::client_ws", peer_id,

@@ -1029,7 +1029,7 @@ impl SfuMetrics {
         let sfu_renegotiation_answers_total = reg!(IntCounterVec::new(
             Opts::new(
                 "sfu_renegotiation_answers_total",
-                "M2: renegotiation answer processing outcomes. outcome ∈ {ok, err, timeout, ws_closed, ctrl_tx_full, state_mismatch}. err rising = malformed browser answer or str0m rejection. state_mismatch = accept_answer Ok but no Negotiating TrackOut found.",
+                "M2: renegotiation answer processing outcomes. outcome ∈ {ok, err, timeout, ws_closed, ctrl_tx_full, ctrl_tx_retry_ok, state_mismatch}. err rising = malformed browser answer or str0m rejection. state_mismatch = accept_answer Ok but no Negotiating TrackOut found. ctrl_tx_retry_ok = try_send failed but bounded retry send succeeded.",
             ),
             &["outcome"],
         )
@@ -1048,6 +1048,9 @@ impl SfuMetrics {
             .get();
         let _ = sfu_renegotiation_answers_total
             .with_label_values(&["ctrl_tx_full"])
+            .get();
+        let _ = sfu_renegotiation_answers_total
+            .with_label_values(&["ctrl_tx_retry_ok"])
             .get();
         let _ = sfu_renegotiation_answers_total
             .with_label_values(&["state_mismatch"])
