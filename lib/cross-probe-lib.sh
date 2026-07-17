@@ -93,7 +93,22 @@ _read_cross_probe_token() {
     fi
     local f="${_CROSS_PROBE_TOKEN_FILE:-${_PREFIX_ETC}/cross-probe-token}"
     if [[ -r "$f" ]]; then
-        cat "$f"
+        local _token
+        _token=$(cat "$f" 2>/dev/null || true)
+        # Runtime validation of the cross-process file contract
+        # (writer: lib/xprb-refresh-lib.sh refresh_cross_probe_token).
+        # Contract: 0600 perms, raw-token-string, no trailing newline,
+        # xprb_ prefix. A drift would fail silently at read time without
+        # this guard — see #433.
+        if [[ -z "$_token" ]]; then
+            log "WARNING: _read_cross_probe_token: $f is empty — token not minted yet?"
+            return 1
+        fi
+        if [[ "$_token" != xprb_* ]]; then
+            log "WARNING: _read_cross_probe_token: $f content lacks xprb_ prefix — file contract drift?"
+            return 1
+        fi
+        printf '%s' "$_token"
         return 0
     fi
     return 1
