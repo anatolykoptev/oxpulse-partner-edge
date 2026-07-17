@@ -71,3 +71,35 @@ setup() {
 	echo "$guard_block" | grep -qE '/api/partner/register|register response|backend.*response' \
 		|| { echo "die message does not point to register response"; return 1; }
 }
+
+# 4. install.sh MUST guard python3 availability before awg_extract calls.
+#    awg_extract() has no sed fallback (unlike json_get); if python3 is
+#    missing, ALL awg_extract returns empty, AWG_ALLOCATED_IP is empty,
+#    the validation block is skipped, and install proceeds without AWG.
+@test "install.sh guards python3 availability before awg_extract calls" {
+	grep -q "command -v python3" "$INSTALL" \
+		|| { echo "install.sh does not guard python3 before awg_extract"; return 1; }
+
+	# The guard must be BEFORE the first awg_extract call.
+	python3_line=$(grep -n "command -v python3" "$INSTALL" | head -1 | cut -d: -f1)
+	awg_extract_line=$(grep -n "AWG_ALLOCATED_IP=\$(awg_extract" "$INSTALL" | head -1 | cut -d: -f1)
+
+	[[ -n "$python3_line" && -n "$awg_extract_line" ]] \
+		|| { echo "could not locate python3 guard or first awg_extract call"; return 1; }
+
+	[[ "$python3_line" -lt "$awg_extract_line" ]] \
+		|| { echo "python3 guard (line $python3_line) is AFTER first awg_extract (line $awg_extract_line)"; return 1; }
+}
+
+# 5. deps_install MUST include python3 in the package list.
+@test "install-deps.sh includes python3 in deps_install package list" {
+	DEPS="$REPO_ROOT/lib/install-deps.sh"
+	[[ -f "$DEPS" ]] || skip "install-deps.sh not at expected path"
+
+	grep -q "python3" "$DEPS" \
+		|| { echo "install-deps.sh does not install python3"; return 1; }
+
+	# Must be in the for _pkg in ... loop.
+	grep -E "for _pkg in .* python3" "$DEPS" >/dev/null 2>&1 \
+		|| { echo "python3 not in deps_install for-loop"; return 1; }
+}
