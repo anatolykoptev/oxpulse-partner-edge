@@ -37,6 +37,16 @@ max-bps=250000
 # Total server bandwidth cap: 200 Mbps conservative.
 bps-capacity=25000000
 stale-nonce=600
+# Allocation lifetime cap: prevents leaked allocations from wedging user-quota.
+# When the coturn probe (channel-health-lib.sh) times out on a dead relay, the
+# turnutils_uclient process is killed (exit 124) without sending TURN Refresh(0)
+# (graceful dealloc). Coturn holds 2 dangling allocations per probe tick until
+# the default expiry (600s). At 60s tick rate this is ~10 leaked allocations at
+# steady state; with user-quota=16, the probe username wedges into 486 Allocation
+# Quota Reached after ~8 minutes of continuous failure. Capping at 120s halves
+# the wedge window. Root cause fix: OXPULSE_COTURN_PROBE_TARGET (avoid hairpin).
+max-allocate-lifetime=120
+allocation-default-timeout=120
 
 # ─── Peer policy ────────────────────────────────────────────────────────
 no-loopback-peers
