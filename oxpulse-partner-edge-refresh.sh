@@ -538,14 +538,14 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
             "${PREFIX_ETC}/xray-client.json" \
             "${PREFIX_LIB}/xray-config.sha" \
             "$_compose" \
-            oxpulse-partner-xray
+            xray-client restart oxpulse-partner-xray
         # Naive channel (CH5) — skip when not deployed
         if [[ -f "${PREFIX_ETC}/naive-client.json" ]]; then
             _channel_restart_if_changed naive \
                 "${PREFIX_ETC}/naive-client.json" \
                 "${PREFIX_LIB}/naive-config.sha" \
                 "$_compose" \
-                oxpulse-partner-naive
+                naive restart oxpulse-partner-naive
         fi
         # Hysteria2 channel (CH3) — restart existing or bootstrap from node-config
         _hy2_server=$(jq -r ".hysteria2_server // empty" "$NODE_CFG" 2>/dev/null || true)
@@ -554,7 +554,7 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
                 "${PREFIX_ETC}/hysteria2-client.yaml" \
                 "${PREFIX_LIB}/hysteria2-config.sha" \
                 "$_compose" \
-                oxpulse-partner-hysteria2
+                hysteria2-client restart oxpulse-partner-hysteria2
         elif [[ -n "${_hy2_server:-}" ]]; then
             # Bootstrap path: node-config returns hysteria2_server but channel was
             # never activated on this edge (installed before Phase 1.7).

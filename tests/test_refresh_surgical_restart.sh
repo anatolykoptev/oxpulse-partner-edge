@@ -322,3 +322,26 @@ EOF
 	! grep -q 'docker' "$DOCKER_LOG" 2>/dev/null || true
 	[[ "$output" == *"skipping restart"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# 7. Structural: call sites pass compose service key (not container_name)
+#    as $5 to _channel_restart_if_changed. docker compose restart needs the
+#    SERVICE key, not the container_name. Regression guard for #428.
+# ---------------------------------------------------------------------------
+@test "refresh.sh: xray call site passes xray-client (service key) not oxpulse-partner-xray (container name)" {
+	grep -A5 "_channel_restart_if_changed xray" "$REPO_ROOT/oxpulse-partner-edge-refresh.sh" | \
+		grep -q "xray-client restart oxpulse-partner-xray" \
+		|| { echo "xray call site does not pass service key + state_container"; return 1; }
+}
+
+@test "refresh.sh: naive call site passes naive (service key) not oxpulse-partner-naive (container name)" {
+	grep -A5 "_channel_restart_if_changed naive" "$REPO_ROOT/oxpulse-partner-edge-refresh.sh" | \
+		grep -q "naive restart oxpulse-partner-naive" \
+		|| { echo "naive call site does not pass service key + state_container"; return 1; }
+}
+
+@test "refresh.sh: hysteria2 call site passes hysteria2-client (service key) not oxpulse-partner-hysteria2" {
+	grep -A5 "_channel_restart_if_changed hysteria2" "$REPO_ROOT/oxpulse-partner-edge-refresh.sh" | \
+		grep -q "hysteria2-client restart oxpulse-partner-hysteria2" \
+		|| { echo "hysteria2 call site does not pass service key + state_container"; return 1; }
+}
