@@ -2967,6 +2967,11 @@ if [[ "$MODE" == with_templates ]]; then
 	# diagnostic beyond the last log line). Wrapping the assignment as an
 	# `if` condition IS the exemption — bash does not apply errexit to a
 	# command whose status is being tested.
+	# NOTE (#434): this is the idiomatic bash pattern for set -e exemption.
+	# Do NOT "simplify" to `var=$(...) || true; if [[ $? -ne 0 ]]; then` —
+	# `$?` after `|| true` is always 0. The `if ! var=$(...)` form is
+	# correct and is structurally tested by test_upgrade_pull_scope_and_rollback.sh
+	# Section A (A1-A3) + Section E (rollback branch runs on pull failure).
 	if ! pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_wt_edge_svcs[@]}" 2>&1); then
 		printf '%s\n' "$pull_out" >&2
 		if ! ghcr_pull_diagnose "$pull_out"; then
