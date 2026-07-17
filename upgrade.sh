@@ -813,6 +813,7 @@ resolve_default_target() {
 # Resolution order:
 #   partner-edge-vX.Y.Z → strip prefix → vX.Y.Z (transition: old-form input)
 #   vX.Y.Z              → unchanged             (canonical new form)
+#   X.Y.Z (bare)        → prepend v → vX.Y.Z   (VERSION file may lack v-prefix)
 #   latest              → unchanged             (floating; SHA256SUMS guard skipped)
 #
 # Sets RELEASE_TAG = TARGET (same value; no dual forms post-v0.12.60).
@@ -823,6 +824,18 @@ normalize_target() {
 			# Transition: old-form input from pre-v0.12.60 installer. Strip prefix.
 			TARGET="${TARGET#partner-edge-}"
 			warn "old tag form detected — treating as $TARGET (releases ≥v0.12.60 use vX.Y.Z)"
+			;;
+		latest)
+			: # floating tag — no normalization
+			;;
+		v[0-9]*)
+			: # canonical form — already has v-prefix
+			;;
+		[0-9]*.[0-9]*.[0-9]*)
+			# Bare X.Y.Z from VERSION file (no v-prefix) — GitHub release URLs
+			# use vX.Y.Z, so prepend v to avoid a 404 on RELEASES_BASE.
+			TARGET="v$TARGET"
+			warn "bare version $TARGET missing v-prefix — normalized to v$TARGET"
 			;;
 	esac
 	# One-form world: RELEASE_TAG = TARGET (git tag = image tag = release tag).

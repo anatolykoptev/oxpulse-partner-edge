@@ -53,9 +53,10 @@ grep -qE '^restore_host_scripts\(\)' "$UPGRADE" \
     || fail "1d: restore_host_scripts() not defined"
 
 # sync_host_scripts must be called with RELEASE_TAG (not TARGET) in the apply path.
-# The tag-form fix (2026-05-26) changed all call sites from "$TARGET" to "$RELEASE_TAG"
-# so that the GitHub release URL form (partner-edge-vX.Y.Z) is used, not the docker
-# image tag form (vX.Y.Z).
+# The tag-form fix (2026-05-26) unified the dual tag forms: post-v0.12.60
+# RELEASE_TAG == TARGET == vX.Y.Z (git tag = image tag = release tag).
+# The old partner-edge-vX.Y.Z form is stripped by normalize_target() for
+# backward compat with mid-flight edges, but no longer produced.
 grep -q 'sync_host_scripts "$RELEASE_TAG"' "$UPGRADE" \
     && pass "1e: sync_host_scripts called with RELEASE_TAG in apply path" \
     || fail "1e: sync_host_scripts not called with RELEASE_TAG (tag-form regression)"
