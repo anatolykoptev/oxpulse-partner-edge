@@ -5,6 +5,19 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.0...v0.16.1) (2026-07-17)
+
+
+### Bug Fixes
+
+* **coturn:** cap allocation lifetime to prevent probe leak wedge ([#440](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/440)) ([752acba](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/752acbaf80384e4f9edc0dbc466511e26302d24c))
+* **cross-probe:** validate token file contract at read time ([#444](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/444)) ([f832465](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/f832465f40793aa49224cfccf9a87db287f1db46))
+* **install:** guard python3 before awg_extract + add to deps_install ([#437](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/437)) ([3de06a8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3de06a81422b33c0745d1318f553c725c22bb4e2))
+* **reconcile:** log warning on mktemp/mkdir failure in _write_coturn_skip_count ([#443](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/443)) ([e96efac](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e96efac29bdaa84e424dc781184710a65a40b72e))
+* **refresh:** pass compose service key to _channel_restart_if_changed ([#439](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/439)) ([9843681](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/9843681bfd8755e90ffe541b322cf25ef78bf2e8))
+* **sfu:** bounded retry for renegotiation answer on full ws_ctrl_tx ([#441](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/441)) ([450f956](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/450f956e20fb4a79c4dc04cd812c00342949307f))
+* **sfu:** log + count mutex poison in bwe-hint rate gate ([#438](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/438)) ([c892d8b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c892d8bd438953dcebccc579b243a0fc723e4047))
+
 ## [0.16.0](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.15.1...v0.16.0) (2026-07-13)
 
 
