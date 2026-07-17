@@ -79,16 +79,16 @@ settle_budget=$(grep -oE 'OXPULSE_UPGRADE_HEALTH_TIMEOUT:-[0-9]+' "$UPGRADE" | h
     || { echo "FAIL: settle budget is ${settle_budget:-missing}s (need ≥10s); xray Reality tunnel startup takes up to 8s"; exit 1; }
 
 # 4. The rollback path must also give a ≥10s settle before its healthcheck
-#    (same xray startup concern). The rollback-mode block still uses a fixed
-#    sleep; anchor on the rollback-mode marker and read the first NUMERIC sleep
-#    (ignoring poll-loop `sleep "$interval"` lines).
-rollback_sleep=$(awk '
+#    (same xray startup concern). The rollback-mode block now uses
+#    settle_healthcheck_with_retry (replacing the old fixed sleep 10 — #269).
+#    Anchor on the rollback-mode marker and check for the settle call.
+rollback_settle=$(awk '
     /---- --rollback mode ----/ { in_rollback=1 }
-    in_rollback && /^[[:space:]]*sleep [0-9]/ { match($0, /[0-9]+/); print substr($0, RSTART, RLENGTH); exit }
+    in_rollback && /settle_healthcheck_with_retry/ { print "found"; exit }
 ' "$UPGRADE")
 
-[[ "${rollback_sleep:-0}" -ge 10 ]] \
-    || { echo "FAIL: upgrade.sh rollback settle sleep is ${rollback_sleep:-missing}s (need ≥10s)"; exit 1; }
+[[ "$rollback_settle" == "found" ]] \
+    || { echo "FAIL: upgrade.sh rollback path does not call settle_healthcheck_with_retry (need ≥10s settle before healthcheck)"; exit 1; }
 
 # 5. Sanity: upgrade.sh still parses.
 bash -n "$UPGRADE" || { echo "FAIL: upgrade.sh has syntax errors"; exit 1; }
