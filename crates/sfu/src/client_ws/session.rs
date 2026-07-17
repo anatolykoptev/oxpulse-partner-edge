@@ -727,7 +727,18 @@ async fn park_until_close_or_steal(
                                         // the same peer_id see a consistent clock.
                                         let throttled = {
                                             let mut map = hint_rate_registry.lock()
-                                                .unwrap_or_else(|p| p.into_inner());
+                                                .unwrap_or_else(|p| {
+                                                    metrics
+                                                        .sfu_bwe_hint_registry_mutex_poisoned_total
+                                                        .inc();
+                                                    tracing::warn!(
+                                                        target: "sfu::client_ws",
+                                                        peer_id,
+                                                        %room_id,
+                                                        "hint_rate_registry mutex poisoned — recovering with potentially inconsistent state"
+                                                    );
+                                                    p.into_inner()
+                                                });
                                             let last = map.get(&peer_id).copied();
                                             if last.is_some_and(|t| now.duration_since(t) < hint_interval) {
                                                 true
