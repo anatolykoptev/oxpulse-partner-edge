@@ -33,3 +33,7 @@ grep -q '{{TURNS_SUBDOMAIN}}' "$TPL" || { echo "FAIL: TURNS_SUBDOMAIN placeholde
 grep -q '{{PARTNER_DOMAIN}}' "$TPL" || { echo "FAIL: PARTNER_DOMAIN placeholder missing"; exit 1; }
 
 echo "PASS: coturn.conf.tpl hardening checks"
+
+# Allocation lifetime cap (prevents probe allocation leak from wedging user-quota)
+grep -qE ^max-allocate-lifetime=120 "$TPL" || { echo "FAIL: max-allocate-lifetime=120 missing"; exit 1; }
+grep -qE ^allocation-default-timeout=120 "$TPL" || { echo "FAIL: allocation-default-timeout=120 missing"; exit 1; }
