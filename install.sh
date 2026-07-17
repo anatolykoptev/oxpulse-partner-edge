@@ -759,6 +759,15 @@ SIGNALING_SFU_SECRET=$(json_get signaling_sfu_secret "$tmp_cfg")
 # is configured AND we sent up our awg_pubkey). All fields are extracted
 # from the nested `awg` object via python — sed-based json_get only handles
 # top-level scalars. awg_extract() defined in lib/install-awg.sh.
+# Guard: awg_extract() uses python3 with no sed fallback (unlike json_get).
+# If python3 is missing, ALL awg_extract calls return empty, AWG_ALLOCATED_IP
+# is empty, the validation block below is skipped, and install proceeds
+# without AWG -- even if the backend DID allocate an AWG IP.
+command -v python3 >/dev/null 2>&1 \
+	|| die "python3 is required for AWG config extraction but was not found.
+deps_install should have installed it -- check install-deps.sh or install
+python3 manually then re-run."
+
 AWG_ALLOCATED_IP=$(awg_extract     "$tmp_cfg" allocated_ip)
 # Strip CIDR prefix for SFU bind vars. SFU v0.12.67+ strict getaddrinfo
 # rejects "10.9.0.7/24"; needs plain host IP "10.9.0.7". Central always

@@ -11,7 +11,7 @@
 deps_install() {
 	if [[ $DRY_RUN -eq 0 ]]; then
 		local _pkg
-		for _pkg in jq curl; do
+		for _pkg in jq curl python3; do
 			if ! command -v "$_pkg" >/dev/null 2>&1; then
 				log "  installing missing runtime dep: $_pkg"
 				if [[ $OS_FAMILY == rhel ]]; then
