@@ -550,3 +550,14 @@ fi
 echo ""
 echo "=== Results: PASS=$PASS FAIL=$FAIL ==="
 [[ "$FAIL" -eq 0 ]]
+
+# SK5: mktemp failure must log a warning, not silently return 0
+# Regression guard for #432
+test_mktemp_failure_warns() {
+    local fn_body
+    fn_body=$(grep -A20 "^_write_coturn_skip_count()" "$LIB")
+    echo "$fn_body" | grep -q "mktemp.*failed\|WARNING.*mktemp" \
+        && pass "SK5: mktemp failure logs warning" \
+        || fail "SK5: mktemp failure does not log warning"
+}
+test_mktemp_failure_warns
