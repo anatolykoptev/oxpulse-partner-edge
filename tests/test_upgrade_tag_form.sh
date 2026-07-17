@@ -44,6 +44,13 @@ PASS=0; FAIL=0
 pass() { echo "PASS: $1"; PASS=$((PASS+1)); }
 fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
+# Probe a free TCP port to avoid hardcoded fixture ports flaking under socket
+# reuse in parallel CI. Race-free in practice: the port is bound immediately
+# after probe by the http.server process.
+probe_free_port() {
+    python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
+
 # ---------------------------------------------------------------------------
 # Fix A: Tag-form mapping — structural guards
 # ---------------------------------------------------------------------------
@@ -282,7 +289,7 @@ pass "C-0: sync preamble syntax clean"
 
 # Fixture server: no assets at all → SHA256SUMS will 404 for any tag.
 TMPDIR_FAIL=$(mktemp -d)
-FAIL_PORT=18771
+FAIL_PORT=$(probe_free_port)
 python3 -m http.server "$FAIL_PORT" --directory "$TMPDIR_FAIL" \
     >/tmp/test-tag-form-fail-httpd.log 2>&1 &
 FAIL_HTTP_PID=$!
@@ -400,7 +407,7 @@ EDGE_E_RELEASE_DIR="$TMPDIR_EDGE_E/v0.12.59"
 mkdir -p "$EDGE_E_RELEASE_DIR"
 
 # Serve raw files from repo root (as REPO_RAW).
-RAW_PORT=18772
+RAW_PORT=$(probe_free_port)
 python3 -m http.server "$RAW_PORT" --directory "$REPO_ROOT" \
     >/tmp/test-edge-e-raw.log 2>&1 &
 RAW_HTTP_PID=$!
@@ -442,7 +449,7 @@ EDGE_E_UPGRADE_SHA=$(sha256sum "$EDGE_E_RELEASE_DIR/partner-edge-upgrade.sh" | a
     printf '%s  partner-edge-upgrade.sh\n' "$EDGE_E_UPGRADE_SHA"
 } > "$EDGE_E_RELEASE_DIR/SHA256SUMS"
 
-RELEASE_PORT=18773
+RELEASE_PORT=$(probe_free_port)
 python3 -m http.server "$RELEASE_PORT" --directory "$TMPDIR_EDGE_E" \
     >/tmp/test-edge-e-release.log 2>&1 &
 REL_HTTP_PID=$!
