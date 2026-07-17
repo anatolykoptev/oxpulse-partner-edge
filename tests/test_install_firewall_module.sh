@@ -183,4 +183,16 @@ grep -q "8.8.8.0/24"                                                            
 grep -q "not-a-cidr"                                                             "$TMP/calls.log" && { echo "FAIL test6: junk token must be filtered out"; cat "$TMP/calls.log"; exit 1; }
 echo "[ok] test6: PE_FW_EDGE_SUBNETS override → one rule per valid PRIVATE CIDR, public/junk rejected"
 
+# ── Test 7: firewalld rich rules for UDP MUST NOT use source-only scoping ────
+# Regression guard for #436: the firewalld path for SFU client WS (:8920)
+# uses source-subnet-scoped rich rules (cannot match ingress interface).
+# This is safe for TCP (no return path for spoofer) but NOT for UDP.
+# Structural test: no firewalld rich rule in firewall-lib.sh should use
+# protocol=udp with source-only scoping (no interface/zone restriction).
+if grep -q "protocol=udp" "$REPO_ROOT/lib/firewall-lib.sh" 2>/dev/null; then
+	echo "FAIL test7: firewall-lib.sh has UDP rich rule (source-only scoping is spoofable for UDP)"
+	exit 1
+fi
+echo "[ok] test7: no UDP rich rules in firewall-lib.sh (source-only scoping is spoofable for UDP)"
+
 echo "[ok] all firewall-module tests passed"
