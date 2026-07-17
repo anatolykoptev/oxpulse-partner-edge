@@ -32,6 +32,12 @@ PASS=0; FAIL=0
 pass() { echo "PASS: $1"; PASS=$((PASS+1)); }
 fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
+# Probe a free TCP port to avoid hardcoded fixture ports flaking under socket
+# reuse in parallel CI.
+probe_free_port() {
+    python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()'
+}
+
 # ---------------------------------------------------------------------------
 # Test 1: Structural — required symbols present in upgrade.sh
 # ---------------------------------------------------------------------------
@@ -92,7 +98,7 @@ grep -q 'SYSTEMCTL_BIN' "$UPGRADE" \
 # REPO_RAW pointing at http://127.0.0.1:PORT (same pattern as
 # test_upgrade_with_templates.sh).
 # ---------------------------------------------------------------------------
-SERVE_PORT=18761
+SERVE_PORT=$(probe_free_port)
 python3 -m http.server "$SERVE_PORT" --directory "$REPO_ROOT" \
     >/tmp/test-hostscript-httpd.log 2>&1 &
 HTTP_PID=$!
@@ -311,7 +317,7 @@ printf '%s  oxpulse-channels-health-report.sh\n' "$FAKE_HASH" > "$T5_RELEASE/SHA
 printf '%s  partner-edge-upgrade.sh\n'            "$FAKE_HASH" >> "$T5_RELEASE/SHA256SUMS"
 
 # Serve SHA256SUMS from a dedicated fixture server.
-SHA_PORT=18762
+SHA_PORT=$(probe_free_port)
 python3 -m http.server "$SHA_PORT" --directory "$TMPDIR_ROOT/t5/release" \
     >/tmp/test-sha256-httpd.log 2>&1 &
 SHA_HTTP_PID=$!
