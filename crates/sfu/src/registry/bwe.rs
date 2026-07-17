@@ -94,6 +94,11 @@ impl Registry {
                         .remove_label_values(&[&peer_label, rid_label]);
                     // M6.1: scrub layer_transitions_total{from,to,peer} series
                     // for this peer to prevent cardinality growth on reconnects.
+                    // NOTE (#435): PACER_RID_LABELS is a compile-time const
+                    // (&["q","h","f","other"]) — always non-empty, always valid.
+                    // The nested loop is O(4²)=16 iterations by design: removes
+                    // every (from,to) RID pair. Rust's slice iterator is always
+                    // bounds-safe; no runtime validation needed.
                     for to_label in PACER_RID_LABELS {
                         let _ = metrics.layer_transitions_total.remove_label_values(&[
                             rid_label,
