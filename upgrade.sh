@@ -1498,6 +1498,18 @@ settle_healthcheck_with_retry() {
 	local _serve_baseline="${3:-}"              # P3-serveability: pre-change chN=OK|DOWN snapshot
 	local budget="${OXPULSE_UPGRADE_HEALTH_TIMEOUT:-30}"
 	local interval=3
+	# Clamp budget to ≥1: a value of 0 or negative → max_attempts≤0 → loop
+	# never runs → immediate rollback of a healthy upgrade (#269).
+	case "$budget" in
+		''|*[!0-9-]*)
+			warn "OXPULSE_UPGRADE_HEALTH_TIMEOUT='$budget' is non-numeric — defaulting to 30"
+			budget=30
+			;;
+		0|-[0-9]*)
+			warn "OXPULSE_UPGRADE_HEALTH_TIMEOUT=$budget is non-positive — clamping to 1"
+			budget=1
+			;;
+	esac
 	local max_attempts=$(( (budget + interval - 1) / interval ))  # ceil(budget/interval)
 
 	# ---------------------------------------------------------------------------
@@ -2251,8 +2263,11 @@ if [[ "$MODE" == rollback ]]; then
 			(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_rollback_mode_edge_svcs[@]}")
 		fi
 		(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate)
-		sleep 10
-		if "$HEALTHCHECK" --local; then
+		# Route through settle_healthcheck_with_retry instead of single
+		# sleep 10 + one-shot healthcheck (#269): the one-shot path is
+		# racy on the restored-image verify — a cold-start settle window
+		# shorter than 10s produces a false die on a healthy rollback.
+		if settle_healthcheck_with_retry "rollback-verify"; then
 			log "rollback complete"
 			exit 0
 		else
@@ -3025,7 +3040,10 @@ if [[ "$MODE" == with_templates ]]; then
 			(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_wt_rb2_edge_svcs[@]}") || true
 		fi
 		(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d) || true
-		if ! "$HEALTHCHECK" --local; then
+		# Route through settle_healthcheck_with_retry instead of one-shot
+		# healthcheck (#269): the restored-image verify is racy with a
+		# single check — a cold-start settle window produces a false die.
+		if ! settle_healthcheck_with_retry "with-templates-rollback-verify"; then
 			die "--with-templates rolled back but healthcheck still failing — manual recovery required"
 		fi
 		die "--with-templates upgrade rolled back due to post-upgrade healthcheck regression"
@@ -3226,6 +3244,12 @@ if ! settle_healthcheck_with_retry "plain-upgrade" "${_baseline_snapshot:-}" "${
 		(ghcr_login_from_file || true; cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_rb_edge_svcs[@]}")
 	fi
 	(cd "$PREFIX_ETC" && $DOCKER_BIN compose up -d --force-recreate) || true
+	# Re-verify healthcheck after rollback (#269): previously died without
+	# verifying, asymmetric with the with-templates arm — a broken rollback
+	# would exit with a misleading 'healthcheck regression' message.
+	if ! settle_healthcheck_with_retry "plain-rollback-verify"; then
+		die "upgrade rolled back but healthcheck still failing — manual recovery required"
+	fi
 	die "upgrade rolled back due to post-upgrade healthcheck regression"
 fi
 rm -f "${_baseline_snapshot:-}"
