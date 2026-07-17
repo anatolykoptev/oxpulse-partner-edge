@@ -842,26 +842,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **installer:** render() handles multi-line values (SFU_SIGNING_PUBLIC_KEY PEM) ([#136](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/136)) ([a4c62ac](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a4c62acc7682173bc8794c64e12ab66e388402af))
 * **upgrade:** reviewer findings — cover_dir, atomic install, flock, rollback pull, healthcheck disambig ([#126](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/126)) ([92f7f5a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/92f7f5a76c46c2986e568e60cde8b9fe191cb235))
 
-## [Unreleased]
-
-### Added
-- **CH3 Hysteria2 client** as second control-plane channel alongside CH2 AmneziaWG mesh.
-  - New service `hysteria2-client` in compose (image `tobyxdd/hysteria:latest`, host network, restart always).
-  - New `re_render_hysteria2()` in `channel-render-lib.sh` (mirrors `re_render_xray` pattern).
-  - Caddy `tunnel_upstream` snippet → 2-upstream pool (`10.9.0.2:8907` primary, `host.docker.internal:18443` fallback) with `lb_policy first` + active health probes at `/api/health` every 10s.
-  - `install.sh` provisions hy2 if `/api/partner/hy2-credentials` returns creds OR env vars `OXPULSE_HY2_AUTH_PASS` + `OXPULSE_HY2_OBFS_PASS` present.
-  - `upgrade.sh --templates-only` re-renders hy2 alongside xray on existing edges.
-  - 2 new healthcheck items: hy2 container healthy + `:18443` listener (graceful on awg-only edges).
-- Golden-file test for `hysteria2-client.yaml` rendering: `tests/test_hysteria2_render.sh`.
-
-### Changed
-- `Caddyfile.tpl` `(tunnel_upstream)` + `(tunnel_upstream_default)` snippets — now emit pool + health directives (backward-incompatible with single-upstream golden — bumped fixture).
-
-### Notes
-- Phase 1 uses fleet-shared hy2 credentials. Per-edge identity = Phase 7 (`partner_nodes.hy2_auth_hash` schema migration TBD).
-- CH5 NaiveProxy deferred — caddy-forwardproxy `forbidden_zones` blocks RFC1918+loopback at hub server-side; needs external relay (Phase 2).
-- CH1 Reality reinstall blocked on oxpulse-chat PR #971 (XRAY_XHTTP_MODE env extraction).
-
 ## [0.12.27](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.26...partner-edge-v0.12.27) (2026-05-15)
 
 
@@ -1011,12 +991,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * **sfu:** pass real candidate_addr to handle_incoming — STUN destination match ([#58](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/58)) ([842f07a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/842f07a7aff18fd476ec319349d4c66dccfc7a5d))
 
-## [Unreleased]
-
-### Bug Fixes
-
-- **sfu/ice:** pass `candidate_addr` to `udp_loop::serve` — fixes `iceState:failed` on group calls. str0m's ICE agent silently dropped STUN binding requests whose destination didn't match the installed host candidate (wildcard 0.0.0.0:7878 vs SFU_PUBLIC_IP:7878).
-
 ## [0.12.12](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.11...partner-edge-v0.12.12) (2026-05-08)
 
 
@@ -1046,18 +1020,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **sfu/pacer:** F7-5 symmetric exit hysteresis ([#45](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/45)) ([ce4a3fd](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ce4a3fdbdb1cc14268fd71fe57e2ef3080c91d86))
 * **sfu/registry:** F2b-2 reap chat_relay label series on disconnect ([#46](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/46)) ([e30d41c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e30d41c018cfc8fb1701ffd85abdbf67b9dbd71d))
 * **sfu:** observability bundle — gauge fix + degraded-state visibility + healthcheck ([#48](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/48)) ([54130e1](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/54130e1d65a0eba3f2ab827102d3b7ae18f61c01))
-
-## [0.12.12] (2026-05-08)
-
-### Bug Fixes
-
-* **sfu/ice:** pass candidate_addr to udp_loop::serve so str0m ICE agent can match STUN binding requests — fixes iceState:failed for group calls on wildcard-bound sockets (SFU_PUBLIC_IP != 0.0.0.0)
-
-## [Unreleased]
-
-### Bug Fixes
-
-- **installer:** die on empty signaling_sfu_secret response (closes 2026-05-06 silent-fail class).
 
 ## [0.12.9](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/partner-edge-v0.12.8...partner-edge-v0.12.9) (2026-05-02)
 
