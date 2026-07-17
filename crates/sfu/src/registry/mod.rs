@@ -152,6 +152,14 @@ impl Registry {
         // doesn't see itself as a peer to subscribe to. Only browser
         // clients carry an `external_peer_id`; relay clients (None)
         // bypass this check entirely.
+        //
+        // ATOMICITY INVARIANT: `insert` takes `&mut self`, so the steal
+        // and the cross-advertise loop below run with exclusive access
+        // to the registry — no other code can insert/remove clients
+        // between them. This guarantees the newcomer sees exactly the
+        // post-steal client set, not a transient state. Do NOT split
+        // this function or yield/await between steal and cross-advertise
+        // without preserving this invariant (e.g. by holding a lock).
         if let Some(new_pid) = client.external_peer_id {
             if let Some(idx) = self
                 .clients
