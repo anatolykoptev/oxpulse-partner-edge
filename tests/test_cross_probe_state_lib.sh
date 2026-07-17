@@ -162,6 +162,29 @@ else
     ok "case6: _read_cross_probe_token is silent (token only via stdout return)"
 fi
 
+# ── Case 7: _read_cross_probe_token validates file contract (#433) ─────────
+T7=$(mktemp -d)
+
+# 7a: empty token file → return 1
+: > "$T7/empty-tok"
+OUT=$(unset OXPULSE_CROSS_PROBE_TOKEN; _CROSS_PROBE_TOKEN_FILE="$T7/empty-tok" _read_cross_probe_token 2>/dev/null); RC=$?
+if [[ "$RC" -ne 0 ]]; then ok "case7a: empty token file → exit 1"; else fail "case7a: empty token file should exit 1"; fi
+
+# 7b: non-xprb prefix → return 1
+printf 'garbage_token' > "$T7/bad-tok"
+OUT=$(unset OXPULSE_CROSS_PROBE_TOKEN; _CROSS_PROBE_TOKEN_FILE="$T7/bad-tok" _read_cross_probe_token 2>/dev/null); RC=$?
+if [[ "$RC" -ne 0 ]]; then ok "case7b: non-xprb prefix → exit 1"; else fail "case7b: non-xprb prefix should exit 1"; fi
+
+# 7c: valid xprb_ token → return 0 + stdout
+printf 'xprb_valid123' > "$T7/good-tok"
+OUT=$(unset OXPULSE_CROSS_PROBE_TOKEN; _CROSS_PROBE_TOKEN_FILE="$T7/good-tok" _read_cross_probe_token 2>/dev/null); RC=$?
+if [[ "$RC" -eq 0 && "$OUT" == "xprb_valid123" ]]; then
+    ok "case7c: valid xprb_ token → exit 0 + correct stdout"
+else
+    fail "case7c: valid xprb_ token should exit 0 + return token (got rc=$RC out=$OUT)"
+fi
+rm -rf "$T7"
+
 echo
 echo "Cross-probe state lib: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
