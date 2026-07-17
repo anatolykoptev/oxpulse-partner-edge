@@ -347,7 +347,7 @@ _firewall_purge_rogue_rejects() {
 	# Find the line number of the first ufw-* chain in INPUT — rogue rules
 	# are those BEFORE this line.
 	local ufw_line
-	ufw_line=$(iptables -L INPUT --line-numbers -n 2>/dev/null | grep -n 'ufw-' | head -1 | cut -d: -f1 || true)
+	ufw_line=$(iptables -L INPUT --line-numbers -n 2>/dev/null | awk '/ufw-/{print $1; exit}' || true)
 	[[ "$ufw_line" =~ ^[0-9]+$ ]] || return 0  # no UFW chain — not our problem
 
 	# Walk INPUT rules from top, collect rogue REJECT/DROP rule numbers
