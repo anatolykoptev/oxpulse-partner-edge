@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.3](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.2...v0.16.3) (2026-07-18)
+
+
+### Bug Fixes
+
+* **hydrate:** SFU_PUBLIC_IP DNS-authoritative + motherly-IP guard ([#453](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/453)) ([ed389f6](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/ed389f68bbbe6c525d4c5309ec2e8c8fab1ee3d7))
+
 ## [0.16.2](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.1...v0.16.2) (2026-07-18)
 
 
