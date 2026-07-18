@@ -101,7 +101,7 @@ mod tests {
     fn ws_to_non_mesh_ip_rejected() {
         assert!(!is_allowed_upstream("ws://8.8.8.8/ws/call/r"));
         assert!(!is_allowed_upstream("ws://10.10.0.2/ws/call/r"));
-        assert!(!is_allowed_upstream("ws://192.9.243.148/ws/call/r"));
+        assert!(!is_allowed_upstream("ws://203.0.113.10/ws/call/r"));
     }
 
     #[test]

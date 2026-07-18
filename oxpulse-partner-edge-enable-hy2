@@ -21,7 +21,7 @@
 set -euo pipefail
 
 # ── defaults ──────────────────────────────────────────────────────────────────
-HY2_SERVER="${HY2_SERVER:-192.9.243.148:51822}"
+HY2_SERVER="${HY2_SERVER:-203.0.113.10:51822}"
 HY2_LOCAL_LISTEN="${HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
 HY2_REMOTE_BACKEND="${HY2_REMOTE_BACKEND:-127.0.0.1:8907}"
 BACKEND_API="${BACKEND_API:-https://api.oxpulse.chat}"
@@ -44,7 +44,7 @@ Usage:
   oxpulse-partner-edge-enable-hy2 [OPTIONS]
 
 Options:
-  --server   HOST:PORT    Hysteria2 server (default: 192.9.243.148:51822)
+  --server   HOST:PORT    Hysteria2 server (default: 203.0.113.10:51822)
   --listen   ADDR:PORT    Local TCP-forward listen address (default: 0.0.0.0:18443)
   --backend  ADDR:PORT    Remote backend forwarded to (default: 127.0.0.1:8907)
   --backend-api URL       Central API base URL (default: https://api.oxpulse.chat)

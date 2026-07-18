@@ -15,8 +15,8 @@ fn fixture_dir() -> PathBuf {
 fn set_frozen_env() {
     env::set_var("PARTNER_ID", "edge-b");
     env::set_var("PARTNER_DOMAIN", "edge-b.example");
-    env::set_var("BACKEND_ENDPOINT", "192.9.243.148:5349");
-    env::set_var("BACKEND_HOST", "192.9.243.148");
+    env::set_var("BACKEND_ENDPOINT", "203.0.113.10:5349");
+    env::set_var("BACKEND_HOST", "203.0.113.10");
     env::set_var("BACKEND_PORT", "5349");
     env::set_var("TURN_SECRET", "test-turn-secret-deadbeef");
     env::set_var("REALITY_UUID", "d529dee6-3cdd-4079-95d1-f8801722147c");

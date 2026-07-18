@@ -2,7 +2,7 @@
 # DO NOT EDIT DIRECTLY — regenerated on reinstall / upgrade.
 #
 # Placeholders (all substituted at install time):
-#   edge-b edge-b.example 192.9.243.148:5349
+#   edge-b edge-b.example 203.0.113.10:5349
 #   test-turn-secret-deadbeef d529dee6-3cdd-4079-95d1-f8801722147c U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk abcd1234
 #   www.samsung.com 157.22.204.190  stable
 #   7878 9317 -----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAZiwaWp+FJ1sGprGGS69mq+sB6nhwOMi24xGSGfgdXNo=\n-----END PUBLIC KEY-----\n

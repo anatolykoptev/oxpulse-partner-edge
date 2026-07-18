@@ -17,8 +17,8 @@ const ISSUE_TOKEN_WARNING: &str =
     "!! This is the ONLY time this raw token will be shown. Copy it now. !!";
 
 /// Partner identifier format: lowercase alphanumeric + hyphen, 3–32 chars,
-/// no leading/trailing hyphen. Shared rule with oxpulse-admin
-/// (internal/admin/store_partners.go::partnerIDPattern) — keep them in
+/// no leading/trailing hyphen. Shared rule with a downstream admin service
+/// (admin partner-id pattern) — keep them in
 /// lockstep or the CLI and UI will disagree about which IDs are valid.
 static PARTNER_ID_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$").expect("regex"));
@@ -461,8 +461,8 @@ mod tests {
         );
     }
 
-    /// Partner-id rule parity with oxpulse-admin
-    /// (internal/admin/store_partners.go::partnerIDPattern). Keep the
+    /// Partner-id rule parity with a downstream admin service
+    /// (admin partner-id pattern). Keep the
     /// accept/reject cases identical — the web UI and the CLI must agree
     /// on which IDs are valid.
     #[test]

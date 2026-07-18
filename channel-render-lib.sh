@@ -239,7 +239,7 @@ re_render_hysteria2() {
     local out="${HY2_OUTPUT_PATH:-/etc/oxpulse-partner-edge/hysteria2-client.yaml}"
     local backup
     backup="${out}.bak.$(date +%s)"
-    local server="${HY2_SERVER:-${OXPULSE_HY2_SERVER:-192.9.243.148:51822}}"
+    local server="${HY2_SERVER:-${OXPULSE_HY2_SERVER:-203.0.113.10:51822}}"
     local listen="${HY2_LOCAL_LISTEN:-${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}}"
     local backend="${HY2_REMOTE_BACKEND:-${OXPULSE_HY2_REMOTE_BACKEND:-127.0.0.1:8907}}"
 

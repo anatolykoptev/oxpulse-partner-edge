@@ -29,7 +29,7 @@ COMPOSE
     # Pre-render a hysteria2-client.yaml matching what would be produced.
     # (dry-run cannot write — but we test the hash-compare idempotency logic)
     cat >"$TMP/etc/hysteria2-client.yaml" <<'YAML'
-server: "192.9.243.148:51822"
+server: "203.0.113.10:51822"
 auth: "AUTH_FIX"
 obfs:
   type: salamander
@@ -126,7 +126,7 @@ teardown() {
     output=$(PREFIX_ETC="$TMP/etc" \
         PARTNER_EDGE_PREFIX_ETC="$TMP/etc" \
         OXPULSE_REPO_DIR="$TMP" \
-        HY2_SERVER="192.9.243.148:51822" \
+        HY2_SERVER="203.0.113.10:51822" \
         HY2_LOCAL_LISTEN="0.0.0.0:18443" \
         HY2_REMOTE_BACKEND="127.0.0.1:8907" \
         PATH="$TMP:$MOCKS:$PATH" \

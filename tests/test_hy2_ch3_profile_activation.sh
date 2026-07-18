@@ -67,7 +67,7 @@ INNER
 # Test 1: hy2 provisioned → exactly "ch3" (not "ch3,ch3")
 # ---------------------------------------------------------------------------
 @test "hy2 provisioned: COMPOSE_PROFILES_EXTRA is exactly ch3, not ch3,ch3" {
-    result=$(_run_hy2_profiles_logic "192.9.243.148:51822" "authpass" "obfspass" "")
+    result=$(_run_hy2_profiles_logic "203.0.113.10:51822" "authpass" "obfspass" "")
     [ "$result" = "ch3" ]
 }
 
@@ -83,7 +83,7 @@ INNER
 # Test 3: ch3 + ch5 both active → exactly "ch3,ch5"
 # ---------------------------------------------------------------------------
 @test "hy2 + naive both provisioned: COMPOSE_PROFILES_EXTRA is ch3,ch5" {
-    result=$(_run_hy2_profiles_logic "192.9.243.148:51822" "authpass" "obfspass" "naive.example.com:443")
+    result=$(_run_hy2_profiles_logic "203.0.113.10:51822" "authpass" "obfspass" "naive.example.com:443")
     [ "$result" = "ch3,ch5" ]
 }
 

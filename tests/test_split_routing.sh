@@ -70,7 +70,7 @@ MOCK
 echo "getent $*" >> "$CALLS_DIR/argv.log"
 # ahostsv4 <host> → return fixture IP
 if [[ "$1" == "ahostsv4" ]]; then
-    echo "192.9.243.148 STREAM hub.example.com"
+    echo "203.0.113.10 STREAM hub.example.com"
 fi
 exit 0
 MOCK
@@ -90,8 +90,8 @@ FwMark = off
 
 [Peer]
 PublicKey = FIXTUREPUBKEY1234AAAA5678BBBB9012CCCC3456DDDD7890EEEE1234FFFF56789=
-Endpoint = 192.9.243.148:443
-AllowedIPs = 192.9.243.148/32
+Endpoint = 203.0.113.10:443
+AllowedIPs = 203.0.113.10/32
 Jc = 5
 CONF
 
@@ -241,9 +241,9 @@ _run_disable() {
     # wg FwMark set (0xCA6D)
     grep -q "awg set awg0 fwmark" "$CALLS/argv.log" || { echo "awg set fwmark not found"; cat "$CALLS/argv.log"; false; }
 
-    # endpoint exemption route uses the IP parsed from conf (192.9.243.148) — NOT hardcoded
-    grep -q "ip route replace 192.9.243.148/32" "$CALLS/argv.log" || {
-        echo "endpoint exemption route 192.9.243.148/32 not found"
+    # endpoint exemption route uses the IP parsed from conf (203.0.113.10) — NOT hardcoded
+    grep -q "ip route replace 203.0.113.10/32" "$CALLS/argv.log" || {
+        echo "endpoint exemption route 203.0.113.10/32 not found"
         cat "$CALLS/argv.log"
         false
     }
