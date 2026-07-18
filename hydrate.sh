@@ -120,21 +120,16 @@ for ip_url in "https://ifconfig.me" "https://api.ipify.org"; do
 done
 [[ -n "$PUBLIC_IP" ]] || die "could not detect public IP (tried ifconfig.me and api.ipify.org)"
 
-# Detect private/NAT IP (optional).
+# Detect private/NAT IP (optional). EXTERNAL_IP_LINE / ALLOWED_PEER_IP_LINE
+# (coturn's external-ip, the OCI-hairpin allowed-peer-ip) are derived from
+# this further down in resolve_external_ip (step 3c) — deferred until after
+# registration because tier 2 of that resolution needs TURNS_SUBDOMAIN,
+# which the backend only assigns in its response (step 3). The PUBLIC_IP
+# detected just above is the host's OUTBOUND egress IP; it is used as-is for
+# the registration POST body below (informational to the backend) but is
+# NOT necessarily the right value for coturn/SFU inbound reachability — see
+# resolve_external_ip's docstring.
 PRIVATE_IP=$(ip route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1)}' | head -1 || true)
-if [[ "${PRIVATE_IP:-}" == "$PUBLIC_IP" ]]; then
-    PRIVATE_IP=""
-fi
-EXTERNAL_IP_LINE="${PUBLIC_IP}"
-[[ -n "${PRIVATE_IP:-}" ]] && EXTERNAL_IP_LINE="${PUBLIC_IP}/${PRIVATE_IP}"
-
-# OCI-hairpin fix (2026-07-11): when behind NAT, permit coturn to relay to the
-# co-located SFU's private IP (the SFU advertises it as a host candidate via
-# SFU_LOCAL_IP). Empty on nodes with the public IP bound directly, so the
-# coturn.conf placeholder renders to nothing rather than an invalid
-# `allowed-peer-ip=` line. See coturn.conf.tpl / docker-compose.yml.tpl.
-ALLOWED_PEER_IP_LINE=""
-[[ -n "${PRIVATE_IP:-}" ]] && ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
 
 # ---------- Step 2: register with backend ----------
 log "[2/7] registering with $BACKEND_URL/api/partner/register"
@@ -266,6 +261,77 @@ unset PEER_ROSTER CROSS_PROBE_TOKEN
 
 # Wipe raw response — no longer needed, don't leave secrets on disk.
 rm -f "$tmp_resp"
+
+# ---------- Step 3c: resolve authoritative external IP ----------
+# resolve_external_ip EGRESS_IP TURNS_SUBDOMAIN PARTNER_DOMAIN — resolve the
+# AUTHORITATIVE external/public IP and (re)derive the coturn/SFU-facing
+# EXTERNAL_IP_LINE + ALLOWED_PEER_IP_LINE from it. Mutates globals PUBLIC_IP,
+# PUBLIC_IP_SOURCE, PRIVATE_IP, EXTERNAL_IP_LINE, ALLOWED_PEER_IP_LINE
+# (PRIVATE_IP must already be set — empty string if there is none).
+#
+# EGRESS_IP is the step-1 curl-detected outbound IP (tier 3 fallback,
+# unchanged). On a multi-homed host (e.g. an Oracle Cloud instance whose
+# NAT-gateway EGRESS IP differs from its reserved INBOUND public IP) that
+# value is outbound-only and has no inbound path — using it verbatim as
+# coturn's external-ip / the SFU's SFU_PUBLIC_IP makes every WebRTC relay
+# candidate unreachable, so ICE connectivity checks stall (~6s) and calls
+# never connect. Live incident 2026-07-17: egress=132.145.192.254 (no
+# inbound path) vs. the real reachable IP 129.159.103.86 (the TURNS DNS
+# A-record); relay RTT dropped 6000ms→67ms once external-ip was corrected.
+#
+# Precedence, most-authoritative first:
+#   1. OXPULSE_PUBLIC_IP env override — operator escape hatch, always wins.
+#   2. DNS A-record of TURNS_SUBDOMAIN.PARTNER_DOMAIN — this is exactly the
+#      address partner-edge CLIENTS connect to for TURNS:443, so it IS the
+#      reachable inbound IP by construction. Only resolvable here (after
+#      step 3) because TURNS_SUBDOMAIN is backend-assigned at registration.
+#      Requires 'dig' or 'getent' — neither is a hard dependency of
+#      hydrate.sh (unlike upgrade.sh), so this tier degrades gracefully to
+#      tier 3 when both are absent, or when the record does not exist yet.
+#   3. EGRESS_IP (step-1 autodetect, unchanged fallback).
+resolve_external_ip() {
+    local egress_ip="$1" turns_subdomain="$2" partner_domain="$3"
+    local dns_ip=""
+
+    if [[ -n "${OXPULSE_PUBLIC_IP:-}" ]]; then
+        PUBLIC_IP="$OXPULSE_PUBLIC_IP"
+        PUBLIC_IP_SOURCE="override (OXPULSE_PUBLIC_IP)"
+    else
+        if [[ -n "$turns_subdomain" && -n "$partner_domain" ]]; then
+            if command -v dig >/dev/null 2>&1; then
+                dns_ip=$(dig +short +time=3 +tries=1 "${turns_subdomain}.${partner_domain}" A 2>/dev/null \
+                    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+            fi
+            if [[ -z "$dns_ip" ]] && command -v getent >/dev/null 2>&1; then
+                dns_ip=$(getent ahostsv4 "${turns_subdomain}.${partner_domain}" 2>/dev/null \
+                    | awk '{print $1; exit}' || true)
+            fi
+        fi
+        if [[ -n "$dns_ip" ]]; then
+            PUBLIC_IP="$dns_ip"
+            PUBLIC_IP_SOURCE="dns (A-record for ${turns_subdomain}.${partner_domain})"
+        else
+            PUBLIC_IP="$egress_ip"
+            PUBLIC_IP_SOURCE="autodetect (ifconfig.me/api.ipify.org egress IP)"
+        fi
+    fi
+    log "  external IP: $PUBLIC_IP (source: $PUBLIC_IP_SOURCE)"
+
+    # Recompute the coturn/SFU-facing derived lines now that PUBLIC_IP may
+    # have changed (same OCI-hairpin logic as the original step-1 site,
+    # moved here so it runs against the final, authoritative PUBLIC_IP
+    # rather than the raw egress IP). See coturn.conf.tpl / docker-compose.yml.tpl.
+    if [[ "${PRIVATE_IP:-}" == "$PUBLIC_IP" ]]; then
+        PRIVATE_IP=""
+    fi
+    EXTERNAL_IP_LINE="${PUBLIC_IP}"
+    [[ -n "${PRIVATE_IP:-}" ]] && EXTERNAL_IP_LINE="${PUBLIC_IP}/${PRIVATE_IP}"
+    ALLOWED_PEER_IP_LINE=""
+    [[ -n "${PRIVATE_IP:-}" ]] && ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
+}
+
+log "[3c/7] resolving authoritative external IP"
+resolve_external_ip "$PUBLIC_IP" "$TURNS_SUBDOMAIN" "$PARTNER_DOMAIN"
 
 # ---------- Load render library ----------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

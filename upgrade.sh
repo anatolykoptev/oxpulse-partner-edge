@@ -2172,6 +2172,47 @@ do_rollback_templates() {
 	fi
 }
 
+# resolve_public_ip TURNS_SUBDOMAIN PARTNER_DOMAIN — resolve the AUTHORITATIVE
+# public IP with explicit precedence. Sets globals PUBLIC_IP, PUBLIC_IP_SOURCE,
+# and DIG_IPS (the A-records for TURNS_SUBDOMAIN.PARTNER_DOMAIN — the caller's
+# DNS-preflight guard reuses this so 'dig' only runs once per call). Requires
+# 'dig' on PATH (a hard dependency of upgrade.sh — the caller must check
+# `command -v dig` before calling this).
+#
+# On a multi-homed host (e.g. an Oracle Cloud instance whose NAT-gateway
+# EGRESS IP differs from its reserved INBOUND public IP) the curl-based
+# autodetect below always returns the outbound-only egress IP, which has no
+# inbound path — using it as coturn's external-ip / the SFU's SFU_PUBLIC_IP
+# makes every WebRTC relay candidate unreachable (ICE checks stall ~6s).
+# Live incident 2026-07-17: RTT dropped 6000ms→67ms once corrected to the
+# TURNS DNS A-record. See hydrate.sh's resolve_external_ip for the same fix
+# applied at first-boot time.
+#
+# Precedence, most-authoritative first:
+#   1. OXPULSE_PUBLIC_IP env override — operator escape hatch, always wins.
+#   2. DNS A-record of TURNS_SUBDOMAIN.PARTNER_DOMAIN — this is exactly the
+#      address partner-edge CLIENTS connect to for TURNS:443, so it IS the
+#      reachable inbound IP by construction.
+#   3. curl ifconfig.me / api.ipify.org egress autodetect (pre-existing
+#      fallback, unchanged) — used only when DNS has no A-record yet.
+resolve_public_ip() {
+	local turns_subdomain="$1" partner_domain="$2"
+	DIG_IPS=$(dig +short +time=3 +tries=1 "${turns_subdomain}.${partner_domain}" A 2>/dev/null | grep -E '^[0-9.]+$' | sort -u)
+
+	if [[ -n "${OXPULSE_PUBLIC_IP:-}" ]]; then
+		PUBLIC_IP="$OXPULSE_PUBLIC_IP"
+		PUBLIC_IP_SOURCE="override (OXPULSE_PUBLIC_IP)"
+	elif [[ -n "$DIG_IPS" ]]; then
+		PUBLIC_IP=$(head -1 <<< "$DIG_IPS")
+		PUBLIC_IP_SOURCE="dns (A-record for ${turns_subdomain}.${partner_domain})"
+	else
+		PUBLIC_IP=$(curl -fsS --max-time 5 https://ifconfig.me 2>/dev/null || curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
+		[[ -n "$PUBLIC_IP" ]] || die "could not determine public IP (OXPULSE_PUBLIC_IP unset, no DNS A-record for ${turns_subdomain}.${partner_domain}, and both ifconfig.me and api.ipify.org failed)"
+		PUBLIC_IP_SOURCE="autodetect (ifconfig.me/api.ipify.org egress IP)"
+	fi
+	log "  public IP: $PUBLIC_IP (source: $PUBLIC_IP_SOURCE)"
+}
+
 maybe_v01_to_v02_preflight() {
 	[[ "$CURRENT" =~ ^v0\.1($|\.) ]] || return 0
 	[[ "$TARGET"  =~ ^v0\.2($|\.) ]] || return 0
@@ -2185,11 +2226,10 @@ maybe_v01_to_v02_preflight() {
 	[[ -n "${TURNS_SUBDOMAIN:-}" ]] || die "TURNS_SUBDOMAIN missing from $STATE_FILE — migrate_state could not derive it. Provide it: echo 'TURNS_SUBDOMAIN=api-<hex>' >> $STATE_FILE"
 	[[ -n "${PARTNER_DOMAIN:-}"  ]] || die "PARTNER_DOMAIN missing from $STATE_FILE — migrate_state could not derive it. Provide it: echo 'PARTNER_DOMAIN=<your-domain>' >> $STATE_FILE"
 
-	PUBLIC_IP=$(curl -fsS --max-time 5 https://ifconfig.me 2>/dev/null || curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
-	[[ -n "$PUBLIC_IP" ]] || die "could not determine public IP (both ifconfig.me and api.ipify.org failed)"
-
 	command -v dig >/dev/null 2>&1 || die "'dig' is not installed — install dnsutils (Debian/Ubuntu: 'apt-get install dnsutils'; RHEL/Rocky/Alma/CentOS: 'dnf install bind-utils') and retry"
-	DIG_IPS=$(dig +short +time=3 +tries=1 "${TURNS_SUBDOMAIN}.${PARTNER_DOMAIN}" A | grep -E '^[0-9.]+$' | sort -u)
+
+	resolve_public_ip "$TURNS_SUBDOMAIN" "$PARTNER_DOMAIN"
+
 	if ! grep -Fxq "$PUBLIC_IP" <<< "$DIG_IPS"; then
 		die "DNS preflight failed:
   expected A-record for ${TURNS_SUBDOMAIN}.${PARTNER_DOMAIN} to include ${PUBLIC_IP}
