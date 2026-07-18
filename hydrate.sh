@@ -163,6 +163,15 @@ NODE_ID=$(jq_get node_id)
 BACKEND_ENDPOINT=$(jq_get backend_endpoint)
 TURN_SECRET=$(jq_get turn_secret)
 TURNS_SUBDOMAIN=$(jq_get turns_subdomain)
+# T3b: central-authoritative public IP. The central's POST /api/partner/register
+# resolves the edge's authoritative inbound IP server-side (it sees the edge's
+# connection from outside the NAT, with no NAT-gateway hairpin confusion) and
+# returns it here. Absent/empty on older/other centrals or when unresolvable →
+# graceful degrade (behavior unchanged, falls through to DNS/egress tiers in
+# resolve_external_ip). Consumed as a precedence tier there — MORE authoritative
+# than the edge's own DNS-derive/egress, LESS than the operator's
+# OXPULSE_PUBLIC_IP override.
+REGISTER_PUBLIC_IP=$(jq_get public_ip)
 REALITY_UUID=$(jq_get reality_uuid)
 REALITY_PUBLIC_KEY=$(jq_get reality_public_key)
 REALITY_SHORT_ID=$(jq_get reality_short_id)
@@ -311,14 +320,22 @@ _persist_state_ip() {
 #
 # Precedence, most-authoritative first:
 #   1. OXPULSE_PUBLIC_IP env override — operator escape hatch, always wins.
-#   2. DNS A-record of TURNS_SUBDOMAIN.PARTNER_DOMAIN — this is exactly the
+#   2. REGISTER_PUBLIC_IP (T3b) — the central's server-side-resolved public_ip
+#      from the register response. The central sees the edge's connection from
+#      outside the NAT (no hairpin confusion), so this is MORE authoritative
+#      than the edge's own DNS-derive/egress, but LESS than the operator's
+#      explicit override. Absent/empty on older/other centrals → graceful
+#      degrade to tiers 3/4. Motherly-self guard applies (defense-in-depth:
+#      never advertise the hub as the edge's own IP even if the central
+#      mistakenly returned it).
+#   3. DNS A-record of TURNS_SUBDOMAIN.PARTNER_DOMAIN — this is exactly the
 #      address partner-edge CLIENTS connect to for TURNS:443, so it IS the
 #      reachable inbound IP by construction. Only resolvable here (after
 #      step 3) because TURNS_SUBDOMAIN is backend-assigned at registration.
 #      Requires 'dig' or 'getent' — neither is a hard dependency of
 #      hydrate.sh (unlike upgrade.sh), so this tier degrades gracefully to
-#      tier 3 when both are absent, or when the record does not exist yet.
-#   3. EGRESS_IP (step-1 autodetect, unchanged fallback).
+#      tier 4 when both are absent, or when the record does not exist yet.
+#   4. EGRESS_IP (step-1 autodetect, unchanged fallback).
 #
 # Motherly/central IP guard (T2): an edge must NEVER advertise the central
 # backend's IP as its own public IP. Live bug: the RU edge's egress route
@@ -364,13 +381,32 @@ resolve_external_ip() {
     if [[ -z "${PUBLIC_IP:-}" && -n "${OXPULSE_PUBLIC_IP:-}" ]]; then
         if [[ -n "$motherly_ip" && "$OXPULSE_PUBLIC_IP" == "$motherly_ip" ]]; then
             warn "  OXPULSE_PUBLIC_IP override ($OXPULSE_PUBLIC_IP) equals the motherly/central IP ($motherly_ip) — rejecting and falling through to DNS/autodetect (an edge must NOT advertise the central IP as its own public IP)"
+        elif [[ ! "$OXPULSE_PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            warn "  OXPULSE_PUBLIC_IP override ($OXPULSE_PUBLIC_IP) is not a bare IPv4 address — rejecting and falling through to DNS/autodetect (only a validated IPv4 may be rendered into coturn external-ip + SFU_PUBLIC_IP)"
         else
             PUBLIC_IP="$OXPULSE_PUBLIC_IP"
             PUBLIC_IP_SOURCE="override (OXPULSE_PUBLIC_IP)"
         fi
     fi
 
-    # --- tier 2: TURNS DNS A-record (rejected if == motherly) ---
+    # --- tier 2: REGISTER_PUBLIC_IP (central-authoritative, T3b) ---
+    # The central's register response carries a server-side-resolved public_ip
+    # that is more authoritative than the edge's own DNS-derive/egress (the
+    # central sees the edge from outside the NAT). Motherly-self guard still
+    # applies: a central that mistakenly returns the hub IP is rejected and
+    # we fall through to DNS/egress.
+    if [[ -z "${PUBLIC_IP:-}" && -n "${REGISTER_PUBLIC_IP:-}" ]]; then
+        if [[ -n "$motherly_ip" && "$REGISTER_PUBLIC_IP" == "$motherly_ip" ]]; then
+            warn "  REGISTER_PUBLIC_IP ($REGISTER_PUBLIC_IP) equals the motherly/central IP ($motherly_ip) — rejecting and falling through to DNS/autodetect (the central must not return its own IP as the edge's public IP)"
+        elif [[ ! "$REGISTER_PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            warn "  REGISTER_PUBLIC_IP ($REGISTER_PUBLIC_IP) is not a bare IPv4 address — rejecting and falling through to DNS/autodetect (guards a malformed/null/IPv6 central value out of coturn external-ip + SFU_PUBLIC_IP; the DNS tier below self-heals)"
+        else
+            PUBLIC_IP="$REGISTER_PUBLIC_IP"
+            PUBLIC_IP_SOURCE="register (central-authoritative public_ip)"
+        fi
+    fi
+
+    # --- tier 3: TURNS DNS A-record (rejected if == motherly) ---
     if [[ -z "${PUBLIC_IP:-}" && -n "$turns_subdomain" && -n "$partner_domain" ]]; then
         if command -v dig >/dev/null 2>&1; then
             dns_ip=$(dig +short +time=3 +tries=1 "${turns_subdomain}.${partner_domain}" A 2>/dev/null \
@@ -390,7 +426,7 @@ resolve_external_ip() {
         fi
     fi
 
-    # --- tier 3: egress autodetect fallback (rejected if == motherly) ---
+    # --- tier 4: egress autodetect fallback (rejected if == motherly) ---
     if [[ -z "${PUBLIC_IP:-}" ]]; then
         if [[ -n "$motherly_ip" && "$egress_ip" == "$motherly_ip" ]]; then
             die "egress autodetect IP ($egress_ip) equals the motherly/central IP ($motherly_ip) — refusing to advertise the central hub as this edge's public IP. Fix: set OXPULSE_PUBLIC_IP to the edge's real inbound IP, or correct DNS/routing so the edge's egress does not traverse the central tunnel."
