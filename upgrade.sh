@@ -2195,21 +2195,71 @@ do_rollback_templates() {
 #      reachable inbound IP by construction.
 #   3. curl ifconfig.me / api.ipify.org egress autodetect (pre-existing
 #      fallback, unchanged) — used only when DNS has no A-record yet.
+#
+# Motherly/central IP guard (T2): an edge must NEVER advertise the central
+# backend's IP as its own public IP. Live bug: the RU edge's egress route
+# traversed the AWG mesh tunnel to motherly, so curl ifconfig.me returned the
+# central IP (192.9.243.148). The motherly IP is derived from OXPULSE_MOTHERLY_IP
+# env (operator escape hatch) or by resolving the BACKEND_API / OXPULSE_BACKEND_URL
+# host A-record (best-effort; empty when unresolvable → guard is a no-op). Any
+# tier that would yield the motherly IP is REJECTED and the resolver falls
+# through to the next tier with a loud warning; if ALL tiers yield the motherly
+# IP (or are empty) the resolver dies rather than ship the central IP as the
+# edge's own. Mirrors hydrate.sh's resolve_external_ip guard.
 resolve_public_ip() {
 	local turns_subdomain="$1" partner_domain="$2"
+	local motherly_ip="" _be_host=""
 	DIG_IPS=$(dig +short +time=3 +tries=1 "${turns_subdomain}.${partner_domain}" A 2>/dev/null | grep -E '^[0-9.]+$' | sort -u)
 
-	if [[ -n "${OXPULSE_PUBLIC_IP:-}" ]]; then
-		PUBLIC_IP="$OXPULSE_PUBLIC_IP"
-		PUBLIC_IP_SOURCE="override (OXPULSE_PUBLIC_IP)"
-	elif [[ -n "$DIG_IPS" ]]; then
-		PUBLIC_IP=$(head -1 <<< "$DIG_IPS")
-		PUBLIC_IP_SOURCE="dns (A-record for ${turns_subdomain}.${partner_domain})"
+	# --- motherly/central IP derivation (T2) ---
+	if [[ -n "${OXPULSE_MOTHERLY_IP:-}" ]]; then
+		motherly_ip="$OXPULSE_MOTHERLY_IP"
 	else
+		local _be_url="${BACKEND_API:-${OXPULSE_BACKEND_URL:-}}"
+		_be_host="${_be_url#*://}"
+		_be_host="${_be_host%%/*}"
+		_be_host="${_be_host%%:*}"
+		if [[ -n "$_be_host" ]]; then
+			motherly_ip=$(dig +short +time=3 +tries=1 "$_be_host" A 2>/dev/null \
+				| grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+		fi
+	fi
+
+	# --- tier 1: OXPULSE_PUBLIC_IP override (rejected if == motherly) ---
+	if [[ -z "${PUBLIC_IP:-}" && -n "${OXPULSE_PUBLIC_IP:-}" ]]; then
+		if [[ -n "$motherly_ip" && "$OXPULSE_PUBLIC_IP" == "$motherly_ip" ]]; then
+			warn "  OXPULSE_PUBLIC_IP override ($OXPULSE_PUBLIC_IP) equals the motherly/central IP ($motherly_ip) — rejecting and falling through to DNS/autodetect (an edge must NOT advertise the central IP as its own public IP)"
+		else
+			PUBLIC_IP="$OXPULSE_PUBLIC_IP"
+			PUBLIC_IP_SOURCE="override (OXPULSE_PUBLIC_IP)"
+		fi
+	fi
+
+	# --- tier 2: TURNS DNS A-record (rejected if == motherly) ---
+	if [[ -z "${PUBLIC_IP:-}" && -n "$DIG_IPS" ]]; then
+		local _dns_first
+		_dns_first=$(head -1 <<< "$DIG_IPS")
+		if [[ -n "$motherly_ip" && "$_dns_first" == "$motherly_ip" ]]; then
+			warn "  TURNS DNS A-record ($_dns_first) equals the motherly/central IP ($motherly_ip) — rejecting and falling through to egress autodetect (DNS misconfig: the edge TURNS subdomain must NOT point at the central hub)"
+		else
+			PUBLIC_IP="$_dns_first"
+			PUBLIC_IP_SOURCE="dns (A-record for ${turns_subdomain}.${partner_domain})"
+		fi
+	fi
+
+	# --- tier 3: egress autodetect fallback (rejected if == motherly) ---
+	if [[ -z "${PUBLIC_IP:-}" ]]; then
 		PUBLIC_IP=$(curl -fsS --max-time 5 https://ifconfig.me 2>/dev/null || curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
-		[[ -n "$PUBLIC_IP" ]] || die "could not determine public IP (OXPULSE_PUBLIC_IP unset, no DNS A-record for ${turns_subdomain}.${partner_domain}, and both ifconfig.me and api.ipify.org failed)"
+		if [[ -z "$PUBLIC_IP" ]]; then
+			die "could not determine public IP (OXPULSE_PUBLIC_IP unset, no DNS A-record for ${turns_subdomain}.${partner_domain}, and both ifconfig.me and api.ipify.org failed)"
+		fi
+		if [[ -n "$motherly_ip" && "$PUBLIC_IP" == "$motherly_ip" ]]; then
+			die "egress autodetect IP ($PUBLIC_IP) equals the motherly/central IP ($motherly_ip) — refusing to advertise the central hub as this edge's public IP. Fix: set OXPULSE_PUBLIC_IP to the edge's real inbound IP, or correct DNS/routing so the edge's egress does not traverse the central tunnel."
+		fi
 		PUBLIC_IP_SOURCE="autodetect (ifconfig.me/api.ipify.org egress IP)"
 	fi
+
+	[[ -n "${PUBLIC_IP:-}" ]] || die "could not resolve a non-motherly public IP (override/DNS/egress all rejected or empty)"
 	log "  public IP: $PUBLIC_IP (source: $PUBLIC_IP_SOURCE)"
 }
 

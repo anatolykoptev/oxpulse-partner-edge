@@ -269,6 +269,12 @@ rm -f "$tmp_resp"
 # PUBLIC_IP_SOURCE, PRIVATE_IP, EXTERNAL_IP_LINE, ALLOWED_PEER_IP_LINE
 # (PRIVATE_IP must already be set — empty string if there is none).
 #
+# The resolved PUBLIC_IP is the SINGLE source of truth for BOTH coturn's
+# external-ip (EXTERNAL_IP_LINE) AND the SFU's SFU_PUBLIC_IP — the latter is
+# rendered into docker-compose.yml from the {{PUBLIC_IP}} placeholder, so the
+# two can never diverge. On a multi-homed edge a stale egress-only IP here
+# breaks BOTH relay (coturn) and host-candidate (SFU) media paths at once.
+#
 # EGRESS_IP is the step-1 curl-detected outbound IP (tier 3 fallback,
 # unchanged). On a multi-homed host (e.g. an Oracle Cloud instance whose
 # NAT-gateway EGRESS IP differs from its reserved INBOUND public IP) that
@@ -289,32 +295,82 @@ rm -f "$tmp_resp"
 #      hydrate.sh (unlike upgrade.sh), so this tier degrades gracefully to
 #      tier 3 when both are absent, or when the record does not exist yet.
 #   3. EGRESS_IP (step-1 autodetect, unchanged fallback).
+#
+# Motherly/central IP guard (T2): an edge must NEVER advertise the central
+# backend's IP as its own public IP. Live bug: the RU edge's egress route
+# traversed the AWG mesh tunnel to motherly, so curl ifconfig.me returned the
+# central IP (192.9.243.148) — rendering that as coturn external-ip /
+# SFU_PUBLIC_IP points clients at the hub, not the edge. The motherly IP is
+# derived from OXPULSE_MOTHERLY_IP env (operator escape hatch) or by resolving
+# BACKEND_URL's host A-record (best-effort; empty when unresolvable → guard
+# is a no-op). Any tier that would yield the motherly IP is REJECTED and the
+# resolver falls through to the next tier with a loud warning; if ALL tiers
+# yield the motherly IP (or are empty) the resolver dies rather than ship the
+# central IP as the edge's own. The guard applies to BOTH coturn external-ip
+# and SFU_PUBLIC_IP because they share PUBLIC_IP.
 resolve_external_ip() {
     local egress_ip="$1" turns_subdomain="$2" partner_domain="$3"
-    local dns_ip=""
+    local dns_ip="" motherly_ip=""
 
-    if [[ -n "${OXPULSE_PUBLIC_IP:-}" ]]; then
-        PUBLIC_IP="$OXPULSE_PUBLIC_IP"
-        PUBLIC_IP_SOURCE="override (OXPULSE_PUBLIC_IP)"
-    else
-        if [[ -n "$turns_subdomain" && -n "$partner_domain" ]]; then
+    # --- motherly/central IP derivation (T2) ---
+    if [[ -n "${OXPULSE_MOTHERLY_IP:-}" ]]; then
+        motherly_ip="$OXPULSE_MOTHERLY_IP"
+    elif [[ -n "${BACKEND_URL:-}" ]]; then
+        local _be_host="${BACKEND_URL#*://}"
+        _be_host="${_be_host%%/*}"
+        _be_host="${_be_host%%:*}"
+        if [[ -n "$_be_host" ]]; then
             if command -v dig >/dev/null 2>&1; then
-                dns_ip=$(dig +short +time=3 +tries=1 "${turns_subdomain}.${partner_domain}" A 2>/dev/null \
+                motherly_ip=$(dig +short +time=3 +tries=1 "$_be_host" A 2>/dev/null \
                     | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
             fi
-            if [[ -z "$dns_ip" ]] && command -v getent >/dev/null 2>&1; then
-                dns_ip=$(getent ahostsv4 "${turns_subdomain}.${partner_domain}" 2>/dev/null \
+            if [[ -z "$motherly_ip" ]] && command -v getent >/dev/null 2>&1; then
+                motherly_ip=$(getent ahostsv4 "$_be_host" 2>/dev/null \
                     | awk '{print $1; exit}' || true)
             fi
         fi
-        if [[ -n "$dns_ip" ]]; then
-            PUBLIC_IP="$dns_ip"
-            PUBLIC_IP_SOURCE="dns (A-record for ${turns_subdomain}.${partner_domain})"
+    fi
+
+    # --- tier 1: OXPULSE_PUBLIC_IP override (rejected if == motherly) ---
+    if [[ -z "${PUBLIC_IP:-}" && -n "${OXPULSE_PUBLIC_IP:-}" ]]; then
+        if [[ -n "$motherly_ip" && "$OXPULSE_PUBLIC_IP" == "$motherly_ip" ]]; then
+            warn "  OXPULSE_PUBLIC_IP override ($OXPULSE_PUBLIC_IP) equals the motherly/central IP ($motherly_ip) — rejecting and falling through to DNS/autodetect (an edge must NOT advertise the central IP as its own public IP)"
         else
-            PUBLIC_IP="$egress_ip"
-            PUBLIC_IP_SOURCE="autodetect (ifconfig.me/api.ipify.org egress IP)"
+            PUBLIC_IP="$OXPULSE_PUBLIC_IP"
+            PUBLIC_IP_SOURCE="override (OXPULSE_PUBLIC_IP)"
         fi
     fi
+
+    # --- tier 2: TURNS DNS A-record (rejected if == motherly) ---
+    if [[ -z "${PUBLIC_IP:-}" && -n "$turns_subdomain" && -n "$partner_domain" ]]; then
+        if command -v dig >/dev/null 2>&1; then
+            dns_ip=$(dig +short +time=3 +tries=1 "${turns_subdomain}.${partner_domain}" A 2>/dev/null \
+                | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+        fi
+        if [[ -z "$dns_ip" ]] && command -v getent >/dev/null 2>&1; then
+            dns_ip=$(getent ahostsv4 "${turns_subdomain}.${partner_domain}" 2>/dev/null \
+                | awk '{print $1; exit}' || true)
+        fi
+        if [[ -n "$dns_ip" ]]; then
+            if [[ -n "$motherly_ip" && "$dns_ip" == "$motherly_ip" ]]; then
+                warn "  TURNS DNS A-record ($dns_ip) equals the motherly/central IP ($motherly_ip) — rejecting and falling through to egress autodetect (DNS misconfig: the edge TURNS subdomain must NOT point at the central hub)"
+            else
+                PUBLIC_IP="$dns_ip"
+                PUBLIC_IP_SOURCE="dns (A-record for ${turns_subdomain}.${partner_domain})"
+            fi
+        fi
+    fi
+
+    # --- tier 3: egress autodetect fallback (rejected if == motherly) ---
+    if [[ -z "${PUBLIC_IP:-}" ]]; then
+        if [[ -n "$motherly_ip" && "$egress_ip" == "$motherly_ip" ]]; then
+            die "egress autodetect IP ($egress_ip) equals the motherly/central IP ($motherly_ip) — refusing to advertise the central hub as this edge's public IP. Fix: set OXPULSE_PUBLIC_IP to the edge's real inbound IP, or correct DNS/routing so the edge's egress does not traverse the central tunnel."
+        fi
+        PUBLIC_IP="$egress_ip"
+        PUBLIC_IP_SOURCE="autodetect (ifconfig.me/api.ipify.org egress IP)"
+    fi
+
+    [[ -n "${PUBLIC_IP:-}" ]] || die "could not resolve a non-motherly public IP (override/DNS/egress all rejected or empty)"
     log "  external IP: $PUBLIC_IP (source: $PUBLIC_IP_SOURCE)"
 
     # Recompute the coturn/SFU-facing derived lines now that PUBLIC_IP may
