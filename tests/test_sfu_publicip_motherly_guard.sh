@@ -137,7 +137,9 @@ STUBPATH="$BIN:$PATH"
 
 _run_hydrate() {
     # $1=egress_ip $2=turns_subdomain $3=partner_domain $4=private_ip
-    bash -c "source '$HYDRATE_PREAMBLE'; PRIVATE_IP='$4'; resolve_external_ip '$1' '$2' '$3'; \
+    # Pre-set the global PUBLIC_IP to the egress value, exactly as hydrate.sh's
+    # caller does, so the harness reproduces the production short-circuit.
+    bash -c "source '$HYDRATE_PREAMBLE'; PUBLIC_IP=\"$1\"; PRIVATE_IP='$4'; resolve_external_ip '$1' '$2' '$3'; \
         echo \"PUBLIC_IP=\$PUBLIC_IP\"; echo \"PUBLIC_IP_SOURCE=\$PUBLIC_IP_SOURCE\"; \
         echo \"EXTERNAL_IP_LINE=\$EXTERNAL_IP_LINE\"; echo \"ALLOWED_PEER_IP_LINE=\$ALLOWED_PEER_IP_LINE\"" 2>&1
 }
@@ -289,7 +291,9 @@ bash -n "$UPGRADE_PREAMBLE" && pass "G1: extracted resolve_public_ip parses clea
     || { fail "G1: extracted resolve_public_ip has syntax errors"; exit 1; }
 
 _run_upgrade() {
-    bash -c "source '$UPGRADE_PREAMBLE'; resolve_public_ip '$1' '$2'; \
+    # upgrade.sh sources STATE_FILE before calling resolve_public_ip, so the
+    # global PUBLIC_IP is pre-set to a stale egress value in production.
+    bash -c "source '$UPGRADE_PREAMBLE'; PUBLIC_IP=\"$EGRESS\"; resolve_public_ip '$1' '$2'; \
         echo \"PUBLIC_IP=\$PUBLIC_IP\"; echo \"PUBLIC_IP_SOURCE=\$PUBLIC_IP_SOURCE\"; echo \"DIG_IPS=\$DIG_IPS\"" 2>&1
 }
 

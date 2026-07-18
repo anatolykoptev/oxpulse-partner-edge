@@ -2209,6 +2209,12 @@ do_rollback_templates() {
 resolve_public_ip() {
 	local turns_subdomain="$1" partner_domain="$2"
 	local motherly_ip="" _be_host=""
+
+	# Reset the global so the precedence tiers run. upgrade.sh's caller has
+	# already sourced STATE_FILE, which pre-sets PUBLIC_IP to the persisted
+	# egress value; the egress fallback is recomputed in tier 3 if needed.
+	PUBLIC_IP=""
+
 	DIG_IPS=$(dig +short +time=3 +tries=1 "${turns_subdomain}.${partner_domain}" A 2>/dev/null | grep -E '^[0-9.]+$' | sort -u)
 
 	# --- motherly/central IP derivation (T2) ---

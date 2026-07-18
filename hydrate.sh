@@ -336,6 +336,11 @@ resolve_external_ip() {
     local egress_ip="$1" turns_subdomain="$2" partner_domain="$3"
     local dns_ip="" motherly_ip=""
 
+    # Reset the global so the precedence tiers run. hydrate.sh's caller sets
+    # PUBLIC_IP to the egress autodetect before this function; the egress value
+    # is still available via $egress_ip for the tier-3 fallback.
+    PUBLIC_IP=""
+
     # --- motherly/central IP derivation (T2) ---
     if [[ -n "${OXPULSE_MOTHERLY_IP:-}" ]]; then
         motherly_ip="$OXPULSE_MOTHERLY_IP"

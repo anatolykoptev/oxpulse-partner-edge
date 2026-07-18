@@ -118,6 +118,8 @@ RUN="$TMPD/run_hydrate.sh"
 cat > "$RUN" <<EOF
 export STATE_FILE="$STATE_FILE"
 export PREFIX_LIB="$TMPD/lib"
+# Simulate the caller's pre-set global PUBLIC_IP (egress autodetect).
+export PUBLIC_IP="$EGRESS"
 export PRIVATE_IP="$PRIVATE_IP"
 source "$HYDRATE_PREAMBLE"
 resolve_external_ip "$EGRESS" "$TURNS" "$DOMAIN"
