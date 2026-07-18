@@ -135,7 +135,9 @@ echo "=== Section B: hydrate.sh resolve_external_ip precedence ==="
 
 _run_hydrate() {
     # $1=egress_ip $2=turns_subdomain $3=partner_domain $4=private_ip
-    bash -c "source '$HYDRATE_PREAMBLE'; PRIVATE_IP='$4'; resolve_external_ip '$1' '$2' '$3'; \
+    # Pre-set the global PUBLIC_IP to the egress value, exactly as hydrate.sh's
+    # caller does, so the harness reproduces the production short-circuit.
+    bash -c "source '$HYDRATE_PREAMBLE'; PUBLIC_IP=\"$1\"; PRIVATE_IP='$4'; resolve_external_ip '$1' '$2' '$3'; \
         echo \"PUBLIC_IP=\$PUBLIC_IP\"; echo \"PUBLIC_IP_SOURCE=\$PUBLIC_IP_SOURCE\"; \
         echo \"EXTERNAL_IP_LINE=\$EXTERNAL_IP_LINE\"; echo \"ALLOWED_PEER_IP_LINE=\$ALLOWED_PEER_IP_LINE\"" 2>&1
 }
@@ -178,7 +180,7 @@ echo "$B3_OUT" | grep -qF 'PUBLIC_IP_SOURCE=autodetect' \
 # autodetect (no crash / die). hydrate.sh does NOT hard-require dig, unlike
 # upgrade.sh — this is the explicit graceful-degrade requirement.
 B4_OUT=$(PATH="$EMPTY_BIN" \
-    "$BASH_BIN" -c "source '$HYDRATE_PREAMBLE'; PRIVATE_IP=''; resolve_external_ip '132.145.192.254' 'turns' 'example.com'; \
+    "$BASH_BIN" -c "source '$HYDRATE_PREAMBLE'; PUBLIC_IP='132.145.192.254'; PRIVATE_IP=''; resolve_external_ip '132.145.192.254' 'turns' 'example.com'; \
         echo \"PUBLIC_IP=\$PUBLIC_IP\"; echo \"PUBLIC_IP_SOURCE=\$PUBLIC_IP_SOURCE\"" 2>&1) && B4_RC=0 || B4_RC=$?
 [[ "$B4_RC" -eq 0 ]] \
     && pass "B4: dig+getent both absent → resolve_external_ip does not die (RC=0)" \
@@ -212,7 +214,9 @@ echo ""
 echo "=== Section C: upgrade.sh resolve_public_ip precedence ==="
 
 _run_upgrade() {
-    bash -c "source '$UPGRADE_PREAMBLE'; resolve_public_ip '$1' '$2'; \
+    # upgrade.sh sources STATE_FILE before calling resolve_public_ip, so the
+    # global PUBLIC_IP is pre-set to a stale egress value in production.
+    bash -c "source '$UPGRADE_PREAMBLE'; PUBLIC_IP='132.145.192.254'; resolve_public_ip '$1' '$2'; \
         echo \"PUBLIC_IP=\$PUBLIC_IP\"; echo \"PUBLIC_IP_SOURCE=\$PUBLIC_IP_SOURCE\"; echo \"DIG_IPS=\$DIG_IPS\"" 2>&1
 }
 
