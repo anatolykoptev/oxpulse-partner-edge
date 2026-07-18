@@ -20,6 +20,9 @@ PREFIX_ETC=/etc/oxpulse-partner-edge
 PREFIX_LIB=/var/lib/oxpulse-partner-edge
 HYDRATE_ENV="$PREFIX_ETC/hydrate.env"
 SENTINEL="$PREFIX_LIB/hydrated"
+# install.env is the canonical STATE_FILE for reconcile.sh's tier-2 resolution
+# of PUBLIC_IP/PRIVATE_IP. It may be overridden in tests.
+STATE_FILE="${STATE_FILE:-$PREFIX_LIB/install.env}"
 BACKEND_URL="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
 # Resolve IMAGE_VERSION with strict precedence:
 #   1. $OXPULSE_IMAGE_VERSION env (operator override via hydrate.env)
@@ -262,6 +265,27 @@ unset PEER_ROSTER CROSS_PROBE_TOKEN
 # Wipe raw response — no longer needed, don't leave secrets on disk.
 rm -f "$tmp_resp"
 
+# ---------------------------------------------------------------------------
+# _persist_state_ip KEY VALUE
+#
+# Write KEY=VALUE to $STATE_FILE, replacing an existing line or appending if
+# absent. Keeps exactly one line per key so repeated hydrate runs stay idempotent
+# and reconcile.sh's tier-2 resolution reads the authoritative value.
+# ---------------------------------------------------------------------------
+_persist_state_ip() {
+    local _key="$1" _value="$2" _file="$STATE_FILE"
+    mkdir -p "$(dirname "$_file")"
+    if [[ -f "$_file" ]] && grep -qE "^${_key}=" "$_file" 2>/dev/null; then
+        sed -i "s|^${_key}=.*|${_key}=${_value}|" "$_file"
+    else
+        printf '%s=%s\n' "$_key" "$_value" >> "$_file"
+    fi
+    # New state files start locked down; keep perms on existing ones.
+    if [[ -f "$_file" ]]; then
+        chmod 0600 "$_file"
+    fi
+}
+
 # ---------- Step 3c: resolve authoritative external IP ----------
 # resolve_external_ip EGRESS_IP TURNS_SUBDOMAIN PARTNER_DOMAIN — resolve the
 # AUTHORITATIVE external/public IP and (re)derive the coturn/SFU-facing
@@ -388,6 +412,14 @@ resolve_external_ip() {
 
 log "[3c/7] resolving authoritative external IP"
 resolve_external_ip "$PUBLIC_IP" "$TURNS_SUBDOMAIN" "$PARTNER_DOMAIN"
+
+# Persist the resolved authoritative PUBLIC_IP/PRIVATE_IP to STATE_FILE so
+# reconcile.sh's tier-2 resolution reads the DNS-authoritative IP, not the raw
+# egress IP that install.sh originally persisted. This closes the
+# converge-revert path that would otherwise re-render coturn external-ip /
+# SFU_PUBLIC_IP back to the unreachable egress IP.
+_persist_state_ip "PUBLIC_IP" "$PUBLIC_IP"
+_persist_state_ip "PRIVATE_IP" "$PRIVATE_IP"
 
 # ---------- Load render library ----------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
