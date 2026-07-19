@@ -73,6 +73,7 @@ impl Client {
             origin: oxpulse_sfu_kit::ClientOrigin::Local,
             relay_auth_secret: None,
             relay_signing_pubkey: None,
+            relay_hs256_fallback_enabled: true,
             #[cfg(feature = "vfm")]
             max_vfm_temporal_layer: u8::MAX,
             // Phase J M2 — all None/empty at construction; populated by

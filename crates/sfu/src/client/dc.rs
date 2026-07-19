@@ -92,13 +92,19 @@ const CHAT_FRAME_MAX_BYTES: usize = 256 * 1024;
 ///
 /// During the EdDSA rollout, room-tokens are therefore no stricter than
 /// relay-connect: an HS256-signed `roomToken` stays acceptable even once the
-/// EdDSA pubkey is configured (the normal prod shape).
+/// EdDSA pubkey is configured (the normal prod shape) — UNLESS
+/// `hs256_fallback_enabled` is `false` (the `SFU_RELAY_HS256_FALLBACK`
+/// kill-switch), in which case the HS256 fallback is skipped and the token
+/// is rejected. This mirrors `client_ws::handler::verify_token` and
+/// `relay::handler::relay_connect`, closing the gap where this DC path
+/// still fell back to HS256 unconditionally (Task 7).
 pub(super) fn handle_channel_data(
     client_id: ClientId,
     label: &str,
     data: &[u8],
     relay_auth_secret: Option<&[u8]>,
     relay_signing_pubkey: Option<&str>,
+    hs256_fallback_enabled: bool,
 ) -> Propagated {
     // relay_source can arrive on any DC channel — check before label filter.
     // When relay_auth_secret is Some, the message MUST contain a valid roomToken JWT
@@ -160,13 +166,20 @@ pub(super) fn handle_channel_data(
                         match room_auth::verify_room_token_ed25519(token, room_id, pubkey) {
                             Ok(claims) => Ok(claims),
                             // Likely a legacy/rollout HS256 token — retry under
-                            // HS256 when a secret is configured; with no secret
-                            // there is nothing to fall back to.
+                            // HS256 when a secret is configured AND the
+                            // SFU_RELAY_HS256_FALLBACK kill-switch is enabled.
+                            // A disabled kill-switch means EdDSA rollout is
+                            // complete: rejecting here instead of re-verifying
+                            // under HS256 closes the forged-token gap (a peer
+                            // with a leaked SIGNALING_SFU_SECRET could
+                            // otherwise self-promote to cascade relay even
+                            // post-rollout). With no secret configured there
+                            // is nothing to fall back to either way.
                             Err(room_auth::RoomAuthError::InvalidSignature) => match maybe_secret {
-                                Some(secret) => {
+                                Some(secret) if hs256_fallback_enabled => {
                                     room_auth::verify_room_token(token, room_id, secret)
                                 }
-                                None => Err(room_auth::RoomAuthError::InvalidSignature),
+                                _ => Err(room_auth::RoomAuthError::InvalidSignature),
                             },
                             // Expired / Malformed / RoomMismatch — definitive.
                             Err(e) => Err(e),
@@ -427,7 +440,8 @@ mod tests {
     #[test]
     fn relay_source_returns_mark_relay_on_any_channel() {
         let data = br#"{"type":"relay_source","upstreamUrl":"wss://eu-1.example/sfu"}"#;
-        let result = handle_channel_data(ClientId(42), "some-other-channel", data, None, None);
+        let result =
+            handle_channel_data(ClientId(42), "some-other-channel", data, None, None, true);
         match result {
             Propagated::MarkRelaySource(id, url) => {
                 assert_eq!(*id, 42);
@@ -440,7 +454,7 @@ mod tests {
     #[test]
     fn relay_source_missing_url_returns_noop() {
         let data = br#"{"type":"relay_source"}"#;
-        let result = handle_channel_data(ClientId(43), "sfu-budget", data, None, None);
+        let result = handle_channel_data(ClientId(43), "sfu-budget", data, None, None, true);
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -450,7 +464,7 @@ mod tests {
         // relay_source takes priority since it is checked first.
         let data =
             br#"{"type":"relay_source","upstreamUrl":"wss://eu-1.example/sfu","bps":500000}"#;
-        let result = handle_channel_data(ClientId(44), "sfu-budget", data, None, None);
+        let result = handle_channel_data(ClientId(44), "sfu-budget", data, None, None, true);
         assert!(matches!(result, Propagated::MarkRelaySource(..)));
     }
 
@@ -488,8 +502,14 @@ mod tests {
             r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
             token
         );
-        let result =
-            handle_channel_data(ClientId(50), "any", payload.as_bytes(), Some(secret), None);
+        let result = handle_channel_data(
+            ClientId(50),
+            "any",
+            payload.as_bytes(),
+            Some(secret),
+            None,
+            true,
+        );
         assert!(matches!(result, Propagated::MarkRelaySource(..)));
     }
 
@@ -498,7 +518,7 @@ mod tests {
         let secret = b"test-secret-32-bytes-long-enough!";
         let data =
             br#"{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc"}"#;
-        let result = handle_channel_data(ClientId(51), "any", data, Some(secret), None);
+        let result = handle_channel_data(ClientId(51), "any", data, Some(secret), None, true);
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -510,8 +530,14 @@ mod tests {
             r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
             token
         );
-        let result =
-            handle_channel_data(ClientId(52), "any", payload.as_bytes(), Some(secret), None);
+        let result = handle_channel_data(
+            ClientId(52),
+            "any",
+            payload.as_bytes(),
+            Some(secret),
+            None,
+            true,
+        );
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -523,8 +549,14 @@ mod tests {
             r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
             token
         );
-        let result =
-            handle_channel_data(ClientId(53), "any", payload.as_bytes(), Some(secret), None);
+        let result = handle_channel_data(
+            ClientId(53),
+            "any",
+            payload.as_bytes(),
+            Some(secret),
+            None,
+            true,
+        );
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -537,8 +569,14 @@ mod tests {
             r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
             token
         );
-        let result =
-            handle_channel_data(ClientId(54), "any", payload.as_bytes(), Some(secret), None);
+        let result = handle_channel_data(
+            ClientId(54),
+            "any",
+            payload.as_bytes(),
+            Some(secret),
+            None,
+            true,
+        );
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -588,6 +626,7 @@ mod tests {
             payload.as_bytes(),
             None,
             Some(pub_pem.as_str()),
+            true,
         );
         assert!(matches!(result, Propagated::MarkRelaySource(..)));
     }
@@ -597,7 +636,14 @@ mod tests {
         let (_priv, pub_pem) = generate_test_keypair_dc();
         let data =
             br#"{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc"}"#;
-        let result = handle_channel_data(ClientId(61), "any", data, None, Some(pub_pem.as_str()));
+        let result = handle_channel_data(
+            ClientId(61),
+            "any",
+            data,
+            None,
+            Some(pub_pem.as_str()),
+            true,
+        );
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -616,6 +662,7 @@ mod tests {
             payload.as_bytes(),
             None,
             Some(pub_pem2.as_str()),
+            true,
         );
         assert!(matches!(result, Propagated::Noop));
     }
@@ -625,7 +672,7 @@ mod tests {
     #[test]
     fn sframe_keys_label_emits_keys_data_propagated() {
         let payload = b"identity-payload-bytes";
-        let result = handle_channel_data(ClientId(80), "sframe-keys", payload, None, None);
+        let result = handle_channel_data(ClientId(80), "sframe-keys", payload, None, None, true);
         match result {
             Propagated::KeysData(cid, bytes) => {
                 assert_eq!(*cid, 80);
@@ -638,14 +685,14 @@ mod tests {
     #[test]
     fn sframe_keys_oversize_dropped() {
         let big = vec![0u8; super::SFRAME_KEYS_FRAME_MAX_BYTES + 1];
-        let result = handle_channel_data(ClientId(81), "sframe-keys", &big, None, None);
+        let result = handle_channel_data(ClientId(81), "sframe-keys", &big, None, None, true);
         assert!(matches!(result, Propagated::Noop));
     }
 
     #[test]
     fn sframe_keys_carries_binary_unmodified() {
         let bin: Vec<u8> = (0u8..=255u8).collect();
-        let result = handle_channel_data(ClientId(82), "sframe-keys", &bin, None, None);
+        let result = handle_channel_data(ClientId(82), "sframe-keys", &bin, None, None, true);
         match result {
             Propagated::KeysData(_, bytes) => assert_eq!(bytes, bin),
             other => panic!("expected KeysData passthrough, got {other:?}"),
@@ -657,7 +704,7 @@ mod tests {
     #[test]
     fn chat_data_label_emits_chat_data_propagated() {
         let payload = b"\xC7sealed-envelope-bytes";
-        let result = handle_channel_data(ClientId(70), "chat-data", payload, None, None);
+        let result = handle_channel_data(ClientId(70), "chat-data", payload, None, None, true);
         match result {
             Propagated::ChatData(cid, bytes) => {
                 assert_eq!(*cid, 70);
@@ -670,7 +717,7 @@ mod tests {
     #[test]
     fn chat_ctrl_label_emits_chat_ctrl_propagated() {
         let payload = br#"{"kind":"typing"}"#;
-        let result = handle_channel_data(ClientId(71), "chat-ctrl", payload, None, None);
+        let result = handle_channel_data(ClientId(71), "chat-ctrl", payload, None, None, true);
         match result {
             Propagated::ChatCtrl(cid, bytes) => {
                 assert_eq!(*cid, 71);
@@ -683,14 +730,14 @@ mod tests {
     #[test]
     fn chat_data_oversize_dropped() {
         let big = vec![0u8; super::CHAT_FRAME_MAX_BYTES + 1];
-        let result = handle_channel_data(ClientId(72), "chat-data", &big, None, None);
+        let result = handle_channel_data(ClientId(72), "chat-data", &big, None, None, true);
         assert!(matches!(result, Propagated::Noop));
     }
 
     #[test]
     fn chat_ctrl_oversize_dropped() {
         let big = vec![0u8; super::CHAT_FRAME_MAX_BYTES + 1];
-        let result = handle_channel_data(ClientId(73), "chat-ctrl", &big, None, None);
+        let result = handle_channel_data(ClientId(73), "chat-ctrl", &big, None, None, true);
         assert!(matches!(result, Propagated::Noop));
     }
 
@@ -699,7 +746,7 @@ mod tests {
         // chat-data is opaque to the SFU — non-UTF8 must pass through
         // unmodified. The SFU never parses the AEAD-sealed envelope.
         let bin: Vec<u8> = (0u8..=255u8).collect();
-        let result = handle_channel_data(ClientId(74), "chat-data", &bin, None, None);
+        let result = handle_channel_data(ClientId(74), "chat-data", &bin, None, None, true);
         match result {
             Propagated::ChatData(_, bytes) => assert_eq!(bytes, bin),
             other => panic!("expected ChatData passthrough, got {other:?}"),
@@ -722,6 +769,7 @@ mod tests {
             payload.as_bytes(),
             Some(b"some-hs256-secret"), // present but irrelevant — EdDSA wins
             Some(pub_pem.as_str()),
+            true,
         );
         assert!(matches!(result, Propagated::MarkRelaySource(..)));
     }
@@ -751,10 +799,43 @@ mod tests {
             payload.as_bytes(),
             Some(secret),           // relay_auth_secret — HS256 fallback credential
             Some(pub_pem.as_str()), // relay_signing_pubkey — EdDSA preferred (normal prod)
+            true,                   // hs256_fallback_enabled — kill-switch ON (default)
         );
         assert!(
             matches!(result, Propagated::MarkRelaySource(..)),
             "HS256 room token must be accepted via HS256 fallback when the EdDSA pubkey is also set (rollout interop)"
+        );
+    }
+
+    #[test]
+    fn relay_source_hs256_token_rejected_when_pubkey_set_and_fallback_disabled() {
+        // Task 7 gap closure: a peer holding a leaked SIGNALING_SFU_SECRET can
+        // forge a valid-HS256 roomToken. Once SFU_RELAY_HS256_FALLBACK is
+        // disabled (EdDSA rollout complete), this DC path must reject that
+        // forged token instead of falling back to HS256 re-verification —
+        // mirroring client_ws::handler.rs and relay::handler.rs. Pre-fix, this
+        // fails because the fallback branch ran unconditionally whenever a
+        // secret was configured, regardless of the kill-switch.
+        let secret = b"test-secret-32-bytes-long-enough!";
+        let (_priv_pem, pub_pem) = generate_test_keypair_dc();
+        // Token is signed with the HS256 secret, NOT the EdDSA key — the
+        // exact shape a forged/legacy token takes.
+        let token = make_room_token("room-abc", 42, secret, 3600);
+        let payload = format!(
+            r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{}"}}"#,
+            token
+        );
+        let result = handle_channel_data(
+            ClientId(65),
+            "any",
+            payload.as_bytes(),
+            Some(secret),
+            Some(pub_pem.as_str()),
+            false, // hs256_fallback_enabled — kill-switch OFF
+        );
+        assert!(
+            matches!(result, Propagated::Noop),
+            "HS256 fallback must be rejected when the kill-switch is disabled, got {result:?}"
         );
     }
 
@@ -765,7 +846,7 @@ mod tests {
         // Any write from a browser on the "sfu-events" DC is a protocol violation.
         let payload =
             br#"{"kind":"peer-suspended","from":"1","ts":1715712345678,"tier":"audio-normal"}"#;
-        let result = handle_channel_data(ClientId(99), "sfu-events", payload, None, None);
+        let result = handle_channel_data(ClientId(99), "sfu-events", payload, None, None, true);
         assert!(
             matches!(result, Propagated::Noop),
             "browser write on sfu-events must return Noop, got {result:?}"
@@ -774,14 +855,14 @@ mod tests {
 
     #[test]
     fn sfu_events_browser_write_empty_payload_returns_noop() {
-        let result = handle_channel_data(ClientId(100), "sfu-events", b"", None, None);
+        let result = handle_channel_data(ClientId(100), "sfu-events", b"", None, None, true);
         assert!(matches!(result, Propagated::Noop));
     }
 
     #[test]
     fn sfu_events_browser_write_binary_payload_returns_noop() {
         let bin: Vec<u8> = (0u8..=255u8).collect();
-        let result = handle_channel_data(ClientId(101), "sfu-events", &bin, None, None);
+        let result = handle_channel_data(ClientId(101), "sfu-events", &bin, None, None, true);
         assert!(matches!(result, Propagated::Noop));
     }
 }

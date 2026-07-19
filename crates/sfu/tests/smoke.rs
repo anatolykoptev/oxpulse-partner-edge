@@ -46,6 +46,7 @@ async fn udp_loop_binds_receives_and_shuts_down() {
             metrics,
             None,
             None,
+            true, // hs256_fallback_enabled: default-on in test
             Some(relay_rx),
             Some(client_inject_rx),
             local, // candidate_addr: same as local in loopback tests

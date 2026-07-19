@@ -136,6 +136,7 @@ async fn start_full_pipeline() -> (
         metrics.clone(),
         None,
         None,
+        true, // hs256_fallback_enabled: default-on in test
         Some(relay_rx),
         Some(client_inject_rx),
         local_udp, // candidate_addr: loopback tests use actual local addr

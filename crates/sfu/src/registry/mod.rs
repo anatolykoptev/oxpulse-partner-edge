@@ -58,6 +58,10 @@ pub struct Registry {
     /// Ed25519 public key (PEM) for EdDSA-signed room token verification (Phase 2).
     /// Copied into each client at insert() time alongside relay_auth_secret.
     pub(super) relay_signing_pubkey: Option<Arc<String>>,
+    /// `SFU_RELAY_HS256_FALLBACK` kill-switch. Copied into each client at
+    /// insert() time so `dc::handle_channel_data`'s relay_source path can
+    /// honor it identically to `client_ws::handler` and `relay::handler`.
+    pub(super) hs256_fallback_enabled: bool,
 }
 
 impl Registry {
@@ -72,18 +76,24 @@ impl Registry {
         metrics: Arc<SfuMetrics>,
         relay_auth_secret: Option<Arc<[u8]>>,
     ) -> Self {
-        Self::with_relay_auth(metrics, relay_auth_secret, None)
+        // No config available at this call site — default to the fail-safe
+        // `SFU_RELAY_HS256_FALLBACK` default (true), matching `config.rs`'s
+        // `parse_hs256_fallback_env` default.
+        Self::with_relay_auth(metrics, relay_auth_secret, None, true)
     }
 
     /// Construct a registry with both HS256 secret and Ed25519 pubkey for room token auth.
     ///
     /// When `relay_signing_pubkey` is `Some`, EdDSA verification is preferred for
     /// relay_source DataChannel messages; HS256 is used as fallback when only
-    /// `relay_auth_secret` is set.
+    /// `relay_auth_secret` is set — unless `hs256_fallback_enabled` is `false`
+    /// (the `SFU_RELAY_HS256_FALLBACK` kill-switch), in which case a forged or
+    /// legacy HS256 token is rejected instead of re-verified.
     pub fn with_relay_auth(
         metrics: Arc<SfuMetrics>,
         relay_auth_secret: Option<Arc<[u8]>>,
         relay_signing_pubkey: Option<Arc<String>>,
+        hs256_fallback_enabled: bool,
     ) -> Self {
         let detector = ActiveSpeakerDetector::new();
         Self {
@@ -96,6 +106,7 @@ impl Registry {
             bandwidth: BandwidthEstimator::new(),
             relay_auth_secret,
             relay_signing_pubkey,
+            hs256_fallback_enabled,
             solo_since: None,
         }
     }
@@ -146,6 +157,9 @@ impl Registry {
         client.relay_auth_secret = self.relay_auth_secret.clone();
         // Phase 2: also copy the Ed25519 pubkey for EdDSA-preferred verification.
         client.relay_signing_pubkey = self.relay_signing_pubkey.clone();
+        // Task 7: copy the SFU_RELAY_HS256_FALLBACK kill-switch so dc.rs's
+        // relay_source path honors it identically to client_ws/relay handlers.
+        client.relay_hs256_fallback_enabled = self.hs256_fallback_enabled;
 
         // Session steal — drop the older entry sharing this external
         // peer_id BEFORE the cross-advertisement loop so the newcomer

@@ -88,6 +88,7 @@ where
         .clone()
         .map(|v| Arc::from(v.as_slice()));
     let relay_signing_pubkey = config.sfu_signing_public_key.clone().map(Arc::new);
+    let hs256_fallback_enabled = config.relay_hs256_fallback_enabled;
     let socket = bind(&config).await?;
     let local_addr = socket.local_addr().context("failed to read local_addr")?;
     // Compute the candidate address — same logic as main.rs M4.A6.
@@ -105,6 +106,7 @@ where
         metrics,
         relay_auth_secret,
         relay_signing_pubkey,
+        hs256_fallback_enabled,
         relay_rx,
         client_inject_rx,
         candidate_addr,
@@ -146,6 +148,7 @@ pub async fn serve<F>(
     metrics: Arc<SfuMetrics>,
     relay_auth_secret: Option<Arc<[u8]>>,
     relay_signing_pubkey: Option<Arc<String>>,
+    hs256_fallback_enabled: bool,
     mut relay_rx: Option<tokio::sync::mpsc::Receiver<crate::relay::client::PendingRelay>>,
     mut client_inject_rx: Option<tokio::sync::mpsc::Receiver<crate::client_ws::PendingClient>>,
     candidate_addr: std::net::SocketAddr,
@@ -157,7 +160,12 @@ where
 {
     // Clone metrics before moving into Registry so relay injection can use it too.
     let metrics_ref = metrics.clone();
-    let mut registry = Registry::with_relay_auth(metrics, relay_auth_secret, relay_signing_pubkey);
+    let mut registry = Registry::with_relay_auth(
+        metrics,
+        relay_auth_secret,
+        relay_signing_pubkey,
+        hs256_fallback_enabled,
+    );
     let mut buf = vec![0u8; RECV_BUFFER_BYTES];
     // M1.4: ASO tick drives dominant-speaker election. Delay-on-miss so
     // a slow tick doesn't cause a burst of tick() calls.
@@ -542,6 +550,7 @@ mod tests {
             metrics,
             None,
             None,
+            true, // hs256_fallback_enabled
             None,
             None,
             candidate_addr,
@@ -585,6 +594,7 @@ mod tests {
             metrics,
             None,
             None,
+            true, // hs256_fallback_enabled
             None, // standalone — no relay channel
             None, // standalone — no client inject channel
             candidate_addr,
@@ -638,6 +648,7 @@ mod tests {
             metrics,
             None,
             None,
+            true, // hs256_fallback_enabled
             Some(relay_rx),
             None,
             candidate_addr,
@@ -719,6 +730,7 @@ mod tests {
             metrics_clone,
             None,
             None,
+            true, // hs256_fallback_enabled
             Some(relay_rx),
             Some(client_inject_rx),
             candidate_addr,
@@ -839,6 +851,7 @@ mod tests {
             metrics_clone,
             None,
             None,
+            true, // hs256_fallback_enabled
             Some(relay_rx),
             Some(client_inject_rx),
             candidate_addr,
@@ -1052,6 +1065,7 @@ mod tests {
             metrics,
             None,
             None,
+            true, // hs256_fallback_enabled
             None, // standalone — no relay channel
             None, // standalone — no client inject channel
             candidate_addr,
