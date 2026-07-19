@@ -166,6 +166,14 @@ services:
       RUST_LOG: "info"
       RELAY_JWT_SECRET: "{{RELAY_JWT_SECRET}}"
       SFU_RELAY_API_PORT: "8912"
+      # T4.3 cutover (2026-07-19): EdDSA rollout is complete and every fleet edge
+      # has SFU_SIGNING_PUBLIC_KEY, so reject HS256 room/relay tokens instead of
+      # falling back — closes the forged-HS256-token vector (a leaked
+      # SIGNALING_SFU_SECRET could otherwise self-promote a peer to a cascade
+      # relay via the dc.rs relay-source path, #461). Only affects pubkey-present
+      # edges; a pubkey-less (degraded-install) edge uses the ungated (None,Some)
+      # HS256 path and is unaffected. Remove/set true to re-enable the fallback.
+      SFU_RELAY_HS256_FALLBACK: "false"
       PARTNER_ID: "{{PARTNER_ID}}"
       # SFU_SIGNING_PUBLIC_KEY is injected from env_file (sfu-keys.env), NOT here.
       # A value under `environment:` would override env_file (compose precedence)
