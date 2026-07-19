@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.4](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.3...v0.16.4) (2026-07-19)
+
+
+### Features
+
+* **hydrate:** consume central-authoritative public_ip from register response as highest-precedence tier ([#455](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/455)) ([f950e48](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/f950e4842b991355f118448efc004023fcdd97b7))
+
 ## [0.16.3](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.2...v0.16.3) (2026-07-18)
 
 
