@@ -550,6 +550,7 @@ mod tests {
             metrics,
             None,
             None,
+            true, // hs256_fallback_enabled
             None,
             None,
             candidate_addr,
@@ -593,6 +594,7 @@ mod tests {
             metrics,
             None,
             None,
+            true, // hs256_fallback_enabled
             None, // standalone — no relay channel
             None, // standalone — no client inject channel
             candidate_addr,
@@ -646,6 +648,7 @@ mod tests {
             metrics,
             None,
             None,
+            true, // hs256_fallback_enabled
             Some(relay_rx),
             None,
             candidate_addr,
@@ -727,6 +730,7 @@ mod tests {
             metrics_clone,
             None,
             None,
+            true, // hs256_fallback_enabled
             Some(relay_rx),
             Some(client_inject_rx),
             candidate_addr,
@@ -847,6 +851,7 @@ mod tests {
             metrics_clone,
             None,
             None,
+            true, // hs256_fallback_enabled
             Some(relay_rx),
             Some(client_inject_rx),
             candidate_addr,
@@ -1060,6 +1065,7 @@ mod tests {
             metrics,
             None,
             None,
+            true, // hs256_fallback_enabled
             None, // standalone — no relay channel
             None, // standalone — no client inject channel
             candidate_addr,
