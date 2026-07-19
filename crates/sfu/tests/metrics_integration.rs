@@ -71,6 +71,7 @@ async fn udp_loop_serves_with_registry_and_shuts_down() {
             metrics,
             None,
             None,
+            true, // hs256_fallback_enabled: default-on in test
             Some(relay_rx),
             Some(client_inject_rx),
             local, // candidate_addr: loopback tests use actual local addr

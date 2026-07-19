@@ -121,7 +121,7 @@ async fn stun_response_queued_only_when_destination_matches_candidate() {
 
     // ── Registry A: correct destination ───────────────────────────────────
     let metrics = Arc::new(SfuMetrics::default());
-    let mut reg_a = Registry::with_relay_auth(metrics.clone(), None, None);
+    let mut reg_a = Registry::with_relay_auth(metrics.clone(), None, None, true);
     {
         let mut rtc_a = str0m::Rtc::builder()
             .set_local_ice_credentials(str0m::IceCreds {
@@ -147,7 +147,7 @@ async fn stun_response_queued_only_when_destination_matches_candidate() {
     let transmits_a = poll_and_count_transmits(&mut reg_a);
 
     // ── Registry B: wildcard destination ──────────────────────────────────
-    let mut reg_b = Registry::with_relay_auth(metrics.clone(), None, None);
+    let mut reg_b = Registry::with_relay_auth(metrics.clone(), None, None, true);
     {
         let mut rtc_b = str0m::Rtc::builder()
             .set_local_ice_credentials(str0m::IceCreds {

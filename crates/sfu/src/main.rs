@@ -460,6 +460,7 @@ async fn main() -> anyhow::Result<()> {
         metrics,
         relay_auth_secret,
         relay_signing_pubkey,
+        config.relay_hs256_fallback_enabled,
         relay_inject_rx,
         client_inject_rx,
         host_candidate_addr,

@@ -229,6 +229,13 @@ pub struct Client {
     /// When set, EdDSA verification is preferred over HS256.
     /// Loaded from SFU_SIGNING_PUBLIC_KEY at startup.
     pub(crate) relay_signing_pubkey: Option<Arc<String>>,
+    /// `SFU_RELAY_HS256_FALLBACK` kill-switch (Task 7). When `false`, a
+    /// relay_source roomToken that fails EdDSA verification is rejected
+    /// instead of being re-verified under HS256 — closing the forged-token
+    /// gap once EdDSA rollout is complete. Defaults `true` (fail-safe,
+    /// matches `config.rs`'s `parse_hs256_fallback_env` default); overwritten
+    /// from `Registry`'s copy at `insert()` time.
+    pub(crate) relay_hs256_fallback_enabled: bool,
     /// Test-only: override the value returned by `ch.buffered_amount()` in
     /// `handle_voice_data_out`. Necessary because str0m's SCTP association is
     /// not live in unit tests — `buffered_amount()` always returns 0 without a

@@ -267,6 +267,7 @@ impl Client {
                     &data,
                     self.relay_auth_secret.as_deref(),
                     self.relay_signing_pubkey.as_deref().map(|s| s.as_str()),
+                    self.relay_hs256_fallback_enabled,
                 );
                 // MAJOR-1: inbound oversize voice frame — emit the
                 // `frame_malformed` drop counter at the dispatch callsite.
