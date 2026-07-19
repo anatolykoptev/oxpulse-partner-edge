@@ -316,6 +316,70 @@ else
     log "heartbeat ok: $HB_BODY"
 fi
 
+# ── Central-driven self-upgrade (partner_nodes.desired_release) ─────────────
+# The central sets a per-node target release (`partner-cli update`); the edge
+# pulls it from the heartbeat response and self-upgrades. Pull model — no
+# inbound path, no SSH. FAIL-SOFT: any problem logs + skips, NEVER aborts the
+# refresh (the 2026-05-13 incident class). Defense-in-depth with partner-cli's
+# set-time downgrade refusal (L1) and upgrade.sh's apply-path Check 3 (L3):
+# here we also reject a non-bare-semver value and a downgrade vs the installed
+# IMAGE_VERSION before invoking the (SHA256SUMS-verified) upgrade.
+_self_upgrade_is_ge() {
+    # bare-semver A >= B (MAJOR.MINOR.PATCH via sort -V)
+    [[ "$1" == "$2" ]] && return 0
+    [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]
+}
+_maybe_self_upgrade() {
+    local hb_code="$1" hb_body="$2"
+    [[ "$hb_code" == "200" ]] || return 0
+    local _desired _installed
+    _desired=$(printf '%s' "$hb_body" | jq -r '.desired_release // empty' 2>/dev/null || true)
+    [[ -n "$_desired" ]] || return 0
+    # FAIL-SOFT: a missing IMAGE_VERSION= line (grep exit 1) or unreadable file
+    # must NOT abort the refresh under `set -euo pipefail` (2026-05-13 incident
+    # class) — `|| true` on the whole pipeline.
+    _installed=$(grep -E '^IMAGE_VERSION=' "$PREFIX_LIB/install.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
+    _installed="${_installed#v}"
+    # desired must be a CONCRETE release semver — no pre-release/build suffix:
+    # `sort -V` mis-orders pre-releases and rc-over-final is a downgrade in
+    # disguise, so a fleet rollout only targets MAJOR.MINOR.PATCH.
+    if [[ ! "$_desired" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        log "self-upgrade: ignoring desired_release '$_desired' — not a concrete release semver"
+        emit_metric "partner_edge_self_upgrade_rejected_total" "reason=\"format\"" "1"
+        return 0
+    fi
+    # installed must be a concrete semver to rank — a default `IMAGE_VERSION=stable`
+    # or unset value cannot be compared (`sort -V` ranks `stable` above any
+    # number), so FAIL-CLOSED refuse rather than mis-rank it: bootstrap the node
+    # to a concrete version via a manual upgrade first.
+    if [[ ! "$_installed" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        log "self-upgrade: installed version '${_installed:-unset}' not a concrete semver — refusing (bootstrap manually first)"
+        emit_metric "partner_edge_self_upgrade_unknown_installed_total" "" "1"
+        return 0
+    fi
+    if [[ "$_desired" == "$_installed" ]]; then
+        return 0  # already converged — idempotent no-op
+    fi
+    if ! _self_upgrade_is_ge "$_desired" "$_installed"; then
+        log "self-upgrade: refusing downgrade desired=$_desired installed=$_installed"
+        emit_metric "partner_edge_self_upgrade_downgrade_refused_total" "" "1"
+        return 0
+    fi
+    log "self-upgrade: desired_release=$_desired (installed=$_installed) — applying"
+    emit_metric "partner_edge_self_upgrade_applied_total" "tag=\"$_desired\"" "1"
+    local _upg_bin
+    _upg_bin=$(command -v oxpulse-partner-edge-upgrade 2>/dev/null || echo /usr/local/sbin/oxpulse-partner-edge-upgrade)
+    # timeout: a DPI-blocked docker pull must not block this refresh (and the
+    # cross-probe-token re-mint after it) indefinitely. Fail-soft either way.
+    if timeout 900 "$_upg_bin" "v${_desired}" >/dev/null 2>&1; then
+        log "self-upgrade: applied v$_desired"
+    else
+        log "self-upgrade: $_upg_bin v$_desired FAILED/timed-out (non-fatal; retry next refresh)"
+        emit_metric "partner_edge_self_upgrade_failure_total" "" "1"
+    fi
+}
+_maybe_self_upgrade "$HB_CODE" "$HB_BODY"
+
 # ---------- cross-probe token refresh (T2.4.c re-mint endpoint) ----------
 # refresh_cross_probe_token (emit_xprb_failure / xprb_curl_get_with_retry) —
 # extracted to lib/xprb-refresh-lib.sh (P3 of the 2026-07-08

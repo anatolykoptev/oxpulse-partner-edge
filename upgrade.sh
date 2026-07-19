@@ -2586,6 +2586,31 @@ _conflict_check_3() {
 	fi
 }
 
+# _assert_apply_not_downgrade — D4-L3. Check 3 (downgrade detection) historically
+# ran ONLY on the --dry-run report path (run_conflict_checks); the plain and
+# --with-templates APPLY paths did not, so `oxpulse-partner-edge-upgrade
+# <older-tag>` would SILENTLY downgrade (SHA256SUMS still verifies — an older tag
+# is a real release). Gate the apply path here, fail-closed, honoring the
+# documented --skip-check=3 escape hatch (mirrors partner-cli --allow-downgrade).
+# CHECK_STATUS/CHECK_DETAIL are declared local inside run_conflict_checks, so we
+# declare them local here too — bash dynamic scope lets _conflict_check_3 write
+# into these for the standalone call.
+_assert_apply_not_downgrade() {
+	case " ${SKIPPED_CHECKS:-} " in *" 3 "*) return 0 ;; esac
+	local -a CHECK_STATUS CHECK_DETAIL
+	# _conflict_check_3 needs ^v[0-9] on the proposed tag; a bare semver (the
+	# release-please VERSION file, or a bare manual tag) would fall to its WARNING
+	# branch and skip the gate. v-normalize it here.
+	local _tgt="$RELEASE_TAG"
+	[[ "$_tgt" =~ ^[0-9] ]] && _tgt="v$_tgt"
+	_conflict_check_3 "$_tgt"
+	if [[ "${CHECK_STATUS[3]:-}" == "CATASTROPHIC" ]]; then
+		die "downgrade refused (check 3):
+${CHECK_DETAIL[3]:-}
+  Re-run with --skip-check=3 to force this downgrade."
+	fi
+}
+
 # Check 4: healthcheck.sh check-count diff.
 _conflict_check_4() {
 	CHECK_STATUS[4]="INFO"
@@ -2906,6 +2931,11 @@ if [[ "$MODE" == with_templates ]]; then
 	# released upgrade.sh (once) if the running copy is stale, so an in-upgrade.sh
 	# fix (e.g. the settle cold-start gate) lands this run. Rollback-safe: execs a
 	# temp copy, disk untouched (see _maybe_self_update_reexec).
+	# D4-L3: refuse a downgrade on the apply path BEFORE the self-update-reexec,
+	# which would otherwise re-exec into the OLDER target's upgrade.sh that lacks
+	# this guard. --skip-check=3 forces (mirrors partner-cli --allow-downgrade).
+	_assert_apply_not_downgrade
+
 	_maybe_self_update_reexec "$@"
 
 	# PR2 finding 4a call site 3/4: staged AFTER the self-update-reexec decision
@@ -3173,6 +3203,10 @@ fi
 # FIX 2: self-update - before ANY backup/mutation, re-exec into the freshly
 # released upgrade.sh (once) if the running copy is stale (see with-templates
 # path). Rollback-safe: temp-exec, disk untouched.
+# D4-L3: refuse a downgrade on the apply path BEFORE the self-update-reexec
+# (which would re-exec into the OLDER target's ungated upgrade.sh).
+_assert_apply_not_downgrade
+
 _maybe_self_update_reexec "$@"
 
 # PR2 finding 4a call site 4/4: staged AFTER the self-update-reexec decision
