@@ -217,6 +217,7 @@ async fn serve_with_explicit_candidate_addr_starts_cleanly() {
         metrics,
         None,
         None,
+        true, // hs256_fallback_enabled
         None,
         None,
         candidate_addr,
