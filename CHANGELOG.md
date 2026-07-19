@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.6](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.5...v0.16.6) (2026-07-19)
+
+
+### Bug Fixes
+
+* **sfu:** honor SFU_RELAY_HS256_FALLBACK in relay-source DC path ([#461](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/461)) ([47624a8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/47624a8f7d11617adc426d37e7a6828c9938752b))
+
 ## [0.16.5](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.4...v0.16.5) (2026-07-19)
 
 
