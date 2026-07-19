@@ -636,8 +636,14 @@ mod tests {
         let (_priv, pub_pem) = generate_test_keypair_dc();
         let data =
             br#"{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc"}"#;
-        let result =
-            handle_channel_data(ClientId(61), "any", data, None, Some(pub_pem.as_str()), true);
+        let result = handle_channel_data(
+            ClientId(61),
+            "any",
+            data,
+            None,
+            Some(pub_pem.as_str()),
+            true,
+        );
         assert!(matches!(result, Propagated::Noop));
     }
 
