@@ -562,6 +562,15 @@ pub struct SfuMetrics {
     /// in temporal SVC a frame at layer T references only frames at layer ≤ T
     /// (AV1 spec §3). The remaining stream is self-consistent and decodable.
     pub sfu_dd_temporal_drops_total: IntCounterVec,
+    /// G3 P3b: SFU-BWE-driven per-subscriber temporal-layer cap decisions.
+    /// Incremented once per `update_pacer_layers` pass (when the kill-switch
+    /// is on AND the tick was not throttled) with the cap value selected by
+    /// `Client::bwe_select_temporal_cap`. Cap-only label (no peer_id) → 3
+    /// series (`0`, `1`, `uncapped`), federated-safe. Behind
+    /// `SFU_BWE_TEMPORAL_CAP` (default off) and `#[cfg(feature = "vfm")]` at
+    /// the call site; the metric itself is always registered so the baseline
+    /// is 0 at startup (mirrors `sfu_dd_temporal_drops_total`).
+    pub bwe_temporal_cap_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -1444,6 +1453,35 @@ impl SfuMetrics {
             .with_label_values(&["3plus"])
             .get();
 
+        // G3 P3b: SFU-BWE-driven temporal-layer cap decision counter. Bounded
+        // label (3 values: 0/1/uncapped). Pre-touch all so the baseline is 0
+        // at startup. Cap-only label (no peer_id) — federated-safe, aggregated
+        // across all subscribers. Mirrors the `dd_temporal_drops_total` reg!
+        // block; the metric is always registered (the `#[cfg(feature = "vfm")]`
+        // gate is at the call site in `registry::bwe`, not here).
+        let bwe_temporal_cap_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "bwe_temporal_cap_total",
+                "SFU-BWE-driven per-subscriber temporal-layer cap decisions, \
+                 by the selected cap value. Incremented once per \
+                 update_pacer_layers pass when SFU_BWE_TEMPORAL_CAP=1 and the \
+                 tick was not throttled. cap=0: deepest degrade (budget < \
+                 audio_only_bps, T0 only). cap=1: grace band (audio_only_bps \
+                 <= budget < low_min_bps, drop T2). cap=uncapped: budget >= \
+                 low_min_bps or no estimate (fail-open). Real Schmitt \
+                 hysteresis on the 0<->1 edge (enter <audio_only_bps, exit \
+                 >=low_min_bps); the benign 1<->uncapped edge is damped by \
+                 the shared min-tick floor."
+            ),
+            &["cap"],
+        )
+        .context("bwe_temporal_cap_total")?);
+        let _ = bwe_temporal_cap_total.with_label_values(&["0"]).get();
+        let _ = bwe_temporal_cap_total.with_label_values(&["1"]).get();
+        let _ = bwe_temporal_cap_total
+            .with_label_values(&["uncapped"])
+            .get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1523,6 +1561,7 @@ impl SfuMetrics {
             pacer_tick_throttled_total,
             sfu_dd_frames_total,
             sfu_dd_temporal_drops_total,
+            bwe_temporal_cap_total,
         })
     }
 

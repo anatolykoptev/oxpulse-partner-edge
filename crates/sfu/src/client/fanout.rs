@@ -20,6 +20,57 @@ use super::{layer, Client};
 use crate::propagate::ClientId;
 
 impl Client {
+    /// G3 P3b: the SOLE combiner of the client-DC cap (`max_vfm_temporal_layer`)
+    /// and the SFU-BWE cap (`bwe_vfm_temporal_cap`). MIN = most-restrictive;
+    /// neither client DC nor SFU-BWE can raise the other. `u8::MAX` means
+    /// "no cap" (forward all temporal layers).
+    ///
+    /// Also drives the PERF GUARD: the fanout drop path short-circuits on
+    /// `effective_temporal_cap() >= u8::MAX` (nothing capping → skip the
+    /// DD parse → zero hot-path cost). The P0 `sfu_dd_frames_total` counter
+    /// stays outside/ungated (per-frame, cheap `is_some()`).
+    #[cfg(feature = "vfm")]
+    pub(crate) fn effective_temporal_cap(&self) -> u8 {
+        self.max_vfm_temporal_layer.min(self.bwe_vfm_temporal_cap)
+    }
+
+    /// G3 P3b: derive the SFU-BWE-driven temporal-layer cap from the budget
+    /// estimate. Real Schmitt with self-sourced rails (`bwe_cap_audio_only_bps`
+    /// = `audio_only_bps` = 100k, `bwe_cap_low_min_bps` = `low_min_bps` = 150k):
+    ///
+    /// * `None` → `u8::MAX` (no estimate → inert / fail-open).
+    /// * `budget ≥ hi` (150k) → `u8::MAX` (recovered → uncap; shared exit rail).
+    /// * `cap==0 && budget < hi` → `0` (sticky cap=0 until budget clears low_min;
+    ///   Schmitt hold on the disruptive 0↔1 edge).
+    /// * `budget < lo` (100k) → `0` (enter deepest degrade, T0 only).
+    /// * else (grace band `[lo,hi)`) → `1` (drop T2).
+    ///
+    /// Down-transitions immediate. The benign 1↔MAX edge is a bare rail damped
+    /// by the shared min-tick floor (`pacer_tick_ready` ≥100ms). NOT routed
+    /// through the kit's `PacerAction` (no public state accessor; keep
+    /// Client/Registry independent of kit internals — see `pacer_floor.rs`).
+    #[cfg(feature = "vfm")]
+    pub(crate) fn bwe_select_temporal_cap(&mut self, budget_bps: Option<u64>) -> u8 {
+        let (lo, hi) = (self.bwe_cap_audio_only_bps, self.bwe_cap_low_min_bps);
+        let next = match (self.bwe_vfm_temporal_cap, budget_bps) {
+            (_, None) => u8::MAX,
+            (_, Some(b)) if b >= hi => u8::MAX,
+            (0, Some(b)) if b < hi => 0,
+            (_, Some(b)) if b < lo => 0,
+            (_, Some(_)) => 1,
+        };
+        // Sample `before` AFTER computing `next` from the match (the match
+        // reads the OLD `bwe_vfm_temporal_cap`) but BEFORE writing it back,
+        // so `before` reflects the OLD effective cap. Invalidate the DD
+        // structure cache on a MAX→<MAX engage so a stale structure from a
+        // prior capped window can't misresolve a template-only frame into
+        // an unsafe drop (see `invalidate_dd_cache_on_cap_engage`).
+        let before = self.effective_temporal_cap();
+        self.bwe_vfm_temporal_cap = next;
+        self.invalidate_dd_cache_on_cap_engage(before);
+        next
+    }
+
     /// Consult the per-client [`oxpulse_sfu_kit::SubscriberPacer`] for the
     /// simulcast tier this subscriber should receive, given the latest BWE
     /// estimate. Updates `self.desired_layer` in place (no SDP renegotiation).
@@ -118,7 +169,7 @@ impl Client {
             .with_label_values(&[if dd_present { "true" } else { "false" }])
             .inc();
 
-        // G3 P1: per-subscriber temporal-layer drop.
+        // G3 P1/P3b: per-subscriber temporal-layer drop.
         //
         // DECODE-SAFETY INVARIANT: dropping frames with temporal_id > cap is
         // decode-safe because in temporal SVC (e.g. L1T3) a frame at
@@ -134,9 +185,27 @@ impl Client {
         // unresolvable (template-only DD before any keyframe structure was
         // cached), the packet is FORWARDED (no drop). A relay must not crash
         // or over-drop on adversarial/malformed headers.
+        //
+        // PERF GUARD (P3a code-quality review): short-circuit the parse/drop
+        // block when `effective_temporal_cap() >= u8::MAX` (nothing capping →
+        // skip the DD parse → zero hot-path cost). The P0 `sfu_dd_frames_total`
+        // counter stays OUTSIDE/ungated (per-frame, cheap `is_some()`).
+        // Structure-cache-cold on cap-engage is acceptable — fail-soft FORWARD
+        // until the next natural keyframe; do NOT request a keyframe on
+        // cap-engage (the subscriber is bandwidth-starved, a keyframe would
+        // worsen it).
+        //
+        // P3b LOOP-FIX: the cache is now ACTIVELY CLEARED on the effective-cap
+        // MAX→<MAX transition (via `invalidate_dd_cache_on_cap_engage` wired
+        // into both `set_max_vfm_temporal_layer` and `bwe_select_temporal_cap`),
+        // so a stale structure from a prior capped window — which the perf
+        // guard skipped re-parsing while UNCAPPED — can NEVER drive an unsafe
+        // drop. The window after engage is cold-forward (parse returns
+        // `temporal_id = None` without a `prior` structure), NOT
+        // stale-misresolve.
         #[cfg(feature = "vfm")]
         {
-            if dd_present {
+            if dd_present && self.effective_temporal_cap() < u8::MAX {
                 if let Some(dd_bytes) = data.ext_vals.user_values.get::<crate::svc::DdPresent>() {
                     let stream_key = (origin, data.mid);
                     let prior = self.dd_structure_cache.get(&stream_key);
@@ -151,7 +220,7 @@ impl Client {
                         // Drop iff temporal_id is known AND exceeds the cap.
                         // temporal_id == None → fail-soft FORWARD.
                         if let Some(tid) = parsed.temporal_id {
-                            if tid > self.max_vfm_temporal_layer {
+                            if tid > self.effective_temporal_cap() {
                                 let label = match tid {
                                     0 => "0",
                                     1 => "1",

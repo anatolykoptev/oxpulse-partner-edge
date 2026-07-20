@@ -4,6 +4,7 @@
 //! See `docs/superpowers/plans/2026-04-21-group-calls-execution.md`.
 
 pub mod bwe_hint;
+pub mod bwe_temporal_cap;
 pub mod client;
 pub mod client_ws;
 pub mod config;

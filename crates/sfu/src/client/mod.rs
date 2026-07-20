@@ -268,6 +268,28 @@ pub struct Client {
     /// forwarding. `u8::MAX` means "no cap" (forward all layers).
     #[cfg(feature = "vfm")]
     pub(crate) max_vfm_temporal_layer: u8,
+    /// G3 P3b: SFU-BWE-driven per-subscriber temporal-layer cap. Derived
+    /// from the BWE estimate by [`Client::bwe_select_temporal_cap`] in the
+    /// sub-spatial-floor "grace band" (`audio_only_bps ≤ budget <
+    /// `low_min_bps`). Combined with `max_vfm_temporal_layer` via
+    /// [`Client::effective_temporal_cap`] (MIN — neither client DC nor
+    /// SFU-BWE can raise the other). `u8::MAX` means "no cap" (inert /
+    /// fail-open). Behind `SFU_BWE_TEMPORAL_CAP` (default off).
+    #[cfg(feature = "vfm")]
+    pub(crate) bwe_vfm_temporal_cap: u8,
+    /// G3 P3b: lower Schmitt rail for the BWE temporal cap — the
+    /// `audio_only_bps` from the SAME `oxpulse_partner_edge_pacer_config()`
+    /// the pacer is seeded with (self-sourced so the registry never learns
+    /// pacer thresholds, and correct against the fork's 100k override).
+    /// Enter deepest degrade (cap=0) when `budget < lo`.
+    #[cfg(feature = "vfm")]
+    pub(crate) bwe_cap_audio_only_bps: u64,
+    /// G3 P3b: upper Schmitt rail for the BWE temporal cap — the
+    /// `low_min_bps` from the SAME `oxpulse_partner_edge_pacer_config()`
+    /// the pacer is seeded with. Uncap (cap=u8::MAX) when `budget ≥ hi`.
+    /// Real hysteresis on the disruptive 0↔1 edge: enter <100k, exit ≥150k.
+    #[cfg(feature = "vfm")]
+    pub(crate) bwe_cap_low_min_bps: u64,
     /// G3 P1: per-stream Dependency Descriptor structure cache for this
     /// subscriber. Keyed by `(origin ClientId, Mid)` — the publisher track.
     /// Used to resolve template-only DDs (non-keyframe frames) against the
@@ -376,7 +398,37 @@ impl Client {
     /// VFM filter before forwarding. Pass `u8::MAX` to disable the cap.
     #[cfg(feature = "vfm")]
     pub fn set_max_vfm_temporal_layer(&mut self, max: u8) {
+        let before = self.effective_temporal_cap();
         self.max_vfm_temporal_layer = max;
+        self.invalidate_dd_cache_on_cap_engage(before);
+    }
+
+    /// G3 P3b: invalidate the per-subscriber DD structure cache on a
+    /// cap-ENGAGE transition. Defined here in `client/mod.rs` (not
+    /// `fanout.rs`) because it is called from BOTH `client/mod.rs`
+    /// (`set_max_vfm_temporal_layer`) and `client/fanout.rs`
+    /// (`bwe_select_temporal_cap`); a private fn in the parent `client`
+    /// module is accessible from the child `client::fanout` module, but
+    /// not vice-versa.
+    ///
+    /// `before` = `effective_temporal_cap()` sampled BEFORE the cap
+    /// mutation. Only a MAX→<MAX transition can expose a stale structure:
+    /// while UNCAPPED the perf guard in `handle_media_data_out` skips
+    /// parsing/caching, so a keyframe's `template_dependency_structure`
+    /// arriving in that window is NOT cached and the cache may hold a
+    /// STALE structure from a prior capped window. On ENGAGE, that stale
+    /// structure could misresolve a template-only frame's `template_id`
+    /// into an in-range-but-WRONG `temporal_id` (only out-of-range →
+    /// `None` → safe forward) — a true-T0 reference frame misresolving
+    /// to `tid > cap` would be DROPPED → decode break. Clearing forces
+    /// the already-accepted safe cold-forward (parse returns
+    /// `temporal_id = None` without a `prior` structure) until the next
+    /// keyframe re-caches a fresh structure.
+    #[cfg(feature = "vfm")]
+    fn invalidate_dd_cache_on_cap_engage(&mut self, before: u8) {
+        if before == u8::MAX && self.effective_temporal_cap() < u8::MAX {
+            self.dd_structure_cache.clear();
+        }
     }
 
     /// Simulcast RIDs the peer has been observed publishing. Built up

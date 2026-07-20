@@ -184,3 +184,13 @@ name = "dd_temporal_drop"
 # and the `vfm`-gated `set_max_vfm_temporal_layer_for_tests` + temporal drop
 # wiring in `handle_media_data_out`. Run with `--features test-utils,vfm`.
 required-features = ["test-utils", "vfm"]
+
+[[test]]
+name = "bwe_temporal_cap_test"
+# G3 P3b — SFU-BWE-driven per-subscriber temporal-layer cap. Uses `new_client`,
+# `seed_track_in`, `Registry::*_for_tests` seams (test-utils), the `vfm`-gated
+# `bwe_select_temporal_cap` / `effective_temporal_cap` wiring, and the
+# `bwe_temporal_cap` kill-switch (test-utils override). All tests are `#[serial]`
+# and the file is its own binary, so the process-global flag overrides are
+# isolated. Run with `--features test-utils,vfm`.
+required-features = ["test-utils", "vfm"]

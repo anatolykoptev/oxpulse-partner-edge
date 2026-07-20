@@ -182,6 +182,18 @@ impl DdStructureCache {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    /// Evict the entire cache. Called on cap-ENGAGE (effective cap
+    /// MAX→<MAX transition) so a structure cached during a prior capped
+    /// window — which the perf guard skipped re-parsing while UNCAPPED —
+    /// can never misresolve a template-only frame into an unsafe drop.
+    /// After clear, capped resolution restarts COLD: template-only DDs
+    /// fail-soft FORWARD (parse returns `temporal_id = None` without a
+    /// `prior` structure) until the next keyframe re-caches a fresh one.
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
 }
 
 impl Default for DdStructureCache {
