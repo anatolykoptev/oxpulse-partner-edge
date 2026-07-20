@@ -79,6 +79,8 @@ impl Client {
             relay_hs256_fallback_enabled: true,
             #[cfg(feature = "vfm")]
             max_vfm_temporal_layer: u8::MAX,
+            #[cfg(feature = "vfm")]
+            dd_structure_cache: crate::svc::DdStructureCache::new(),
             // Phase J M2 — all None/empty at construction; populated by
             // with_ws_msg_tx / with_ws_ctrl_rx in the browser inject arm.
             ws_msg_tx: None,

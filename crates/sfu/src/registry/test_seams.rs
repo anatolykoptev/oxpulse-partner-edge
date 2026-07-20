@@ -53,6 +53,15 @@ impl Registry {
         self.clients[idx].set_desired_layer(rid);
     }
 
+    /// Test-only: set a client's RFC 9626 VFM temporal-layer cap by index.
+    /// G3 P1 — drives the per-subscriber temporal drop in
+    /// `handle_media_data_out`. Pass `u8::MAX` to disable the cap.
+    #[doc(hidden)]
+    #[cfg(feature = "vfm")]
+    pub fn set_max_vfm_temporal_layer_for_tests(&mut self, idx: usize, cap: u8) {
+        self.clients[idx].set_max_vfm_temporal_layer(cap);
+    }
+
     /// Test-only: inject an audio level into the dominant-speaker
     /// detector bypassing the (M2-deferred) wire-level RFC 6464
     /// parser. Uses `record_level` directly with ms conversion.

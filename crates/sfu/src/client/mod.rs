@@ -268,6 +268,14 @@ pub struct Client {
     /// forwarding. `u8::MAX` means "no cap" (forward all layers).
     #[cfg(feature = "vfm")]
     pub(crate) max_vfm_temporal_layer: u8,
+    /// G3 P1: per-stream Dependency Descriptor structure cache for this
+    /// subscriber. Keyed by `(origin ClientId, Mid)` — the publisher track.
+    /// Used to resolve template-only DDs (non-keyframe frames) against the
+    /// last keyframe's `template_dependency_structure`. See
+    /// `svc::dd_ext::DdStructureCache` for the keying + interior-mutability
+    /// design note.
+    #[cfg(feature = "vfm")]
+    pub(crate) dd_structure_cache: crate::svc::DdStructureCache,
     /// Phase J M2: WS outbound channel for sending offer-renegotiate JSON to browser.
     /// `None` for relay/test clients (no WS session).
     pub(crate) ws_msg_tx: Option<tokio::sync::mpsc::Sender<String>>,
