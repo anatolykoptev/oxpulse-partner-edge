@@ -20,11 +20,11 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
-    cargo chef cook --release --locked -p oxpulse-sfu --recipe-path recipe.json
+    cargo chef cook --release --locked -p oxpulse-sfu --features vfm --recipe-path recipe.json
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
-    cargo build --release --locked -p oxpulse-sfu --bin oxpulse-sfu \
+    cargo build --release --locked -p oxpulse-sfu --features vfm --bin oxpulse-sfu \
  && cp target/release/oxpulse-sfu /binary
 
 # ─── Stage 3: runtime ────────────────────────────────────────────────────────

@@ -248,6 +248,11 @@ pub struct SfuMetrics {
     /// federation path is live; `sum(sfu_relay_api_enabled) == 0` while cascade
     /// relay is expected fires the mis-activation alert.
     pub relay_api_enabled: IntGaugeVec,
+    /// 1 if the vfm temporal-drop subsystem is compiled into this build
+    /// (Dockerfile.sfu `--features vfm`); 0 otherwise. PromQL:
+    /// `sfu_vfm_enabled == 1` confirms the G3 temporal-drop path is live
+    /// post-deploy.
+    pub vfm_enabled: IntGauge,
 
     // ── Phase 8 T10: voice DC relay metrics ──────────────────────────────────
     /// Phase 8 T10: bytes written to a subscriber's outbound voice DC.
@@ -853,6 +858,23 @@ impl SfuMetrics {
         for auth in [RELAY_AUTH_EDDSA, RELAY_AUTH_HS256, RELAY_AUTH_BOTH] {
             let _ = relay_api_enabled.with_label_values(&[auth]).get();
         }
+
+        // G3 P3a: compiled-in build-flag gauge for the vfm temporal-drop
+        // subsystem. A registered plain IntGauge always appears in
+        // `gather()`, so it reports 0 from startup; set to 1 only when the
+        // `vfm` feature is on so a prod build that compiled the drop path
+        // out is directly alertable via `sfu_vfm_enabled == 0` instead of
+        // being silent.
+        let vfm_enabled = reg!(IntGauge::with_opts(Opts::new(
+            "vfm_enabled",
+            "1 if the vfm temporal-drop subsystem is compiled into this \
+             build (Dockerfile.sfu --features vfm); 0 otherwise. PromQL: \
+             sfu_vfm_enabled == 1 confirms the G3 temporal-drop path is \
+             live post-deploy.",
+        ))
+        .context("vfm_enabled")?);
+        #[cfg(feature = "vfm")]
+        vfm_enabled.set(1);
 
         let chat_relay_active_channels = reg!(IntGaugeVec::new(
             Opts::new(
@@ -1461,6 +1483,7 @@ impl SfuMetrics {
             chat_relay_active_channels,
             relay_jwt_verify_total,
             relay_api_enabled,
+            vfm_enabled,
             voice_relay_tx_bytes_total,
             voice_relay_rx_bytes_total,
             voice_relay_dropped,
@@ -1729,6 +1752,37 @@ mod tests {
         assert!(
             text.contains("sfu_client_ws_disabled"),
             "sfu_client_ws_disabled must be reachable via /metrics scrape, \
+             got:\n{text}",
+        );
+    }
+
+    /// G3 P3a: the `vfm` temporal-drop subsystem is compiled into the prod
+    /// image only when `Dockerfile.sfu` builds `oxpulse-sfu` with
+    /// `--features vfm`. This test is itself `#[cfg(feature = "vfm")]`-gated:
+    /// under a featureless build (CI's `cargo test --workspace`) the `set(1)`
+    /// is compiled out, so the gauge stays 0 and this assert would be wrong to
+    /// run — the gate compiles the test out there. CI's
+    /// `cargo test -p oxpulse-sfu --features test-utils,vfm` job exercises it.
+    /// A 0 under the feature means the gauge was not registered, not set under
+    /// the cfg, or the field was dropped from the struct — all of which would
+    /// silently hide a prod build that compiled the drop path out.
+    #[cfg(feature = "vfm")]
+    #[test]
+    fn sfu_vfm_enabled_gauge_reads_one_when_feature_is_on() {
+        let m = SfuMetrics::new().expect("metrics build");
+        assert_eq!(
+            m.vfm_enabled.get(),
+            1,
+            "vfm_enabled must read 1 when the vfm feature is compiled in. A 0 \
+             means the G3 temporal-drop path is compiled out of this build or \
+             the gauge was not set under #[cfg(feature = \"vfm\")] in \
+             SfuMetrics::new."
+        );
+
+        let text = m.encode_text().expect("encode metrics");
+        assert!(
+            text.contains("sfu_vfm_enabled"),
+            "sfu_vfm_enabled must be reachable via /metrics scrape, \
              got:\n{text}",
         );
     }
