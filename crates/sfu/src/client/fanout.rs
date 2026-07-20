@@ -99,6 +99,21 @@ impl Client {
     /// matched packets and layer selections.
     #[tracing::instrument(level = "trace", skip(self, data), fields(dst_peer = *self.id, src_peer = *origin))]
     pub fn handle_media_data_out(&mut self, origin: ClientId, data: &MediaData) {
+        // G3 P0: Dependency Descriptor presence observability. Read the DD
+        // marker placed by `svc::DdSerializer` on ingress and increment a
+        // bounded-label counter. Pure observability — NO drop, NO forwarding
+        // change. Inspected before the layer filter so every packet the
+        // fanout sees for this subscriber is counted, regardless of layer.
+        let dd_present = data
+            .ext_vals
+            .user_values
+            .get::<crate::svc::DdPresent>()
+            .is_some();
+        self.metrics
+            .sfu_dd_frames_total
+            .with_label_values(&[if dd_present { "true" } else { "false" }])
+            .inc();
+
         // M1.3 / M5.3: drop packets that don't match desired layer.
         // The desired layer itself may have been updated by the pacer
         // via [`pacer_select_layer`] earlier in the fanout cycle.

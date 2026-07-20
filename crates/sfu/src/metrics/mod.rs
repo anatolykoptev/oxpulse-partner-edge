@@ -528,6 +528,21 @@ pub struct SfuMetrics {
     /// `relay_connect_success_total` per edge — a rising exhausted/success
     /// ratio flags a degraded or unreachable upstream hub.
     pub relay_candidate_exhausted_total: IntCounter,
+
+    // ── G3 P0: Dependency Descriptor presence observability ──────────────────
+    /// Count of forwarded RTP packets inspected for the AV1 Dependency
+    /// Descriptor (DD) header extension, labelled by `present` ∈ `{true,
+    /// false}`. `true` = the DD extension was present on the incoming packet
+    /// (`MediaData.ext_vals.user_values.get::<DdPresent>()` was `Some`);
+    /// `false` = it was absent.
+    ///
+    /// G3 P0 is observability-only: a rising `present="true"` rate confirms
+    /// the str0m `ExtensionSerializer` seam + URI-rebind is delivering DD
+    /// bytes to the fanout path, de-risking the P1 SVC layer-selection
+    /// investment. NO packet is dropped and NO forwarding behaviour changes
+    /// based on this counter. Bounded label (2 values) — no per-client
+    /// cardinality, no reap scrub needed.
+    pub sfu_dd_frames_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -1350,6 +1365,25 @@ impl SfuMetrics {
         ))
         .context("relay_candidate_exhausted_total")?);
 
+        // G3 P0: Dependency Descriptor presence observability. Bounded label
+        // (present=true/false). Pre-touch both values so the alert baseline
+        // is 0 at startup, not absent — mirrors sdp_msid_injected_total.
+        let sfu_dd_frames_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "dd_frames_total",
+                "Forwarded RTP packets inspected for the AV1 Dependency \
+                 Descriptor (DD) header extension, by presence. G3 P0 \
+                 observability-only — no packet is dropped based on this \
+                 counter. present=true means the DD extension was parsed on \
+                 the incoming packet (str0m ExtensionSerializer seam + \
+                 URI-rebind delivered DD bytes to the fanout path)."
+            ),
+            &["present"],
+        )
+        .context("sfu_dd_frames_total")?);
+        let _ = sfu_dd_frames_total.with_label_values(&["true"]).get();
+        let _ = sfu_dd_frames_total.with_label_values(&["false"]).get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1426,6 +1460,7 @@ impl SfuMetrics {
             relay_connect_success_total,
             relay_candidate_exhausted_total,
             pacer_tick_throttled_total,
+            sfu_dd_frames_total,
         })
     }
 
