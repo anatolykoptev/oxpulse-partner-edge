@@ -97,6 +97,10 @@ impl Client {
     /// Forward a `MediaData` from `origin` out to this peer. Applies
     /// the simulcast layer filter; increments Prometheus counters for
     /// matched packets and layer selections.
+    ///
+    /// G3 P1: additionally applies a per-subscriber temporal-layer drop
+    /// based on the parsed Dependency Descriptor. See the decode-safety
+    /// invariant in [`crate::svc::dd_parse`].
     #[tracing::instrument(level = "trace", skip(self, data), fields(dst_peer = *self.id, src_peer = *origin))]
     pub fn handle_media_data_out(&mut self, origin: ClientId, data: &MediaData) {
         // G3 P0: Dependency Descriptor presence observability. Read the DD
@@ -113,6 +117,59 @@ impl Client {
             .sfu_dd_frames_total
             .with_label_values(&[if dd_present { "true" } else { "false" }])
             .inc();
+
+        // G3 P1: per-subscriber temporal-layer drop.
+        //
+        // DECODE-SAFETY INVARIANT: dropping frames with temporal_id > cap is
+        // decode-safe because in temporal SVC (e.g. L1T3) a frame at
+        // temporal_id = T references ONLY frames at temporal_id ≤ T (AV1
+        // spec §3: "a temporal layer with temporal_id T … is only allowed to
+        // reference previously coded video data having temporal_id T' and
+        // spatial_id S', where T' <= T and S' <= S"). Dropping every frame
+        // with temporal_id > cap leaves a self-consistent, decodable
+        // lower-rate stream — no remaining frame depends on a dropped one.
+        // SPATIAL drop is out of scope (P2) and is NOT performed here.
+        //
+        // Fail-soft: if the DD is absent, malformed, or the temporal_id is
+        // unresolvable (template-only DD before any keyframe structure was
+        // cached), the packet is FORWARDED (no drop). A relay must not crash
+        // or over-drop on adversarial/malformed headers.
+        #[cfg(feature = "vfm")]
+        {
+            if dd_present {
+                if let Some(dd_bytes) = data.ext_vals.user_values.get::<crate::svc::DdPresent>() {
+                    let stream_key = (origin, data.mid);
+                    let prior = self.dd_structure_cache.get(&stream_key);
+                    if let Some(parsed) =
+                        crate::svc::parse_dependency_descriptor(&dd_bytes.0, prior)
+                    {
+                        // Cache the structure if this frame carried one (keyframe).
+                        if let Some(structure) = &parsed.structure {
+                            self.dd_structure_cache
+                                .insert(stream_key, structure.clone());
+                        }
+                        // Drop iff temporal_id is known AND exceeds the cap.
+                        // temporal_id == None → fail-soft FORWARD.
+                        if let Some(tid) = parsed.temporal_id {
+                            if tid > self.max_vfm_temporal_layer {
+                                let label = match tid {
+                                    0 => "0",
+                                    1 => "1",
+                                    2 => "2",
+                                    _ => "3plus",
+                                };
+                                self.metrics
+                                    .sfu_dd_temporal_drops_total
+                                    .with_label_values(&[label])
+                                    .inc();
+                                return;
+                            }
+                        }
+                    }
+                    // parse returned None (malformed) → fail-soft FORWARD.
+                }
+            }
+        }
 
         // M1.3 / M5.3: drop packets that don't match desired layer.
         // The desired layer itself may have been updated by the pacer

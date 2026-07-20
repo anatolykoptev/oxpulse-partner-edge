@@ -543,6 +543,20 @@ pub struct SfuMetrics {
     /// based on this counter. Bounded label (2 values) — no per-client
     /// cardinality, no reap scrub needed.
     pub sfu_dd_frames_total: IntCounterVec,
+
+    // ── G3 P1: per-subscriber temporal-layer drop ───────────────────────────
+    /// Count of forwarded RTP packets **dropped** by the G3 P1 temporal-layer
+    /// filter, labelled by the packet's `temporal_id` ∈ `{"0","1","2","3plus"}`.
+    /// A packet is dropped when its parsed DD `temporal_id` exceeds the
+    /// subscriber's `max_vfm_temporal_layer` cap. The `3plus` label collapses
+    /// all temporal_id ≥ 3 to keep label cardinality bounded (AV1 temporal
+    /// layers in practice are 0..=2 for L1T3; higher is rare and would
+    /// unbound the label if passed through verbatim).
+    ///
+    /// Decode-safety: dropping frames with `temporal_id > cap` is safe because
+    /// in temporal SVC a frame at layer T references only frames at layer ≤ T
+    /// (AV1 spec §3). The remaining stream is self-consistent and decodable.
+    pub sfu_dd_temporal_drops_total: IntCounterVec,
 }
 
 impl SfuMetrics {
@@ -1384,6 +1398,30 @@ impl SfuMetrics {
         let _ = sfu_dd_frames_total.with_label_values(&["true"]).get();
         let _ = sfu_dd_frames_total.with_label_values(&["false"]).get();
 
+        // G3 P1: temporal-layer drop counter. Bounded label (4 values:
+        // 0/1/2/3plus). Pre-touch all so the baseline is 0 at startup.
+        let sfu_dd_temporal_drops_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "dd_temporal_drops_total",
+                "Forwarded RTP packets dropped by the G3 P1 per-subscriber \
+                 temporal-layer filter, by the packet's temporal_id. A packet \
+                 is dropped when its parsed Dependency Descriptor temporal_id \
+                 exceeds the subscriber's max_vfm_temporal_layer cap. \
+                 Decode-safe: in temporal SVC a frame at layer T references \
+                 only frames at layer <= T (AV1 spec sec 3), so dropping \
+                 temporal_id > cap leaves a decodable lower-rate stream. \
+                 Label 3plus collapses all temporal_id >= 3 to bound cardinality."
+            ),
+            &["temporal_id"],
+        )
+        .context("sfu_dd_temporal_drops_total")?);
+        let _ = sfu_dd_temporal_drops_total.with_label_values(&["0"]).get();
+        let _ = sfu_dd_temporal_drops_total.with_label_values(&["1"]).get();
+        let _ = sfu_dd_temporal_drops_total.with_label_values(&["2"]).get();
+        let _ = sfu_dd_temporal_drops_total
+            .with_label_values(&["3plus"])
+            .get();
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1461,6 +1499,7 @@ impl SfuMetrics {
             relay_candidate_exhausted_total,
             pacer_tick_throttled_total,
             sfu_dd_frames_total,
+            sfu_dd_temporal_drops_total,
         })
     }
 
