@@ -238,6 +238,14 @@ impl Registry {
         };
 
         let floor_enabled = crate::pacer_floor::pacer_floor_enabled();
+        // G3 P3b: hoist the BWE temporal-cap kill-switch read once per pass.
+        // The cap's ≥100ms floor is independent of SFU_PACER_FLOOR — both
+        // flags feed the SAME `pacer_tick_ready` call (single call per
+        // client/pass), so the cap engages even when the pacer floor is off
+        // and vice-versa. The draft's double-call of the SIDE-EFFECTING
+        // `pacer_tick_ready` made the feature DEAD under the intended prod
+        // config (SFU_PACER_FLOOR=1) — do not reintroduce that.
+        let bwe_cap_enabled = crate::bwe_temporal_cap::bwe_temporal_cap_enabled();
 
         for client in self.clients.iter_mut() {
             // CAST INVARIANT: same u64-backed `ClientId` rule as in
@@ -269,9 +277,19 @@ impl Registry {
             // and skips straight to the metrics snapshot below, so gauges
             // stay fresh even on a throttled pass. Behind SFU_PACER_FLOOR,
             // default off (see `crate::pacer_floor`).
-            let chosen = if floor_enabled
-                && !client.pacer_tick_ready(now, oxpulse_sfu_kit::bwe::PACER_MIN_TICK_INTERVAL)
-            {
+            //
+            // G3 P3b: the BWE temporal-cap's ≥100ms floor shares the SAME
+            // `pacer_tick_ready` call — `tick_ready` is computed once per
+            // client/pass and gates BOTH the pacer FSM advance and the cap
+            // selection. When neither flag is on, `tick_ready` is trivially
+            // `true` (no `pacer_tick_ready` call → no `last_pacer_tick` side
+            // effect), preserving byte-identical FSM behaviour.
+            let tick_ready = if floor_enabled || bwe_cap_enabled {
+                client.pacer_tick_ready(now, oxpulse_sfu_kit::bwe::PACER_MIN_TICK_INTERVAL)
+            } else {
+                true
+            };
+            let chosen = if floor_enabled && !tick_ready {
                 self.metrics
                     .pacer_tick_throttled_total
                     .with_label_values(&[&peer_label])
@@ -369,6 +387,27 @@ impl Registry {
                         ])
                         .inc();
                 }
+            }
+
+            // G3 P3b: SFU-BWE-driven per-subscriber temporal-layer cap.
+            // Runs only when the kill-switch is on AND the tick was not
+            // throttled (the cap's ≥100ms floor shares `tick_ready` with
+            // the pacer floor). NOT routed through PacerAction — the cap
+            // is a pure function of `budget_bps` + the Schmitt state in
+            // `bwe_vfm_temporal_cap`. Cap-only label (no peer_id) → 3
+            // series, federated-safe.
+            #[cfg(feature = "vfm")]
+            if bwe_cap_enabled && tick_ready {
+                let cap = client.bwe_select_temporal_cap(budget);
+                let label = match cap {
+                    0 => "0",
+                    1 => "1",
+                    _ => "uncapped",
+                };
+                self.metrics
+                    .bwe_temporal_cap_total
+                    .with_label_values(&[label])
+                    .inc();
             }
         }
     }

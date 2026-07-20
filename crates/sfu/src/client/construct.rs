@@ -43,6 +43,13 @@ impl Client {
         // with "sctp_stream_id (5) exists already". Browser construction
         // sites chain `Client::new(rtc, metrics).with_chat_dcs()`; relay
         // construction sites do not — cascade SFU edges have no UI chat.
+        //
+        // G3 P3b: hoist the pacer config to a local so the BWE temporal-cap
+        // rails (`audio_only_bps`, `low_min_bps`) are captured from the SAME
+        // `oxpulse_partner_edge_pacer_config()` value the pacer is seeded
+        // with — self-sourced so the registry never learns pacer thresholds,
+        // and correct against the fork's `audio_only_bps→100k` override.
+        let pacer_config = crate::pacer::oxpulse_partner_edge_pacer_config();
         Self {
             id: next_client_id(),
             rtc,
@@ -80,6 +87,12 @@ impl Client {
             #[cfg(feature = "vfm")]
             max_vfm_temporal_layer: u8::MAX,
             #[cfg(feature = "vfm")]
+            bwe_vfm_temporal_cap: u8::MAX,
+            #[cfg(feature = "vfm")]
+            bwe_cap_audio_only_bps: pacer_config.audio_only_bps,
+            #[cfg(feature = "vfm")]
+            bwe_cap_low_min_bps: pacer_config.low_min_bps,
+            #[cfg(feature = "vfm")]
             dd_structure_cache: crate::svc::DdStructureCache::new(),
             // Phase J M2 — all None/empty at construction; populated by
             // with_ws_msg_tx / with_ws_ctrl_rx in the browser inject arm.
@@ -95,9 +108,7 @@ impl Client {
             // not subject to peer-id steal.
             external_peer_id: None,
             close_signal: None,
-            pacer: oxpulse_sfu_kit::SubscriberPacer::with_config(
-                crate::pacer::oxpulse_partner_edge_pacer_config(),
-            ),
+            pacer: oxpulse_sfu_kit::SubscriberPacer::with_config(pacer_config),
             last_pacer_tick: None,
             // Phase 2c: populated by with_sfu_events_dc(); relay clients leave None.
             sfu_events_cid: None,

@@ -62,6 +62,35 @@ impl Registry {
         self.clients[idx].set_max_vfm_temporal_layer(cap);
     }
 
+    /// Test-only: read a client's SFU-BWE-driven temporal-layer cap by index.
+    /// G3 P3b — observes the Schmitt state set by `bwe_select_temporal_cap`.
+    /// `u8::MAX` means "no cap" (inert / fail-open).
+    #[doc(hidden)]
+    #[cfg(feature = "vfm")]
+    pub fn bwe_vfm_temporal_cap_for_tests(&self, idx: usize) -> u8 {
+        self.clients[idx].bwe_vfm_temporal_cap
+    }
+
+    /// Test-only: directly invoke `bwe_select_temporal_cap` on a client by
+    /// index, bypassing the `update_pacer_layers` path. G3 P3b — used by
+    /// tests that exercise the Schmitt logic in isolation (without driving
+    /// the full pacer refresh + budget estimator wiring).
+    #[doc(hidden)]
+    #[cfg(feature = "vfm")]
+    pub fn bwe_select_temporal_cap_for_tests(&mut self, idx: usize, budget_bps: Option<u64>) -> u8 {
+        self.clients[idx].bwe_select_temporal_cap(budget_bps)
+    }
+
+    /// Test-only: read a client's cached DD structure count by index.
+    /// G3 P3b LOOP-FIX — used by the cap-engage invalidation guarding test
+    /// to assert the cache is cleared on a MAX→<MAX effective-cap transition
+    /// and NOT cleared on uncap (only engage clears).
+    #[doc(hidden)]
+    #[cfg(feature = "vfm")]
+    pub fn dd_cache_len_for_tests(&self, idx: usize) -> usize {
+        self.clients[idx].dd_structure_cache.len()
+    }
+
     /// Test-only: inject an audio level into the dominant-speaker
     /// detector bypassing the (M2-deferred) wire-level RFC 6464
     /// parser. Uses `record_level` directly with ms conversion.
