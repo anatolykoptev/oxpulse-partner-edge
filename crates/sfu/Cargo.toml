@@ -104,6 +104,13 @@ name = "ice_stun_destination_mismatch"
 required-features = ["test-utils"]
 
 [[test]]
+name = "keyframe_on_switch"
+# G4 — drives the real pacer→bwe.rs wiring path and uses the
+# cfg-gated `keyframe_requests_received_for_tests` capture seam on
+# `Client`, both gated behind `test-utils`.
+required-features = ["test-utils"]
+
+[[test]]
 name = "relay_api"
 required-features = []
 

@@ -288,6 +288,26 @@ impl Registry {
                 client.pacer_select_layer(budget, available)
             };
 
+            // G4: on an ACTUAL layer switch (desired layer changed AND
+            // video is still active — `chosen` is Some), proactively
+            // request a keyframe on the TARGET RID so the subscriber's
+            // decoder gets a keyframe for the new layer immediately
+            // instead of freezing until a reactive PLI (visible stutter)
+            // or the publisher's next periodic keyframe. Worst on
+            // slow/variable internet where the pacer switches exactly
+            // when the user can least afford a freeze. Throttled
+            // per-target-RID inside `emit_keyframe_on_layer_switch`
+            // (mirrors `request_keyframe_throttled`'s MIN_GAP pattern) so
+            // a rapid up/down oscillation cannot storm the publisher.
+            // `chosen == Some(prev_layer)` covers NoChange and
+            // clamped-to-same; `chosen == None` covers SuspendVideo /
+            // GoAudioOnly (no keyframe while video is suspended).
+            if chosen != Some(prev_layer) {
+                if let Some(new_rid) = chosen {
+                    client.emit_keyframe_on_layer_switch(new_rid, &mut self.to_propagate);
+                }
+            }
+
             // Phase 2c: emit PeerSuspended when pacer tier changes.
             // `pending_tier_emit` is set by pacer_select_layer based on PacerAction;
             // None means no state transition occurred this tick.

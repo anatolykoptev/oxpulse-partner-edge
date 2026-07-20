@@ -106,6 +106,18 @@ pub struct SfuMetrics {
     pub pacer_layer_total: IntCounterVec,
     /// M6.1: simulcast layer transitions per subscriber (from/to/peer labels).
     pub layer_transitions_total: IntCounterVec,
+    /// G4: keyframe requests emitted proactively when a subscriber's pacer
+    /// switches it to a different simulcast layer (RID). Eliminates the
+    /// decode-freeze the subscriber would otherwise hit while waiting for a
+    /// reactive PLI or the publisher's next periodic keyframe — worst on
+    /// slow/variable internet where the pacer switches exactly when the user
+    /// can least afford a freeze. Label: `rid` (the TARGET layer requested),
+    /// bounded to `q`/`h`/`f`/`other` — no `peer_id`, so no per-client
+    /// cardinality and no reap_dead scrub needed (mirrors
+    /// `layer_selection_total`'s label-only shape). Throttled per target RID
+    /// by `KEYFRAME_REQUEST_MIN_GAP` in `client::keyframe`, so oscillation
+    /// cannot storm the publisher.
+    pub sfu_keyframe_on_switch_total: IntCounterVec,
     /// Task #18: pacer FSM advances skipped by the `SFU_PACER_FLOOR` min-tick
     /// floor. Label: `peer_id`. Only increments while the floor is enabled
     /// (`SFU_PACER_FLOOR=1`); always-zero on an edge with the flag off.
@@ -586,6 +598,19 @@ impl SfuMetrics {
             &["layer"],
         )
         .context("layer_selection_total")?);
+
+        // G4: keyframe-on-switch counter. Label `rid` only (the TARGET layer
+        // requested) — bounded to q/h/f/other, no per-client cardinality.
+        let sfu_keyframe_on_switch_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_keyframe_on_switch_total",
+                "Keyframe requests emitted proactively on subscriber simulcast \
+                 layer switch (G4). Label: rid = target layer requested. \
+                 Throttled per target RID by KEYFRAME_REQUEST_MIN_GAP."
+            ),
+            &["rid"],
+        )
+        .context("sfu_keyframe_on_switch_total")?);
 
         let dominant_speaker_changes_total = reg!(IntCounter::with_opts(Opts::new(
             "dominant_speaker_changes_total",
@@ -1332,6 +1357,7 @@ impl SfuMetrics {
             client_ws_disabled,
             forwarded_packets_total,
             layer_selection_total,
+            sfu_keyframe_on_switch_total,
             dominant_speaker_changes_total,
             client_connect_total,
             client_disconnect_total,

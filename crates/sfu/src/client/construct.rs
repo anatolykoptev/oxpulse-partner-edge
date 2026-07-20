@@ -49,6 +49,7 @@ impl Client {
             tracks_in: Vec::new(),
             tracks_out: Vec::new(),
             chosen_rid: None,
+            last_switch_keyframe_request: std::collections::HashMap::new(),
             desired_layer: layer::LOW,
             active_rids: HashSet::new(),
             pending_out: VecDeque::new(),
@@ -62,6 +63,8 @@ impl Client {
             last_active_speaker_payload: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "test-utils"))]
             buffered_amount_override: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            keyframe_requests_received: std::sync::Mutex::new(Vec::new()),
             active_speaker_cid,
             keys_dc_cid: None,
             chat_data_cid: None,
