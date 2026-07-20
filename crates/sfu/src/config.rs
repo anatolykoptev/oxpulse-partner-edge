@@ -272,10 +272,31 @@ pub const SUBSCRIBER_BWE_DESIRED_CAP_BPS: u64 = 2_500_000;
 /// emitted no `EgressBitrateEstimate` and `native_estimate` stayed `None`. RELAY
 /// (SFU↔SFU) legs deliberately do NOT use this helper — see `relay/client.rs`.
 pub fn subscriber_rtc_config(stats_interval: Option<Duration>) -> str0m::RtcConfig {
+    // G3 P0: register the AV1 Dependency Descriptor (DD) RTP header-extension
+    // serializer on every browser-facing leg. str0m rebinds this to whatever
+    // extmap id the browser negotiates, matched BY URI (ext.rs `remap` /
+    // `session.rs remote_extmap`), so the local id is arbitrary — it just
+    // must not collide with `ExtensionMap::standard()` (1,2,3,4,10,11,13).
+    // We pick 9. P0 is observability-only: the serializer marks DD presence
+    // on ingress `MediaData.ext_vals.user_values`; no bit-parse, no drop.
+    // See `svc::dd_ext` and `client::fanout::handle_media_data_out`.
+    let dd_ext =
+        str0m::rtp::Extension::with_serializer(crate::svc::DD_URI, crate::svc::DdSerializer);
     str0m::Rtc::builder()
         .set_stats_interval(stats_interval)
         .enable_bwe(Some(str0m::bwe::Bitrate::bps(SUBSCRIBER_BWE_INITIAL_BPS)))
+        .set_extension(DD_LOCAL_EXTMAP_ID, dd_ext)
 }
+
+/// Local extmap id under which the Dependency Descriptor serializer is
+/// registered on the subscriber-facing [`str0m::RtcConfig`].
+///
+/// The exact value is irrelevant to behaviour: str0m's URI-reconcile rebinds
+/// the serializer to whatever extmap id the browser negotiates (matched by
+/// URI, see `str0m::rtp::ext.rs` `remap`). It only needs to avoid the ids
+/// already used by [`str0m::rtp::ExtensionMap::standard`] (1, 2, 3, 4, 10,
+/// 11, 13) and stay within `1..=MAX_ID` (16). 9 is free.
+pub const DD_LOCAL_EXTMAP_ID: u8 = 9;
 
 fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
