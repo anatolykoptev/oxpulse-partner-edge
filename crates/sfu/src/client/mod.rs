@@ -96,6 +96,16 @@ pub struct Client {
     pub tracks_out: Vec<TrackOut>,
     /// Last rid actually forwarded to this peer. `None` = no simulcast yet.
     pub(crate) chosen_rid: Option<Rid>,
+    /// G4: per-target-RID throttle state for keyframe-on-switch requests.
+    /// Mirrors `TrackInEntry::last_keyframe_request` (the upstream throttle
+    /// in `keyframe::request_keyframe_throttled`) but keyed by the TARGET
+    /// RID the subscriber switched to, so a rapid up/down oscillation
+    /// (low→high→low→high) cannot storm the publisher with keyframe
+    /// requests — each RID is independently throttled by
+    /// `KEYFRAME_REQUEST_MIN_GAP`. Per-subscriber (not per-publisher): the
+    /// layer switch is a subscriber-side event, and one keyframe refresh on
+    /// a given RID serves all subscribers of that publisher's layer anyway.
+    pub(crate) last_switch_keyframe_request: std::collections::HashMap<Rid, std::time::Instant>,
     /// Preferred simulcast layer (default [`layer::LOW`]).
     pub(crate) desired_layer: Rid,
     /// Simulcast RIDs this peer has been observed *publishing* —
@@ -243,6 +253,16 @@ pub struct Client {
     /// via the real path. Set via [`Client::set_buffered_amount_for_tests`].
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) buffered_amount_override: Option<usize>,
+    /// Test-only: capture of every `req.rid` reaching
+    /// [`Client::handle_keyframe_request`] (the terminal handler for a
+    /// propagated `Propagated::KeyframeRequest`). The real `writer.request_keyframe`
+    /// call no-ops on an unnegotiated `Rtc` (the unit/integration-test path), so
+    /// this mutex is the only way to observe that the G4 keyframe-on-switch
+    /// emission actually routed a request to the publisher with the correct
+    /// target RID. Each entry is the `Option<Rid>` from the request. Append-only
+    /// across a test; production builds elide this field entirely.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) keyframe_requests_received: std::sync::Mutex<Vec<Option<Rid>>>,
     /// RFC 9626 VFM temporal-layer cap for this subscriber.
     /// Packets at a temporal layer higher than this are dropped before
     /// forwarding. `u8::MAX` means "no cap" (forward all layers).
@@ -402,6 +422,21 @@ impl Client {
             .lock()
             .ok()
             .and_then(|guard| guard.clone())
+    }
+
+    /// Test-only: snapshot of every `req.rid` reaching
+    /// [`Client::handle_keyframe_request`] for this client (the publisher).
+    /// Each element is the `Option<Rid>` from one propagated keyframe
+    /// request. Used by the G4 keyframe-on-switch tests to assert that a
+    /// subscriber layer switch routed exactly one request to the publisher
+    /// with the correct target RID, and that a second switch within the
+    /// throttle window did NOT. Empty in production builds.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn keyframe_requests_received_for_tests(&self) -> Vec<Option<Rid>> {
+        self.keyframe_requests_received
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Phase 2c: write a SFU-originated event frame to the `sfu-events` DC
