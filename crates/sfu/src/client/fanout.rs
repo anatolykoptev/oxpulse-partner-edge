@@ -43,21 +43,42 @@ impl Client {
     /// * `cap==0 && budget < hi` → `0` (sticky cap=0 until budget clears low_min;
     ///   Schmitt hold on the disruptive 0↔1 edge).
     /// * `budget < lo` (100k) → `0` (enter deepest degrade, T0 only).
-    /// * else (grace band `[lo,hi)`) → `1` (drop T2).
+    /// * `cap==u8::MAX && budget ≥ hi_reenter` (140k) → `u8::MAX` (Schmitt hold
+    ///   on the 1↔uncapped edge — stay uncapped across the re-enter band;
+    ///   see `hi_reenter` below). #473.
+    /// * else (grace band `[lo,hi)`, or uncapped below `hi_reenter`) → `1`
+    ///   (drop T2; re-cap from uncapped only below the re-enter rail).
     ///
-    /// Down-transitions immediate. The benign 1↔MAX edge is a bare rail damped
-    /// by the shared min-tick floor (`pacer_tick_ready` ≥100ms). NOT routed
-    /// through the kit's `PacerAction` (no public state accessor; keep
-    /// Client/Registry independent of kit internals — see `pacer_floor.rs`).
+    /// Down-transitions immediate. The 0↔1 edge has a wide Schmitt band
+    /// `[lo,hi)`; the 1↔uncapped edge has a narrower band `[hi_reenter,hi)`
+    /// (= 20% of the `[lo,hi]` spread below `hi`) so a budget hovering ~150k
+    /// no longer flaps T2 on/off at ~10Hz (#473). Still damped by the shared
+    /// min-tick floor (`pacer_tick_ready` ≥100ms). NOT routed through the
+    /// kit's `PacerAction` (no public state accessor; keep Client/Registry
+    /// independent of kit internals — see `pacer_floor.rs`).
     #[cfg(feature = "vfm")]
     pub(crate) fn bwe_select_temporal_cap(&mut self, budget_bps: Option<u64>) -> u8 {
         let (lo, hi) = (self.bwe_cap_audio_only_bps, self.bwe_cap_low_min_bps);
+        // Re-enter rail for the MAX→1 (re-cap) transition only. Uncap still
+        // happens at `b ≥ hi`; re-cap from uncapped happens only when
+        // `b < hi_reenter`. The band `[hi_reenter, hi)` is history-stable
+        // (Schmitt hold) so a budget hovering ~150k doesn't flap T2 (#473).
+        // 20% of the `[lo,hi]` spread below `hi`: chosen as a proportional
+        // band (not a hard-coded constant) so a deployment with different
+        // rails (e.g. 80k/120k) still gets a proportional 8k hysteresis
+        // band rather than a fixed 10k that could be too wide or too narrow
+        // relative to its rails. Both the inner and outer subtractions are
+        // saturating, so a misconfigured rail set (`lo >= hi`) can never
+        // underflow/panic — it yields `hi_reenter == hi` (empty band → no
+        // hysteresis, still correct), not a wrapped-huge value.
+        let hi_reenter = hi.saturating_sub(hi.saturating_sub(lo) / 5);
         let next = match (self.bwe_vfm_temporal_cap, budget_bps) {
             (_, None) => u8::MAX,
-            (_, Some(b)) if b >= hi => u8::MAX,
-            (0, Some(b)) if b < hi => 0,
-            (_, Some(b)) if b < lo => 0,
-            (_, Some(_)) => 1,
+            (_, Some(b)) if b < lo => 0, // deepest degrade, always
+            (_, Some(b)) if b >= hi => u8::MAX, // recover → uncap (any state)
+            (0, Some(_)) => 0,           // sticky-0 (b in [lo,hi))
+            (u8::MAX, Some(b)) if b >= hi_reenter => u8::MAX, // uncapped: hold across the re-enter band
+            (_, Some(_)) => 1,                                // re-cap / grace band → 1
         };
         // Sample `before` AFTER computing `next` from the match (the match
         // reads the OLD `bwe_vfm_temporal_cap`) but BEFORE writing it back,

@@ -316,10 +316,14 @@ fn bwe_temporal_cap_precedence_min() {
 
 // ─── Test 3: No-flap damping via min-tick floor ──────────────────────────────
 
-/// Budget oscillates 149k/151k/149k/151k across throttled+non-throttled
-/// ticks. The shared min-tick floor (≥100ms) damps the 1↔MAX edge so the
-/// cap changes at most once (MAX→1 on the first real tick; throttled
-/// ticks skip the cap update entirely).
+/// Budget oscillates 139k/151k/139k/151k across throttled+non-throttled
+/// ticks. 139k < hi_reenter=140k → re-cap to 1; 151k ≥ hi=150k → uncap.
+/// The shared min-tick floor (≥100ms) damps the 1↔MAX edge so the cap
+/// changes at most once (MAX→1 on the first real tick; throttled ticks
+/// skip the cap update entirely). Uses 139k (not 149k) because 149k now
+/// falls inside the [hi_reenter,hi) hysteresis hold — it would NOT re-cap
+/// from uncapped, so it can no longer exercise the tick-floor damper on
+/// this edge (see test 8 for the hysteresis-band damping of 149k/151k).
 #[test]
 #[serial]
 fn bwe_temporal_cap_no_flap_via_tick_floor() {
@@ -333,11 +337,12 @@ fn bwe_temporal_cap_no_flap_via_tick_floor() {
 
         let t0 = Instant::now();
 
-        // Tick 1 (real, first tick): 149k → grace band → cap=1 (change 1: MAX→1)
-        set_budget(&mut r, sub, 149_000);
+        // Tick 1 (real, first tick): 139k < hi_reenter=140k → re-cap → cap=1
+        // (change 1: MAX→1).
+        set_budget(&mut r, sub, 139_000);
         r.force_pacer_refresh_at_for_tests(origin, t0);
         let cap_after_1 = r.bwe_vfm_temporal_cap_for_tests(SUB);
-        assert_eq!(cap_after_1, 1, "149k → cap=1");
+        assert_eq!(cap_after_1, 1, "139k < hi_reenter → cap=1");
 
         // Tick 2 (throttled, 10ms < 100ms): 151k → tick_ready=false → cap stays 1
         set_budget(&mut r, sub, 151_000);
@@ -348,11 +353,11 @@ fn bwe_temporal_cap_no_flap_via_tick_floor() {
             "151k on throttled tick → cap stays 1 (no flap)"
         );
 
-        // Tick 3 (real, ≥100ms): 149k → cap=1 (no change, already 1)
-        set_budget(&mut r, sub, 149_000);
+        // Tick 3 (real, ≥100ms): 139k → cap=1 (no change, already 1)
+        set_budget(&mut r, sub, 139_000);
         r.force_pacer_refresh_at_for_tests(origin, t0 + Duration::from_millis(100));
         let cap_after_3 = r.bwe_vfm_temporal_cap_for_tests(SUB);
-        assert_eq!(cap_after_3, 1, "149k on real tick → cap stays 1");
+        assert_eq!(cap_after_3, 1, "139k on real tick → cap stays 1");
 
         // Tick 4 (throttled, 110ms < 200ms): 151k → tick_ready=false → cap stays 1
         set_budget(&mut r, sub, 151_000);
@@ -614,6 +619,210 @@ fn bwe_temporal_cap_engage_invalidates_dd_structure_cache() {
             r.dd_cache_len_for_tests(SUB),
             0,
             "(c) re-engage (MAX→<MAX) MUST clear the cache — stale-structure window closed"
+        );
+    }
+    oxpulse_sfu::bwe_temporal_cap::reset_bwe_temporal_cap_for_tests();
+}
+
+// ─── Test 8: #473 — no-flap in the 1↔uncapped hysteresis band ───────────────
+//
+// The `1 ↔ u8::MAX` edge used the SAME threshold `hi=150k` both directions
+// (enter 1 when b<hi, exit to MAX when b≥hi) → NO hysteresis → a budget
+// hovering ~145k flapped T2 on/off up to 10Hz. The fix adds a re-enter rail
+// `hi_reenter = hi - (hi-lo)/5` (=140k for prod rails 100k/150k): uncap still
+// at b≥hi, re-cap from uncapped only when b<hi_reenter. The band
+// [hi_reenter, hi) = [140k,150k) becomes history-stable (Schmitt hold).
+//
+// Falsification: against the OLD match (no `hi_reenter` arm), the uncapped
+// 145k case drops to 1 on the first tick (flap). With the fix it stays MAX.
+// The capped-1 control case stays 1 under both (the band is a hold, not a
+// force-uncap) — it pins that the fix doesn't over-correct.
+
+#[test]
+#[serial]
+fn bwe_temporal_cap_no_flap_in_reenter_band() {
+    oxpulse_sfu::bwe_temporal_cap::set_bwe_temporal_cap_for_tests(true);
+    {
+        // ── Half A: from UNCAPPED start, steady 145k → stays MAX (0 changes) ──
+        let mut r = setup_pub_sub(800, 801);
+        // Default client state is u8::MAX (uncapped); confirm the invariant.
+        assert_eq!(
+            r.bwe_vfm_temporal_cap_for_tests(SUB),
+            u8::MAX,
+            "fixture: subscriber starts uncapped"
+        );
+
+        let mut changes_a = 0u32;
+        let mut prev = u8::MAX;
+        // Feed steady 145k (inside [hi_reenter=140k, hi=150k)) across 5 ticks.
+        for _ in 0..5 {
+            let cap = r.bwe_select_temporal_cap_for_tests(SUB, Some(145_000));
+            assert_eq!(
+                cap,
+                u8::MAX,
+                "145k in [hi_reenter,hi) from uncapped → hold MAX (no flap)"
+            );
+            if cap != prev {
+                changes_a += 1;
+                prev = cap;
+            }
+        }
+        assert_eq!(
+            changes_a, 0,
+            "uncapped + steady 145k across the band → 0 cap changes (pre-fix flaps to 1)"
+        );
+
+        // ── Half B: from CAPPED-1 start, steady 145k → stays 1 (0 changes) ──
+        let mut r2 = setup_pub_sub(810, 811);
+        // Drive to cap=1 first via 130k (grace band, below hi_reenter).
+        let cap1 = r2.bwe_select_temporal_cap_for_tests(SUB, Some(130_000));
+        assert_eq!(cap1, 1, "130k from uncapped → cap=1 (drive to capped-1)");
+
+        let mut changes_b = 0u32;
+        let mut prev = 1u8;
+        for _ in 0..5 {
+            let cap = r2.bwe_select_temporal_cap_for_tests(SUB, Some(145_000));
+            assert_eq!(
+                cap, 1,
+                "145k in [hi_reenter,hi) from capped-1 → hold 1 (band is a hold, not force-uncap)"
+            );
+            if cap != prev {
+                changes_b += 1;
+                prev = cap;
+            }
+        }
+        assert_eq!(
+            changes_b, 0,
+            "capped-1 + steady 145k across the band → 0 cap changes"
+        );
+    }
+    oxpulse_sfu::bwe_temporal_cap::reset_bwe_temporal_cap_for_tests();
+}
+
+// ─── Test 9: 149k/151k oscillation damped by the hysteresis band ────────────
+//
+// Pre-fix, alternating 149k/151k across the hi=150k rail flapped the cap
+// every tick (MAX↔1). Post-fix, 149k ≥ hi_reenter=140k so an UNCAPPED client
+// holds MAX across both sides of the rail → ≤1 change total across 6 ticks.
+//
+// Falsification: against the OLD match, tick1 149k drops MAX→1 (change),
+// tick2 151k lifts 1→MAX (change), … → 6 changes, fails the ≤1 bound.
+
+#[test]
+#[serial]
+fn bwe_temporal_cap_oscillation_149_151_damped() {
+    oxpulse_sfu::bwe_temporal_cap::set_bwe_temporal_cap_for_tests(true);
+    {
+        let mut r = setup_pub_sub(820, 821);
+        // Subscriber starts uncapped (u8::MAX).
+        let mut changes = 0u32;
+        let mut prev = u8::MAX;
+        // Alternate 149k / 151k for 6 ticks. 149k ∈ [hi_reenter, hi) → hold
+        // MAX; 151k ≥ hi → MAX. No transition expected.
+        for bps in [149_000u64, 151_000, 149_000, 151_000, 149_000, 151_000] {
+            let cap = r.bwe_select_temporal_cap_for_tests(SUB, Some(bps));
+            if cap != prev {
+                changes += 1;
+                prev = cap;
+            }
+        }
+        assert!(
+            changes <= 1,
+            "149k/151k oscillation from uncapped → ≤1 cap change across 6 ticks (saw {changes}); pre-fix flaps every tick"
+        );
+    }
+    oxpulse_sfu::bwe_temporal_cap::reset_bwe_temporal_cap_for_tests();
+}
+
+// ─── Test 10: re-enter rail exactness (pins hi_reenter = 140k) ──────────────
+//
+// From uncapped: 141k (≥ hi_reenter=140k) → hold MAX; 139k (< hi_reenter) →
+// re-cap to 1. Pins the re-enter rail at exactly 140k (= hi - (hi-lo)/5 =
+// 150k - 10k) for the prod rails.
+//
+// Falsification: against the OLD match, the 141k assertion fails — 141k < hi
+// → cap drops to 1 (no re-enter band). The 139k assertion passes under both
+// (139k was always below the grace-band ceiling); the 141k row is the RED.
+
+#[test]
+#[serial]
+fn bwe_temporal_cap_reenter_rail_exactness() {
+    oxpulse_sfu::bwe_temporal_cap::set_bwe_temporal_cap_for_tests(true);
+    {
+        let mut r = setup_pub_sub(830, 831);
+        // Subscriber starts uncapped.
+
+        // 141k → ≥ hi_reenter=140k → hold MAX (the hysteresis band).
+        let cap_141 = r.bwe_select_temporal_cap_for_tests(SUB, Some(141_000));
+        assert_eq!(
+            cap_141,
+            u8::MAX,
+            "141k ≥ hi_reenter=140k from uncapped → hold MAX (pre-fix drops to 1)"
+        );
+
+        // 139k → < hi_reenter=140k → re-cap to 1.
+        let cap_139 = r.bwe_select_temporal_cap_for_tests(SUB, Some(139_000));
+        assert_eq!(
+            cap_139, 1,
+            "139k < hi_reenter=140k from uncapped → re-cap to 1"
+        );
+    }
+    oxpulse_sfu::bwe_temporal_cap::reset_bwe_temporal_cap_for_tests();
+}
+
+// ─── Test 11: preserve existing semantics (regression guard) ────────────────
+//
+// The new `hi_reenter` arm must NOT disturb the existing rails:
+//  * uncap at 155k (≥ hi) from capped-1 → MAX (shared exit rail).
+//  * deepest degrade: 90k (< lo) from any state → 0.
+//  * sticky-0: at cap=0, 145k stays 0; 155k → MAX (exits sticky).
+//  * grace band: 120k from uncapped → 1 (120k < hi_reenter=140k → re-cap).
+//
+// All four rows pass under BOTH the old and new match (regression guard,
+// not a RED differentiator) — they pin that the fix is surgical.
+
+#[test]
+#[serial]
+fn bwe_temporal_cap_preserves_existing_semantics() {
+    oxpulse_sfu::bwe_temporal_cap::set_bwe_temporal_cap_for_tests(true);
+    {
+        // (a) uncap at 155k from capped-1.
+        let mut r = setup_pub_sub(840, 841);
+        r.bwe_select_temporal_cap_for_tests(SUB, Some(120_000));
+        assert_eq!(r.bwe_vfm_temporal_cap_for_tests(SUB), 1, "120k → cap=1");
+        let cap = r.bwe_select_temporal_cap_for_tests(SUB, Some(155_000));
+        assert_eq!(cap, u8::MAX, "155k ≥ hi=150k from capped-1 → uncap");
+
+        // (b) deepest degrade: 90k from uncapped → 0.
+        let mut r2 = setup_pub_sub(841, 842);
+        let cap = r2.bwe_select_temporal_cap_for_tests(SUB, Some(90_000));
+        assert_eq!(
+            cap, 0,
+            "90k < lo=100k from uncapped → cap=0 (deepest degrade)"
+        );
+
+        // (c) sticky-0: at cap=0, 145k stays 0; 155k → MAX.
+        let mut r3 = setup_pub_sub(842, 843);
+        r3.bwe_select_temporal_cap_for_tests(SUB, Some(90_000));
+        assert_eq!(r3.bwe_vfm_temporal_cap_for_tests(SUB), 0, "90k → cap=0");
+        let cap_145 = r3.bwe_select_temporal_cap_for_tests(SUB, Some(145_000));
+        assert_eq!(
+            cap_145, 0,
+            "145k in [lo,hi) at cap=0 → sticky 0 (Schmitt hold on 0↔1 edge)"
+        );
+        let cap_155 = r3.bwe_select_temporal_cap_for_tests(SUB, Some(155_000));
+        assert_eq!(
+            cap_155,
+            u8::MAX,
+            "155k ≥ hi=150k at cap=0 → uncap (exits sticky)"
+        );
+
+        // (d) grace band: 120k from uncapped → 1 (120k < hi_reenter=140k).
+        let mut r4 = setup_pub_sub(843, 844);
+        let cap = r4.bwe_select_temporal_cap_for_tests(SUB, Some(120_000));
+        assert_eq!(
+            cap, 1,
+            "120k < hi_reenter=140k from uncapped → re-cap to 1 (grace band)"
         );
     }
     oxpulse_sfu::bwe_temporal_cap::reset_bwe_temporal_cap_for_tests();
