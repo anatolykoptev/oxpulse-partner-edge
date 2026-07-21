@@ -5,6 +5,18 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.7](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.6...v0.16.7) (2026-07-21)
+
+
+### Features
+
+* **sfu:** add hysteresis band on BWE temporal-cap 1↔uncapped rail (closes [#473](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/473)) ([#474](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/474)) ([6626702](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/6626702456f3f92f9b2ca93be4e1b2c13788549a))
+* **sfu:** enable Dependency Descriptor extension parsing (G3 P0, observability-only) ([#466](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/466)) ([7adef27](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7adef273bcdfa206869f36e578dcb31fe828f857))
+* **sfu:** enable vfm temporal-drop subsystem in prod build + sfu_vfm_enabled marker (G3 P3a) ([#471](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/471)) ([a4740b2](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a4740b2a7b0eebf0b26e884f51896919bea7404f))
+* **sfu:** parse Dependency Descriptor + per-subscriber temporal-layer drop (G3 P1) ([#468](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/468)) ([4385a7d](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4385a7d16bced4742ab4c818ed3a3da06dde3407))
+* **sfu:** request keyframe on simulcast layer switch (G4) ([#464](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/464)) ([4843722](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/48437222190947a78f265d46a32cc093a1532426))
+* **sfu:** SFU-BWE-driven per-subscriber temporal-layer cap (G3 P3b) ([#472](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/472)) ([e2a96cc](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e2a96cc570f2e93ac370ed2bc77d7c622c0ba114))
+
 ## [0.16.6](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.5...v0.16.6) (2026-07-19)
 
 
