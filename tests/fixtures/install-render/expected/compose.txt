@@ -70,10 +70,11 @@ services:
     expose:
       - "3080"
     healthcheck:
-      test: ["CMD-SHELL", "ss -ltn | grep -q ':3080' || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null -T 5 http://127.0.0.1:3080/api/health/live || exit 1"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
+      start_period: 30s
 
   coturn:
     image: ghcr.io/anatolykoptev/partner-edge-coturn:stable
