@@ -137,7 +137,7 @@ EOF
         hysteria2-client restart oxpulse-partner-hysteria2 2>&1)
 
     # The gate must SKIP — hysteria2=skipped, no GATE_PASSED in output
-    if echo "$out" | grep -q "GATE_PASSED"; then
+    if grep -q "GATE_PASSED" <<<"$out"; then
         fail "t_before_skip: gate should have skipped but _docker_restart_if_sha_changed was called"
     else
         pass "t_before_skip: hysteria2=skipped → gate skips (no docker call)"
@@ -218,7 +218,7 @@ EOF
         "$PREFIX_ETC/docker-compose.yml" \
         hysteria2-client restart oxpulse-partner-hysteria2 2>&1)
 
-    if echo "$out" | grep -q "GATE_PASSED"; then
+    if grep -q "GATE_PASSED" <<<"$out"; then
         pass "t_after_acts: hysteria2=active → gate passes (_docker_restart_if_sha_changed called)"
     else
         fail "t_after_acts: gate skipped even though hysteria2=active"
