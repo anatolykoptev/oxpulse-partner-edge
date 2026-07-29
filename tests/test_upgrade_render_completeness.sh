@@ -35,7 +35,7 @@ fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 # sync_host_scripts moved to lib/host-scripts-lib.sh (Phase 4 strangler-harden,
 # task p4) — check there, not upgrade.sh (which now only holds a thin forwarder).
 echo "==> Test 4: sync_host_scripts provisions xray.env"
-grep -A 5 "Step 6.5" "$REPO_ROOT/lib/host-scripts-lib.sh" | grep -q "xray.env" \
+grep -A 5 "Step 6.5" "$REPO_ROOT/lib/host-scripts-lib.sh" | grep "xray.env" >/dev/null \
     && pass "xray.env provisioning step present in lib/host-scripts-lib.sh" \
     || fail "xray.env provisioning step missing from lib/host-scripts-lib.sh"
 
@@ -197,7 +197,7 @@ else
 fi
 
 # 6b: opec got the EXACT --tpl/--out flags the block passes (falsifies a flag typo).
-if echo "$T6_ARGS" | grep -qF -- "--tpl $T6_TPL --out $T6_OUTPATH" && [[ -n "$T6_TPL" && -n "$T6_OUTPATH" ]]; then
+if echo "$T6_ARGS" | grep -F -- "--tpl $T6_TPL --out $T6_OUTPATH" >/dev/null && [[ -n "$T6_TPL" && -n "$T6_OUTPATH" ]]; then
     pass "6b: opec invoked with correct --tpl/--out flags"
 else
     fail "6b: opec --tpl/--out flags wrong or missing — args='$T6_ARGS' tpl='$T6_TPL' out='$T6_OUTPATH'"

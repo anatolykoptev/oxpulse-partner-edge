@@ -145,8 +145,8 @@ A2_OUT=$(env TMPDIR="$TMP" RELEASES_BASE="https://example.invalid/releases" \
     RELEASE_TAG=v9.9.9 MODE=apply DRY_RUN=0 PREFIX_SBIN="$TMP" \
     OXPULSE_INSTALLED_UPGRADE_PATH="$WRAP_A" \
     bash "$WRAP_A" v9.9.9 2>&1 || true)
-if printf '%s\n' "$A2_OUT" | grep -q 'WARN: self-update: could not fetch upgrade.sh' \
-    && printf '%s\n' "$A2_OUT" | grep -q 'PARENT_CONTINUED'; then
+if printf '%s\n' "$A2_OUT" | grep 'WARN: self-update: could not fetch upgrade.sh' >/dev/null \
+    && printf '%s\n' "$A2_OUT" | grep 'PARENT_CONTINUED' >/dev/null; then
     pass "A2: a failed upgrade.sh fetch now WARNs (was silent) and degrades to continue"
 else
     fail "A2: expected a fetch-failure warn + PARENT_CONTINUED; got: $A2_OUT"
@@ -245,8 +245,8 @@ run_gate() {
 
 # C1: applicable + CONVERGED (presync == installed bytes) => silent, gate survives.
 C1_OUT=$(run_gate "$GATE_WRAP_SHA" "$GATE_WRAP")
-if printf '%s\n' "$C1_OUT" | grep -q 'GATE_SURVIVED' \
-    && ! printf '%s\n' "$C1_OUT" | grep -qE 'DIE:|WARN:'; then
+if printf '%s\n' "$C1_OUT" | grep 'GATE_SURVIVED' >/dev/null \
+    && ! printf '%s\n' "$C1_OUT" | grep -E 'DIE:|WARN:' >/dev/null; then
     pass "C1: applicable + converged (running bytes == installed) => gate silent, proceeds"
 else
     fail "C1: expected silent GATE_SURVIVED on converged bytes; got: $C1_OUT"
@@ -257,8 +257,8 @@ fi
 # exists to catch. Non-vacuous: neutering _assert_self_update_converged to `return 0`
 # makes this go RED (verified in development).
 C2_OUT=$(run_gate "$ZERO_SHA" "$GATE_WRAP")
-if printf '%s\n' "$C2_OUT" | grep -q 'DIE: self-update did not converge' \
-    && ! printf '%s\n' "$C2_OUT" | grep -q 'GATE_SURVIVED'; then
+if printf '%s\n' "$C2_OUT" | grep 'DIE: self-update did not converge' >/dev/null \
+    && ! printf '%s\n' "$C2_OUT" | grep 'GATE_SURVIVED' >/dev/null; then
     pass "C2: applicable + divergent bytes => gate DIES with the actionable re-run message (incident caught)"
 else
     fail "C2: expected a convergence DIE; got: $C2_OUT"
@@ -267,9 +267,9 @@ fi
 # C3: escape hatch OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 on the SAME divergent case =>
 # warn instead of die, gate survives.
 C3_OUT=$(run_gate "$ZERO_SHA" "$GATE_WRAP" OXPULSE_UPGRADE_NO_CONVERGE_GATE=1)
-if printf '%s\n' "$C3_OUT" | grep -q 'WARN: self-update did NOT converge' \
-    && printf '%s\n' "$C3_OUT" | grep -q 'GATE_SURVIVED' \
-    && ! printf '%s\n' "$C3_OUT" | grep -q 'DIE:'; then
+if printf '%s\n' "$C3_OUT" | grep 'WARN: self-update did NOT converge' >/dev/null \
+    && printf '%s\n' "$C3_OUT" | grep 'GATE_SURVIVED' >/dev/null \
+    && ! printf '%s\n' "$C3_OUT" | grep 'DIE:' >/dev/null; then
     pass "C3: OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 downgrades die->warn and proceeds"
 else
     fail "C3: escape hatch did not downgrade to warn+proceed; got: $C3_OUT"
@@ -282,8 +282,8 @@ fi
 # DIFFERENT real file so the realpath-match fails.
 OTHER_INSTALLED="$TMP/other_installed"; printf 'different bytes\n' > "$OTHER_INSTALLED"
 C4_OUT=$(run_gate "$ZERO_SHA" "$OTHER_INSTALLED")
-if printf '%s\n' "$C4_OUT" | grep -q 'GATE_SURVIVED' \
-    && ! printf '%s\n' "$C4_OUT" | grep -q 'DIE:'; then
+if printf '%s\n' "$C4_OUT" | grep 'GATE_SURVIVED' >/dev/null \
+    && ! printf '%s\n' "$C4_OUT" | grep 'DIE:' >/dev/null; then
     pass "C4: not-applicable invocation (running != installed path) => gate no-ops, never false-dies"
 else
     fail "C4: gate false-died on a non-applicable (dev/CI) invocation; got: $C4_OUT"
@@ -293,7 +293,7 @@ fi
 C5_OUT=$(env RELEASE_TAG=v9.9.9 MODE=apply DRY_RUN=1 PREFIX_SBIN="$TMP" \
     OXPULSE_INSTALLED_UPGRADE_PATH="$GATE_WRAP" OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA="$ZERO_SHA" \
     bash "$GATE_WRAP" 2>&1 || true)
-if printf '%s\n' "$C5_OUT" | grep -q 'GATE_SURVIVED' && ! printf '%s\n' "$C5_OUT" | grep -q 'DIE:'; then
+if printf '%s\n' "$C5_OUT" | grep 'GATE_SURVIVED' >/dev/null && ! printf '%s\n' "$C5_OUT" | grep 'DIE:' >/dev/null; then
     pass "C5: DRY_RUN=1 => gate no-ops (dry-run never self-updates)"
 else
     fail "C5: gate did not no-op under DRY_RUN; got: $C5_OUT"

@@ -25,7 +25,7 @@ if [[ -z "$servers_block" ]]; then
     exit 1
 fi
 
-if ! echo "$servers_block" | grep -qE '^[[:space:]]*metrics[[:space:]]*$'; then
+if ! echo "$servers_block" | grep -E '^[[:space:]]*metrics[[:space:]]*$' >/dev/null; then
     echo "FAIL: 'metrics' directive missing from servers{} block"
     echo "--- servers block content ---"
     echo "$servers_block"

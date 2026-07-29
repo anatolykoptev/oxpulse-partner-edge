@@ -223,7 +223,7 @@ else
     fail "U2: regression not detected — health_regressions should exit non-zero; output: $U2_OUT"
 fi
 
-if echo "$U2_OUT" | grep -q 'check_api'; then
+if echo "$U2_OUT" | grep 'check_api' >/dev/null; then
     pass "U2b: regressed check name (check_api) present in output"
 else
     fail "U2b: regressed check name missing from output; got: $U2_OUT"
@@ -454,14 +454,14 @@ fi
 " 2>&1
 ) && G1_RC=0 || G1_RC=$?
 
-if [[ $G1_RC -eq 0 ]] && echo "$G1_OUT" | grep -q 'GATE_PASS'; then
+if [[ $G1_RC -eq 0 ]] && echo "$G1_OUT" | grep 'GATE_PASS' >/dev/null; then
     pass "G1: pre-existing red (check_sfu_metrics RED in both) → gate passes, no rollback"
 else
     fail "G1: pre-existing red incorrectly triggered rollback; rc=$G1_RC output: $G1_OUT"
 fi
 
 # Verify drift is reported (pre-existing reds should appear as drift findings).
-if echo "$G1_OUT" | grep -qiE 'drift|RED|pre.existing' || [[ $G1_RC -eq 0 ]]; then
+if echo "$G1_OUT" | grep -iE 'drift|RED|pre.existing' >/dev/null || [[ $G1_RC -eq 0 ]]; then
     pass "G1b: pre-existing reds noted (drift or silent pass acceptable)"
 else
     fail "G1b: no drift indication in output"
@@ -501,7 +501,7 @@ fi
 " 2>&1
 ) && G2_RC=0 || G2_RC=$?
 
-if [[ $G2_RC -ne 0 ]] && echo "$G2_OUT" | grep -q 'GATE_ROLLBACK'; then
+if [[ $G2_RC -ne 0 ]] && echo "$G2_OUT" | grep 'GATE_ROLLBACK' >/dev/null; then
     pass "G2: regression (check_api GREEN→RED) → gate triggers rollback"
 else
     fail "G2: regression not detected — health_regressions failed to catch GREEN→RED; rc=$G2_RC output: $G2_OUT"
@@ -540,7 +540,7 @@ fi
 " 2>&1
 ) && G3_RC=0 || G3_RC=$?
 
-if [[ $G3_RC -eq 0 ]] && echo "$G3_OUT" | grep -q 'GATE_PASS'; then
+if [[ $G3_RC -eq 0 ]] && echo "$G3_OUT" | grep 'GATE_PASS' >/dev/null; then
     pass "G3: healed red (check_containers RED→GREEN) → gate passes"
 else
     fail "G3: healed red incorrectly treated as regression; rc=$G3_RC output: $G3_OUT"
@@ -615,7 +615,7 @@ fi
 " 2>&1
 ) && G5_RC=0 || G5_RC=$?
 
-if [[ $G5_RC -eq 0 ]] && echo "$G5_OUT" | grep -q 'GATE_PASS'; then
+if [[ $G5_RC -eq 0 ]] && echo "$G5_OUT" | grep 'GATE_PASS' >/dev/null; then
     pass "G5: fresh install (no baseline file) → skip diff, no rollback"
 else
     fail "G5: fresh install incorrectly triggered rollback; rc=$G5_RC output: $G5_OUT"
@@ -705,7 +705,7 @@ fi
 " 2>&1
 ) && G7_RC=0 || G7_RC=$?
 
-if [[ $G7_RC -eq 0 ]] && echo "$G7_OUT" | grep -q 'GATE_PASS'; then
+if [[ $G7_RC -eq 0 ]] && echo "$G7_OUT" | grep 'GATE_PASS' >/dev/null; then
     pass "G7: edge-a stale reds (12+13+14 RED in both) → no rollback (Phase 3 exit criterion)"
 else
     fail "G7: edge-a stale reds incorrectly rolled back — Phase 3 exit criterion NOT met; output: $G7_OUT"
@@ -809,7 +809,7 @@ fi
 " 2>&1
 ) && G8_RC=0 || G8_RC=$?
 
-if [[ $G8_RC -eq 0 ]] && echo "$G8_OUT" | grep -q 'GATE_PASS'; then
+if [[ $G8_RC -eq 0 ]] && echo "$G8_OUT" | grep 'GATE_PASS' >/dev/null; then
     pass "G8: legacy-edge post-fix: non-empty baseline + stale red in both → gate present, no rollback"
 else
     fail "G8: legacy-edge post-fix: gate rolled back unexpectedly; rc=$G8_RC output: $G8_OUT"
@@ -887,7 +887,7 @@ fi
 " 2>&1
 ) && G9_RC=0 || G9_RC=$?
 
-if [[ $G9_RC -eq 0 ]] && echo "$G9_OUT" | grep -q 'GATE_PASS'; then
+if [[ $G9_RC -eq 0 ]] && echo "$G9_OUT" | grep 'GATE_PASS' >/dev/null; then
     pass "G9: edge-a stale reds through real path — gate present + no rollback (Phase 3 exit criterion)"
 else
     fail "G9: edge-a stale reds: gate rolled back via real path; rc=$G9_RC output: $G9_OUT"
@@ -934,7 +934,7 @@ fi
 " 2>&1
 ) && G6_FUNC_RC=0 || G6_FUNC_RC=$?
 
-if [[ $G6_FUNC_RC -eq 0 ]] && echo "$G6_FUNC_OUT" | grep -q 'ABSOLUTE_GATE_WIRED'; then
+if [[ $G6_FUNC_RC -eq 0 ]] && echo "$G6_FUNC_OUT" | grep 'ABSOLUTE_GATE_WIRED' >/dev/null; then
     pass "G6_FUNC: OXPULSE_ABSOLUTE_HEALTH_GATE=1 branch wired and reachable in upgrade.sh"
 else
     fail "G6_FUNC: OXPULSE_ABSOLUTE_HEALTH_GATE=1 escape hatch not functionally wired; output: $G6_FUNC_OUT"
@@ -995,8 +995,8 @@ else
 fi
 
 # H2: --snapshot must not contain ANSI escape codes (machine-parseable).
-if echo "$H1_OUT" | grep -qP '\x1b\[' 2>/dev/null || \
-   echo "$H1_OUT" | grep -q $'\033\['; then
+if echo "$H1_OUT" | grep -P '\x1b\[' 2>/dev/null >/dev/null || \
+   echo "$H1_OUT" | grep $'\033\[' >/dev/null; then
     fail "H2: --snapshot output contains ANSI color codes (not machine-parseable)"
 else
     pass "H2: --snapshot output is free of ANSI escape codes"
@@ -1010,7 +1010,7 @@ H3_OUT=$(
 ) || true
 
 # Human mode: output contains the header line and OK/FAIL/PASS text.
-if echo "$H3_OUT" | grep -qiE 'healthcheck|check|OK|FAIL|PASS|SKIP'; then
+if echo "$H3_OUT" | grep -iE 'healthcheck|check|OK|FAIL|PASS|SKIP' >/dev/null; then
     pass "H3: non-snapshot (--local) mode produces human-readable output"
 else
     fail "H3: --local mode output is missing human-readable content; got: $(echo "$H3_OUT" | head -5)"

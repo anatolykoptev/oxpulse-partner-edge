@@ -54,7 +54,7 @@ fi
 
 # Test 1: metrics probe must NOT use bare 127.0.0.1:port for /metrics
 echo "==> Test 1: metrics probe does not hardcode 127.0.0.1 for /metrics"
-if echo "$HC_LINE" | grep -qF '127.0.0.1:{{SFU_METRICS_PORT}}'; then
+if echo "$HC_LINE" | grep -F '127.0.0.1:{{SFU_METRICS_PORT}}' >/dev/null; then
     fail "metrics probe still hardcodes 127.0.0.1:{{SFU_METRICS_PORT}} -- fix not applied"
 else
     pass "metrics probe does not contain 127.0.0.1:{{SFU_METRICS_PORT}}"
@@ -63,7 +63,7 @@ fi
 # Test 4: client_ws probe MUST stay on 127.0.0.1 (SFU_BIND_ADDRESS is 0.0.0.0)
 echo "==> Test 4: client_ws probe stays on 127.0.0.1 (SFU_BIND_ADDRESS=0.0.0.0)"
 CLIENT_WS_CLAUSE=$(echo "$HC_LINE" | grep -oE 'SIGNALING_SFU_SECRET[^;]+' || true)
-if echo "$CLIENT_WS_CLAUSE" | grep -qF '127.0.0.1'; then
+if echo "$CLIENT_WS_CLAUSE" | grep -F '127.0.0.1' >/dev/null; then
     pass "client_ws probe uses 127.0.0.1 (correct: binds on 0.0.0.0)"
 else
     fail "client_ws probe no longer uses 127.0.0.1 -- was it accidentally moved to mesh IP?"

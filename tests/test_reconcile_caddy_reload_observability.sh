@@ -62,7 +62,7 @@ else
     fail "P1: no timestamped Caddyfile persisted (file='$_p1_file'); out: $P1_OUT"
 fi
 # Timestamp must come from the system, not a hardcoded literal (UTC ...Z form).
-if [[ -n "$_p1_file" ]] && basename "$_p1_file" | grep -qE 'caddy-reload-fail-[0-9]{8}T[0-9]{6}Z\.caddy'; then
+if [[ -n "$_p1_file" ]] && basename "$_p1_file" | grep -E 'caddy-reload-fail-[0-9]{8}T[0-9]{6}Z\.caddy' >/dev/null; then
     pass "P1b: post-mortem filename carries a system UTC timestamp (not hardcoded)"
 else
     fail "P1b: persisted filename lacks a UTC timestamp: '$_p1_file'"
@@ -106,17 +106,17 @@ P2_OUT=$( (
     echo "RC:$?"
 ) 2>&1 )
 
-if echo "$P2_OUT" | grep -q 'SIMULATED-RELOAD-ADAPTER-ERR'; then
+if echo "$P2_OUT" | grep 'SIMULATED-RELOAD-ADAPTER-ERR' >/dev/null; then
     pass "P2: caddy reload stderr is surfaced (no longer swallowed by 2>/dev/null)"
 else
     fail "P2: reload stderr NOT surfaced; out: $P2_OUT"
 fi
-if echo "$P2_OUT" | grep -q 'SIMULATED-RECREATE-ERR'; then
+if echo "$P2_OUT" | grep 'SIMULATED-RECREATE-ERR' >/dev/null; then
     pass "P2b: caddy force-recreate stderr is surfaced too"
 else
     fail "P2b: force-recreate stderr NOT surfaced; out: $P2_OUT"
 fi
-if echo "$P2_OUT" | grep -qE 'RC:[1-9]'; then
+if echo "$P2_OUT" | grep -E 'RC:[1-9]' >/dev/null; then
     pass "P2c: apply_caddy_reloads still returns non-zero on double failure (fail-loud preserved)"
 else
     fail "P2c: apply_caddy_reloads did not return non-zero; out: $P2_OUT"
@@ -139,7 +139,7 @@ P3_OUT=$(
     _reconcile_persist_failed_caddyfile
     echo "RC:$?"
 )
-if echo "$P3_OUT" | grep -q 'RC:0' && [[ ! -d "$TMP/p3_log" || -z "$(ls -A "$TMP/p3_log" 2>/dev/null)" ]]; then
+if echo "$P3_OUT" | grep 'RC:0' >/dev/null && [[ ! -d "$TMP/p3_log" || -z "$(ls -A "$TMP/p3_log" 2>/dev/null)" ]]; then
     pass "P3: persist is a silent no-op (rc=0, no file) when no Caddyfile is present"
 else
     fail "P3: persist mishandled the absent-Caddyfile case; out: $P3_OUT"

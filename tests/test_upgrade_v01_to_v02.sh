@@ -13,7 +13,7 @@ grep -qE '^maybe_v01_to_v02_preflight\(\)' "$SCRIPT" \
     || { echo "FAIL: maybe_v01_to_v02_preflight() definition not found" >&2; exit 1; }
 
 # 3. Function is invoked (call site, not just defined).
-grep -cE '^maybe_v01_to_v02_preflight$' "$SCRIPT" | grep -qE '^[1-9]' \
+grep -cE '^maybe_v01_to_v02_preflight$' "$SCRIPT" | grep -E '^[1-9]' >/dev/null \
     || { echo "FAIL: maybe_v01_to_v02_preflight call site not found" >&2; exit 1; }
 
 # 4. v0.1 regex guard is present.
@@ -53,7 +53,7 @@ RESEED_LINE=$(grep -n '\-\-reseed' "$SCRIPT" | head -1 | cut -d: -f1)
 # The block just before it (within 10 lines) must contain V01_TO_V02.
 BLOCK_START=$(( RESEED_LINE - 10 ))
 [[ $BLOCK_START -lt 1 ]] && BLOCK_START=1
-sed -n "${BLOCK_START},${RESEED_LINE}p" "$SCRIPT" | grep -q 'V01_TO_V02' \
+sed -n "${BLOCK_START},${RESEED_LINE}p" "$SCRIPT" | grep 'V01_TO_V02' >/dev/null \
     || { echo "FAIL: --reseed invocation is not inside a V01_TO_V02-guarded block" >&2; exit 1; }
 
 # 10. Existing rollback/backup machinery is still present.

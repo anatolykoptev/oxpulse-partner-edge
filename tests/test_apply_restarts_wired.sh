@@ -121,20 +121,20 @@ _ar1_result=$(
     echo "DONE"
 )
 
-if echo "$_ar1_result" | grep -q "CADDY_RELOAD:FIRED"; then
+if echo "$_ar1_result" | grep "CADDY_RELOAD:FIRED" >/dev/null; then
     pass "AR1: apply_caddy_reloads fired after caddyfile change (targeted reload, not full restart)"
     # AR3: verify _RECONCILE_CADDY_RELOAD was set (mark_caddy_reload was called)
     # Inferred: CADDY_RELOAD:FIRED means _RECONCILE_CADDY_RELOAD=1 was detected in apply_caddy_reloads
     pass "AR3: mark_caddy_reload set _RECONCILE_CADDY_RELOAD=1 on caddyfile change (peers untouched)"
     # Also verify oxpulse-partner-edge.service was NOT in _RECONCILE_RESTART_UNITS
     # (full-stack restart must NOT happen for a caddy-only change)
-    if echo "$_ar1_result" | grep -q "RESTART:EMPTY"; then
+    if echo "$_ar1_result" | grep "RESTART:EMPTY" >/dev/null; then
         pass "AR3a: oxpulse-partner-edge.service NOT in restart list (caddy change = hot-reload only)"
     else
         _restart_units=$(echo "$_ar1_result" | grep "^RESTART:" | head -1 | cut -d: -f2-)
         fail "AR3a: full systemd restart triggered for caddy-only change (units: $_restart_units) — blast radius too wide"
     fi
-elif echo "$_ar1_result" | grep -q "CADDY_RELOAD:EMPTY"; then
+elif echo "$_ar1_result" | grep "CADDY_RELOAD:EMPTY" >/dev/null; then
     fail "AR1: apply_caddy_reloads fired but _RECONCILE_CADDY_RELOAD was 0 (mark_caddy_reload not called)"
     fail "AR3: mark_caddy_reload not called on caddyfile change"
 else
@@ -215,9 +215,9 @@ _ar2_result=$(
     echo "DONE"
 )
 
-if echo "$_ar2_result" | grep -q "CADDY_RELOAD:0"; then
+if echo "$_ar2_result" | grep "CADDY_RELOAD:0" >/dev/null; then
     pass "AR2: no caddy reload when caddyfile unchanged (STATE sha matches rendered sha)"
-elif echo "$_ar2_result" | grep -q "CADDY_RELOAD:1"; then
+elif echo "$_ar2_result" | grep "CADDY_RELOAD:1" >/dev/null; then
     fail "AR2: caddy reload triggered on unchanged caddyfile (STATE sha compare broken)"
 else
     fail "AR2: apply_caddy_reloads not called"

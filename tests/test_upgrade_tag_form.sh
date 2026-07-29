@@ -193,13 +193,13 @@ grep -qE 'OXPULSE_UPGRADE_TAG.*@RELEASE_TAG@' "$UPGRADE" \
 # expands to empty → released upgrade.sh has empty OXPULSE_UPGRADE_TAG default
 # → REPO_RAW defaults to /main (wrong — should be pinned to release tag).
 grep -A 5 'name: Stage artifacts' "$RELEASE_YML" \
-    | grep -q 'TAG:' \
+    | grep 'TAG:' >/dev/null \
     && pass "B-3: release.yml Stage artifacts env includes TAG=" \
     || fail "B-3: release.yml Stage artifacts missing TAG= — sed substitution is a no-op (empty tag)"
 
 # The sed substitution for upgrade.sh must be present in Stage artifacts.
 grep -A 30 'name: Stage artifacts' "$RELEASE_YML" \
-    | grep -q '@RELEASE_TAG@' \
+    | grep '@RELEASE_TAG@' >/dev/null \
     && pass "B-4: release.yml Stage artifacts has @RELEASE_TAG@ sed step for upgrade.sh" \
     || fail "B-4: @RELEASE_TAG@ sed step missing from Stage artifacts"
 
@@ -316,7 +316,7 @@ rm -rf "$TC1_SBIN"
     && pass "C-1: pinned tag + SHA256SUMS 404 → sync exits non-zero ($RC_C1) [fail-loud]" \
     || fail "C-1: sync exited 0 despite SHA256SUMS 404 — silent unverified install not blocked"
 
-echo "$OUT_C1" | grep -qi 'Supply-chain integrity check FAILED\|could not fetch SHA256SUMS' \
+echo "$OUT_C1" | grep -i 'Supply-chain integrity check FAILED\|could not fetch SHA256SUMS' >/dev/null \
     && pass "C-2: fail-loud error message mentions supply-chain / SHA256SUMS" \
     || fail "C-2: expected supply-chain error in output; got: $OUT_C1"
 
@@ -341,7 +341,7 @@ rm -rf "$TC3_SBIN"
     && pass "C-3: --allow-unverified + SHA256SUMS 404 → exits 0 (warn+proceed)" \
     || fail "C-3: --allow-unverified should not die on SHA256SUMS 404, got exit $RC_C3"
 
-echo "$OUT_C3" | grep -qi 'allow-unverified\|proceeding WITHOUT' \
+echo "$OUT_C3" | grep -i 'allow-unverified\|proceeding WITHOUT' >/dev/null \
     && pass "C-4: --allow-unverified emits warning about unverified proceed" \
     || fail "C-4: expected unverified-proceed warning; got: $OUT_C3"
 
@@ -366,7 +366,7 @@ rm -rf "$TC5_SBIN"
     && pass "C-5: 'latest' tag → exits 0 (no SHA256SUMS guard for floating tag)" \
     || fail "C-5: 'latest' sync should not die even without SHA256SUMS, got exit $RC_C5"
 
-echo "$OUT_C5" | grep -qi 'latest.*SHA256SUMS.*not available\|floating tag' \
+echo "$OUT_C5" | grep -i 'latest.*SHA256SUMS.*not available\|floating tag' >/dev/null \
     && pass "C-6: 'latest' run emits 'not available' / 'floating tag' warning" \
     || fail "C-6: expected floating-tag warning for 'latest'; got: $OUT_C5"
 
@@ -493,12 +493,12 @@ OUT_D3=$(
     || fail "D-3: sync failed with exit $RC_D3; output: $OUT_D3"
 
 # D-4: SHA256SUMS was fetched and guard ran (log line present).
-echo "$OUT_D3" | grep -qi 'fetched SHA256SUMS for v0.12.59\|SHA256SUMS' \
+echo "$OUT_D3" | grep -i 'fetched SHA256SUMS for v0.12.59\|SHA256SUMS' >/dev/null \
     && pass "D-4: SHA256SUMS fetched for v0.12.59 (checksum guard ran)" \
     || fail "D-4: expected SHA256SUMS fetch log; got: $OUT_D3"
 
 # D-5: at least one file installed or up-to-date (sync did work).
-echo "$OUT_D3" | grep -qi 'installed\|up-to-date' \
+echo "$OUT_D3" | grep -i 'installed\|up-to-date' >/dev/null \
     && pass "D-5: files installed or up-to-date after sync" \
     || fail "D-5: no 'installed'/'up-to-date' in output — sync may have silently skipped; output: $OUT_D3"
 
@@ -520,12 +520,12 @@ else
 fi
 
 # D-8: the edge-e WARN "could not fetch SHA256SUMS" is gone.
-echo "$OUT_D3" | grep -qi 'could not fetch SHA256SUMS' \
+echo "$OUT_D3" | grep -i 'could not fetch SHA256SUMS' >/dev/null \
     && fail "D-8: 'could not fetch SHA256SUMS' STILL in output — edge-e WARN not fixed" \
     || pass "D-8: no 'could not fetch SHA256SUMS' warning (edge-e SHA256SUMS bug fixed)"
 
 # D-9: the edge-e WARN "skipping oxpulse-partner-edge-upgrade" is gone.
-echo "$OUT_D3" | grep -qi 'skipping oxpulse-partner-edge-upgrade' \
+echo "$OUT_D3" | grep -i 'skipping oxpulse-partner-edge-upgrade' >/dev/null \
     && fail "D-9: 'skipping oxpulse-partner-edge-upgrade' STILL in output — edge-e bug not fixed" \
     || pass "D-9: no 'skipping oxpulse-partner-edge-upgrade' warning (edge-e self-update bug fixed)"
 

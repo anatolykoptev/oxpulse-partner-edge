@@ -29,7 +29,7 @@ sed -e 's/{{PARTNER_DOMAIN}}/example.test/g' \
 # Validate via the partner-edge image (has caddy-l4 plugin)
 VALIDATE_OUT=$(docker run --rm -v "$TMP:/etc/caddy/Caddyfile:ro" "$IMAGE" \
        caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1)
-if ! echo "$VALIDATE_OUT" | grep -q 'Valid configuration'; then
+if ! echo "$VALIDATE_OUT" | grep 'Valid configuration' >/dev/null; then
   echo "FAIL: caddy validate rejected rendered Caddyfile.tpl" >&2
   echo "$VALIDATE_OUT" >&2
   exit 1
@@ -42,7 +42,7 @@ grep -qE 'tls sni \{\{TURNS_SUBDOMAIN\}\}\.\{\{PARTNER_DOMAIN\}\}' "$TPL" || { e
 grep -qF 'proxy tcp/host.docker.internal:5349' "$TPL" || { echo "FAIL: proxy target wrong (expected host.docker.internal:5349)"; exit 1; }
 grep -q 'disable_tlsalpn_challenge' "$TPL" || { echo "FAIL: disable_tlsalpn_challenge missing in TURNS stub"; exit 1; }
 # Trailing 'tls' fallback inside listener_wrappers
-awk '/listener_wrappers \{/,/^    \}$/' "$TPL" | grep -qxE '[[:space:]]+tls' \
+awk '/listener_wrappers \{/,/^    \}$/' "$TPL" | grep -xE '[[:space:]]+tls' >/dev/null \
   || { echo "FAIL: fallback 'tls' directive missing inside listener_wrappers"; exit 1; }
 
 # Phase 1 canary site checks

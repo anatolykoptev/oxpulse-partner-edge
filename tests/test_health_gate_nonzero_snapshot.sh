@@ -104,7 +104,7 @@ fi
 BASELINE_A="$TMP/baseline_a.snap"
 printf 'check_containers=GREEN\ncheck_api=GREEN\ncheck_sfu_metrics=RED\n' > "$BASELINE_A"
 A_OUT=$(_run_settle "$BASELINE_A")
-if echo "$A_OUT" | grep -q 'GATE_PASS'; then
+if echo "$A_OUT" | grep 'GATE_PASS' >/dev/null; then
     pass "A: pre-existing red + non-zero --snapshot exit => gate passes (no false rollback)"
 else
     fail "A: pre-existing red rolled back (got '$A_OUT') — exit-code gate still active"
@@ -114,7 +114,7 @@ fi
 BASELINE_B="$TMP/baseline_b.snap"
 printf 'check_containers=GREEN\ncheck_api=GREEN\ncheck_sfu_metrics=GREEN\n' > "$BASELINE_B"
 B_OUT=$(_run_settle "$BASELINE_B")
-if echo "$B_OUT" | grep -q 'GATE_ROLLBACK'; then
+if echo "$B_OUT" | grep 'GATE_ROLLBACK' >/dev/null; then
     pass "B: NEW regression (check_sfu_metrics GREEN->RED) => rollback (real detection intact)"
 else
     fail "B: new GREEN->RED regression NOT rolled back (got '$B_OUT') — gate over-relaxed"
@@ -138,12 +138,12 @@ fi
 # The snapshot file must contain the valid per-check lines regardless.
 grep -qE '^check_sfu_metrics=RED\$' \"\$_snap\" && echo CONTENT_PRESENT || echo CONTENT_MISSING
 " 2>/dev/null)
-if echo "$C_OUT" | grep -q 'SNAP_OK'; then
+if echo "$C_OUT" | grep 'SNAP_OK' >/dev/null; then
     pass "C: health_snapshot returns success on a valid-but-red (non-zero-exit) snapshot"
 else
     fail "C: health_snapshot returned failure on a valid snapshot (got '$C_OUT') — exit-code gate"
 fi
-if echo "$C_OUT" | grep -q 'CONTENT_PRESENT'; then
+if echo "$C_OUT" | grep 'CONTENT_PRESENT' >/dev/null; then
     pass "C2: health_snapshot captured the per-check lines (baseline non-empty, not discarded)"
 else
     fail "C2: health_snapshot did not capture the snapshot content (got '$C_OUT')"

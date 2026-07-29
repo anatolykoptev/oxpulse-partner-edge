@@ -26,7 +26,7 @@ for snippet in tunnel_upstream tunnel_upstream_default; do
         echo "FAIL: snippet ($snippet) not found in Caddyfile.tpl"
         exit 1
     fi
-    if ! echo "$body" | grep -qE 'header_up X-Channel-Tag[[:space:]]+\{upstream_hostport\}'; then
+    if ! echo "$body" | grep -E 'header_up X-Channel-Tag[[:space:]]+\{upstream_hostport\}' >/dev/null; then
         echo "FAIL: ($snippet) missing 'header_up X-Channel-Tag {upstream_hostport}'"
         echo "--- snippet body ---"
         echo "$body"

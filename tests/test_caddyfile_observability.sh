@@ -46,7 +46,7 @@ if grep -q 'meta http-equiv="refresh"' "$TPL"; then
 fi
 # Must NOT contain href/src/redirect to api.oxpulse.chat in rendered HTML
 # (DPI risk for RU users). Comments in the template are acceptable.
-if grep -v '^[[:space:]]*#' "$TPL" | grep -q 'href=.*api\.oxpulse\.chat\|src=.*api\.oxpulse\.chat\|redir.*api\.oxpulse\.chat'; then
+if grep -v '^[[:space:]]*#' "$TPL" | grep 'href=.*api\.oxpulse\.chat\|src=.*api\.oxpulse\.chat\|redir.*api\.oxpulse\.chat' >/dev/null; then
     echo "FAIL: error page must not link or redirect to api.oxpulse.chat — same-origin reload only"
     exit 1
 fi
@@ -57,9 +57,9 @@ retry_count=$(grep -c 'lb_retries 2' "$TPL")
 [[ "$retry_count" -ge 2 ]] \
     || { echo "FAIL: expected lb_retries 2 in >= 2 snippets, found $retry_count"; exit 1; }
 # Confirm in both named snippets.
-grep -A 20 '(tunnel_upstream)' "$TPL" | grep -q 'lb_retries 2' \
+grep -A 20 '(tunnel_upstream)' "$TPL" | grep 'lb_retries 2' >/dev/null \
     || { echo "FAIL: lb_retries 2 missing from (tunnel_upstream) snippet"; exit 1; }
-grep -A 20 '(tunnel_upstream_default)' "$TPL" | grep -q 'lb_retries 2' \
+grep -A 20 '(tunnel_upstream_default)' "$TPL" | grep 'lb_retries 2' >/dev/null \
     || { echo "FAIL: lb_retries 2 missing from (tunnel_upstream_default) snippet"; exit 1; }
 echo "OK: lb_retries 2 found in both tunnel snippets (count=$retry_count)"
 
@@ -94,7 +94,7 @@ PYEOF
         echo "$validate_out"
         exit 1
     fi
-    if ! echo "$validate_out" | grep -q "Valid configuration"; then
+    if ! echo "$validate_out" | grep "Valid configuration" >/dev/null; then
         echo "FAIL: caddy validate did not report 'Valid configuration'"
         echo "$validate_out"
         exit 1

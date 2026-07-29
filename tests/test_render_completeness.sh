@@ -51,7 +51,7 @@ var_is_exported() {
     local _joined
     for f in "$INSTALL" "$UPGRADE" "$RECONCILE_LIB_SH"; do
         _joined=$(sed ':a;N;$!ba;s/\\\n/ /g' "$f" 2>/dev/null || true)
-        echo "$_joined" | grep -qE "\bexport\b[^#\n]*\b${var}\b" && return 0
+        echo "$_joined" | grep -E "\bexport\b[^#\n]*\b${var}\b" >/dev/null && return 0
         # Also: explicit assignment line (VAR=...) even if separate from export
         grep -qE "^\s*${var}=" "$f" 2>/dev/null && return 0
         # Also: export VAR=... form
@@ -157,7 +157,7 @@ ASSERT_OUT=$(
     ' 2>&1
 ) || ASSERT_RC=$?
 
-if [[ $ASSERT_RC -ne 0 ]] && echo "$ASSERT_OUT" | grep -qi "LEFTOVER_PLACEHOLDER"; then
+if [[ $ASSERT_RC -ne 0 ]] && echo "$ASSERT_OUT" | grep -i "LEFTOVER_PLACEHOLDER" >/dev/null; then
     pass "assert_no_unresolved_placeholders: fires and names the leftover placeholder"
 else
     fail "assert_no_unresolved_placeholders: did NOT fire (rc=$ASSERT_RC, out=$ASSERT_OUT)"
@@ -220,7 +220,7 @@ T5_OUT=$(
     ' 2>&1
 ) || T5_RC=$?
 
-if [[ $T5_RC -eq 0 ]] && echo "$T5_OUT" | grep -q "PRIMITIVES_OK"; then
+if [[ $T5_RC -eq 0 ]] && echo "$T5_OUT" | grep "PRIMITIVES_OK" >/dev/null; then
     pass "atomic_swap and mark_restart dedup work correctly"
 else
     fail "lib primitives smoke test failed (rc=$T5_RC): $T5_OUT"

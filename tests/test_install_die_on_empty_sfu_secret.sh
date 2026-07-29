@@ -26,22 +26,22 @@ guard_block=$(awk '
     || { echo "FAIL: could not locate SIGNALING_SFU_SECRET guard block (if [[ -z ... ]]; then ... fi) in $INSTALL"; exit 1; }
 
 # 2. The guard must invoke die (hard exit), not warn (soft continue).
-echo "$guard_block" | grep -qE '\bdie\b' \
+echo "$guard_block" | grep -E '\bdie\b' >/dev/null \
     || { echo "FAIL: SIGNALING_SFU_SECRET empty guard does not call die"; \
          echo "---block---"; echo "$guard_block"; echo "---/block---"; exit 1; }
 
-echo "$guard_block" | grep -qE '^[[:space:]]*warn\b' \
+echo "$guard_block" | grep -E '^[[:space:]]*warn\b' >/dev/null \
     && { echo "FAIL: SIGNALING_SFU_SECRET empty guard still uses warn (should die)"; \
          echo "---block---"; echo "$guard_block"; echo "---/block---"; exit 1; }
 
 # 3. The error message must point the operator at the central-side fix.
 #    Specifically mention SIGNALING_SFU_SECRET (so grep on logs surfaces it)
 #    and "redeploy" / "motherly" (the actionable verb + target).
-echo "$guard_block" | grep -q 'SIGNALING_SFU_SECRET' \
+echo "$guard_block" | grep 'SIGNALING_SFU_SECRET' >/dev/null \
     || { echo "FAIL: die message missing SIGNALING_SFU_SECRET hint"; exit 1; }
 # Use tr to flatten newlines so the test tolerates line wrap inside the
 # die heredoc (e.g. group calls split across lines).
-echo "$guard_block" | tr -s '[:space:]' ' ' | grep -qi 'group  *calls' \
+echo "$guard_block" | tr -s '[:space:]' ' ' | grep -i 'group  *calls' >/dev/null \
     || { echo "FAIL: die message must explain group-call breakage"; exit 1; }
 
 # 4. Sanity: install.sh still parses.

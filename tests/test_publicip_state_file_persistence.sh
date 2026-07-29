@@ -134,7 +134,7 @@ chmod +x "$RUN"
 B_OUT=$(export PATH="$STUBPATH" DIG_STUB_RESULT="$DNS_IP"; bash "$RUN") && B_RC=0 || B_RC=$?
 [[ "$B_RC" -eq 0 ]] || fail "B0: resolve/persist died unexpectedly (RC=$B_RC): $B_OUT"
 
-echo "$B_OUT" | grep -qF "PUBLIC_IP=$DNS_IP" \
+echo "$B_OUT" | grep -F "PUBLIC_IP=$DNS_IP" >/dev/null \
     && pass "B1: resolve_external_ip yields DNS IP ($DNS_IP)" \
     || fail "B1: expected PUBLIC_IP=$DNS_IP, got: $B_OUT"
 

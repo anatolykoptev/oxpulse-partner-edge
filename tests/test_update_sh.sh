@@ -199,7 +199,7 @@ out2=$(PATH="$t2/stub:$PATH" \
 exit2=$?
 set -e
 
-if [[ $exit2 -ne 0 ]] && echo "$out2" | grep -qi "token"; then
+if [[ $exit2 -ne 0 ]] && echo "$out2" | grep -i "token" >/dev/null; then
     pass "test2: exits non-zero with token-related error message"
 else
     fail "test2: expected exit non-zero + 'token' in message; got exit=$exit2; msg: $out2"
@@ -328,7 +328,7 @@ set -e
 
 if [[ $exit4 -ne 0 ]]; then
     pass "test4a: smoke failure → exit non-zero"
-    if echo "$out4" | grep -qi "smoke\|real certificate\|Reality\|handshake"; then
+    if echo "$out4" | grep -i "smoke\|real certificate\|Reality\|handshake" >/dev/null; then
         pass "test4b: error message mentions smoke/Reality failure"
     else
         fail "test4b: exited $exit4 but message doesn't mention smoke failure; output: $out4"

@@ -79,7 +79,7 @@ ok "Stripped plugin-dependent blocks for host-caddy validation"
 # --- caddy validate ---
 if command -v caddy >/dev/null 2>&1; then
     validate_out=$(caddy validate --config "$TMP_STRIPPED" --adapter caddyfile 2>&1 || true)
-    if echo "$validate_out" | grep -q "Valid configuration"; then
+    if echo "$validate_out" | grep "Valid configuration" >/dev/null; then
         ok "caddy validate: Valid configuration"
     else
         echo "$validate_out" | grep -iE "error|Error" | head -5 >&2
@@ -89,7 +89,7 @@ elif docker info >/dev/null 2>&1; then
     echo "  INFO: host caddy not found, using docker caddy:2.10"
     validate_out=$(docker run --rm -v "$TMP_STRIPPED:/work/Caddyfile:ro" caddy:2.10 \
         caddy validate --config /work/Caddyfile --adapter caddyfile 2>&1 || true)
-    if echo "$validate_out" | grep -q "Valid configuration"; then
+    if echo "$validate_out" | grep "Valid configuration" >/dev/null; then
         ok "caddy validate (docker): Valid configuration"
     else
         echo "$validate_out" | tail -10 >&2

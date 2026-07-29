@@ -76,7 +76,7 @@ try:
 except Exception as e:
     print('error: ' + str(e), file=sys.stderr)
     sys.exit(1)
-" 2>/dev/null | grep -q ok; then
+" 2>/dev/null | grep ok >/dev/null; then
         pass "M6: python3 can read manifest.yaml"
     else
         fail "M6: python3 failed to read manifest.yaml"
@@ -102,7 +102,7 @@ PYEOF
 
 required_fields=("template:" "out:" "renderer:" "placeholder_completeness:" "restart_unit:")
 for _field in "${required_fields[@]}"; do
-    if echo "$_caddy_block" | grep -qF "$_field"; then
+    if echo "$_caddy_block" | grep -F "$_field" >/dev/null; then
         pass "M7: caddyfile surface has field: $_field"
     else
         fail "M7: caddyfile surface missing required field: $_field"
@@ -110,14 +110,14 @@ for _field in "${required_fields[@]}"; do
 done
 
 # M8: caddyfile sha_key = CADDYFILE_SHA
-if echo "$_caddy_block" | grep -qE 'sha_key:\s*CADDYFILE_SHA'; then
+if echo "$_caddy_block" | grep -E 'sha_key:\s*CADDYFILE_SHA' >/dev/null; then
     pass "M8: caddyfile sha_key is CADDYFILE_SHA"
 else
     fail "M8: caddyfile sha_key is not CADDYFILE_SHA"
 fi
 
 # M9: wired-surface indicator — caddyfile must NOT have wired: false
-if echo "$_caddy_block" | grep -qE 'wired:\s*false'; then
+if echo "$_caddy_block" | grep -E 'wired:\s*false' >/dev/null; then
     fail "M9: caddyfile surface is marked wired: false (should be the wired P4a surface)"
 else
     pass "M9: caddyfile surface is wired (no wired: false)"

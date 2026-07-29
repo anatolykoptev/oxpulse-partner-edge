@@ -195,7 +195,7 @@ else
     fail "2b: stale health-report still installed"
 fi
 
-echo "$OUT2" | grep -q 'installed oxpulse-channels-health-report' \
+echo "$OUT2" | grep 'installed oxpulse-channels-health-report' >/dev/null \
     && pass "2c: log confirms installation" \
     || fail "2c: expected 'installed' log line not found; output: $OUT2"
 
@@ -229,7 +229,7 @@ AFTER_SHA=$(sha256sum "$T2_SBIN/oxpulse-channels-health-report" | awk '{print $1
     && pass "3b: health-report sha256 unchanged (idempotent)" \
     || fail "3b: sha256 changed on second run: before=$BEFORE_SHA after=$AFTER_SHA"
 
-echo "$OUT3" | grep -q 'up-to-date' \
+echo "$OUT3" | grep 'up-to-date' >/dev/null \
     && pass "3c: second run logs 'up-to-date'" \
     || fail "3c: expected 'up-to-date' log; output: $OUT3"
 
@@ -342,7 +342,7 @@ else
     fail "5a: health-report overwritten despite SHA mismatch"
 fi
 
-echo "$OUT5" | grep -q 'MISMATCH' \
+echo "$OUT5" | grep 'MISMATCH' >/dev/null \
     && pass "5b: MISMATCH warning logged" \
     || fail "5b: no MISMATCH warning; output: $OUT5"
 
@@ -376,7 +376,7 @@ sbin_count=$(find "$T6_SBIN" -maxdepth 1 -type f 2>/dev/null | wc -l)
     && pass "6b: no files written to sbin in dry-run" \
     || fail "6b: dry-run wrote $sbin_count file(s)"
 
-echo "$OUT6" | grep -q 'dry-run' \
+echo "$OUT6" | grep 'dry-run' >/dev/null \
     && pass "6c: [dry-run] log line emitted" \
     || fail "6c: no [dry-run] log; output: $OUT6"
 
@@ -390,11 +390,11 @@ echo "=== Test 7: plain apply path ordering (structural) ==="
 # --with-templates/rollback/check branches exit).
 apply_section=$(awk '/^resolve_default_target$/{found=1} found{print}' "$UPGRADE")
 
-echo "$apply_section" | grep -q 'snapshot_host_scripts' \
+echo "$apply_section" | grep 'snapshot_host_scripts' >/dev/null \
     && pass "7a: snapshot_host_scripts in apply section" \
     || fail "7a: snapshot_host_scripts missing from apply section"
 
-echo "$apply_section" | grep -q 'sync_host_scripts' \
+echo "$apply_section" | grep 'sync_host_scripts' >/dev/null \
     && pass "7b: sync_host_scripts in apply section" \
     || fail "7b: sync_host_scripts missing from apply section"
 
@@ -426,11 +426,11 @@ rollback_section=$(awk '
     found && /^fi$/{exit}
 ' "$UPGRADE")
 
-echo "$rollback_section" | grep -q 'restore_host_scripts' \
+echo "$rollback_section" | grep 'restore_host_scripts' >/dev/null \
     && pass "8a: restore_host_scripts in --rollback branch" \
     || fail "8a: restore_host_scripts missing from --rollback branch"
 
-echo "$rollback_section" | grep -q 'PREV_HOST_SCRIPTS_DIR' \
+echo "$rollback_section" | grep 'PREV_HOST_SCRIPTS_DIR' >/dev/null \
     && pass "8b: PREV_HOST_SCRIPTS_DIR referenced in rollback guard" \
     || fail "8b: PREV_HOST_SCRIPTS_DIR not in rollback guard"
 
@@ -475,7 +475,7 @@ if [[ -f "$RELEASE_YML" ]]; then
 
     for sbin_name in "${!sbin_to_asset[@]}"; do
         asset="${sbin_to_asset[$sbin_name]}"
-        if echo "$sha256_staged" | grep -qF "$asset"; then
+        if echo "$sha256_staged" | grep -F "$asset" >/dev/null; then
             pass "9-sbin: $sbin_name → $asset in SHA256SUMS staging"
         else
             fail "9-sbin: $sbin_name → $asset MISSING from SHA256SUMS staging in release.yml"
@@ -498,7 +498,7 @@ if [[ -f "$RELEASE_YML" ]]; then
         oxpulse-channels-health-report.timer
     )
     for unit in "${synced_units[@]}"; do
-        if echo "$sha256_staged" | grep -qF "$unit"; then
+        if echo "$sha256_staged" | grep -F "$unit" >/dev/null; then
             pass "9-unit: $unit in SHA256SUMS staging"
         else
             fail "9-unit: $unit MISSING from SHA256SUMS staging in release.yml"
@@ -718,7 +718,7 @@ else
 fi
 
 # Verify log says 'installed' not 'skipping'.
-echo "$OUT11" | grep -q 'installed oxpulse-channels-health-report' \
+echo "$OUT11" | grep 'installed oxpulse-channels-health-report' >/dev/null \
     && pass "11b: log confirms 'installed' on SHA match" \
     || fail "11b: expected 'installed' log; output: $OUT11"
 
@@ -835,7 +835,7 @@ else
     fail "13b: health-report NOT installed — SHA256SUMS may have been fetched from wrong path; output: $OUT13"
 fi
 
-echo "$OUT13" | grep -q 'installed oxpulse-channels-health-report' \
+echo "$OUT13" | grep 'installed oxpulse-channels-health-report' >/dev/null \
     && pass "13c: log confirms 'installed' on SHA match (single-tag form)" \
     || fail "13c: expected 'installed' log; output: $OUT13"
 
@@ -846,7 +846,7 @@ grep -qE '^normalize_target\(\)' "$UPGRADE" \
 
 # No partner-edge-v construction in RELEASE_TAG assignment inside normalize_target.
 normalize_fn=$(awk '/^normalize_target\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE")
-if echo "$normalize_fn" | grep -qE 'RELEASE_TAG.*partner-edge-'; then
+if echo "$normalize_fn" | grep -E 'RELEASE_TAG.*partner-edge-' >/dev/null; then
     fail "13e: normalize_target still constructs RELEASE_TAG with partner-edge- prefix"
 else
     pass "13e: normalize_target does NOT prepend partner-edge- to RELEASE_TAG"
@@ -864,11 +864,11 @@ echo "=== Test 14: transition — old partner-edge-vX.Y.Z input normalized grace
 normalize_fn=$(awk '/^normalize_target\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE")
 
 # Must strip partner-edge- prefix and set TARGET to bare vX.Y.Z.
-echo "$normalize_fn" | grep -qE 'partner-edge-v\*|partner-edge-\)' \
+echo "$normalize_fn" | grep -E 'partner-edge-v\*|partner-edge-\)' >/dev/null \
     && pass "14a: normalize_target() has partner-edge-v* case" \
     || fail "14a: normalize_target() missing partner-edge-v* transition case"
 
-echo "$normalize_fn" | grep -qE 'TARGET=.*#partner-edge-|TARGET=.*\{TARGET#' \
+echo "$normalize_fn" | grep -E 'TARGET=.*#partner-edge-|TARGET=.*\{TARGET#' >/dev/null \
     && pass "14b: normalize_target() strips partner-edge- prefix from TARGET" \
     || fail "14b: normalize_target() missing prefix-strip assignment"
 

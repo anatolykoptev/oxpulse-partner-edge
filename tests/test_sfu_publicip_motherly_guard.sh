@@ -57,7 +57,7 @@ bash -n "$HYDRATE" && pass "A1: hydrate.sh syntax clean" || { fail "A1: hydrate.
 # A2: resolve_external_ip carries the motherly-IP guard. RED before the guard
 # is added (grep finds no "motherly" reference inside the function body).
 _hydrate_fn_body=$(awk '/^resolve_external_ip\(\)/{f=1} f{print} /^}$/ && f{exit}' "$HYDRATE")
-echo "$_hydrate_fn_body" | grep -qi 'motherly' \
+echo "$_hydrate_fn_body" | grep -i 'motherly' >/dev/null \
     && pass "A2: resolve_external_ip has motherly-IP guard" \
     || fail "A2: resolve_external_ip missing motherly-IP guard (T2 not implemented)"
 
@@ -164,10 +164,10 @@ echo "=== Section B: T1 — SFU_PUBLIC_IP follows resolve_external_ip ==="
 B1_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="$EDGE_DNS" \
     _run_hydrate "$EGRESS" "turns" "example.com" "") && B1_RC=0 || B1_RC=$?
 [[ "$B1_RC" -eq 0 ]] || fail "B1: resolve_external_ip died unexpectedly: $B1_OUT"
-echo "$B1_OUT" | grep -qF "PUBLIC_IP=$EDGE_DNS" \
+echo "$B1_OUT" | grep -F "PUBLIC_IP=$EDGE_DNS" >/dev/null \
     && pass "B1: PUBLIC_IP resolves to TURNS DNS A-record ($EDGE_DNS) — flows to both coturn external-ip and SFU_PUBLIC_IP" \
     || fail "B1: expected PUBLIC_IP=$EDGE_DNS (DNS A-record), got: $B1_OUT"
-echo "$B1_OUT" | grep -qF "EXTERNAL_IP_LINE=$EDGE_DNS" \
+echo "$B1_OUT" | grep -F "EXTERNAL_IP_LINE=$EDGE_DNS" >/dev/null \
     && pass "B2: EXTERNAL_IP_LINE (coturn external-ip) equals the resolved DNS IP" \
     || fail "B2: EXTERNAL_IP_LINE not equal to resolved DNS IP, got: $B1_OUT"
 # B3: structural restatement of the SFU_PUBLIC_IP==PUBLIC_IP invariant — the
@@ -192,13 +192,13 @@ C1_OUT=$(PATH="$STUBPATH" OXPULSE_MOTHERLY_IP="$MOTHERLY" \
     OXPULSE_PUBLIC_IP="$MOTHERLY" DIG_STUB_RESULT="$EDGE_DNS" \
     _run_hydrate "$EGRESS" "turns" "example.com" "") && C1_RC=0 || C1_RC=$?
 [[ "$C1_RC" -eq 0 ]] || fail "C1: resolve_external_ip died unexpectedly: $C1_OUT"
-echo "$C1_OUT" | grep -qF "PUBLIC_IP=$EDGE_DNS" \
+echo "$C1_OUT" | grep -F "PUBLIC_IP=$EDGE_DNS" >/dev/null \
     && pass "C1: override==motherly rejected → fell through to DNS ($EDGE_DNS)" \
     || fail "C1: expected fall-through to DNS $EDGE_DNS, got: $C1_OUT"
-echo "$C1_OUT" | grep -qi 'motherly' \
+echo "$C1_OUT" | grep -i 'motherly' >/dev/null \
     && pass "C2: loud warning emitted for motherly override rejection" \
     || fail "C2: no motherly warning in output: $C1_OUT"
-echo "$C1_OUT" | grep -qF 'PUBLIC_IP_SOURCE=dns' \
+echo "$C1_OUT" | grep -F 'PUBLIC_IP_SOURCE=dns' >/dev/null \
     && pass "C3: source labeled dns after override rejection" \
     || fail "C3: source not labeled dns: $C1_OUT"
 
@@ -214,13 +214,13 @@ D1_OUT=$(PATH="$STUBPATH" OXPULSE_MOTHERLY_IP="$MOTHERLY" \
     DIG_STUB_RESULT="$MOTHERLY" \
     _run_hydrate "$EGRESS" "turns" "example.com" "") && D1_RC=0 || D1_RC=$?
 [[ "$D1_RC" -eq 0 ]] || fail "D1: resolve_external_ip died unexpectedly: $D1_OUT"
-echo "$D1_OUT" | grep -qF "PUBLIC_IP=$EGRESS" \
+echo "$D1_OUT" | grep -F "PUBLIC_IP=$EGRESS" >/dev/null \
     && pass "D1: DNS==motherly rejected → fell through to egress ($EGRESS)" \
     || fail "D1: expected fall-through to egress $EGRESS, got: $D1_OUT"
-echo "$D1_OUT" | grep -qi 'motherly' \
+echo "$D1_OUT" | grep -i 'motherly' >/dev/null \
     && pass "D2: loud warning emitted for motherly DNS rejection" \
     || fail "D2: no motherly warning in output: $D1_OUT"
-echo "$D1_OUT" | grep -qF 'PUBLIC_IP_SOURCE=autodetect' \
+echo "$D1_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \
     && pass "D3: source labeled autodetect after DNS rejection" \
     || fail "D3: source not labeled autodetect: $D1_OUT"
 
@@ -239,7 +239,7 @@ E1_OUT=$(PATH="$STUBPATH" OXPULSE_MOTHERLY_IP="$MOTHERLY" \
 [[ "$E1_RC" -ne 0 ]] \
     && pass "E1: all tiers motherly → resolve_external_ip dies (RC=$E1_RC)" \
     || fail "E1: expected die with all tiers motherly, got RC=0: $E1_OUT"
-echo "$E1_OUT" | grep -qi 'motherly' \
+echo "$E1_OUT" | grep -i 'motherly' >/dev/null \
     && pass "E2: die message references motherly IP" \
     || fail "E2: die message does not reference motherly: $E1_OUT"
 
@@ -261,10 +261,10 @@ F1_OUT=$(PATH="$STUBPATH" \
     DIG_STUB_motherly_example_com="$MOTHERLY" \
     _run_hydrate "$EGRESS" "turns" "example.com" "") && F1_RC=0 || F1_RC=$?
 [[ "$F1_RC" -eq 0 ]] || fail "F1: resolve_external_ip died unexpectedly: $F1_OUT"
-echo "$F1_OUT" | grep -qF "PUBLIC_IP=$EDGE_DNS" \
+echo "$F1_OUT" | grep -F "PUBLIC_IP=$EDGE_DNS" >/dev/null \
     && pass "F1: motherly IP derived from BACKEND_URL host → override rejected → fell through to DNS ($EDGE_DNS)" \
     || fail "F1: expected fall-through to DNS $EDGE_DNS, got: $F1_OUT"
-echo "$F1_OUT" | grep -qi 'motherly' \
+echo "$F1_OUT" | grep -i 'motherly' >/dev/null \
     && pass "F2: loud warning emitted for BACKEND_URL-derived motherly rejection" \
     || fail "F2: no motherly warning in output: $F1_OUT"
 
@@ -303,10 +303,10 @@ G2_OUT=$(PATH="$STUBPATH" OXPULSE_MOTHERLY_IP="$MOTHERLY" \
     OXPULSE_PUBLIC_IP="$MOTHERLY" DIG_STUB_RESULT="$EDGE_DNS" CURL_STUB_RESULT="$EGRESS" \
     _run_upgrade "turns" "example.com") && G2_RC=0 || G2_RC=$?
 [[ "$G2_RC" -eq 0 ]] || fail "G2: resolve_public_ip died unexpectedly: $G2_OUT"
-echo "$G2_OUT" | grep -qF "PUBLIC_IP=$EDGE_DNS" \
+echo "$G2_OUT" | grep -F "PUBLIC_IP=$EDGE_DNS" >/dev/null \
     && pass "G2: upgrade override==motherly rejected → fell through to DNS ($EDGE_DNS)" \
     || fail "G2: expected fall-through to DNS $EDGE_DNS, got: $G2_OUT"
-echo "$G2_OUT" | grep -qi 'motherly' \
+echo "$G2_OUT" | grep -i 'motherly' >/dev/null \
     && pass "G3: upgrade loud warning emitted for motherly override rejection" \
     || fail "G3: no motherly warning in output: $G2_OUT"
 
@@ -315,10 +315,10 @@ G4_OUT=$(PATH="$STUBPATH" OXPULSE_MOTHERLY_IP="$MOTHERLY" \
     DIG_STUB_RESULT="$MOTHERLY" CURL_STUB_RESULT="$EGRESS" \
     _run_upgrade "turns" "example.com") && G4_RC=0 || G4_RC=$?
 [[ "$G4_RC" -eq 0 ]] || fail "G4: resolve_public_ip died unexpectedly: $G4_OUT"
-echo "$G4_OUT" | grep -qF "PUBLIC_IP=$EGRESS" \
+echo "$G4_OUT" | grep -F "PUBLIC_IP=$EGRESS" >/dev/null \
     && pass "G4: upgrade DNS==motherly rejected → fell through to egress ($EGRESS)" \
     || fail "G4: expected fall-through to egress $EGRESS, got: $G4_OUT"
-echo "$G4_OUT" | grep -qF 'PUBLIC_IP_SOURCE=autodetect' \
+echo "$G4_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \
     && pass "G5: upgrade source labeled autodetect after DNS rejection" \
     || fail "G5: source not labeled autodetect: $G4_OUT"
 
@@ -337,10 +337,10 @@ G6_OUT=$(PATH="$STUBPATH" OXPULSE_MOTHERLY_IP="$MOTHERLY" \
 G7_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="$EDGE_DNS" CURL_STUB_RESULT="$EGRESS" \
     _run_upgrade "turns" "example.com") && G7_RC=0 || G7_RC=$?
 [[ "$G7_RC" -eq 0 ]] || fail "G7: resolve_public_ip died unexpectedly: $G7_OUT"
-echo "$G7_OUT" | grep -qF "PUBLIC_IP=$EDGE_DNS" \
+echo "$G7_OUT" | grep -F "PUBLIC_IP=$EDGE_DNS" >/dev/null \
     && pass "G7: upgrade no-motherly guard no-op → DNS tier wins (backward compat)" \
     || fail "G7: expected DNS $EDGE_DNS, got: $G7_OUT"
-echo "$G7_OUT" | grep -qF 'PUBLIC_IP_SOURCE=dns' && pass "G8: upgrade source labeled dns" || fail "G8: $G7_OUT"
+echo "$G7_OUT" | grep -F 'PUBLIC_IP_SOURCE=dns' >/dev/null && pass "G8: upgrade source labeled dns" || fail "G8: $G7_OUT"
 
 # ===========================================================================
 echo ""

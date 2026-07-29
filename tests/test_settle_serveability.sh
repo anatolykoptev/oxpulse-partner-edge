@@ -101,17 +101,17 @@ if [[ "$EXIT_A" -eq 0 ]]; then
 else
     bad "A0: --serveability exited $EXIT_A (expected 0); output: $OUT_A"
 fi
-if printf '%s\n' "$SERVE_A" | grep -qx 'ch1=DOWN'; then
+if printf '%s\n' "$SERVE_A" | grep -x 'ch1=DOWN' >/dev/null; then
     ok "A1: ch1 (xray canary 502) reported DOWN"
 else
     bad "A1: expected 'ch1=DOWN'; got: $SERVE_A"
 fi
-if printf '%s\n' "$SERVE_A" | grep -qx 'ch2=OK'; then
+if printf '%s\n' "$SERVE_A" | grep -x 'ch2=OK' >/dev/null; then
     ok "A2: ch2 (awg 200) reported OK"
 else
     bad "A2: expected 'ch2=OK'; got: $SERVE_A"
 fi
-if printf '%s\n' "$SERVE_A" | grep -qx 'ch3=OK'; then
+if printf '%s\n' "$SERVE_A" | grep -x 'ch3=OK' >/dev/null; then
     ok "A3: ch3 (hy2 200) reported OK"
 else
     bad "A3: expected 'ch3=OK'; got: $SERVE_A"

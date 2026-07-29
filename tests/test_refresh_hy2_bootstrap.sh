@@ -61,15 +61,15 @@ teardown() {
     # Script name and --server are on adjacent lines; check both exist in the bootstrap block
     local block
     block=$(awk '/elif.*_hy2_server/,/unset _hy2_server/' "$REFRESH")
-    printf '%s\n' "$block" | grep -q 'oxpulse-partner-edge-enable-hy2'
-    printf '%s\n' "$block" | grep -q -- '--server'
+    printf '%s\n' "$block" | grep 'oxpulse-partner-edge-enable-hy2' >/dev/null
+    printf '%s\n' "$block" | grep -- '--server' >/dev/null
 }
 
 @test "refresh.sh bootstrap failure is non-fatal (WARNING, not die)" {
     # The bootstrap failure path must log WARNING, NOT call die
     local block
     block=$(awk '/elif.*_hy2_server/,/unset _hy2_server/' "$REFRESH")
-    printf '%s\n' "$block" | grep -q 'WARNING'
+    printf '%s\n' "$block" | grep 'WARNING' >/dev/null
     # Verify die() is not called in bootstrap path
     local die_calls
     die_calls=$(printf '%s\n' "$block" | grep -c '^\s*die ' 2>/dev/null || true)
@@ -166,7 +166,7 @@ _run_hy2_block() {
     # enable-hy2 must have been called with --server test:443
     run cat "$ENABLE_HY2_ARGS"
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -q -- '--server test:443'
+    printf '%s\n' "$output" | grep -- '--server test:443' >/dev/null
 
     # Restart path must NOT have been taken
     run ls "$TMP/restart_called" 2>/dev/null
@@ -195,7 +195,7 @@ _run_hy2_block() {
     [ "$exit_code" -eq 0 ]
 
     # Must log the upgrade.sh hint
-    printf '%s\n' "$output" | grep -q 'upgrade.sh'
+    printf '%s\n' "$output" | grep 'upgrade.sh' >/dev/null
 
     # enable-hy2 sentinel must NOT exist (it was never called)
     run ls "$ENABLE_HY2_CALLED" 2>/dev/null

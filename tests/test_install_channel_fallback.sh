@@ -142,7 +142,7 @@ pass "healthcheck.sh has degraded aggregate logic"
 # ---------------------------------------------------------------------------
 # The dry-run template at ~L347 writes TURNS_SUBDOMAIN="${TURNS_SUBDOMAIN}".
 # Under set -u with TURNS_SUBDOMAIN unset this aborts. Fix: use ${TURNS_SUBDOMAIN:-}.
-if grep -n 'TURNS_SUBDOMAIN="${TURNS_SUBDOMAIN}"' "$REPO_ROOT/install.sh" | grep -qv ':-'; then
+if grep -n 'TURNS_SUBDOMAIN="${TURNS_SUBDOMAIN}"' "$REPO_ROOT/install.sh" | grep -v ':-' >/dev/null; then
     fail "Bug 5: TURNS_SUBDOMAIN dry-run uses bare \${TURNS_SUBDOMAIN} (not \${TURNS_SUBDOMAIN:-}) — unbound under set -u"
 fi
 pass "Bug 5: TURNS_SUBDOMAIN dry-run uses defensive \${TURNS_SUBDOMAIN:-} expansion"

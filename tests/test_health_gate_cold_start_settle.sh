@@ -139,7 +139,7 @@ T1_HC="$TMP/t1_hc.sh"
 make_hc "$T1_HC" "$TMP/t1.cnt" 3
 printf 'check_ok=GREEN\ncheck_flap=GREEN\n' > "$TMP/t1_baseline.snap"
 T1_OUT=$(run_settle "$T1_HC" "$TMP/t1_baseline.snap" 9 "$T1_TD")
-if echo "$T1_OUT" | grep -q 'GATE_PASS'; then
+if echo "$T1_OUT" | grep 'GATE_PASS' >/dev/null; then
     pass "T1: transient cold-start regression (check_flap RED->GREEN) tolerated => no false rollback"
 else
     fail "T1: transient cold-start regression rolled back (got '$T1_OUT') - cold-start gate not re-polling"
@@ -160,7 +160,7 @@ T2_HC="$TMP/t2_hc.sh"
 make_hc "$T2_HC" "$TMP/t2.cnt" 0   # FLIP=0 => check_flap always RED
 printf 'check_ok=GREEN\ncheck_flap=GREEN\n' > "$TMP/t2_baseline.snap"
 T2_OUT=$(run_settle "$T2_HC" "$TMP/t2_baseline.snap" 6 "$T2_TD")
-if echo "$T2_OUT" | grep -q 'GATE_ROLLBACK'; then
+if echo "$T2_OUT" | grep 'GATE_ROLLBACK' >/dev/null; then
     pass "T2: persistent regression (check_flap stays RED past budget) => rollback (real path intact)"
 else
     fail "T2: persistent regression NOT rolled back (got '$T2_OUT') - gate over-relaxed"
@@ -180,7 +180,7 @@ T3_HC="$TMP/t3_hc.sh"
 make_hc "$T3_HC" "$TMP/t3.cnt" 1   # FLIP=1 => GREEN from the first call
 printf 'check_ok=GREEN\ncheck_flap=GREEN\n' > "$TMP/t3_baseline.snap"
 T3_OUT=$(run_settle "$T3_HC" "$TMP/t3_baseline.snap" 6 "$T3_TD")
-if echo "$T3_OUT" | grep -q 'GATE_PASS'; then
+if echo "$T3_OUT" | grep 'GATE_PASS' >/dev/null; then
     pass "T3: clean settle (no regression) => pass"
 else
     fail "T3: clean settle incorrectly rolled back (got '$T3_OUT')"

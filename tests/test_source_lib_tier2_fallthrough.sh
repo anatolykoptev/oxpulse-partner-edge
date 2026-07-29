@@ -116,7 +116,7 @@ _drive() {
 
 	local out
 	out=$(_drive "$remote_match" 0) || true
-	echo "$out" | grep -q 'SOURCED_OK' \
+	echo "$out" | grep 'SOURCED_OK' >/dev/null \
 		|| { echo "expected SOURCED_OK via remote fallthrough; got: $out"; false; }
 	# Prove the remote manifest fetch actually happened (fallthrough occurred, not
 	# a silent tier-2 acceptance).
@@ -138,9 +138,9 @@ _drive() {
 
 	local out
 	out=$(_drive "$remote_would_be_correct" 0) || true
-	echo "$out" | grep -qi 'checksum mismatch' \
+	echo "$out" | grep -i 'checksum mismatch' >/dev/null \
 		|| { echo "expected a terminal mismatch die; got: $out"; false; }
-	echo "$out" | grep -q 'SOURCED_OK' \
+	echo "$out" | grep 'SOURCED_OK' >/dev/null \
 		&& { echo "sourced despite a tier-2 mismatch — mismatch must never be rescued by another tier! out: $out"; false; }
 	# The remote manifest must NEVER have been fetched — the search terminated at
 	# tier-2's mismatched entry, it did not continue.
@@ -161,15 +161,15 @@ _drive() {
 
 	local out
 	out=$(_drive "$remote_noentry" 0) || true
-	echo "$out" | grep -qi 'unsafe' \
+	echo "$out" | grep -i 'unsafe' >/dev/null \
 		|| { echo "expected fail-closed 'unsafe' die when no tier has the entry; got: $out"; false; }
-	echo "$out" | grep -q 'SOURCED_OK' \
+	echo "$out" | grep 'SOURCED_OK' >/dev/null \
 		&& { echo "sourced despite no tier having the entry! out: $out"; false; }
 
 	out=$(_drive "$remote_noentry" 1) || true
-	echo "$out" | grep -q 'SOURCED_OK' \
+	echo "$out" | grep 'SOURCED_OK' >/dev/null \
 		|| { echo "expected SOURCED_OK with OXPULSE_UPGRADE_NO_INTEGRITY=1 override; got: $out"; false; }
-	echo "$out" | grep -qi 'operator accepts risk' \
+	echo "$out" | grep -i 'operator accepts risk' >/dev/null \
 		|| { echo "expected an operator-accepts-risk warn with the override; got: $out"; false; }
 }
 
@@ -187,7 +187,7 @@ _drive() {
 
 	local out
 	out=$(_drive "" 0) || true
-	echo "$out" | grep -q 'SOURCED_OK' \
+	echo "$out" | grep 'SOURCED_OK' >/dev/null \
 		|| { echo "expected SOURCED_OK via tier-1; got: $out"; false; }
 	grep -q 'lib-checksums.txt' "$CURL_LOG" \
 		&& { echo "remote manifest was fetched despite tier-1 already resolving cleanly — needless network call! curl log: $(cat "$CURL_LOG")"; false; }

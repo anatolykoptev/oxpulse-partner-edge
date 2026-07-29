@@ -58,7 +58,7 @@ fi
 
 # I5: apply_restarts is called inside reconcile_all (not dead code)
 _reconcile_all_body=$(awk '/^reconcile_all\(\)/,/^}/' "$LIB" 2>/dev/null || true)
-if echo "$_reconcile_all_body" | grep -q 'apply_restarts'; then
+if echo "$_reconcile_all_body" | grep 'apply_restarts' >/dev/null; then
     pass "I5: apply_restarts() is called inside reconcile_all()"
 else
     fail "I5: apply_restarts() NOT called inside reconcile_all() — it is dead code"
@@ -238,11 +238,11 @@ chmod +x "$_tmpdir/run_idempotency.sh"
 
 _idem_out=$(bash "$_tmpdir/run_idempotency.sh" "$_tmpdir" "$REPO_ROOT" 2>/dev/null || true)
 
-if echo "$_idem_out" | grep -q "RUN1_FAILED"; then
+if echo "$_idem_out" | grep "RUN1_FAILED" >/dev/null; then
     fail "I6: reconcile_all run1 failed (function may not be implemented yet)"
-elif echo "$_idem_out" | grep -q "RUN2_FAILED"; then
+elif echo "$_idem_out" | grep "RUN2_FAILED" >/dev/null; then
     fail "I6: reconcile_all run2 failed (non-idempotent crash)"
-elif echo "$_idem_out" | grep -q "DONE"; then
+elif echo "$_idem_out" | grep "DONE" >/dev/null; then
     _run1_swaps=$(echo "$_idem_out" | grep "^RUN1_SWAPS=" | cut -d= -f2)
     _run2_swaps=$(echo "$_idem_out" | grep "^RUN2_SWAPS=" | cut -d= -f2)
     # Run-1 must detect a change (STATE sha=abc123 != rendered pre-sub sha).

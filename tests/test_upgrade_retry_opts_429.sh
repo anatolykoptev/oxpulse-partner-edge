@@ -108,7 +108,7 @@ fi
 bash -n "$RETRY_FN" && pass "X1: extracted RETRY_OPTS block parses" || { fail "X1: syntax error in extracted block"; exit 1; }
 
 RETRY_ARR=$(bash -c "source '$RETRY_FN'; printf '%s\n' \"\${RETRY_OPTS[@]}\"")
-if echo "$RETRY_ARR" | grep -qx -- '--retry-all-errors'; then
+if echo "$RETRY_ARR" | grep -x -- '--retry-all-errors' >/dev/null; then
     pass "X2: this environment's curl ($(curl --version | head -1 | awk '{print $2}')) qualifies for --retry-all-errors, and RETRY_OPTS includes it"
 else
     fail "X2: --retry-all-errors missing from RETRY_OPTS despite a qualifying curl ($(curl --version | head -1 | awk '{print $2}'))"

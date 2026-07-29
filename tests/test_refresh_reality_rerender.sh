@@ -41,7 +41,7 @@ PUBKEY_C="CCCC_new_reality_pubkey_3333333333333333333"
 # rotation branch (between the reality-field merge and the VERSION_FILE write).
 echo "==> Structural: rotation branch invokes the shared xray render seam"
 ROT_BLOCK=$(awk '/# Merge new reality fields into node-config.json/{f=1} f{print} /^echo "\$NEW_VERSION" > "\$VERSION_FILE"/{if(f)exit}' "$SCRIPT")
-if printf '%s' "$ROT_BLOCK" | grep -qE 'render_channel_soft|re_render_xray'; then
+if printf '%s' "$ROT_BLOCK" | grep -E 'render_channel_soft|re_render_xray' >/dev/null; then
 	pass "rotation branch calls render_channel_soft/re_render_xray"
 else
 	fail "rotation branch does NOT re-render xray-client.json (epoch_apply_gap)"

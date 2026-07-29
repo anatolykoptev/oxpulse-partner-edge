@@ -151,7 +151,7 @@ COMPOSE
 
     local config
     config=$(COMPOSE_PROFILES=ch3 docker compose -f "$tmp/docker-compose.yml" config 2>/dev/null)
-    echo "$config" | grep -q "test-hysteria2-profile"
+    echo "$config" | grep "test-hysteria2-profile" >/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -182,7 +182,7 @@ COMPOSE
     local config
     config=$(docker compose --profile "ch3,ch3" -f "$tmp/docker-compose.yml" config 2>/dev/null)
     # Should NOT contain the hysteria2 container (--profile with comma-literal fails)
-    ! echo "$config" | grep -q "test-hysteria2-profile2"
+    ! echo "$config" | grep "test-hysteria2-profile2" >/dev/null
 }
 
 # ---------------------------------------------------------------------------

@@ -89,23 +89,23 @@ EOF
 _patch_compose_sfu_healthcheck_cidr "$BUGGY"
 
 HC_LINE_A=$(grep 'wget -qO- http' "$BUGGY")
-if echo "$HC_LINE_A" | grep -qF 'http://10.9.0.7:9317/metrics'; then
+if echo "$HC_LINE_A" | grep -F 'http://10.9.0.7:9317/metrics' >/dev/null; then
     pass "a-1: wget URL host CIDR stripped (http://10.9.0.7:9317/metrics)"
 else
     fail "a-1: wget URL host still wrong: $HC_LINE_A"
 fi
-if echo "$HC_LINE_A" | grep -qF 'nc -z 10.9.0.7 '; then
+if echo "$HC_LINE_A" | grep -F 'nc -z 10.9.0.7 ' >/dev/null; then
     pass "a-2: nc -z relay-API host CIDR stripped (nc -z 10.9.0.7 )"
 else
     fail "a-2: nc -z relay-API host still wrong: $HC_LINE_A"
 fi
-if echo "$HC_LINE_A" | grep -qF '/24'; then
+if echo "$HC_LINE_A" | grep -F '/24' >/dev/null; then
     fail "a-3: /24 CIDR suffix still present after heal: $HC_LINE_A"
 else
     pass "a-3: no /24 CIDR suffix remains"
 fi
 # client_ws (127.0.0.1) must be untouched — it was never CIDR-suffixed.
-if echo "$HC_LINE_A" | grep -qF 'nc -z 127.0.0.1 \"${SFU_CLIENT_WS_PORT:-8920}\"'; then
+if echo "$HC_LINE_A" | grep -F 'nc -z 127.0.0.1 \"${SFU_CLIENT_WS_PORT:-8920}\"' >/dev/null; then
     pass "a-4: client_ws probe (127.0.0.1) untouched"
 else
     fail "a-4: client_ws probe corrupted: $HC_LINE_A"

@@ -56,7 +56,7 @@ _jq_pipeline() {
 @test "SERVE_COUNTRIES empty by default" {
 	run _parse_sc --dry-run --partner-id=tp --domain=tp.example.com --token=ptkn_t
 	[ "$status" -eq 0 ]
-	echo "$output" | grep -qE "SERVE_COUNTRIES=$"
+	echo "$output" | grep -E "SERVE_COUNTRIES=$" >/dev/null
 }
 
 @test "jq pipeline: RU,BY produces correct JSON" {

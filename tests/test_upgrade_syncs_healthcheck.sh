@@ -50,7 +50,7 @@ bash -n "$UPGRADE" && pass "A1: syntax clean" || { fail "A1: syntax errors"; exi
 # (avoids the anchor-fragility footgun hit earlier in this same file's
 # sibling test, test_upgrade_pull_scope_and_rollback.sh Section C1d).
 sbin_files_block=$(awk '/^_HOST_SCRIPT_SBIN_FILES=\(/{f=1} f{print} f && /^\)$/{exit}' "$UPGRADE")
-echo "$sbin_files_block" | grep -qF 'oxpulse-partner-edge-healthcheck' \
+echo "$sbin_files_block" | grep -F 'oxpulse-partner-edge-healthcheck' >/dev/null \
     && pass "A2: oxpulse-partner-edge-healthcheck listed in _HOST_SCRIPT_SBIN_FILES" \
     || fail "A2: oxpulse-partner-edge-healthcheck NOT in _HOST_SCRIPT_SBIN_FILES — plain upgrade still never syncs it"
 
@@ -76,7 +76,7 @@ fi
 # A6: mode must default to 0755 (executable) for the healthcheck binary —
 # it must NOT fall into the 0644 sourced-lib bucket.
 mode_fn=$(awk '/^_host_script_mode\(\)/{f=1} f{print} f && /^}$/{exit}' "$UPGRADE")
-echo "$mode_fn" | grep -qF 'oxpulse-partner-edge-healthcheck' \
+echo "$mode_fn" | grep -F 'oxpulse-partner-edge-healthcheck' >/dev/null \
     && fail "A6: oxpulse-partner-edge-healthcheck should NOT need a _host_script_mode() special case (falls to the 0755 default) — but it wrongly does" \
     || pass "A6: oxpulse-partner-edge-healthcheck falls through to the default 0755 mode (no 0644-lib special case)"
 
@@ -185,7 +185,7 @@ B_OUT=$(
     && pass "B1: sync_host_scripts exited 0" \
     || fail "B1: sync_host_scripts exited $B_RC; output: $B_OUT"
 
-echo "$B_OUT" | grep -qF 'installed oxpulse-partner-edge-healthcheck' \
+echo "$B_OUT" | grep -F 'installed oxpulse-partner-edge-healthcheck' >/dev/null \
     && pass "B2: sync_host_scripts reports it installed oxpulse-partner-edge-healthcheck" \
     || fail "B2: no 'installed oxpulse-partner-edge-healthcheck' log line; output: $B_OUT"
 
@@ -202,7 +202,7 @@ EXPECTED_NEW_SHA=$(printf '%s' "$NEW_HC_CONTENT" | sha256sum | awk '{print $1}')
     || fail "B4: installed content does not match the fixture's NEW healthcheck.sh (sha mismatch)"
 
 # The newly-installed binary must actually support --snapshot now.
-if "$B_SBIN/oxpulse-partner-edge-healthcheck" --snapshot 2>/dev/null | grep -qE '^check_99_hc_sync_marker=GREEN$'; then
+if "$B_SBIN/oxpulse-partner-edge-healthcheck" --snapshot 2>/dev/null | grep -E '^check_99_hc_sync_marker=GREEN$' >/dev/null; then
     pass "B5: the synced healthcheck supports --snapshot and emits the fixture marker"
 else
     fail "B5: the synced healthcheck does not support --snapshot as expected"
@@ -318,13 +318,13 @@ else
     fail "C2: installed healthcheck does not match the NEW fixture — sync did not run/replace it"
 fi
 
-if echo "$C_OUT" | grep -qF 'lacks --snapshot support'; then
+if echo "$C_OUT" | grep -F 'lacks --snapshot support' >/dev/null; then
     fail "C3: settle_healthcheck fell back to the --local gate ('lacks --snapshot support') — the OLD healthcheck was still in use at settle time, the exact chicken-and-egg bug"
 else
     pass "C3: settle_healthcheck did NOT fall back to the --local gate — the NEWLY-synced (snapshot-capable) healthcheck was used"
 fi
 
-if echo "$C_OUT" | grep -qF 'no regressions'; then
+if echo "$C_OUT" | grep -F 'no regressions' >/dev/null; then
     pass "C4: the baseline-aware regression gate ran and reported no regressions (full happy path, using the synced healthcheck throughout)"
 else
     fail "C4: expected 'no regressions' from the baseline-aware gate; output: $C_OUT"

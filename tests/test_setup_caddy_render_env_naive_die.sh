@@ -112,8 +112,8 @@ if [[ "$a_result" == "DIE" ]]; then
 else
     fail "A: expected die, got RESULT='${a_result:-?}' — tier-4 guard missing (silent-1080 regression: a wrong 127.0.0.1:1080 upstream would be baked into the live Caddyfile)"
 fi
-if echo "$a_msg" | grep -q 'not in STATE_FILE and naive container is down' \
-   && echo "$a_msg" | grep -q 'cannot render Caddyfile safely'; then
+if echo "$a_msg" | grep 'not in STATE_FILE and naive container is down' >/dev/null \
+   && echo "$a_msg" | grep 'cannot render Caddyfile safely' >/dev/null; then
     pass "A: die message is the actionable NAIVE_SOCKS_PORT message"
 else
     fail "A: die fired but message not the expected actionable one — got: '${a_msg:-<none>}'"

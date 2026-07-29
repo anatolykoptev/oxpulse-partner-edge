@@ -77,7 +77,7 @@ echo "OK:     Caddy /metrics endpoint reachable"
 
 # Acceptance 3: per-upstream metrics exposed (Phase 5.8)
 metrics=$(ssh_root "docker exec oxpulse-partner-caddy curl -s -H 'Host: localhost' http://127.0.0.1:2019/metrics 2>/dev/null")
-if ! echo "$metrics" | grep -q "caddy_reverse_proxy_upstreams_healthy"; then
+if ! echo "$metrics" | grep "caddy_reverse_proxy_upstreams_healthy" >/dev/null; then
     echo "FAIL: no caddy_reverse_proxy_upstreams_healthy metric"
     exit 1
 fi

@@ -347,7 +347,7 @@ fi
 T2_LOG=$(mktemp -p "$TMP")
 T2_OUT=$(run_wrap 0 "$T2_LOG")
 T2_FETCHES=$(count_lib_fetches "$T2_LOG")
-if printf '%s\n' "$T2_OUT" | grep -q 'RAN sentinel=0 staged=1'; then
+if printf '%s\n' "$T2_OUT" | grep 'RAN sentinel=0 staged=1' >/dev/null; then
     pass "T2a: no-reexec path ran once with sentinel=0 staged=1 (single process, no exec)"
 else
     fail "T2a: expected 'RAN sentinel=0 staged=1'; got: $T2_OUT"
@@ -411,7 +411,7 @@ T3POST
 chmod +x "$T3_SCRIPT"
 T3_OUT=$(bash "$T3_SCRIPT" 2>&1)
 T3_FETCHES=$(count_lib_fetches "$T3_LOG")
-if [[ "$T3_FETCHES" -eq 5 ]] && printf '%s\n' "$T3_OUT" | grep -q 'GUARD=1'; then
+if [[ "$T3_FETCHES" -eq 5 ]] && printf '%s\n' "$T3_OUT" | grep 'GUARD=1' >/dev/null; then
     pass "T3: calling _stage_reconcile_transitive_deps twice in one process fetches only once (idempotency guard holds); out: $T3_OUT"
 else
     fail "T3: idempotency guard did not prevent a second fetch (fetches=$T3_FETCHES); out: $T3_OUT"

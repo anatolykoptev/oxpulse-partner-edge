@@ -68,9 +68,9 @@ _check_surface_wired() {
     # before the next "- id:" line.
     local block
     block=$(awk "/^  - id: ${surface}$/,/^  - id: /" "$MANIFEST" 2>/dev/null | head -20)
-    if echo "$block" | grep -q 'wired: false'; then
+    if echo "$block" | grep 'wired: false' >/dev/null; then
         fail "${label}: surface '$surface' still has wired:false in manifest.yaml"
-    elif echo "$block" | grep -q "id: ${surface}"; then
+    elif echo "$block" | grep "id: ${surface}" >/dev/null; then
         pass "${label}: surface '$surface' is wired (no wired:false in block)"
     else
         fail "${label}: surface '$surface' block not found in manifest.yaml"
@@ -84,7 +84,7 @@ _check_surface_wired "xray_env"    "W4"
 # compose must stay wired:false (scope discipline)
 # awk range /^  - id: compose$/,/^  - id: / collapses (end=start). Use f-flag instead.
 _block_compose=$(awk 'f && /^  - id:/{exit} /^  - id: compose$/{f=1} f' "$MANIFEST" 2>/dev/null || true)
-if echo "$_block_compose" | grep -q 'wired: false'; then
+if echo "$_block_compose" | grep 'wired: false' >/dev/null; then
     pass "W5: compose stays wired:false (not in P4b scope)"
 else
     fail "W5: compose wired:false removed — outside P4b scope"
@@ -110,7 +110,7 @@ fi
 # firewall: reconcile_all must route to reconcile_firewall_surface,
 # which internally calls firewall_apply (indirect — correct pattern).
 _reconcile_all_body=$(awk '/^reconcile_all\(\)/,/^}/' "$LIB" 2>/dev/null || true)
-if echo "$_reconcile_all_body" | grep -q 'reconcile_firewall_surface'; then
+if echo "$_reconcile_all_body" | grep 'reconcile_firewall_surface' >/dev/null; then
     pass "H3: firewall_apply called from network_apply handler in reconcile_all"
 else
     fail "H3: firewall_apply not called from reconcile_all network_apply handler"
@@ -130,11 +130,11 @@ fi
 # surface change?" independently of dedup state.
 # We verify the coturn surface uses a per-surface flag (not _RECONCILE_RESTART_UNITS).
 _coturn_fn=$(awk '/^reconcile_coturn_surface\(\)/,/^}/' "$LIB" 2>/dev/null || true)
-if echo "$_coturn_fn" | grep -qE '_RECONCILE_COTURN_CHANGED|mark_coturn_|COTURN_CHANGED'; then
+if echo "$_coturn_fn" | grep -E '_RECONCILE_COTURN_CHANGED|mark_coturn_|COTURN_CHANGED' >/dev/null; then
     pass "CC1: coturn surface uses per-surface change flag (not _RECONCILE_RESTART_UNITS delta)"
 else
     # Also acceptable: the handler returns an exit code that reconcile_all uses
-    if echo "$_coturn_fn" | grep -qE 'return 1|echo.*CHANGED|_surface_changed'; then
+    if echo "$_coturn_fn" | grep -E 'return 1|echo.*CHANGED|_surface_changed' >/dev/null; then
         pass "CC1: coturn surface signals change via non-_RECONCILE_RESTART_UNITS mechanism"
     else
         fail "CC1: coturn surface change-tracking mechanism unclear — may undercount changes"
@@ -144,12 +144,12 @@ fi
 # ---------------------------------------------------------------------------
 # PI1: coturn reload via SIGUSR2, not via mark_restart of full-stack unit
 # ---------------------------------------------------------------------------
-if echo "$_coturn_fn" | grep -qE 'SIGUSR2|kill.*USR2|docker.*kill.*USR2'; then
+if echo "$_coturn_fn" | grep -E 'SIGUSR2|kill.*USR2|docker.*kill.*USR2' >/dev/null; then
     pass "PI1a: coturn surface sends SIGUSR2 (no session drop)"
 else
     fail "PI1a: coturn surface does not send SIGUSR2 — may drop TURN allocations"
 fi
-if echo "$_coturn_fn" | grep -qE 'mark_restart.*oxpulse-partner-edge\.service'; then
+if echo "$_coturn_fn" | grep -E 'mark_restart.*oxpulse-partner-edge\.service' >/dev/null; then
     fail "PI1b: coturn surface calls mark_restart(oxpulse-partner-edge.service) — would kill caddy/SFU/xray"
 else
     pass "PI1b: coturn does NOT mark_restart(oxpulse-partner-edge.service)"
@@ -160,7 +160,7 @@ fi
 # ---------------------------------------------------------------------------
 # Look for the xray_client handler (inline in reconcile_all or separate function)
 _xray_client_fn=$(awk '/^reconcile_xray_client_surface\(\)/,/^}/' "$LIB" 2>/dev/null || true)
-if echo "$_xray_client_fn" | grep -qE 'force-recreate xray-client|force.recreate.*xray.client'; then
+if echo "$_xray_client_fn" | grep -E 'force-recreate xray-client|force.recreate.*xray.client' >/dev/null; then
     pass "PI2: xray_client recreate uses --force-recreate xray-client (not full stack)"
 else
     fail "PI2: xray_client recreate does not specify 'xray-client' service — may recreate all"
@@ -179,7 +179,7 @@ _reconcile_all_firewall=$(echo "$_reconcile_all_body" | \
     awk '/firewall/,/;;/' 2>/dev/null | head -20 || true)
 # Strip comment lines before checking for docker/compose calls.
 _reconcile_all_firewall_code=$(echo "$_reconcile_all_firewall" | grep -v '^\s*#' || true)
-if echo "$_reconcile_all_firewall_code" | grep -qE 'docker|compose'; then
+if echo "$_reconcile_all_firewall_code" | grep -E 'docker|compose' >/dev/null; then
     fail "PI3: firewall handler calls docker/compose — violates canon §6 (oxpulse-owned nft only)"
 else
     pass "PI3: firewall handler does NOT call docker/compose (canon §6 compliant)"
@@ -235,9 +235,9 @@ echo "SURVIVED"
 SHELLEOF
 )
 
-if echo "$_fs_out" | grep -q "SURVIVED"; then
+if echo "$_fs_out" | grep "SURVIVED" >/dev/null; then
     pass "FS1: xray_client render failure does NOT die (fail_soft — bypass channel continues)"
-elif echo "$_fs_out" | grep -q "DIE"; then
+elif echo "$_fs_out" | grep "DIE" >/dev/null; then
     fail "FS1: xray_client render failure called die() — should be fail_soft (warn+continue)"
 else
     # Function not yet implemented — expected RED before P4b
@@ -315,9 +315,9 @@ echo "DONE"
 SHELLEOF
 )
 
-if echo "$_i7_out" | grep -q "SKIP_NO_LIB"; then
+if echo "$_i7_out" | grep "SKIP_NO_LIB" >/dev/null; then
     fail "I7: lib/reconcile.sh not found"
-elif echo "$_i7_out" | grep -q "DONE"; then
+elif echo "$_i7_out" | grep "DONE" >/dev/null; then
     _r2=$(echo "$_i7_out" | grep "^RUN2_SWAPS=" | cut -d= -f2)
     if [[ "${_r2:-1}" -eq 0 ]]; then
         pass "I7: coturn surface run-2 = 0 swaps (idempotent)"
@@ -367,9 +367,9 @@ echo "DONE"
 SHELLEOF
 )
 
-if echo "$_i9_out" | grep -q "SKIP_NO_LIB"; then
+if echo "$_i9_out" | grep "SKIP_NO_LIB" >/dev/null; then
     fail "I9: lib/reconcile.sh not found"
-elif echo "$_i9_out" | grep -q "DONE"; then
+elif echo "$_i9_out" | grep "DONE" >/dev/null; then
     _r9=$(echo "$_i9_out" | grep "^RUN2_SWAPS=" | cut -d= -f2)
     if [[ "${_r9:-1}" -eq 0 ]]; then
         pass "I9: xray_env surface run-2 = 0 swaps (idempotent)"
@@ -395,7 +395,7 @@ if [[ -f "$HOST_SCRIPTS_LIB" ]]; then
     # block is "provision xray.env" -> "_xray_env_path=" -> "[[ ! -f ... ]]". A
     # wide grep -A window catches the guard a couple lines below the path assign.
     _upg_xray_env=$(grep -A8 -E '_xray_env_path=|provision xray\.env' "$HOST_SCRIPTS_LIB" 2>/dev/null || true)
-    if echo "$_upg_xray_env" | grep -qE '\[\[ ! -f.*xray_env_path|\[ ! -f.*xray_env_path|!\s*-f.*xray\.env|\[ ! -f.*xray\.env'; then
+    if echo "$_upg_xray_env" | grep -E '\[\[ ! -f.*xray_env_path|\[ ! -f.*xray_env_path|!\s*-f.*xray\.env|\[ ! -f.*xray\.env' >/dev/null; then
         pass "NDP1: lib/host-scripts-lib.sh xray.env provision is guarded touch-if-absent (idempotent with reconcile)"
     else
         # Guard absent -> double-provision risk: sync_host_scripts would clobber an
@@ -508,9 +508,9 @@ echo "DONE"
 SHELLEOF
 )
 
-if echo "$_det_out" | grep -q "SKIP_NO_LIB"; then
+if echo "$_det_out" | grep "SKIP_NO_LIB" >/dev/null; then
     fail "DET: lib/reconcile.sh not found"
-elif echo "$_det_out" | grep -q "DONE"; then
+elif echo "$_det_out" | grep "DONE" >/dev/null; then
     _d1s=$(echo "$_det_out" | grep "^DET1_SAME_SWAPS=" | cut -d= -f2)
     _d1f=$(echo "$_det_out" | grep "^DET1_FLIP_SWAPS=" | cut -d= -f2)
     _d2=$(echo "$_det_out"  | grep "^DET2_SWAPS=" | cut -d= -f2)
@@ -533,7 +533,7 @@ elif echo "$_det_out" | grep -q "DONE"; then
         fail "DET2 (CRITICAL): STATE-empty triggered $_d2 swap(s) — non-idempotent; would swap a (possibly degraded) coturn.conf live on a no-op converge"
     fi
     # And the live config must NOT have been degraded to an empty external-ip.
-    if echo "$_d2ext" | grep -qE '^external-ip=5\.6\.7\.8$'; then
+    if echo "$_d2ext" | grep -E '^external-ip=5\.6\.7\.8$' >/dev/null; then
         pass "DET2 (CRITICAL): live coturn.conf retains last-known-good external-ip (not degraded to empty)"
     else
         fail "DET2 (CRITICAL): live coturn.conf external-ip became '$_d2ext' — degraded NAT config swapped live"

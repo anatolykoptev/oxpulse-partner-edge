@@ -24,7 +24,7 @@ grep -qE '/api/partner/register' "$SCRIPT" || { echo "FAIL: POST /api/partner/re
 grep -qE 'Caddy did not obtain TLS cert' "$SCRIPT" || { echo "FAIL: Caddy ACME timeout error message not found"; exit 1; }
 
 # 7. set -euo pipefail near the top (within first 25 lines, after the comment block).
-head -25 "$SCRIPT" | grep -q 'set -euo pipefail' || { echo "FAIL: set -euo pipefail not found in first 25 lines"; exit 1; }
+head -25 "$SCRIPT" | grep 'set -euo pipefail' >/dev/null || { echo "FAIL: set -euo pipefail not found in first 25 lines"; exit 1; }
 
 # 8. Script is executable.
 [[ -x "$SCRIPT" ]] || { echo "FAIL: hydrate.sh is not executable"; exit 1; }
@@ -33,7 +33,7 @@ head -25 "$SCRIPT" | grep -q 'set -euo pipefail' || { echo "FAIL: set -euo pipef
 grep -q 'config_sha256' "$SCRIPT" || { echo "FAIL: config_sha256 not found in sentinel logic"; exit 1; }
 
 # 10. No plaintext logging of secrets (TURN_SECRET value must not be echo'd raw).
-if grep -E 'echo.*\$TURN_SECRET|log.*\$TURN_SECRET' "$SCRIPT" | grep -qv 'len=\${#TURN_SECRET}'; then
+if grep -E 'echo.*\$TURN_SECRET|log.*\$TURN_SECRET' "$SCRIPT" | grep -v 'len=\${#TURN_SECRET}' >/dev/null; then
     echo "FAIL: TURN_SECRET may be logged in plain text"
     exit 1
 fi

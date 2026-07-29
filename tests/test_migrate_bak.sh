@@ -78,9 +78,9 @@ BAKEOF
 
 echo "==> Test 1: dry-run — output shown, no files written"
 DRY_OUT=$(PREFIX_ETC="$T_ETC" bash "$MIGRATE" "$BAK_FILE" 2>&1 || true)
-echo "$DRY_OUT" | grep -qi "edge-a" \
+echo "$DRY_OUT" | grep -i "edge-a" >/dev/null \
     || { echo "FAIL: no edge-a content in dry-run output"; echo "$DRY_OUT"; exit 1; }
-echo "$DRY_OUT" | grep -qi "dry.run" \
+echo "$DRY_OUT" | grep -i "dry.run" >/dev/null \
     || { echo "FAIL: dry-run notice missing"; echo "$DRY_OUT"; exit 1; }
 CADDY_FILES=$(find "$T_CONFD" -name "*.caddy" 2>/dev/null | wc -l)
 [[ "$CADDY_FILES" -eq 0 ]] \
@@ -117,13 +117,13 @@ IDEM_OUT=$(PREFIX_ETC="$T_ETC" bash "$MIGRATE" "$BAK_FILE" --apply 2>&1 || true)
 AFTER_COUNT=$(find "$T_CONFD" -name "migrated-*.caddy" | wc -l)
 [[ "$AFTER_COUNT" -eq "$BEFORE_COUNT" ]] \
     || { echo "FAIL: second --apply created new files (before=$BEFORE_COUNT after=$AFTER_COUNT)"; exit 1; }
-echo "$IDEM_OUT" | grep -qi "skip\|already\|idempotent" \
+echo "$IDEM_OUT" | grep -i "skip\|already\|idempotent" >/dev/null \
     || { echo "FAIL: idempotency message missing"; echo "$IDEM_OUT"; exit 1; }
 echo "OK: idempotent (count=$AFTER_COUNT, message OK)"
 
 echo "==> Test 4: .bak.migrated input → dies with error"
 ALREADY_RC=0
-PREFIX_ETC="$T_ETC" bash "$MIGRATE" "${BAK_FILE}.migrated" 2>&1 | grep -qi "migrated" || ALREADY_RC=$?
+PREFIX_ETC="$T_ETC" bash "$MIGRATE" "${BAK_FILE}.migrated" 2>&1 | grep -i "migrated" >/dev/null || ALREADY_RC=$?
 echo "OK: .bak.migrated input produces error/warning"
 
 echo ""
