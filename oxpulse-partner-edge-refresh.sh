@@ -442,6 +442,133 @@ _channel_restart_if_changed() {
     _docker_restart_if_sha_changed "$@"
 }
 
+# _rederive_channels_status — re-evaluate channels-status.env from live state.
+#
+# oxpulse-partner-edge#505: channels-status.env was frozen at install time — a
+# channel marked "skipped" (because HYSTERIA2_SERVER was empty at install) stayed
+# skipped forever, even after the inputs appeared and the container was running.
+# _channel_restart_if_changed then skipped every restart for that channel, so
+# config re-renders never reached the container (rvpn-seed ran May's config for
+# two months, reporting healthy the entire time).
+#
+# This function re-derives each channel's status from currently-available inputs
+# + live container/interface state, and writes the result back atomically. It
+# runs on every refresh, BEFORE the channels_version restart block, so the gate
+# sees fresh state.
+#
+# Transition rules (only skipped→active is promoted; failures are sticky):
+#   skipped → active   when the channel's required inputs are now present AND
+#                      its container/interface is running.
+#   skipped → skipped  when inputs are still absent (nothing to try with).
+#   failed_at_*  → unchanged. "We tried and it broke" is a different state from
+#                  "we had nothing to try with" — collapsing them repeats the
+#                  liveness≠authorization mistake that took rvpn-seed down.
+#   active → active    (no downward transition; a running channel stays active).
+#
+# Inputs per channel:
+#   xray       — always active (install.sh always attempts it; ch1 is the
+#                primary signaling channel, never skipped).
+#   hysteria2  — node-config .hysteria2_server present AND
+#                /etc/.../hysteria2-client.yaml exists AND
+#                container oxpulse-partner-hysteria2 is running.
+#   naive      — /etc/.../naive-client.json exists AND
+#                container oxpulse-partner-naive is running.
+#   awg        — node-config .awg_ip present AND
+#                systemctl is-active awg-quick@awg0 == active.
+#
+# Container liveness is checked via `docker inspect --format '{{.State.Running}}'`
+# (same primitive as lib/surgical-restart-lib.sh). A missing/failed docker call
+# is treated as "not running" (fail-closed: no false active promotion).
+_rederive_channels_status() {
+    local _chs_env="${PREFIX_LIB}/channels-status.env"
+    [[ -f "$_chs_env" ]] || return 0
+
+    # Read current statuses into an associative array.
+    declare -A _cur=()
+    local _name _val
+    while IFS='=' read -r _name _val || [[ -n "$_name" ]]; do
+        [[ -z "$_name" || "$_name" =~ ^# ]] && continue
+        _cur["$_name"]="$_val"
+    done < "$_chs_env"
+
+    # Helper: is a docker container running? Fail-closed (false on any error).
+    _rdcs_container_running() {
+        local _ctr="$1"
+        [[ -n "$_ctr" ]] || return 1
+        local _running
+        _running=$(docker inspect --format '{{.State.Running}}' "$_ctr" 2>/dev/null || echo false)
+        [[ "$_running" == "true" ]]
+    }
+
+    # Helper: is a systemd unit active? Fail-closed.
+    _rdcs_unit_active() {
+        local _unit="$1"
+        [[ -n "$_unit" ]] || return 1
+        local _state
+        _state=$(systemctl is-active "$_unit" 2>/dev/null || echo inactive)
+        [[ "$_state" == "active" ]]
+    }
+
+    local _changed=0
+
+    # hysteria2: skipped → active when hysteria2_server in node-config +
+    # config file exists + container running.
+    if [[ "${_cur[hysteria2]:-}" == "skipped" ]]; then
+        local _hy2_server
+        _hy2_server=$(jq -r '.hysteria2_server // empty' "$NODE_CFG" 2>/dev/null || true)
+        if [[ -n "$_hy2_server" && -f "${PREFIX_ETC}/hysteria2-client.yaml" ]] && \
+           _rdcs_container_running oxpulse-partner-hysteria2; then
+            log "  [rederive] hysteria2: skipped → active (server=$_hy2_server, config+container present)"
+            _cur[hysteria2]=active
+            _changed=1
+        fi
+    fi
+
+    # naive: skipped → active when config file exists + container running.
+    if [[ "${_cur[naive]:-}" == "skipped" || \
+          "${_cur[naive]:-}" == "skipped_no_server" || \
+          "${_cur[naive]:-}" == "skipped_fixture_host" ]]; then
+        if [[ -f "${PREFIX_ETC}/naive-client.json" ]] && \
+           _rdcs_container_running oxpulse-partner-naive; then
+            log "  [rederive] naive: ${_cur[naive]} → active (config+container present)"
+            _cur[naive]=active
+            _changed=1
+        fi
+    fi
+
+    # awg: skipped → active when awg_ip in node-config + awg-quick@awg0 active.
+    if [[ "${_cur[awg]:-}" == "skipped" ]]; then
+        local _awg_ip
+        _awg_ip=$(jq -r '.awg_ip // empty' "$NODE_CFG" 2>/dev/null || true)
+        if [[ -n "$_awg_ip" ]] && _rdcs_unit_active awg-quick@awg0; then
+            log "  [rederive] awg: skipped → active (awg_ip=$_awg_ip, awg0 up)"
+            _cur[awg]=active
+            _changed=1
+        fi
+    fi
+
+    # Write back atomically only if something changed.
+    if [[ $_changed -eq 1 ]]; then
+        local _tmp
+        _tmp=$(mktemp "$PREFIX_LIB/.channels-status-XXXXXX.tmp")
+        {
+            printf '# Generated by oxpulse-partner-edge-refresh.sh — DO NOT EDIT\n'
+            # Preserve original key order: xray, hysteria2, naive, awg
+            # (install.sh writes in this order; healthcheck.sh reads in
+            # file order for display, so keeping order stable avoids
+            # spurious snapshot diffs).
+            for _k in xray hysteria2 naive awg; do
+                [[ -n "${_cur[$_k]:-}" ]] && printf '%s=%s\n' "$_k" "${_cur[$_k]}"
+            done
+        } > "$_tmp"
+        chmod 0640 "$_tmp"
+        mv -f "$_tmp" "$_chs_env"
+        log "  [rederive] channels-status.env updated"
+    fi
+
+    unset -f _rdcs_container_running _rdcs_unit_active
+}
+
 # _sfu_env_file_wired COMPOSE_FILE — true iff the live compose's `sfu` service
 # already reads the signing key via `env_file: … sfu-keys.env`. Guards the recreate
 # below: upgrade.sh syncs a NEW refresh.sh on every run but NEVER re-renders the
@@ -566,6 +693,14 @@ if [[ "$KEYS_OK" -eq 1 ]]; then
     _emit_sfu_applied_gauge "$_sfu_wired"
     unset _sfu_compose _sfu_wired
 fi
+
+# oxpulse-partner-edge#505: re-derive channels-status.env from live state
+# BEFORE the restart gate runs. A channel marked "skipped" at install time
+# that now has its inputs present + container running becomes "active", so
+# _channel_restart_if_changed acts on it instead of skipping. Runs on every
+# refresh (not just channels_version change) — inputs can appear via a
+# node-config update without a channels_version bump.
+_rederive_channels_status
 
 if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" != "none" && \
       "$NEW_CHANNELS_VERSION" != "$CURRENT_CHANNELS_VERSION" ]]; then
