@@ -520,7 +520,7 @@ CEOF
 	}
 
 	# NB: use [[ ]] string matches, not `grep && {…}`, for the negative assertions:
-	# a `grep -q X && {…}` as the FINAL command makes bats fail the test when grep
+	# a `grep X && {…}` as the FINAL command makes bats fail the test when grep
 	# (correctly) does NOT match, since the test's exit status = that non-zero grep.
 	local out
 	# (A) flag parsed from $@ must reach the POST-lib bundle check, no integrity die.

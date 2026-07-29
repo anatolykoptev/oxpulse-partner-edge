@@ -108,19 +108,19 @@ EOF
 _patch_compose_xray_healthcheck_probe "$BUGGY"
 
 HC_LINE_A=$(grep 'CMD-SHELL.*3080' "$BUGGY")
-if echo "$HC_LINE_A" | grep -qF 'wget -q -O /dev/null -T 5 http://127.0.0.1:3080/api/health/live'; then
+if echo "$HC_LINE_A" | grep -F 'wget -q -O /dev/null -T 5 http://127.0.0.1:3080/api/health/live' >/dev/null; then
     pass "a-1: test line replaced with wget tunnel-path probe"
 else
     fail "a-1: test line still wrong: $HC_LINE_A"
 fi
-if echo "$HC_LINE_A" | grep -qF 'ss -ltn'; then
+if echo "$HC_LINE_A" | grep -F 'ss -ltn' >/dev/null; then
     fail "a-2: old ss -ltn probe still present: $HC_LINE_A"
 else
     pass "a-2: old ss -ltn probe removed"
 fi
 # timeout must be bumped to 10s in the xray block.
 XRAY_TIMEOUT=$(awk '/xray-client/{f=1} f && /timeout:/{print; exit}' "$BUGGY")
-if echo "$XRAY_TIMEOUT" | grep -qF 'timeout: 10s'; then
+if echo "$XRAY_TIMEOUT" | grep -F 'timeout: 10s' >/dev/null; then
     pass "a-3: xray timeout bumped to 10s"
 else
     fail "a-3: xray timeout not bumped: $XRAY_TIMEOUT"
@@ -158,14 +158,14 @@ else
 fi
 # Caddy timeout must STILL be 5s (not bumped to 10s).
 CADDY_TIMEOUT=$(awk '/caddy:/{f=1} f && /timeout:/{print; exit}' "$BUGGY")
-if echo "$CADDY_TIMEOUT" | grep -qF 'timeout: 5s'; then
+if echo "$CADDY_TIMEOUT" | grep -F 'timeout: 5s' >/dev/null; then
     pass "c-2: caddy healthcheck timeout untouched (still 5s)"
 else
     fail "c-2: caddy timeout was modified by the xray-scoped sed: $CADDY_TIMEOUT"
 fi
 # Coturn timeout must STILL be 5s.
 COTURN_TIMEOUT=$(awk '/coturn:/{f=1} f && /timeout:/{print; exit}' "$BUGGY")
-if echo "$COTURN_TIMEOUT" | grep -qF 'timeout: 5s'; then
+if echo "$COTURN_TIMEOUT" | grep -F 'timeout: 5s' >/dev/null; then
     pass "c-3: coturn healthcheck timeout untouched (still 5s)"
 else
     fail "c-3: coturn timeout was modified by the xray-scoped sed: $COTURN_TIMEOUT"

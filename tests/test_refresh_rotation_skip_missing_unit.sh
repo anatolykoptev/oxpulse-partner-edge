@@ -72,7 +72,7 @@ NODE_CFG="/dev/null" # not used in this branch
 systemctl() {
     case "$*" in
         "list-unit-files oxpulse-partner-edge.service --no-legend"*)
-            return 0  # exit 0, no output → grep -q fails → else branch taken
+            return 0  # exit 0, no output → grep fails → else branch taken
             ;;
         *) return 0 ;;
     esac

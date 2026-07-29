@@ -104,7 +104,7 @@ fi
 
 # ── Case 6: MINOR #2 -- case-insensitive via ${,,} lowercase ─────────────────
 echo "==> Case 6: MINOR #2 -- guard uses lowercase substitution for case-insensitivity"
-if grep -qE '\$\{NAIVE_SERVER,,' "$INSTALL" || grep -E '_naive_server_lc' "$INSTALL" >/dev/null; then
+if grep -qE '\$\{NAIVE_SERVER,,' "$INSTALL" || grep -qE '_naive_server_lc' "$INSTALL"; then
     pass "case-insensitive lowercase (,, or _lc) found in guard"
 else
     fail "case-insensitive lowercase not found — guard may be case-sensitive"
@@ -112,7 +112,7 @@ fi
 
 # ── Case 7: MAJOR #3 -- authority comment present ────────────────────────────
 echo "==> Case 7: MAJOR #3 -- Rust authoritative comment present"
-if grep -q 'Rust render::naive is the authoritative' "$INSTALL" || grep 'Rust render::naive is authoritative' "$INSTALL" >/dev/null; then
+if grep -q 'Rust render::naive is the authoritative' "$INSTALL" || grep -q 'Rust render::naive is authoritative' "$INSTALL"; then
     pass "Rust authoritative comment found in install.sh"
 else
     fail "Rust authoritative comment not found in install.sh"

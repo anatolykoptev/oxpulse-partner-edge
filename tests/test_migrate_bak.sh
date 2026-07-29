@@ -122,8 +122,9 @@ echo "$IDEM_OUT" | grep -i "skip\|already\|idempotent" >/dev/null \
 echo "OK: idempotent (count=$AFTER_COUNT, message OK)"
 
 echo "==> Test 4: .bak.migrated input → dies with error"
-ALREADY_RC=0
-PREFIX_ETC="$T_ETC" bash "$MIGRATE" "${BAK_FILE}.migrated" 2>&1 | grep -i "migrated" >/dev/null || ALREADY_RC=$?
+ALREADY_OUT=$(PREFIX_ETC="$T_ETC" bash "$MIGRATE" "${BAK_FILE}.migrated" 2>&1 || true)
+echo "$ALREADY_OUT" | grep -i "migrated" >/dev/null \
+    || { echo "FAIL: .bak.migrated input did not mention 'migrated' in output"; echo "$ALREADY_OUT"; exit 1; }
 echo "OK: .bak.migrated input produces error/warning"
 
 echo ""
