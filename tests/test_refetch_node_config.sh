@@ -499,6 +499,84 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 6: first-upgrade re-source — stale in-memory lib, fresh installed lib
+#
+# Reproduces the re-exec'd child on the first upgrade: the old
+# channel-render-lib.sh (no refetch_node_config) is already loaded in this
+# shell, but sync_host_scripts has since installed the new one under
+# PREFIX_SBIN.  _ensure_channel_render_lib must re-source from the installed
+# copy before the call, otherwise the upgrade dies with
+# "refetch_node_config: command not found" (exit 127).
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 6: first upgrade re-sources channel-render-lib from installed path ==="
+t6=$(mktemp -d)
+trap 'rm -rf "$t6"' EXIT
+
+setup_env "$t6/stub" "$t6/etc"
+mkdir -p "$t6/var" "$t6/sbin"
+
+# New lib installed by sync_host_scripts (repo copy).
+install -m 0644 "$LIB" "$t6/sbin/channel-render-lib.sh"
+
+# Stale in-memory lib: the same file with refetch_node_config removed,
+# simulating a pre-PR installed copy.
+OLD_LIB="$t6/channel-render-lib.sh.old"
+sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB"
+
+# curl stub: fresh node-config response.
+write_fresh_node_config_json > "$t6/fresh_resp.json"
+make_curl_stub "$t6/stub/curl" "$t6/fresh_resp.json" 0
+
+# Extract _ensure_channel_render_lib from upgrade.sh (uses _source_lib in
+# fallback; stub it so a missed re-source fails the test rather than
+# accidentally fetching from the network).
+HELPER_FN="$t6/ensure_fn.sh"
+awk '/^_ensure_channel_render_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE_SH" > "$HELPER_FN"
+
+set +e
+out6=$(
+    PATH="$t6/stub:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+    PREFIX_ETC="$t6/etc" \
+    PREFIX_LIB="$t6/var" \
+    PREFIX_SBIN="$t6/sbin" \
+    NODE_CFG="$t6/etc/node-config.json" \
+    XRAY_CFG="$t6/etc/xray-client.json" \
+    TOKEN_FILE="$t6/etc/token" \
+    OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
+    REPO_RAW="file://$REPO_ROOT" \
+    LOG_FILE="$t6/var/render.log" \
+    bash -c '
+        set -euo pipefail
+        log()  { printf "%s\n" "$*" >&2; }
+        warn() { log "WARN $*"; }
+        die()  { log "ERR $*"; exit 1; }
+        _source_lib() { return 1; }
+        source "'"$OLD_LIB"'"
+        source "'"$HELPER_FN"'"
+        _ensure_channel_render_lib
+        refetch_node_config
+        re_render_xray
+    ' 2>&1
+)
+exit6=$?
+set -e
+
+if [[ $exit6 -ne 0 ]]; then
+    fail "test6: first-upgrade refetch exited $exit6; output: $out6"
+else
+    rendered_sid6=$(extract_short_id "$t6/etc/xray-client.json")
+    if [[ "$rendered_sid6" == "FRESH_NEW" ]]; then
+        pass "test6: stale in-memory lib re-sourced from installed path; xray rendered with FRESH_NEW short_id"
+    else
+        fail "test6: rendered short_id is '$rendered_sid6', expected 'FRESH_NEW'; output: $out6"
+    fi
+fi
+
+trap - EXIT
+rm -rf "$t6"
+
+# ---------------------------------------------------------------------------
 # Syntax check
 # ---------------------------------------------------------------------------
 echo ""

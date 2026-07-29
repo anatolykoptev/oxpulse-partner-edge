@@ -398,6 +398,39 @@ the lib files adjacent to upgrade.sh."
     return 0
 }
 
+# _ensure_channel_render_lib — re-source channel-render-lib.sh at the point of
+# use, not once at the top of the script.  The first upgrade after this PR runs
+# a freshly re-exec'd upgrade.sh whose in-memory copy of channel-render-lib.sh
+# is still the PREVIOUS version; sync_host_scripts installs the new one later,
+# so a re-source is required before refetch_node_config is called.  This is the
+# post-re-exec/post-sync seam for the refetch fix.
+_ensure_channel_render_lib() {
+    # Fast path: a previous call (or a dev/CI run with the repo copy adjacent
+    # to upgrade.sh) already loaded a lib that defines refetch_node_config.
+    command -v refetch_node_config >/dev/null 2>&1 && return 0
+
+    # sync_host_scripts installs channel-render-lib.sh to PREFIX_SBIN.  After
+    # it runs, the on-disk copy is the new release even though the running shell
+    # may have sourced the old one at the top of the file.  Re-source from the
+    # installed path to pick up refetch_node_config without a network round-trip.
+    local _installed="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
+    if [[ -f "$_installed" ]]; then
+        # shellcheck source=/dev/null
+        source "$_installed"
+        command -v refetch_node_config >/dev/null 2>&1 && return 0
+    fi
+
+    # Edge case: --templates-only or a first re-exec where the on-disk lib still
+    # predates this PR.  Fall back to the same REPO_RAW source sync_host_scripts
+    # would use.  _source_lib verifies the fetch when a release tag is pinned,
+    # and --allow-unverified / OXPULSE_UPGRADE_NO_INTEGRITY permits a dev/CI
+    # placeholder-tag run where no SHA256SUMS exists.
+    _source_lib "channel-render-lib.sh" \
+        "/nonexistent" \
+        "/nonexistent" \
+        "$REPO_RAW/channel-render-lib.sh"
+}
+
 # _stage_lib NAME LOCAL_PATH INSTALLED_PATH REPO_RAW_PATH DEST_DIR — resolve a
 # shared library FILE onto disk in DEST_DIR (does NOT source it). Sibling to
 # _source_lib with the SAME 3-tier resolution (adjacent → installed → REPO_RAW),
@@ -532,12 +565,10 @@ for _arg in "$@"; do
     esac
 done
 
-# Source shared channel render functions (re_render_xray, future re_render_awg, etc.)
-# shellcheck source=channel-render-lib.sh
-_source_lib "channel-render-lib.sh" \
-    "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/channel-render-lib.sh" \
-    "${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh" \
-    "$REPO_RAW/channel-render-lib.sh"
+# channel-render-lib.sh is NOT sourced here.  It is re-sourced at each
+# refetch/render call site via _ensure_channel_render_lib so the running shell
+# picks up the version sync_host_scripts installs during this upgrade, instead of
+# keeping the pre-PR in-memory copy that was loaded at the top of the script.
 
 # Source ghcr auth helpers (ghcr_save_token / ghcr_login_from_file /
 # ghcr_pull_diagnose / ghcr_configure_token).
@@ -842,6 +873,7 @@ fi
 # --templates-only: re-render channel client configs from upstream templates, skip image ops.
 if [[ "$MODE" == templates ]]; then
 	log "--templates-only: refreshing channel client configs from upstream templates"
+	_ensure_channel_render_lib
 	refetch_node_config
 	re_render_xray
 	# Phase 1.7 — render hy2 too if creds available
@@ -3249,6 +3281,7 @@ if [[ "$MODE" == with_templates ]]; then
 	rm -f "${_wt_baseline_snap:-}"
 
 	log "--with-templates upgrade to $TARGET complete"
+	_ensure_channel_render_lib
 	refetch_node_config
 	re_render_xray
 	exit 0
@@ -3457,6 +3490,7 @@ rm -f "${_baseline_snapshot:-}"
 
 log "upgraded to $TARGET successfully"
 
+_ensure_channel_render_lib
 refetch_node_config
 re_render_xray
 
