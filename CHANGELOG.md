@@ -5,6 +5,15 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.8](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.7...v0.16.8) (2026-07-29)
+
+
+### Bug Fixes
+
+* **edge:** healthcheck the xray tunnel path instead of a bound port ([#499](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/499)) ([34ece59](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/34ece59dd4688c9b50f5c51af3f7a5eac5704be5))
+* **refresh:** re-derive channels-status.env instead of freezing the install-time verdict ([#507](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/507)) ([7d07ef2](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7d07ef2bea4bfb8e5692a2eddf9015db6be2be1e))
+* **tests:** stop SIGPIPE from failing passing assertions under pipefail ([#503](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/503)) ([3f9774f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3f9774f73480ae31ad29fe28b74a914d22f72660))
+
 ## [0.16.7](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.6...v0.16.7) (2026-07-21)
 
 
