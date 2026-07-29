@@ -32,7 +32,12 @@ RUN (apk add --no-cache iproute2 2>/dev/null \
 
 EXPOSE 3080
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD sh -c "ss -ltn 2>/dev/null | grep -q ':3080 ' || netstat -ltn 2>/dev/null | grep -q ':3080 ' || exit 1"
+# Probe the tunnel path, not just a bound port. The dokodemo-door on :3080
+# forwards through the VLESS-Reality tunnel to the central backend's
+# /api/health/live. BusyBox wget (in the base image) exits 0 on 2xx, 1 on
+# 4xx/5xx/timeout. See docker-compose.yml.tpl for the full rationale and
+# issue oxpulse-chat#2716 (bound port stayed green while tunnel was dead).
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s \
+  CMD wget -q -O /dev/null -T 5 http://127.0.0.1:3080/api/health/live || exit 1
 
 # Upstream ENTRYPOINT launches xray with /etc/xray/config.json.

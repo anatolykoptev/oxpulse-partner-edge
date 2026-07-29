@@ -71,11 +71,26 @@ services:
     # xray dokodemo-door on :3080 reachable only via docker network
     expose:
       - "3080"
+    # Probe the actual tunnel path, not just a bound port. The dokodemo-door
+    # on :3080 forwards through the VLESS-Reality tunnel to the central
+    # backend's /api/health/live — the same end-to-end path probe_ch1 in
+    # lib/channel-health-lib.sh exercises via the Caddy canary route. A bound
+    # port (ss -ltn) stays green while the tunnel carries nothing (issue
+    # oxpulse-chat#2716: both failing edges reported healthy for >24h while
+    # Caddy returned 502 on every probe through this same container).
+    # BusyBox wget (in the teddysun/xray base image) exits 0 on 2xx, 1 on
+    # 4xx/5xx/timeout — no curl in the image. -T 5 = 5s network read timeout
+    # (matches probe_ch1's --max-time 5).
+    # No restart loop: depends_on uses service_started (not service_healthy),
+    # and restart: unless-stopped acts on container EXIT, not healthcheck
+    # failure. A failing tunnel marks the container unhealthy (visible in
+    # docker ps) without restarting it.
     healthcheck:
-      test: ["CMD-SHELL", "ss -ltn | grep -q ':3080' || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null -T 5 http://127.0.0.1:3080/api/health/live || exit 1"]
       interval: 30s
-      timeout: 5s
+      timeout: 10s
       retries: 3
+      start_period: 30s
 
   coturn:
     image: ghcr.io/anatolykoptev/partner-edge-coturn:{{IMAGE_VERSION}}

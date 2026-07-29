@@ -2458,7 +2458,8 @@ _conflict_check_2() {
 import sys, re
 
 def load_yaml_simple(path):
-    """Minimal YAML structural parser — only extracts service names, port lists, and env keys."""
+    """Minimal YAML structural parser — extracts service names, port lists,
+    env keys, and healthcheck blocks (test/interval/timeout/retries/start_period)."""
     import subprocess
     result = subprocess.run(
         ['python3', '-c', '''
@@ -2475,7 +2476,11 @@ for svc, cfg in svcs.items():
         keys = sorted(e.split("=")[0] for e in env)
     else:
         keys = sorted(env.keys())
-    out[svc] = {"ports": sorted(ports), "env_keys": keys}
+    hc = cfg.get("healthcheck") or {}
+    hc_norm = {}
+    for k, v in hc.items():
+        hc_norm[k] = " ".join(str(x) for x in v) if isinstance(v, list) else str(v)
+    out[svc] = {"ports": sorted(ports), "env_keys": keys, "healthcheck": hc_norm}
 print(json.dumps(out))
 ''', sys.argv[1]],
         capture_output=True, text=True
@@ -2535,6 +2540,39 @@ for svc in sorted(tpl_data):
             f"  Service '{svc}': template adds env keys {sorted(new_keys)!r} not in live compose.\n"
             f"  Will NOT propagate via --with-templates. Requires manual patch or full reinstall."
         )
+
+    # Healthcheck block diff — detects probe/timeout/start_period drift that
+    # --with-templates does NOT propagate (compose is sed-patched in place,
+    # never re-rendered from the template on an existing box). Skips template
+    # values containing {{...}} render-time placeholders (expected to differ
+    # from the live render, e.g. {{SFU_METRICS_PORT}} vs 9317).
+    live_hc = live.get("healthcheck") or {}
+    tmpl_hc = tmpl.get("healthcheck") or {}
+    for k in sorted(set(tmpl_hc) | set(live_hc)):
+        tval = tmpl_hc.get(k)
+        if tval is not None and ("{{" in tval or "__" in tval):
+            continue
+        lval = live_hc.get(k)
+        if tval == lval:
+            continue
+        if tval is not None and lval is not None:
+            issues.append(
+                f"  Service '{svc}': healthcheck.{k} differs "
+                f"(live={lval!r} template={tval!r}).\n"
+                f"  Will NOT propagate via --with-templates. "
+                f"The upgrade shim may heal it; otherwise manual patch or full reinstall."
+            )
+        elif tval is not None:
+            issues.append(
+                f"  Service '{svc}': healthcheck.{k} present in template but NOT in live compose.\n"
+                f"  Will NOT propagate via --with-templates. "
+                f"The upgrade shim may heal it; otherwise manual patch or full reinstall."
+            )
+        else:
+            issues.append(
+                f"  Service '{svc}': healthcheck.{k} present in live but NOT in template "
+                f"(stale key in live compose)."
+            )
 
 for i in issues:
     print(i)
@@ -2859,6 +2897,60 @@ _patch_compose_sfu_healthcheck_cidr() {
 		"$_compose"
 }
 
+# _patch_compose_xray_healthcheck_probe — LIVE-BOX MIGRATION SHIM (2026-07-28).
+#
+# The xray-client healthcheck was `ss -ltn | grep -q ':3080'` — it only
+# asserted that something was listening on :3080, never that the tunnel
+# carried traffic. During the oxpulse-chat#2716 outage both failing edges
+# reported `healthy` in `docker ps` for >24h while Caddy returned 502 on
+# every probe through that same container. The TEMPLATE fix (this PR's
+# first commit) replaced the port check with a wget probe to
+# http://127.0.0.1:3080/api/health/live — the actual dokodemo-door →
+# VLESS-Reality → central-backend path. But upgrade.sh never re-renders
+# docker-compose.yml from the template on an existing box (only image tags
+# are sed-patched in place — see the two call sites below), so a
+# compose-level healthcheck on a running edge keeps the old `ss -ltn`
+# probe forever without this heal. Because a compose-level healthcheck
+# overrides the image HEALTHCHECK, the Dockerfile probe is masked too.
+#
+# Narrowly anchored: the guard returns early if the new probe is already
+# present (prior heal OR fresh render from the fixed template), and only
+# acts if the old `ss -ltn.*:3080` form is found. The test-line sed
+# matches the unique `ss -ltn | grep -q ':3080'` CMD-SHELL string; the
+# timeout/start_period seds are range-scoped from the new test line to
+# the next `retries:` line, so caddy/coturn/sfu healthcheck blocks
+# (which also use `timeout: 5s`) are untouched by construction (see
+# tests/test_upgrade_xray_healthcheck_heal.sh cases c/d).
+#
+# Idempotent (case b): a file with the new probe already in place is a
+# byte-for-byte no-op — the guard returns before any sed runs.
+#
+# FOLLOWUP: remove this shim once fleet telemetry confirms 100% of nodes
+# are on >= the release that ships the fixed template.
+# ---------------------------------------------------------------------------
+_patch_compose_xray_healthcheck_probe() {
+	local _compose="$1"
+	[[ -f "$_compose" ]] || return 0
+	# Idempotent guard: new probe already present → byte-identical no-op
+	# (covers both a prior heal and a fresh render from the fixed template).
+	grep -qF 'wget -q -O /dev/null -T 5 http://127.0.0.1:3080/api/health/live' \
+		"$_compose" && return 0
+	# Only act on the OLD form (ss -ltn :3080). A file with neither form
+	# (e.g. a custom healthcheck) is left untouched.
+	grep -qE "ss -ltn.*:3080" "$_compose" || return 0
+	# 1) Replace the test line (unique anchor: ss -ltn :3080 in CMD-SHELL).
+	sed -i -E \
+		"s#(\"CMD-SHELL\", \")ss -ltn \| grep -q ':3080'( \|\| exit 1\")#\1wget -q -O /dev/null -T 5 http://127.0.0.1:3080/api/health/live\2#" \
+		"$_compose"
+	# 2) Bump timeout 5s → 10s and add start_period: 30s — scoped to the
+	#    xray healthcheck block (range from the new test line to the next
+	#    retries: line) so caddy/coturn/sfu blocks are untouched.
+	sed -i -E \
+		-e "\#wget -q -O /dev/null -T 5 http://127\.0\.0\.1:3080/api/health/live#,/retries:/ { s/timeout: 5s/timeout: 10s/ }" \
+		-e "\#wget -q -O /dev/null -T 5 http://127\.0\.0\.1:3080/api/health/live#,/retries:/ { /retries: 3/s/(retries: 3)/\1\\n      start_period: 30s/ }" \
+		"$_compose"
+}
+
 # ---- --with-templates mode ----
 if [[ "$MODE" == with_templates ]]; then
 	resolve_default_target
@@ -3016,6 +3108,11 @@ if [[ "$MODE" == with_templates ]]; then
 	# healthcheck that still probes the raw /CIDR mesh IP — see the
 	# function's docstring above (_patch_compose_sfu_healthcheck_cidr).
 	_patch_compose_sfu_healthcheck_cidr "$COMPOSE_FILE"
+	# Live-box migration shim (2026-07-28): heal any pre-fix xray
+	# healthcheck that still probes a bound port (ss -ltn) instead of
+	# the tunnel path — see the function's docstring above
+	# (_patch_compose_xray_healthcheck_probe).
+	_patch_compose_xray_healthcheck_probe "$COMPOSE_FILE"
 
 	# Step 4: sync host-scripts for the release tag (health-report, sbin libs, units).
 	# Must run BEFORE the baseline snapshot so the newly-installed healthcheck.sh
@@ -3236,6 +3333,10 @@ sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 # that still probes the raw /CIDR mesh IP — see the function's docstring
 # above (_patch_compose_sfu_healthcheck_cidr).
 _patch_compose_sfu_healthcheck_cidr "$COMPOSE_FILE"
+# Live-box migration shim (2026-07-28): heal any pre-fix xray healthcheck
+# that still probes a bound port (ss -ltn) instead of the tunnel path —
+# see the function's docstring above (_patch_compose_xray_healthcheck_probe).
+_patch_compose_xray_healthcheck_probe "$COMPOSE_FILE"
 log "compose image tags rewritten to $TARGET (pre-pull)"
 
 # Sync host-scripts for the release tag before pulling images so that a

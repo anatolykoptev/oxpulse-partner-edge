@@ -12,7 +12,7 @@ Channels are determined by `.channels[].id` in `/etc/oxpulse-partner-edge/node-c
 
 | Channel | Probe | Fields reported |
 |---------|-------|-----------------|
-| `ch1` (Reality/VLESS) | `docker exec oxpulse-partner-xray ss -ltn \| grep :3080` | `channel_rtt_ms` (exec time), `channel_handshake_ok` |
+| `ch1` (Reality/VLESS) | `curl` to `http://127.0.0.1:9080/canary/tunnel` (Caddy → xray-client:3080 → tunnel → backend `/api/health/live`) | `channel_rtt_ms` (HTTP RTT), `channel_handshake_ok` |
 | `ch2` (AmneziaWG) | `ping -c 1 -W 2 ${OXPULSE_AWG_MOTHERLY_IP}` | `channel_handshake_ok` (no RTT — awg uses age-based freshness) |
 | `ch3` (Hysteria2) | `nc -z 127.0.0.1 ${hy2-port}` | `channel_rtt_ms` (connect time; no `channel_handshake_ok` — UDP tunnel has no handshake concept) |
 | `ch4/ch5/ch6` | Not wired — skipped with log message | — |
@@ -61,10 +61,13 @@ sudo oxpulse-channels-health-report --once
 
 ## Debugging a "down" status
 
-1. **ch1 down** — xray container not running or dokodemo-door not listening on :3080:
+1. **ch1 down** — xray tunnel not carrying traffic (container may be up but tunnel dead):
    ```bash
+   # Probe the actual tunnel path (same as probe_ch1):
+   curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:9080/canary/tunnel
+   # Check container health (now probes the tunnel, not just the port):
    docker ps | grep oxpulse-partner-xray
-   docker exec oxpulse-partner-xray ss -ltn | grep 3080
+   docker inspect --format '{{.State.Health.Status}}' oxpulse-partner-xray
    docker logs oxpulse-partner-xray --tail 50
    ```
 
