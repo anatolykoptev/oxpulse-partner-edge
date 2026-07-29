@@ -21,7 +21,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 naive_block=$(awk '/^  naive:/{found=1} found{print; if(/^  [a-z]/ && !/^  naive:/) {found=0}}' \
     "$REPO_ROOT/docker-compose.yml.tpl")
 
-if echo "$naive_block" | grep -qE 'profiles:.*\[.*ch5.*\]'; then
+if echo "$naive_block" | grep -E 'profiles:.*\[.*ch5.*\]' >/dev/null; then
     pass "case 1: naive service has profiles: [ch5]"
 else
     fail "case 1: naive service missing profiles: [ch5] in docker-compose.yml.tpl"
@@ -66,7 +66,7 @@ sed \
 # Case 2: without COMPOSE_PROFILES, naive service must NOT appear in active config
 # ---------------------------------------------------------------------------
 config_no_profile=$(docker compose -f "$TPL" config 2>/dev/null)
-if echo "$config_no_profile" | grep -qE 'container_name.*oxpulse-partner-naive|name.*oxpulse-partner-naive'; then
+if echo "$config_no_profile" | grep -E 'container_name.*oxpulse-partner-naive|name.*oxpulse-partner-naive' >/dev/null; then
     fail "case 2: naive service present in docker compose config without COMPOSE_PROFILES — crashloop risk"
 else
     pass "case 2: naive service absent from docker compose config without COMPOSE_PROFILES"
@@ -76,7 +76,7 @@ fi
 # Case 3: with COMPOSE_PROFILES=ch5, naive service IS in active config
 # ---------------------------------------------------------------------------
 config_with_ch5=$(COMPOSE_PROFILES=ch5 docker compose -f "$TPL" config 2>/dev/null)
-if echo "$config_with_ch5" | grep -qE 'container_name.*oxpulse-partner-naive|name.*oxpulse-partner-naive'; then
+if echo "$config_with_ch5" | grep -E 'container_name.*oxpulse-partner-naive|name.*oxpulse-partner-naive' >/dev/null; then
     pass "case 3: naive service present in docker compose config with COMPOSE_PROFILES=ch5"
 else
     fail "case 3: naive service absent from docker compose config even with COMPOSE_PROFILES=ch5"

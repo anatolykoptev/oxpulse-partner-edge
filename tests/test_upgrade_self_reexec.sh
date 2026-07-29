@@ -181,7 +181,7 @@ run_wrap() {
 # ---------------------------------------------------------------------------
 T1_OUT=$(run_wrap "$SERVED" OXPULSE_INSTALLED_UPGRADE_PATH="$WRAP")
 T1_CHILD=$(printf '%s\n' "$T1_OUT" | grep -c 'CHILD_RAN sentinel=1' || true)
-if [[ "$T1_CHILD" -eq 1 ]] && ! printf '%s\n' "$T1_OUT" | grep -q 'PARENT_CONTINUED'; then
+if [[ "$T1_CHILD" -eq 1 ]] && ! printf '%s\n' "$T1_OUT" | grep 'PARENT_CONTINUED' >/dev/null; then
     pass "T1: stale installed upgrade.sh re-execs into the verified release once (child ran, parent replaced)"
 else
     fail "T1: expected exactly one CHILD_RAN sentinel=1 and no PARENT_CONTINUED; got: $T1_OUT"
@@ -207,7 +207,7 @@ fi
 # T2: opt-out env => NO re-exec (parent continues).
 # ---------------------------------------------------------------------------
 T2_OUT=$(run_wrap "$SERVED" OXPULSE_INSTALLED_UPGRADE_PATH="$WRAP" OXPULSE_UPGRADE_NO_SELF_UPDATE=1)
-if printf '%s\n' "$T2_OUT" | grep -q 'PARENT_CONTINUED' && ! printf '%s\n' "$T2_OUT" | grep -q 'CHILD_RAN'; then
+if printf '%s\n' "$T2_OUT" | grep 'PARENT_CONTINUED' >/dev/null && ! printf '%s\n' "$T2_OUT" | grep 'CHILD_RAN' >/dev/null; then
     pass "T2: OXPULSE_UPGRADE_NO_SELF_UPDATE=1 disables the re-exec"
 else
     fail "T2: opt-out did not disable re-exec; got: $T2_OUT"
@@ -218,7 +218,7 @@ fi
 #     This is the guard that keeps the integration suite off the network path.
 # ---------------------------------------------------------------------------
 T3_OUT=$(run_wrap "$SERVED" OXPULSE_INSTALLED_UPGRADE_PATH="/nonexistent/installed/upgrade")
-if printf '%s\n' "$T3_OUT" | grep -q 'PARENT_CONTINUED' && ! printf '%s\n' "$T3_OUT" | grep -q 'CHILD_RAN'; then
+if printf '%s\n' "$T3_OUT" | grep 'PARENT_CONTINUED' >/dev/null && ! printf '%s\n' "$T3_OUT" | grep 'CHILD_RAN' >/dev/null; then
     pass "T3: a non-installed (dev/CI/manual) running copy does NOT self-update"
 else
     fail "T3: non-installed running path still re-exec'd; got: $T3_OUT"
@@ -228,7 +228,7 @@ fi
 # T4: fetched release fails SHA256SUMS verification => REFUSE re-exec (fail-safe).
 # ---------------------------------------------------------------------------
 T4_OUT=$(run_wrap "$SERVED_BAD" OXPULSE_INSTALLED_UPGRADE_PATH="$WRAP")
-if printf '%s\n' "$T4_OUT" | grep -q 'PARENT_CONTINUED' && ! printf '%s\n' "$T4_OUT" | grep -q 'CHILD_RAN'; then
+if printf '%s\n' "$T4_OUT" | grep 'PARENT_CONTINUED' >/dev/null && ! printf '%s\n' "$T4_OUT" | grep 'CHILD_RAN' >/dev/null; then
     pass "T4: a SHA256-mismatched release is REFUSED (no unverified re-exec as root)"
 else
     fail "T4: unverified release was exec'd (fail-safe broken); got: $T4_OUT"
@@ -242,7 +242,7 @@ fi
 SERVED_NOSUMS="$TMP/served_nosums"; mkdir -p "$SERVED_NOSUMS"
 cp "$SERVED/partner-edge-upgrade.sh" "$SERVED_NOSUMS/partner-edge-upgrade.sh"   # binary present, NO SHA256SUMS
 T4B_OUT=$(run_wrap "$SERVED_NOSUMS" OXPULSE_INSTALLED_UPGRADE_PATH="$WRAP")
-if printf '%s\n' "$T4B_OUT" | grep -q 'PARENT_CONTINUED' && ! printf '%s\n' "$T4B_OUT" | grep -q 'CHILD_RAN'; then
+if printf '%s\n' "$T4B_OUT" | grep 'PARENT_CONTINUED' >/dev/null && ! printf '%s\n' "$T4B_OUT" | grep 'CHILD_RAN' >/dev/null; then
     pass "T4b: an unfetchable SHA256SUMS is treated as skip (parent continues, no unverified re-exec)"
 else
     fail "T4b: unfetchable SHA256SUMS did not skip cleanly; got: $T4B_OUT"
@@ -258,7 +258,7 @@ fi
 #     which is exactly the intended, opt-in scope of the hatch.
 # ---------------------------------------------------------------------------
 T6_OUT=$(run_wrap "$SERVED_BAD" OXPULSE_INSTALLED_UPGRADE_PATH="$WRAP" ALLOW_UNVERIFIED=1)
-if printf '%s\n' "$T6_OUT" | grep -q 'CHILD_RAN sentinel=1' && ! printf '%s\n' "$T6_OUT" | grep -q 'PARENT_CONTINUED'; then
+if printf '%s\n' "$T6_OUT" | grep 'CHILD_RAN sentinel=1' >/dev/null && ! printf '%s\n' "$T6_OUT" | grep 'PARENT_CONTINUED' >/dev/null; then
     pass "T6: ALLOW_UNVERIFIED=1 bypasses SHA verification and re-execs (escape hatch intentionally scoped)"
 else
     fail "T6: escape hatch did not proceed on a mismatched release; got: $T6_OUT"
@@ -277,7 +277,7 @@ cp "$SERVED/partner-edge-upgrade.sh" "$SERVED_DOTSLASH/partner-edge-upgrade.sh"
 DOTSHA=$(sha256sum "$SERVED_DOTSLASH/partner-edge-upgrade.sh" | awk '{print $1}')
 printf '%s  ./partner-edge-upgrade.sh\n' "$DOTSHA" > "$SERVED_DOTSLASH/SHA256SUMS"  # note the ./ prefix
 T7_OUT=$(run_wrap "$SERVED_DOTSLASH" OXPULSE_INSTALLED_UPGRADE_PATH="$WRAP")
-if printf '%s\n' "$T7_OUT" | grep -q 'CHILD_RAN sentinel=1' && ! printf '%s\n' "$T7_OUT" | grep -q 'PARENT_CONTINUED'; then
+if printf '%s\n' "$T7_OUT" | grep 'CHILD_RAN sentinel=1' >/dev/null && ! printf '%s\n' "$T7_OUT" | grep 'PARENT_CONTINUED' >/dev/null; then
     pass "T7: a './'-prefixed SHA256SUMS entry still verifies + re-execs (shared resolver, no silent skip)"
 else
     fail "T7: './'-prefixed checksum silently skipped the self-update (bare-name awk regression); got: $T7_OUT"
@@ -304,8 +304,8 @@ T4C_OUT=$(env TMPDIR="$FB_TMPDIR" SERVED_DIR="$SERVED_BROKEN" \
     bash "$WRAP" v9.9.9 2>/dev/null) || true
 T4C_LEAK=$(find "$FB_TMPDIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1 || true)
 if [[ -z "$T4C_LEAK" ]] \
-    && printf '%s\n' "$T4C_OUT" | grep -q 'PARENT_CONTINUED' \
-    && ! printf '%s\n' "$T4C_OUT" | grep -q 'SHOULD_NOT_RUN'; then
+    && printf '%s\n' "$T4C_OUT" | grep 'PARENT_CONTINUED' >/dev/null \
+    && ! printf '%s\n' "$T4C_OUT" | grep 'SHOULD_NOT_RUN' >/dev/null; then
     pass "T4c: a failed exec degrades gracefully (parent continues) AND sweeps its tmpdir (no leak)"
 else
     fail "T4c: exec-fail leaked a tmpdir ('$T4C_LEAK'), aborted, or ran the broken interp; out: $T4C_OUT"

@@ -55,7 +55,7 @@ fi
 
 # Test 1: xray healthcheck must probe /api/health/live through :3080.
 echo "==> Test 1: xray healthcheck probes /api/health/live through :3080"
-if echo "$HC_LINE" | grep -qF 'http://127.0.0.1:3080/api/health/live'; then
+if echo "$HC_LINE" | grep -F 'http://127.0.0.1:3080/api/health/live' >/dev/null; then
     pass "xray healthcheck probes http://127.0.0.1:3080/api/health/live"
 else
     fail "xray healthcheck does not probe /api/health/live through :3080: $HC_LINE"
@@ -63,7 +63,7 @@ fi
 
 # Test 2: xray healthcheck must NOT use ss -ltn (the old bound-port probe).
 echo "==> Test 2: xray healthcheck does not use ss -ltn (bound-port probe)"
-if echo "$HC_LINE" | grep -qF 'ss -ltn'; then
+if echo "$HC_LINE" | grep -F 'ss -ltn' >/dev/null; then
     fail "xray healthcheck still uses ss -ltn (bound-port probe, not tunnel path): $HC_LINE"
 else
     pass "xray healthcheck does not contain ss -ltn"
@@ -73,7 +73,7 @@ fi
 # ss/grep (the old bound-port check). Comments may mention ss -ltn in prose
 # (explaining why it was replaced) — this test scopes to the test: line only.
 echo "==> Test 3: xray healthcheck test: line uses wget, not ss/grep"
-if echo "$HC_LINE" | grep -qF 'wget'; then
+if echo "$HC_LINE" | grep -F 'wget' >/dev/null; then
     pass "xray healthcheck test: line uses wget"
 else
     fail "xray healthcheck test: line does not use wget: $HC_LINE"

@@ -37,13 +37,13 @@ guard_block=$(awk '
 [[ -n "$guard_block" ]] \
     || { echo "FAIL: could not locate check_signaling_sfu_secret() in $UPGRADE"; exit 1; }
 
-echo "$guard_block" | grep -qE '\bdie\b' \
+echo "$guard_block" | grep -E '\bdie\b' >/dev/null \
     || { echo "FAIL: postcondition does not call die"; exit 1; }
-echo "$guard_block" | grep -q 'SIGNALING_SFU_SECRET' \
+echo "$guard_block" | grep 'SIGNALING_SFU_SECRET' >/dev/null \
     || { echo "FAIL: die message missing SIGNALING_SFU_SECRET hint"; exit 1; }
-echo "$guard_block" | grep -qi 'group calls' \
+echo "$guard_block" | grep -i 'group calls' >/dev/null \
     || { echo "FAIL: die message must explain group-call breakage"; exit 1; }
-echo "$guard_block" | grep -qi 'install\.sh' \
+echo "$guard_block" | grep -i 'install\.sh' >/dev/null \
     || { echo "FAIL: die message must mention install.sh as remediation"; exit 1; }
 
 # 3. The postcondition must actually be invoked, not just defined.
@@ -81,7 +81,7 @@ output=$(
     || { echo "FAIL: upgrade.sh postcondition did not exit non-zero on empty secret"; \
          echo "---output---"; echo "$output"; echo "---/output---"; exit 1; }
 
-echo "$output" | grep -qi 'SIGNALING_SFU_SECRET' \
+echo "$output" | grep -i 'SIGNALING_SFU_SECRET' >/dev/null \
     || { echo "FAIL: postcondition output missing SIGNALING_SFU_SECRET"; \
          echo "---output---"; echo "$output"; echo "---/output---"; exit 1; }
 

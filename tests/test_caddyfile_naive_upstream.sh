@@ -17,7 +17,7 @@ for snippet in tunnel_upstream tunnel_upstream_default; do
         echo "FAIL: snippet ($snippet) — reverse_proxy line not found"
         exit 1
     fi
-    if ! echo "$line" | grep -qE '127\.0\.0\.1:\{\{NAIVE_SOCKS_PORT\}\}'; then
+    if ! echo "$line" | grep -E '127\.0\.0\.1:\{\{NAIVE_SOCKS_PORT\}\}' >/dev/null; then
         echo "FAIL: ($snippet) — naive upstream 127.0.0.1:{{NAIVE_SOCKS_PORT}} missing"
         echo "  actual: $line"
         exit 1

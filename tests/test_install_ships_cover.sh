@@ -18,7 +18,7 @@ HEALTH="$REPO_ROOT/healthcheck.sh"
 grep -q 'fetch_tpl cover/cover.html' "$INSTALL" \
   || { echo "FAIL: install.sh does not fetch cover/cover.html"; exit 1; }
 grep -q 'install -m 0644 .*cover/cover.html .*cover_out_dir/cover.html' "$INSTALL" \
-  || grep -q 'install -m 0644 "\$stage/cover/cover.html" "\$cover_out_dir/cover.html"' "$INSTALL" \
+  || grep 'install -m 0644 "\$stage/cover/cover.html" "\$cover_out_dir/cover.html"' "$INSTALL" >/dev/null \
   || { echo "FAIL: install.sh does not place cover.html into output dir"; exit 1; }
 
 # hydrate.sh (snapshot+clone path) also places the cover asset.

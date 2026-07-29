@@ -149,20 +149,20 @@ _run_hydrate() {
 B1_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" \
     _run_hydrate "132.145.192.254" "turns" "example.com" "") && B1_RC=0 || B1_RC=$?
 [[ "$B1_RC" -eq 0 ]] || fail "B1: resolve_external_ip died unexpectedly: $B1_OUT"
-echo "$B1_OUT" | grep -qF 'PUBLIC_IP=129.159.103.86' \
+echo "$B1_OUT" | grep -F 'PUBLIC_IP=129.159.103.86' >/dev/null \
     && pass "B1: DNS A-record (129.159.103.86) wins over egress autodetect (132.145.192.254)" \
     || fail "B1: expected DNS IP 129.159.103.86, got: $B1_OUT"
-echo "$B1_OUT" | grep -qF 'PUBLIC_IP_SOURCE=dns' \
+echo "$B1_OUT" | grep -F 'PUBLIC_IP_SOURCE=dns' >/dev/null \
     && pass "B1b: source labeled dns" || fail "B1b: source not labeled dns: $B1_OUT"
 
 # B2: OXPULSE_PUBLIC_IP override wins over BOTH DNS and autodetect.
 B2_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" OXPULSE_PUBLIC_IP="203.0.113.9" \
     _run_hydrate "132.145.192.254" "turns" "example.com" "") && B2_RC=0 || B2_RC=$?
 [[ "$B2_RC" -eq 0 ]] || fail "B2: resolve_external_ip died unexpectedly: $B2_OUT"
-echo "$B2_OUT" | grep -qF 'PUBLIC_IP=203.0.113.9' \
+echo "$B2_OUT" | grep -F 'PUBLIC_IP=203.0.113.9' >/dev/null \
     && pass "B2: OXPULSE_PUBLIC_IP override (203.0.113.9) wins over DNS" \
     || fail "B2: expected override 203.0.113.9, got: $B2_OUT"
-echo "$B2_OUT" | grep -qF 'PUBLIC_IP_SOURCE=override' \
+echo "$B2_OUT" | grep -F 'PUBLIC_IP_SOURCE=override' >/dev/null \
     && pass "B2b: source labeled override" || fail "B2b: source not labeled override: $B2_OUT"
 
 # B3: no DNS A-record (dig present, empty result) → falls through to the
@@ -170,10 +170,10 @@ echo "$B2_OUT" | grep -qF 'PUBLIC_IP_SOURCE=override' \
 B3_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="" \
     _run_hydrate "132.145.192.254" "turns" "example.com" "") && B3_RC=0 || B3_RC=$?
 [[ "$B3_RC" -eq 0 ]] || fail "B3: resolve_external_ip died unexpectedly: $B3_OUT"
-echo "$B3_OUT" | grep -qF 'PUBLIC_IP=132.145.192.254' \
+echo "$B3_OUT" | grep -F 'PUBLIC_IP=132.145.192.254' >/dev/null \
     && pass "B3: no DNS record → falls through to egress autodetect" \
     || fail "B3: expected fallback 132.145.192.254, got: $B3_OUT"
-echo "$B3_OUT" | grep -qF 'PUBLIC_IP_SOURCE=autodetect' \
+echo "$B3_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \
     && pass "B3b: source labeled autodetect" || fail "B3b: source not labeled autodetect: $B3_OUT"
 
 # B4: dig AND getent both absent from PATH → degrades gracefully to
@@ -185,10 +185,10 @@ B4_OUT=$(PATH="$EMPTY_BIN" \
 [[ "$B4_RC" -eq 0 ]] \
     && pass "B4: dig+getent both absent → resolve_external_ip does not die (RC=0)" \
     || fail "B4: resolve_external_ip died with dig+getent absent (RC=$B4_RC): $B4_OUT"
-echo "$B4_OUT" | grep -qF 'PUBLIC_IP=132.145.192.254' \
+echo "$B4_OUT" | grep -F 'PUBLIC_IP=132.145.192.254' >/dev/null \
     && pass "B4b: degrades to egress autodetect value" \
     || fail "B4b: expected egress fallback, got: $B4_OUT"
-echo "$B4_OUT" | grep -qF 'PUBLIC_IP_SOURCE=autodetect' \
+echo "$B4_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \
     && pass "B4c: source labeled autodetect" || fail "B4c: $B4_OUT"
 
 # B5: EXTERNAL_IP_LINE / ALLOWED_PEER_IP_LINE are RECOMPUTED from the final
@@ -200,10 +200,10 @@ echo "$B4_OUT" | grep -qF 'PUBLIC_IP_SOURCE=autodetect' \
 B5_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" \
     _run_hydrate "132.145.192.254" "turns" "example.com" "10.0.0.5") && B5_RC=0 || B5_RC=$?
 [[ "$B5_RC" -eq 0 ]] || fail "B5: resolve_external_ip died unexpectedly: $B5_OUT"
-echo "$B5_OUT" | grep -qF 'EXTERNAL_IP_LINE=129.159.103.86/10.0.0.5' \
+echo "$B5_OUT" | grep -F 'EXTERNAL_IP_LINE=129.159.103.86/10.0.0.5' >/dev/null \
     && pass "B5: EXTERNAL_IP_LINE recomputed from resolved DNS IP + PRIVATE_IP" \
     || fail "B5: EXTERNAL_IP_LINE not recomputed correctly, got: $B5_OUT"
-echo "$B5_OUT" | grep -qF 'ALLOWED_PEER_IP_LINE=allowed-peer-ip=10.0.0.5' \
+echo "$B5_OUT" | grep -F 'ALLOWED_PEER_IP_LINE=allowed-peer-ip=10.0.0.5' >/dev/null \
     && pass "B5b: ALLOWED_PEER_IP_LINE recomputed" \
     || fail "B5b: ALLOWED_PEER_IP_LINE not recomputed, got: $B5_OUT"
 
@@ -224,31 +224,31 @@ _run_upgrade() {
 C1_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" CURL_STUB_RESULT="132.145.192.254" \
     _run_upgrade "turns" "example.com") && C1_RC=0 || C1_RC=$?
 [[ "$C1_RC" -eq 0 ]] || fail "C1: resolve_public_ip died unexpectedly: $C1_OUT"
-echo "$C1_OUT" | grep -qF 'PUBLIC_IP=129.159.103.86' \
+echo "$C1_OUT" | grep -F 'PUBLIC_IP=129.159.103.86' >/dev/null \
     && pass "C1: DNS A-record wins over curl autodetect" \
     || fail "C1: expected DNS IP, got: $C1_OUT"
-echo "$C1_OUT" | grep -qF 'PUBLIC_IP_SOURCE=dns' && pass "C1b: source labeled dns" || fail "C1b: $C1_OUT"
-echo "$C1_OUT" | grep -qF 'DIG_IPS=129.159.103.86' \
+echo "$C1_OUT" | grep -F 'PUBLIC_IP_SOURCE=dns' >/dev/null && pass "C1b: source labeled dns" || fail "C1b: $C1_OUT"
+echo "$C1_OUT" | grep -F 'DIG_IPS=129.159.103.86' >/dev/null \
     && pass "C1c: DIG_IPS populated for the caller's DNS-preflight guard" || fail "C1c: $C1_OUT"
 
 # C2: OXPULSE_PUBLIC_IP override wins over DNS.
 C2_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" OXPULSE_PUBLIC_IP="203.0.113.9" \
     _run_upgrade "turns" "example.com") && C2_RC=0 || C2_RC=$?
 [[ "$C2_RC" -eq 0 ]] || fail "C2: resolve_public_ip died unexpectedly: $C2_OUT"
-echo "$C2_OUT" | grep -qF 'PUBLIC_IP=203.0.113.9' \
+echo "$C2_OUT" | grep -F 'PUBLIC_IP=203.0.113.9' >/dev/null \
     && pass "C2: OXPULSE_PUBLIC_IP override wins over DNS" \
     || fail "C2: got: $C2_OUT"
-echo "$C2_OUT" | grep -qF 'DIG_IPS=129.159.103.86' \
+echo "$C2_OUT" | grep -F 'DIG_IPS=129.159.103.86' >/dev/null \
     && pass "C2b: DIG_IPS still populated (guard still runs against override)" || fail "C2b: $C2_OUT"
 
 # C3: no DNS record → falls through to curl autodetect.
 C3_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="" CURL_STUB_RESULT="132.145.192.254" \
     _run_upgrade "turns" "example.com") && C3_RC=0 || C3_RC=$?
 [[ "$C3_RC" -eq 0 ]] || fail "C3: resolve_public_ip died unexpectedly: $C3_OUT"
-echo "$C3_OUT" | grep -qF 'PUBLIC_IP=132.145.192.254' \
+echo "$C3_OUT" | grep -F 'PUBLIC_IP=132.145.192.254' >/dev/null \
     && pass "C3: no DNS record → falls through to curl autodetect" \
     || fail "C3: got: $C3_OUT"
-echo "$C3_OUT" | grep -qF 'PUBLIC_IP_SOURCE=autodetect' \
+echo "$C3_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \
     && pass "C3b: source labeled autodetect" || fail "C3b: $C3_OUT"
 
 # C4: no DNS record AND curl fails too → die (unchanged pre-existing
@@ -258,7 +258,7 @@ C4_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="" CURL_STUB_RESULT="" \
 [[ "$C4_RC" -ne 0 ]] \
     && pass "C4: no DNS record + curl failure → resolve_public_ip dies (fatal, as before)" \
     || fail "C4: resolve_public_ip should have died with no DNS + no curl result, RC=$C4_RC: $C4_OUT"
-echo "$C4_OUT" | grep -qF 'could not determine public IP' \
+echo "$C4_OUT" | grep -F 'could not determine public IP' >/dev/null \
     && pass "C4b: die message unchanged in spirit" || fail "C4b: $C4_OUT"
 
 # C5: maybe_v01_to_v02_preflight delegates to resolve_public_ip and reuses
@@ -269,10 +269,10 @@ dig_calls=$(echo "$preflight_block" | grep -c 'dig +short' || true)
 [[ "$dig_calls" -eq 0 ]] \
     && pass "C5: maybe_v01_to_v02_preflight issues no direct dig call (delegates to resolve_public_ip)" \
     || fail "C5: maybe_v01_to_v02_preflight still calls dig directly ($dig_calls occurrence(s))"
-echo "$preflight_block" | grep -qF 'resolve_public_ip "$TURNS_SUBDOMAIN" "$PARTNER_DOMAIN"' \
+echo "$preflight_block" | grep -F 'resolve_public_ip "$TURNS_SUBDOMAIN" "$PARTNER_DOMAIN"' >/dev/null \
     && pass "C6: maybe_v01_to_v02_preflight calls resolve_public_ip" \
     || fail "C6: resolve_public_ip not called from maybe_v01_to_v02_preflight"
-echo "$preflight_block" | grep -qF 'grep -Fxq "$PUBLIC_IP" <<< "$DIG_IPS"' \
+echo "$preflight_block" | grep -F 'grep -Fxq "$PUBLIC_IP" <<< "$DIG_IPS"' >/dev/null \
     && pass "C7: existing DNS-preflight guard preserved — still guards override/autodetect paths (not deleted, per spec)" \
     || fail "C7: DNS-preflight guard removed from maybe_v01_to_v02_preflight"
 

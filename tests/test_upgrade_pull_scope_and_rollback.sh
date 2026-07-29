@@ -99,11 +99,11 @@ fi
 capture_sig=$(awk '/^capture_running_digests\(\)/{f=1} f{print} f && /^}$/{exit}' "$UPGRADE")
 resolve_sig=$(awk '/^resolve_pulled_digests\(\)/{f=1} f{print} f && /^}$/{exit}' "$UPGRADE")
 
-echo "$capture_sig" | grep -qE 'local -n _crd_svcs="\$1"' \
+echo "$capture_sig" | grep -E 'local -n _crd_svcs="\$1"' >/dev/null \
     && pass "B1d-a: capture_running_digests takes an explicit service-array param (\$1), not a self-derived list" \
     || fail "B1d-a: capture_running_digests does not take an explicit service-array param"
 
-echo "$resolve_sig" | grep -qE 'local -n _rpd_svcs="\$1"' \
+echo "$resolve_sig" | grep -E 'local -n _rpd_svcs="\$1"' >/dev/null \
     && pass "B1d-b: resolve_pulled_digests takes an explicit service-array param (\$1), not a self-derived list" \
     || fail "B1d-b: resolve_pulled_digests does not take an explicit service-array param"
 
@@ -198,7 +198,7 @@ grep -qE '^_parse_compose_config_images\(\)' "$UPGRADE" \
 
 # C4: NIT — image-match strips quotes before the ghcr.io glob match.
 parse_fn_section=$(awk '/^_parse_compose_config_images\(\)/{f=1} f{print} f && /^}$/{exit}' "$UPGRADE")
-echo "$parse_fn_section" | grep -qE 'gsub\(/"/,"",img\)' \
+echo "$parse_fn_section" | grep -E 'gsub\(/"/,"",img\)' >/dev/null \
     && pass "C4: _parse_compose_config_images strips quotes from the image value before the ghcr.io glob match" \
     || fail "C4: no quote-strip found in _parse_compose_config_images — a quoted image: value would miss the ghcr.io/anatolykoptev/partner-edge-* glob"
 
@@ -386,13 +386,13 @@ else
     fail "E1: upgrade exited 0 despite the pull failing — should never happen"
 fi
 
-if echo "$E_OUT" | grep -qF 'pull failed — previous config and host-scripts restored'; then
+if echo "$E_OUT" | grep -F 'pull failed — previous config and host-scripts restored' >/dev/null; then
     pass "E2: the failure branch's die message ran (proves the branch was REACHED, not dead code under set -e)"
 else
     fail "E2: die message 'pull failed — previous config and host-scripts restored' NOT found — the failure branch likely never ran (BUG A); output: $E_OUT"
 fi
 
-if echo "$E_OUT" | grep -qF 'host-scripts restored from snapshot'; then
+if echo "$E_OUT" | grep -F 'host-scripts restored from snapshot' >/dev/null; then
     pass "E3: restore_host_scripts actually ran (logged 'host-scripts restored from snapshot')"
 else
     fail "E3: 'host-scripts restored from snapshot' not logged — restore_host_scripts did not run; output: $E_OUT"
@@ -470,7 +470,7 @@ F_OUT=$(_run_upgrade "$F_TMPDIR" "$F_FAKE_DOCKER" "$F_CURRENT" "$F_TARGET" "$F_L
     && pass "F1: upgrade exits non-zero when the compose file has zero partner-edge services" \
     || fail "F1: upgrade exited 0 despite zero partner-edge services — the guard did not fire"
 
-echo "$F_OUT" | grep -qF 'compose config parsed but zero ghcr.io/anatolykoptev/partner-edge-* services found' \
+echo "$F_OUT" | grep -F 'compose config parsed but zero ghcr.io/anatolykoptev/partner-edge-* services found' >/dev/null \
     && pass "F2: the distinct zero-services die message fired" \
     || fail "F2: expected die message not found; output: $F_OUT"
 

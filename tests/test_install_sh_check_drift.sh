@@ -77,9 +77,9 @@ echo "==> Test 1: clean install → exit 0"
 OUT=""; RC=0
 OUT=$(do_check) || RC=$?
 [[ "$RC" -eq 0 ]] || { echo "FAIL: expected exit 0, got $RC"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "\[OK\].*Caddyfile" || { echo "FAIL: [OK] Caddyfile missing"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "\[OK\].*docker-compose" || { echo "FAIL: [OK] compose missing"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "\[conf.d/\]" || { echo "FAIL: [conf.d/] missing"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep "\[OK\].*Caddyfile" >/dev/null || { echo "FAIL: [OK] Caddyfile missing"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep "\[OK\].*docker-compose" >/dev/null || { echo "FAIL: [OK] compose missing"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep "\[conf.d/\]" >/dev/null || { echo "FAIL: [conf.d/] missing"; echo "$OUT"; exit 1; }
 echo "OK: exit 0, both [OK] lines"
 
 # ---- Test 2: modify Caddyfile → exit 1 ----
@@ -88,7 +88,7 @@ echo "# operator manual edit" >> "$T_ETC/Caddyfile"
 OUT=""; RC=0
 OUT=$(do_check) || RC=$?
 [[ "$RC" -eq 1 ]] || { echo "FAIL: expected exit 1, got $RC"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "\[DRIFT\].*Caddyfile" || { echo "FAIL: [DRIFT] Caddyfile missing"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep "\[DRIFT\].*Caddyfile" >/dev/null || { echo "FAIL: [DRIFT] Caddyfile missing"; echo "$OUT"; exit 1; }
 echo "OK: exit 1, [DRIFT] Caddyfile"
 sed -i '/# operator manual edit/d' "$T_ETC/Caddyfile"
 
@@ -98,7 +98,7 @@ echo "# operator compose edit" >> "$T_ETC/docker-compose.yml"
 OUT=""; RC=0
 OUT=$(do_check) || RC=$?
 [[ "$RC" -eq 2 ]] || { echo "FAIL: expected exit 2, got $RC"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "\[DRIFT\].*docker-compose" || { echo "FAIL: [DRIFT] compose missing"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep "\[DRIFT\].*docker-compose" >/dev/null || { echo "FAIL: [DRIFT] compose missing"; echo "$OUT"; exit 1; }
 echo "OK: exit 2, [DRIFT] docker-compose.yml"
 sed -i '/# operator compose edit/d' "$T_ETC/docker-compose.yml"
 
@@ -108,7 +108,7 @@ echo 'test.example.local { respond "hi" }' > "$T_CONFD/test.caddy"
 OUT=""; RC=0
 OUT=$(do_check) || RC=$?
 [[ "$RC" -eq 0 ]] || { echo "FAIL: expected exit 0 with conf.d/test.caddy, got $RC"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "\[conf.d/\] 1" || { echo "FAIL: conf.d count not 1"; echo "$OUT"; exit 1; }
+echo "$OUT" | grep "\[conf.d/\] 1" >/dev/null || { echo "FAIL: conf.d count not 1"; echo "$OUT"; exit 1; }
 echo "OK: exit 0, conf.d/1 file reported"
 
 echo ""

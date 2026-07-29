@@ -337,13 +337,13 @@ _mitm_overclaim_lines() {
 		if [ -f "$REPO_ROOT/lib/$t" ]; then
 			# lib/*.sh — home manifest = lib-checksums.txt; staged = the regen block
 			# generates its checksum. Require BOTH (catches committed↔pipeline drift).
-			printf '%s\n' "$regen_block" | grep -qE "^[[:space:]]+$t( |\\\\|\$)" \
+			printf '%s\n' "$regen_block" | grep -E "^[[:space:]]+$t( |\\\\|\$)" >/dev/null \
 				|| { echo "lib NOT staged into lib-checksums.txt regen block: $t"; missing=1; }
 			grep -qE "[[:space:]]${t}\$" "$CHECKSUMS" \
 				|| { echo "lib MISSING from lib-checksums.txt home manifest: $t"; missing=1; }
 		else
 			# repo-root *.sh — home manifest = SHA256SUMS block (== staged evidence).
-			printf '%s\n' "$sums_block" | grep -qE "^[[:space:]]+$t( |\\\\|\$)" \
+			printf '%s\n' "$sums_block" | grep -E "^[[:space:]]+$t( |\\\\|\$)" >/dev/null \
 				|| { echo "repo-root lib NOT in SHA256SUMS home manifest/staging: $t"; missing=1; }
 		fi
 	done
@@ -430,27 +430,27 @@ HEOF
 
 	# TLS + LIB-MATCH: lib/*.sh + matching lib-checksums entry → sources.
 	out=$(_drive "reconcile.sh" "$raw_lib" "$CK_MATCH" 0) || true
-	echo "$out" | grep -q 'SOURCED_OK' || { echo "LIB-MATCH: expected SOURCED_OK; got: $out"; false; return; }
+	echo "$out" | grep 'SOURCED_OK' >/dev/null || { echo "LIB-MATCH: expected SOURCED_OK; got: $out"; false; return; }
 	grep -q -- '--proto =https' "$CURL_LOG" && grep -q -- '--tlsv1.2' "$CURL_LOG" \
 		|| { echo "TLS: tier-3 curl not TLS-pinned; log: $(cat "$CURL_LOG")"; false; return; }
 
 	# LIB-MISMATCH: tampered hash → die, NOT sourced.
 	out=$(_drive "reconcile.sh" "$raw_lib" "$CK_BAD" 0) || true
-	echo "$out" | grep -qi 'checksum mismatch' || { echo "LIB-MISMATCH: expected mismatch die; got: $out"; false; return; }
-	echo "$out" | grep -q 'SOURCED_OK' && { echo "LIB-MISMATCH: sourced despite mismatch!"; false; return; }
+	echo "$out" | grep -i 'checksum mismatch' >/dev/null || { echo "LIB-MISMATCH: expected mismatch die; got: $out"; false; return; }
+	echo "$out" | grep 'SOURCED_OK' >/dev/null && { echo "LIB-MISMATCH: sourced despite mismatch!"; false; return; }
 
 	# ROOT-MATCH: repo-root file verified against SHA256SUMS (release fetch, real tag).
 	out=$(_drive "channel-render-lib.sh" "$raw_root" "$SUMS_MATCH" 0) || true
-	echo "$out" | grep -q 'SOURCED_OK' || { echo "ROOT-MATCH: expected SOURCED_OK via SHA256SUMS; got: $out"; false; return; }
+	echo "$out" | grep 'SOURCED_OK' >/dev/null || { echo "ROOT-MATCH: expected SOURCED_OK via SHA256SUMS; got: $out"; false; return; }
 
 	# FAILCLOSED: no manifest + no override → die, NOT sourced.
 	out=$(_drive "reconcile.sh" "$raw_lib" "" 0) || true
-	echo "$out" | grep -qi 'unsafe' || { echo "FAILCLOSED: expected fail-closed die; got: $out"; false; return; }
-	echo "$out" | grep -q 'SOURCED_OK' && { echo "FAILCLOSED: sourced without a manifest!"; false; return; }
+	echo "$out" | grep -i 'unsafe' >/dev/null || { echo "FAILCLOSED: expected fail-closed die; got: $out"; false; return; }
+	echo "$out" | grep 'SOURCED_OK' >/dev/null && { echo "FAILCLOSED: sourced without a manifest!"; false; return; }
 
 	# OVERRIDE: no manifest + OXPULSE_UPGRADE_NO_INTEGRITY=1 → sources (escape hatch).
 	out=$(_drive "reconcile.sh" "$raw_lib" "" 1) || true
-	echo "$out" | grep -q 'SOURCED_OK' || { echo "OVERRIDE: expected SOURCED_OK with override; got: $out"; false; return; }
+	echo "$out" | grep 'SOURCED_OK' >/dev/null || { echo "OVERRIDE: expected SOURCED_OK with override; got: $out"; false; return; }
 
 	# NOENTRY: the manifest RESOLVES (curl 200) but has NO line for this file → the
 	# resolver must treat that as "no verified checksum" → FAIL-CLOSED, NOT sourced.
@@ -460,12 +460,12 @@ HEOF
 	# reverted to the old install.sh grep-miss "proceed-with-warn", this sources → RED.
 	local CK_NOENTRY="$TMP/ck_noentry.txt"; printf '%s  some-other-file.sh\n' "$ZERO" > "$CK_NOENTRY"
 	out=$(_drive "reconcile.sh" "$raw_lib" "$CK_NOENTRY" 0) || true
-	echo "$out" | grep -q 'SOURCED_OK' && { echo "NOENTRY: sourced despite the manifest omitting the entry!"; false; return; }
-	echo "$out" | grep -qi 'unsafe' || { echo "NOENTRY: expected a fail-closed 'unsafe' die on a missing entry; got: $out"; false; return; }
+	echo "$out" | grep 'SOURCED_OK' >/dev/null && { echo "NOENTRY: sourced despite the manifest omitting the entry!"; false; return; }
+	echo "$out" | grep -i 'unsafe' >/dev/null || { echo "NOENTRY: expected a fail-closed 'unsafe' die on a missing entry; got: $out"; false; return; }
 
 	# NOENTRY-OVERRIDE: same resolved-but-omitting manifest + escape hatch → sources.
 	out=$(_drive "reconcile.sh" "$raw_lib" "$CK_NOENTRY" 1) || true
-	echo "$out" | grep -q 'SOURCED_OK' || { echo "NOENTRY-OVERRIDE: expected SOURCED_OK with override; got: $out"; false; return; }
+	echo "$out" | grep 'SOURCED_OK' >/dev/null || { echo "NOENTRY-OVERRIDE: expected SOURCED_OK with override; got: $out"; false; return; }
 }
 
 # ---------------------------------------------------------------------------
@@ -520,7 +520,7 @@ CEOF
 	}
 
 	# NB: use [[ ]] string matches, not `grep && {…}`, for the negative assertions:
-	# a `grep -q X && {…}` as the FINAL command makes bats fail the test when grep
+	# a `grep X && {…}` as the FINAL command makes bats fail the test when grep
 	# (correctly) does NOT match, since the test's exit status = that non-zero grep.
 	local out
 	# (A) flag parsed from $@ must reach the POST-lib bundle check, no integrity die.
@@ -652,16 +652,16 @@ HEOF
 	# NOENTRY, no override: fail-closed die, module NOT sourced.
 	local out
 	out=$(_drive 0) || true
-	echo "$out" | grep -q 'FETCHED_OK' \
+	echo "$out" | grep 'FETCHED_OK' >/dev/null \
 		&& { echo "NOENTRY: sourced despite the manifest omitting the entry! out: $out"; false; }
-	echo "$out" | grep -qi 'without a verified checksum is unsafe' \
+	echo "$out" | grep -i 'without a verified checksum is unsafe' >/dev/null \
 		|| { echo "NOENTRY: expected fail-closed die; got: $out"; false; }
 
 	# NOENTRY + --no-integrity (NO_INTEGRITY=1): warns and proceeds (sources).
 	out=$(_drive 1) || true
-	echo "$out" | grep -q 'FETCHED_OK' \
+	echo "$out" | grep 'FETCHED_OK' >/dev/null \
 		|| { echo "NOENTRY-OVERRIDE: expected FETCHED_OK with --no-integrity; got: $out"; false; }
-	echo "$out" | grep -qi 'no-integrity acknowledged' \
+	echo "$out" | grep -i 'no-integrity acknowledged' >/dev/null \
 		|| { echo "NOENTRY-OVERRIDE: expected an operator-accepts-risk warn; got: $out"; false; }
 }
 
@@ -720,7 +720,7 @@ HEOF
 		REPO_RAW="https://raw.example.test/oxpulse-partner-edge/main" \
 		INSTALL_LIB_DIR="$TMP/nonexistent-installdir" \
 		bash "$SRC_HARNESS" 2>&1) || true
-	echo "$src_out" | grep -q 'SOURCED_OK' \
+	echo "$src_out" | grep 'SOURCED_OK' >/dev/null \
 		|| { echo "_source_lib: './'-prefixed entry did not resolve; got: $src_out"; false; }
 
 	# --- _stage_lib (upgrade.sh) ----------------------------------------------
@@ -798,6 +798,6 @@ HEOF
 		REPO_RAW="https://raw.example.test/oxpulse-partner-edge/main" \
 		INSTALL_LIB_DIR="$INST_SRCDIR/nonexistent-installdir" NO_INTEGRITY=0 \
 		bash "$INST_HARNESS" 2>&1) || true
-	echo "$inst_out" | grep -q 'SOURCED_OK' \
+	echo "$inst_out" | grep 'SOURCED_OK' >/dev/null \
 		|| { echo "_install_lib_source: './'-prefixed entry did not resolve; got: $inst_out"; false; }
 }

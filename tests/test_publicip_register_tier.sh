@@ -77,14 +77,14 @@ grep -qE 'jq_get[[:space:]]+public_ip' "$HYDRATE" \
 # tier is added (grep finds no REGISTER_PUBLIC_IP reference inside the function
 # body).
 _hydrate_fn_body=$(awk '/^resolve_external_ip\(\)/{f=1} f{print} /^}$/ && f{exit}' "$HYDRATE")
-echo "$_hydrate_fn_body" | grep -qF 'REGISTER_PUBLIC_IP' \
+echo "$_hydrate_fn_body" | grep -F 'REGISTER_PUBLIC_IP' >/dev/null \
     && pass "A3: resolve_external_ip consumes REGISTER_PUBLIC_IP tier" \
     || fail "A3: resolve_external_ip does not reference REGISTER_PUBLIC_IP (T3b tier not implemented)"
 
 # A4: the register tier applies the motherly-self guard (defense-in-depth:
 # never advertise the hub as the edge's own IP even if the central mistakenly
 # returned it).
-echo "$_hydrate_fn_body" | grep -A2 'REGISTER_PUBLIC_IP' | grep -qi 'motherly' \
+echo "$_hydrate_fn_body" | grep -A2 'REGISTER_PUBLIC_IP' | grep -i 'motherly' >/dev/null \
     && pass "A4: REGISTER_PUBLIC_IP tier has motherly-self guard" \
     || fail "A4: REGISTER_PUBLIC_IP tier missing motherly-self guard"
 
@@ -193,18 +193,18 @@ B_OUT=$(PATH="$STUBPATH" \
     bash "$RUN_B" 2>&1) && B_RC=0 || B_RC=$?
 [[ "$B_RC" -eq 0 ]] || fail "B0: resolve/persist died unexpectedly (RC=$B_RC): $B_OUT"
 
-echo "$B_OUT" | grep -qF "PUBLIC_IP=$REGISTER_IP" \
+echo "$B_OUT" | grep -F "PUBLIC_IP=$REGISTER_IP" >/dev/null \
     && pass "B1: REGISTER_PUBLIC_IP ($REGISTER_IP) used verbatim — DNS/egress NOT consulted" \
     || fail "B1: expected PUBLIC_IP=$REGISTER_IP (register tier), got: $B_OUT"
 
-echo "$B_OUT" | grep -qF 'PUBLIC_IP_SOURCE=register' \
+echo "$B_OUT" | grep -F 'PUBLIC_IP_SOURCE=register' >/dev/null \
     && pass "B2: source labeled register (central-authoritative)" \
     || fail "B2: source not labeled register: $B_OUT"
 
 # B3: EXTERNAL_IP_LINE (coturn external-ip) derived from the register IP —
 # this is the value that lands in coturn.conf; SFU_PUBLIC_IP shares PUBLIC_IP
 # via {{PUBLIC_IP}} in docker-compose.yml.tpl (see test_sfu_publicip_motherly_guard).
-echo "$B_OUT" | grep -qF "EXTERNAL_IP_LINE=$REGISTER_IP/$PRIVATE_IP" \
+echo "$B_OUT" | grep -F "EXTERNAL_IP_LINE=$REGISTER_IP/$PRIVATE_IP" >/dev/null \
     && pass "B3: EXTERNAL_IP_LINE (coturn external-ip) derived from register IP" \
     || fail "B3: expected EXTERNAL_IP_LINE=$REGISTER_IP/$PRIVATE_IP, got: $B_OUT"
 
@@ -248,10 +248,10 @@ chmod +x "$RUN_C"
 C_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="$EDGE_DNS" \
     bash "$RUN_C" 2>&1) && C_RC=0 || C_RC=$?
 [[ "$C_RC" -eq 0 ]] || fail "C1: resolve died unexpectedly (RC=$C_RC): $C_OUT"
-echo "$C_OUT" | grep -qF "PUBLIC_IP=$EDGE_DNS" \
+echo "$C_OUT" | grep -F "PUBLIC_IP=$EDGE_DNS" >/dev/null \
     && pass "C1: empty REGISTER_PUBLIC_IP → DNS-derive wins (unchanged behavior)" \
     || fail "C1: expected PUBLIC_IP=$EDGE_DNS (DNS fallback), got: $C_OUT"
-echo "$C_OUT" | grep -qF 'PUBLIC_IP_SOURCE=dns' \
+echo "$C_OUT" | grep -F 'PUBLIC_IP_SOURCE=dns' >/dev/null \
     && pass "C2: source labeled dns (unchanged)" \
     || fail "C2: source not labeled dns: $C_OUT"
 
@@ -280,13 +280,13 @@ chmod +x "$RUN_D"
 D_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="$EDGE_DNS" \
     bash "$RUN_D" 2>&1) && D_RC=0 || D_RC=$?
 [[ "$D_RC" -eq 0 ]] || fail "D1: resolve died unexpectedly (RC=$D_RC): $D_OUT"
-echo "$D_OUT" | grep -qF "PUBLIC_IP=$EDGE_DNS" \
+echo "$D_OUT" | grep -F "PUBLIC_IP=$EDGE_DNS" >/dev/null \
     && pass "D1: register==motherly rejected → fell through to DNS ($EDGE_DNS)" \
     || fail "D1: expected fall-through to DNS $EDGE_DNS, got: $D_OUT"
-echo "$D_OUT" | grep -qi 'motherly' \
+echo "$D_OUT" | grep -i 'motherly' >/dev/null \
     && pass "D2: loud warning emitted for motherly register rejection" \
     || fail "D2: no motherly warning in output: $D_OUT"
-echo "$D_OUT" | grep -qF 'PUBLIC_IP_SOURCE=dns' \
+echo "$D_OUT" | grep -F 'PUBLIC_IP_SOURCE=dns' >/dev/null \
     && pass "D3: source labeled dns after register rejection" \
     || fail "D3: source not labeled dns: $D_OUT"
 
@@ -317,10 +317,10 @@ chmod +x "$RUN_E"
 E_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="$EDGE_DNS" \
     bash "$RUN_E" 2>&1) && E_RC=0 || E_RC=$?
 [[ "$E_RC" -eq 0 ]] || fail "E1: resolve died unexpectedly (RC=$E_RC): $E_OUT"
-echo "$E_OUT" | grep -qF "PUBLIC_IP=$OVERRIDE" \
+echo "$E_OUT" | grep -F "PUBLIC_IP=$OVERRIDE" >/dev/null \
     && pass "E1: OXPULSE_PUBLIC_IP override ($OVERRIDE) wins over REGISTER_PUBLIC_IP ($REGISTER_IP)" \
     || fail "E1: expected override $OVERRIDE, got: $E_OUT"
-echo "$E_OUT" | grep -qF 'PUBLIC_IP_SOURCE=override' \
+echo "$E_OUT" | grep -F 'PUBLIC_IP_SOURCE=override' >/dev/null \
     && pass "E2: source labeled override (operator escape hatch stays top)" \
     || fail "E2: source not labeled override: $E_OUT"
 
@@ -349,13 +349,13 @@ chmod +x "$RUN_F"
 F_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="$EDGE_DNS" \
     bash "$RUN_F" 2>&1) && F_RC=0 || F_RC=$?
 [[ "$F_RC" -eq 0 ]] || fail "F1: resolve died unexpectedly (RC=$F_RC): $F_OUT"
-echo "$F_OUT" | grep -qF "PUBLIC_IP=$EDGE_DNS" \
+echo "$F_OUT" | grep -F "PUBLIC_IP=$EDGE_DNS" >/dev/null \
     && pass "F1: malformed REGISTER_PUBLIC_IP rejected → DNS-derive self-heals ($EDGE_DNS)" \
     || fail "F1: expected PUBLIC_IP=$EDGE_DNS (DNS fallback), got: $F_OUT"
-echo "$F_OUT" | grep -qF 'PUBLIC_IP_SOURCE=dns' \
+echo "$F_OUT" | grep -F 'PUBLIC_IP_SOURCE=dns' >/dev/null \
     && pass "F2: source labeled dns after malformed-register rejection" \
     || fail "F2: source not labeled dns: $F_OUT"
-echo "$F_OUT" | grep -qiF 'not a bare IPv4' \
+echo "$F_OUT" | grep -iF 'not a bare IPv4' >/dev/null \
     && pass "F3: loud warning emitted for malformed register rejection" \
     || fail "F3: no malformed-register warning: $F_OUT"
 

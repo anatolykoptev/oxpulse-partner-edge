@@ -100,7 +100,7 @@ timeout() {
 export -f timeout
 
 _sr_svc="oxpulse-partner-edge-split-routing.service"
-if systemctl list-unit-files "$_sr_svc" --no-legend 2>/dev/null | grep -q "$_sr_svc"; then
+if systemctl list-unit-files "$_sr_svc" --no-legend 2>/dev/null | grep "$_sr_svc" >/dev/null; then
     log "re-asserting split-routing (daily belt-and-suspenders)"
     if timeout 60 systemctl restart "$_sr_svc" 2>>"$LOG_FILE"; then
         log "split-routing re-assert OK"
@@ -120,7 +120,7 @@ set -e
 
 [[ $RC4 -eq 0 ]] || fail "test4: harness exited $RC4; output: $(cat "$T/stdout4.txt")"
 COMBINED4=$(cat "$T/stdout4.txt" "$LOG" 2>/dev/null || true)
-printf '%s' "$COMBINED4" | grep -q "re-assert OK" \
+printf '%s' "$COMBINED4" | grep "re-assert OK" >/dev/null \
     || fail "test4: expected 're-assert OK' in output; got: $COMBINED4"
 pass "test4: behavioral — unit installed → restart called + OK logged"
 
@@ -159,7 +159,7 @@ timeout() { shift; "$@"; }
 export -f timeout
 
 _sr_svc="oxpulse-partner-edge-split-routing.service"
-if systemctl list-unit-files "$_sr_svc" --no-legend 2>/dev/null | grep -q "$_sr_svc"; then
+if systemctl list-unit-files "$_sr_svc" --no-legend 2>/dev/null | grep "$_sr_svc" >/dev/null; then
     log "re-asserting split-routing (daily belt-and-suspenders)"
     if timeout 60 systemctl restart "$_sr_svc" 2>>"$LOG_FILE"; then
         log "split-routing re-assert OK"
@@ -179,7 +179,7 @@ set -e
 
 [[ $RC5 -eq 0 ]] || fail "test5: harness exited $RC5; output: $(cat "$T/stdout5.txt")"
 COMBINED5=$(cat "$T/stdout5.txt" "$LOG5" 2>/dev/null || true)
-printf '%s' "$COMBINED5" | grep -q "skipping re-assert" \
+printf '%s' "$COMBINED5" | grep "skipping re-assert" >/dev/null \
     || fail "test5: expected 'skipping re-assert' in output; got: $COMBINED5"
 pass "test5: behavioral — unit absent → skip logged, no restart attempted"
 

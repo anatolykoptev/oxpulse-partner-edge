@@ -140,7 +140,7 @@ else
 fi
 
 # node_id present
-if printf '%s\n' "$OUTPUT" | grep -q '"node_id"'; then
+if printf '%s\n' "$OUTPUT" | grep '"node_id"' >/dev/null; then
     ok "test1: node_id present in output"
 else
     fail "test1: node_id missing from output"
@@ -384,7 +384,7 @@ else
 fi
 
 # ch5/ch6 must not appear (ch4 is now wired — only ch5/ch6 are skipped)
-if printf '%s\n' "$OUTPUT4" | grep -qE '"channel_name":"ch[56]"'; then
+if printf '%s\n' "$OUTPUT4" | grep -E '"channel_name":"ch[56]"' >/dev/null; then
     fail "test4: ch5/ch6 should not be in JSON output"
 else
     ok "test4: ch5/ch6 correctly absent from JSON"
@@ -415,7 +415,7 @@ STDERR5=$(PATH="$T5:/usr/bin:/bin" \
     bash "$SCRIPT" --dry-run --curl-trace 2>&1 >/dev/null)
 set -e
 
-if printf '%s\n' "$STDERR5" | grep -q 'Authorization: Bearer stkn_trace_token'; then
+if printf '%s\n' "$STDERR5" | grep 'Authorization: Bearer stkn_trace_token' >/dev/null; then
     ok "test5: --curl-trace emits Authorization header to stderr"
 else
     fail "test5: Authorization header not found in stderr; got: $STDERR5"
@@ -461,7 +461,7 @@ if [[ "$EXIT6" -eq 0 ]]; then
 else
     fail "test6: 5xx response should exit 0, got exit $EXIT6"
 fi
-if printf '%s\n' "$STDERR6" | grep -qi "warn\|hiccup\|retry"; then
+if printf '%s\n' "$STDERR6" | grep -i "warn\|hiccup\|retry" >/dev/null; then
     ok "test6: warn log emitted on 5xx"
 else
     fail "test6: expected warn log on 5xx; got: $STDERR6"
@@ -507,7 +507,7 @@ if [[ "$EXIT7" -eq 1 ]]; then
 else
     fail "test7: 401 should exit 1, got exit $EXIT7"
 fi
-if printf '%s\n' "$STDERR7" | grep -qi "warn\|token\|auth"; then
+if printf '%s\n' "$STDERR7" | grep -i "warn\|token\|auth" >/dev/null; then
     ok "test7: auth error log emitted on 401"
 else
     fail "test7: expected warn log on 401; got: $STDERR7"

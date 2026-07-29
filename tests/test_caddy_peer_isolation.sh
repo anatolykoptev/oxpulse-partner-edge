@@ -38,12 +38,12 @@ fi
 
 # P2: reconcile_caddy_surface calls mark_caddy_reload, NOT mark_restart on the edge unit.
 _caddy_fn_body=$(awk '/^reconcile_caddy_surface\(\)/,/^\}/' "$LIB" 2>/dev/null || true)
-if echo "$_caddy_fn_body" | grep -q 'mark_caddy_reload'; then
+if echo "$_caddy_fn_body" | grep 'mark_caddy_reload' >/dev/null; then
     pass "P2a: reconcile_caddy_surface calls mark_caddy_reload"
 else
     fail "P2a: reconcile_caddy_surface does not call mark_caddy_reload"
 fi
-if echo "$_caddy_fn_body" | grep -qE 'mark_restart.*oxpulse-partner-edge'; then
+if echo "$_caddy_fn_body" | grep -E 'mark_restart.*oxpulse-partner-edge' >/dev/null; then
     fail "P2b: reconcile_caddy_surface still calls mark_restart(oxpulse-partner-edge.service) — full-stack restart blast radius"
 else
     pass "P2b: reconcile_caddy_surface does NOT call mark_restart(oxpulse-partner-edge.service)"
@@ -51,14 +51,14 @@ fi
 
 # P3: apply_caddy_reloads calls `caddy reload` (hot-reload via admin API).
 _reload_fn_body=$(awk '/^apply_caddy_reloads\(\)/,/^\}/' "$LIB" 2>/dev/null || true)
-if echo "$_reload_fn_body" | grep -q 'caddy reload'; then
+if echo "$_reload_fn_body" | grep 'caddy reload' >/dev/null; then
     pass "P3: apply_caddy_reloads uses caddy reload (hot-reload, no container down)"
 else
     fail "P3: apply_caddy_reloads does not call caddy reload"
 fi
 
 # P4: Fallback uses --force-recreate caddy (not bare `up -d` which would recreate all).
-if echo "$_reload_fn_body" | grep -q 'force-recreate caddy'; then
+if echo "$_reload_fn_body" | grep 'force-recreate caddy' >/dev/null; then
     pass "P4: apply_caddy_reloads fallback uses --force-recreate caddy (not full stack)"
 else
     fail "P4: apply_caddy_reloads fallback missing --force-recreate caddy"
@@ -141,13 +141,13 @@ _p5_result=$(
     echo "DONE"
 )
 
-if echo "$_p5_result" | grep -q "CADDY_RELOAD:1"; then
+if echo "$_p5_result" | grep "CADDY_RELOAD:1" >/dev/null; then
     pass "P5: apply_caddy_reloads fired on caddyfile change"
 else
     fail "P5: caddy reload not fired on caddyfile change"
 fi
 
-if echo "$_p5_result" | grep -qE "RESTART_UNITS:EMPTY|RESTART_UNITS:$"; then
+if echo "$_p5_result" | grep -E "RESTART_UNITS:EMPTY|RESTART_UNITS:$" >/dev/null; then
     pass "P5a: _RECONCILE_RESTART_UNITS empty after caddyfile change (peers untouched)"
 else
     _units=$(echo "$_p5_result" | grep "^RESTART_UNITS:" | cut -d: -f2-)

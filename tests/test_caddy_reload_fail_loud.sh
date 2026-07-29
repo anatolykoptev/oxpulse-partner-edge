@@ -32,7 +32,7 @@ pass "RF0: prerequisites present"
 
 # RF1s: return 1 statement present in apply_caddy_reloads double-failure path.
 _reload_fn=$(awk '/^apply_caddy_reloads\(\)/,/^\}/' "$LIB" 2>/dev/null || true)
-if echo "$_reload_fn" | grep -q 'return 1'; then
+if echo "$_reload_fn" | grep 'return 1' >/dev/null; then
     pass "RF1s: apply_caddy_reloads has return 1 on double-failure path"
 else
     fail "RF1s: apply_caddy_reloads missing return 1 — double-failure is silent"
@@ -40,7 +40,7 @@ fi
 
 # RF4s: reconcile_all captures apply_caddy_reloads rc.
 _reconcile_fn=$(awk '/^reconcile_all\(\)/,/^\}/' "$LIB" 2>/dev/null || true)
-if echo "$_reconcile_fn" | grep -qE '_caddy_reload_rc|apply_caddy_reloads \|\|'; then
+if echo "$_reconcile_fn" | grep -E '_caddy_reload_rc|apply_caddy_reloads \|\|' >/dev/null; then
     pass "RF4s: reconcile_all captures apply_caddy_reloads return code"
 else
     fail "RF4s: reconcile_all does not capture apply_caddy_reloads rc — double-failure propagation broken"
@@ -90,9 +90,9 @@ _rf1_out=$( (
     echo "RC:$?"
 ) 2>/dev/null || true )
 
-if echo "$_rf1_out" | grep -q "RC:0"; then
+if echo "$_rf1_out" | grep "RC:0" >/dev/null; then
     fail "RF1: apply_caddy_reloads returned 0 on double-failure (should be non-zero)"
-elif echo "$_rf1_out" | grep -qE "RC:[1-9]"; then
+elif echo "$_rf1_out" | grep -E "RC:[1-9]" >/dev/null; then
     pass "RF1: apply_caddy_reloads returns non-zero on double-failure"
 else
     # rc non-zero via exit (e.g. die call) — that's also acceptable loud failure.
@@ -121,7 +121,7 @@ _rf2_out=$( (
     echo "RC:$?"
 ) 2>/dev/null || true )
 
-if echo "$_rf2_out" | grep -q "RC:0"; then
+if echo "$_rf2_out" | grep "RC:0" >/dev/null; then
     pass "RF2: apply_caddy_reloads returns 0 when hot-reload succeeds"
 else
     fail "RF2: apply_caddy_reloads returned non-zero even though hot-reload succeeded"
@@ -150,7 +150,7 @@ _rf3_out=$( (
     echo "RC:$?"
 ) 2>/dev/null || true )
 
-if echo "$_rf3_out" | grep -q "RC:0"; then
+if echo "$_rf3_out" | grep "RC:0" >/dev/null; then
     pass "RF3: apply_caddy_reloads returns 0 when fallback (force-recreate) succeeds"
 else
     fail "RF3: apply_caddy_reloads returned non-zero even though fallback succeeded"
@@ -218,7 +218,7 @@ else
 fi
 
 # RF5: reconcile_all logs the failure (warn/die message visible).
-if echo "$_rf4_result" | grep -qiE "DIE:.*caddy|double.failure|NOT live"; then
+if echo "$_rf4_result" | grep -iE "DIE:.*caddy|double.failure|NOT live" >/dev/null; then
     pass "RF5: reconcile_all emits a meaningful caddy-reload-failure message"
 else
     fail "RF5: reconcile_all did not emit a clear caddy-reload-failure message"

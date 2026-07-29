@@ -24,7 +24,7 @@ fi
 # false-negative if caddy list-modules appends '@module-version' or
 # provenance suffixes in future releases.
 modules=$(docker run --rm "$IMAGE" caddy list-modules 2>&1)
-if ! echo "$modules" | grep -qE '^layer4( |$)'; then
+if ! echo "$modules" | grep -E '^layer4( |$)' >/dev/null; then
   echo "FAIL: caddy-l4 module not found. caddy list-modules output:"
   echo "$modules" | grep -E 'layer|l4' || true
   exit 1
@@ -32,7 +32,7 @@ fi
 
 # Also verify version matches pin (safety against accidental rollback)
 version=$(docker run --rm "$IMAGE" caddy version 2>&1)
-if ! echo "$version" | grep -qE 'v2\.11\.[0-9]+'; then
+if ! echo "$version" | grep -E 'v2\.11\.[0-9]+' >/dev/null; then
   echo "FAIL: caddy version is not 2.11.x: $version"
   exit 1
 fi

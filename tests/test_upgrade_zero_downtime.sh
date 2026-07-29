@@ -75,16 +75,16 @@ A3_OUT=$(
         bash "$UPGRADE" --help 2>&1
 ) && A3_RC=0 || A3_RC=$?
 
-if echo "$A3_OUT" | grep -q 'unbound variable'; then
+if echo "$A3_OUT" | grep 'unbound variable' >/dev/null; then
     fail "A3: got 'unbound variable' error — fix not effective; output: $A3_OUT"
 else
     pass "A3: no 'unbound variable' error (edge-b no-mirror repro clean)"
 fi
 
 # The script should die with a state/compose error, not an unbound-var crash.
-if echo "$A3_OUT" | grep -qE 'unbound variable'; then
+if echo "$A3_OUT" | grep -E 'unbound variable' >/dev/null; then
     fail "A3b: unbound variable in output"
-elif echo "$A3_OUT" | grep -qE 'no installed bundle|missing.*install.env|must run as root'; then
+elif echo "$A3_OUT" | grep -E 'no installed bundle|missing.*install.env|must run as root' >/dev/null; then
     pass "A3b: script failed for expected infra reason (not unbound var)"
 else
     # Some other failure — still acceptable as long as not unbound variable.
@@ -112,7 +112,7 @@ A5_OUT=$(
 ) && A5_RC=0 || A5_RC=$?
 rm -rf "$A5_STATEDIR"
 
-if echo "$A5_OUT" | grep -q 'unbound variable'; then
+if echo "$A5_OUT" | grep 'unbound variable' >/dev/null; then
     fail "A5: 'unbound variable' with no-mirror install.env — fix incomplete"
 else
     pass "A5: no 'unbound variable' with no-mirror install.env (correct)"
@@ -142,15 +142,15 @@ grep -qE '^recreate_changed_services\(\)' "$UPGRADE" \
 # unconditional compose up.
 apply_section=$(awk '/^# ---- Backup current config/{found=1} found{print} found && /^log "upgraded to \$TARGET successfully"/{exit}' "$UPGRADE")
 
-echo "$apply_section" | grep -q 'capture_running_digests' \
+echo "$apply_section" | grep 'capture_running_digests' >/dev/null \
     && pass "B2a: capture_running_digests in apply path" \
     || fail "B2a: capture_running_digests missing from apply path"
 
-echo "$apply_section" | grep -q 'resolve_pulled_digests' \
+echo "$apply_section" | grep 'resolve_pulled_digests' >/dev/null \
     && pass "B2b: resolve_pulled_digests in apply path" \
     || fail "B2b: resolve_pulled_digests missing from apply path"
 
-echo "$apply_section" | grep -q 'recreate_changed_services' \
+echo "$apply_section" | grep 'recreate_changed_services' >/dev/null \
     && pass "B2c: recreate_changed_services in apply path" \
     || fail "B2c: recreate_changed_services missing from apply path"
 
@@ -215,7 +215,7 @@ else
 fi
 
 # Log should say "skipping recreate".
-echo "$B3_OUT" | grep -q 'skip' \
+echo "$B3_OUT" | grep 'skip' >/dev/null \
     && pass "B3c: 'skip' logged for unchanged digest" \
     || fail "B3c: no 'skip' in output; got: $B3_OUT"
 
@@ -249,7 +249,7 @@ else
 fi
 
 # Log should say "recreating" for the changed service.
-echo "$B4_OUT" | grep -q 'changed\|recreat' \
+echo "$B4_OUT" | grep 'changed\|recreat' >/dev/null \
     && pass "B4c: 'changed' or 'recreat' logged for changed digest" \
     || fail "B4c: expected log message missing; got: $B4_OUT"
 
@@ -298,7 +298,7 @@ else
 fi
 
 # B6b: the warning about unavailable digest must be logged.
-echo "$B6_OUT" | grep -q 'could not resolve\|fail-safe' \
+echo "$B6_OUT" | grep 'could not resolve\|fail-safe' >/dev/null \
     && pass "B6b: fail-safe warning logged for empty after-digest" \
     || fail "B6b: no fail-safe warning; got: $B6_OUT"
 
@@ -324,13 +324,13 @@ grep -q -- '--host-scripts-only' "$UPGRADE" \
 # and must NOT call docker compose pull or compose up.
 hs_only_section=$(awk '/"\$MODE" == host_scripts_only/{found=1} found{print} found && /^fi$/{exit}' "$UPGRADE")
 
-echo "$hs_only_section" | grep -q 'sync_host_scripts' \
+echo "$hs_only_section" | grep 'sync_host_scripts' >/dev/null \
     && pass "C2a: sync_host_scripts called in --host-scripts-only block" \
     || fail "C2a: sync_host_scripts missing from --host-scripts-only block"
 
 # Check for actual docker compose command invocations (not log message text).
 # Matches patterns like `$DOCKER_BIN compose pull` or `docker compose up` in code.
-echo "$hs_only_section" | grep -qE '\$DOCKER_BIN compose (pull|up)|\bdocker\b.* compose (pull|up)' \
+echo "$hs_only_section" | grep -E '\$DOCKER_BIN compose (pull|up)|\bdocker\b.* compose (pull|up)' >/dev/null \
     && fail "C2b: --host-scripts-only block invokes compose pull/up — must NOT" \
     || pass "C2b: no compose pull/up invocation in --host-scripts-only block"
 
@@ -422,7 +422,7 @@ kill "$C3_HTTP_PID" 2>/dev/null || true
 # Forbidden docker call (exit 99) = hard failure.
 if [[ $C3_RC -eq 99 ]]; then
     fail "C3a: docker compose pull/up was called (exit 99 from docker mock) — must NOT happen in --host-scripts-only"
-elif echo "$C3_OUT" | grep -q 'FORBIDDEN'; then
+elif echo "$C3_OUT" | grep 'FORBIDDEN' >/dev/null; then
     fail "C3a: FORBIDDEN docker call detected in output"
 else
     pass "C3a: upgrade.sh --host-scripts-only did not invoke forbidden docker commands (rc=$C3_RC)"
@@ -444,7 +444,7 @@ fi
 
 # sync_host_scripts runs → systemctl daemon-reload must have been invoked if
 # any script changed, OR at least the sync function was reached (no "pull" gate).
-echo "$C3_OUT" | grep -qE 'host-script|host_scripts_only|--host-scripts-only' \
+echo "$C3_OUT" | grep -E 'host-script|host_scripts_only|--host-scripts-only' >/dev/null \
     && pass "C3d: host-script sync path reached (log evidence)" \
     || fail "C3d: no evidence host-script path was reached; output: $C3_OUT"
 
@@ -489,7 +489,7 @@ else
     fail "C4a: exited $C4_RC; output: $C4_OUT"
 fi
 
-echo "$C4_OUT" | grep -q 'dry-run' \
+echo "$C4_OUT" | grep 'dry-run' >/dev/null \
     && pass "C4b: [dry-run] tag in output" \
     || fail "C4b: no [dry-run] in output; got: $C4_OUT"
 
@@ -521,12 +521,12 @@ echo "=== Section D: --dry-run gating for plain apply (image upgrade) path ==="
 # resolve_default_target is called), gating early exit before the backup block.
 apply_dry_section=$(awk '/^resolve_default_target$/{found=1} found{print} found && /^log "upgraded to \$TARGET successfully"/{exit}' "$UPGRADE")
 
-echo "$apply_dry_section" | grep -q 'DRY_RUN' \
+echo "$apply_dry_section" | grep 'DRY_RUN' >/dev/null \
     && pass "D1a: DRY_RUN check present in plain apply path" \
     || fail "D1a: DRY_RUN check MISSING from plain apply path — the edge-d incident guard is absent"
 
 # The DRY_RUN block must print a "[dry-run]" plan line.
-echo "$apply_dry_section" | grep -q '\[dry-run\]' \
+echo "$apply_dry_section" | grep '\[dry-run\]' >/dev/null \
     && pass "D1b: [dry-run] plan message in apply path dry-run block" \
     || fail "D1b: no [dry-run] plan message in apply path"
 
@@ -622,11 +622,11 @@ D3_OUT=$(
 # Both are hard failures; distinguish them for diagnostic clarity.
 if [[ $D3_RC -eq 99 ]]; then
     fail "D3a: docker compose PULL was called during --dry-run (plain apply) — exit 99 from docker mock (edge-d incident bug)"
-elif echo "$D3_OUT" | grep -q 'FORBIDDEN-PULL'; then
+elif echo "$D3_OUT" | grep 'FORBIDDEN-PULL' >/dev/null; then
     fail "D3a: FORBIDDEN-PULL marker in plain apply --dry-run output"
 elif [[ $D3_RC -eq 98 ]]; then
     fail "D3a: docker compose UP was called during --dry-run (plain apply) — exit 98 from docker mock"
-elif echo "$D3_OUT" | grep -q 'FORBIDDEN-UP'; then
+elif echo "$D3_OUT" | grep 'FORBIDDEN-UP' >/dev/null; then
     fail "D3a: FORBIDDEN-UP marker in plain apply --dry-run output"
 elif [[ $D3_RC -eq 0 ]]; then
     pass "D3a: upgrade.sh --dry-run plain apply exited 0 (no forbidden docker calls)"
@@ -655,7 +655,7 @@ fi
 # [dry-run] plan message must be the apply-path plan, not incidental sync lines.
 # The apply-path dry-run block logs "plan for full image upgrade" — match that
 # specifically so the test does not pass on incidental [dry-run] from sync_host_scripts.
-echo "$D3_OUT" | grep -q 'plan for full image upgrade' \
+echo "$D3_OUT" | grep 'plan for full image upgrade' >/dev/null \
     && pass "D3d: apply-path [dry-run] plan message in output ('plan for full image upgrade')" \
     || fail "D3d: apply-path plan message missing; got: $D3_OUT"
 
@@ -682,17 +682,17 @@ echo "=== Section E: tag-rewrite — compose tag rewritten to TARGET before pull
 # E1: structural — the compose sed tag-rewrite must appear in the apply section.
 apply_section_e=$(awk '/^resolve_default_target$/{found=1} found{print} found && /^log "upgraded to \$TARGET successfully"/{exit}' "$UPGRADE")
 
-echo "$apply_section_e" | grep -qE 'sed.*-i.*partner-edge' \
+echo "$apply_section_e" | grep -E 'sed.*-i.*partner-edge' >/dev/null \
     && pass "E1a: sed tag-rewrite present in plain apply path" \
     || fail "E1a: sed tag-rewrite MISSING from plain apply path"
 
 # The rewrite must use TARGET variable (not a hardcoded tag).
-echo "$apply_section_e" | grep -qE 'sed.*-i.*\$\{TARGET\}|\$TARGET' \
+echo "$apply_section_e" | grep -E 'sed.*-i.*\$\{TARGET\}|\$TARGET' >/dev/null \
     && pass "E1b: tag-rewrite uses TARGET variable (not hardcoded)" \
     || fail "E1b: tag-rewrite does not use TARGET variable"
 
 # A "rewritten to TARGET" log confirmation must be present.
-echo "$apply_section_e" | grep -q 'rewritten to \$TARGET\|rewritten.*TARGET' \
+echo "$apply_section_e" | grep 'rewritten to \$TARGET\|rewritten.*TARGET' >/dev/null \
     && pass "E1c: log confirms tag rewrite before pull" \
     || fail "E1c: no tag-rewrite confirmation log — operator cannot verify BUG 2 fix is active"
 
@@ -810,9 +810,9 @@ E2_OUT=$(
 # had TARGET tag. Check the recorded compose content at pull time.
 compose_at_pull=$(grep -A5 'PULL_COMPOSE_CONTENT' "$E2_DOCKER_LOG" 2>/dev/null || true)
 
-if echo "$compose_at_pull" | grep -q 'v0.12.61'; then
+if echo "$compose_at_pull" | grep 'v0.12.61' >/dev/null; then
     pass "E2a: compose tag at pull time was TARGET (v0.12.61) — BUG 2 fix confirmed"
-elif echo "$compose_at_pull" | grep -q 'v0.12.45'; then
+elif echo "$compose_at_pull" | grep 'v0.12.45' >/dev/null; then
     fail "E2a: compose tag at pull time was RUNNING (v0.12.45) — BUG 2 NOT fixed: pull fetches wrong version"
 else
     # No pull recorded (upgrade exited before pull, e.g. sync_host_scripts failure) — check compose file directly.
@@ -836,7 +836,7 @@ else
 fi
 
 # Verify the upgrade log mentions TARGET in the pull step.
-echo "$E2_OUT" | grep -qE 'pulling.*v0\.12\.61|tag=v0\.12\.61|rewritten to v0\.12\.61' \
+echo "$E2_OUT" | grep -E 'pulling.*v0\.12\.61|tag=v0\.12\.61|rewritten to v0\.12\.61' >/dev/null \
     && pass "E2c: upgrade log references TARGET tag (v0.12.61) in pull step" \
     || pass "E2c: pull step log not captured (sync_host_scripts may have failed before pull — acceptable in unit test)"
 
@@ -873,12 +873,12 @@ grep -q 'OXPULSE_UPGRADE_HEALTH_TIMEOUT' "$UPGRADE" \
 
 # The plain apply path must call settle_healthcheck_with_retry, not a bare sleep+check.
 apply_section_f=$(awk '/^resolve_default_target$/{found=1} found{print} found && /^log "upgraded to \$TARGET successfully"/{exit}' "$UPGRADE")
-echo "$apply_section_f" | grep -q 'settle_healthcheck_with_retry' \
+echo "$apply_section_f" | grep 'settle_healthcheck_with_retry' >/dev/null \
     && pass "F1c: settle_healthcheck_with_retry called in plain apply path" \
     || fail "F1c: settle_healthcheck_with_retry missing from plain apply path (single-shot sleep still in place?)"
 
 # No bare 'sleep 10' should remain in the apply path.
-echo "$apply_section_f" | grep -qE '^\s*sleep 10\s*$' \
+echo "$apply_section_f" | grep -E '^\s*sleep 10\s*$' >/dev/null \
     && fail "F1d: bare 'sleep 10' still in plain apply path — settle-retry fix not applied" \
     || pass "F1d: no bare 'sleep 10' in plain apply path"
 
@@ -1110,7 +1110,7 @@ else
 fi
 
 # Must have logged a rollback warning.
-echo "$F3_OUT" | grep -qE 'rolling back|rolled back' \
+echo "$F3_OUT" | grep -E 'rolling back|rolled back' >/dev/null \
     && pass "F3b: rollback warning logged" \
     || fail "F3b: no rollback log; output: $F3_OUT"
 
@@ -1176,7 +1176,7 @@ fi
     && pass "F4b: settle_healthcheck_with_retry returned non-zero after exhausting short budget" \
     || fail "F4b: settle_healthcheck_with_retry returned 0 despite always-failing healthcheck"
 
-echo "$F4_OUT" | grep -q 'attempt' \
+echo "$F4_OUT" | grep 'attempt' >/dev/null \
     && pass "F4c: attempt log lines present with custom budget" \
     || fail "F4c: no attempt log lines; output: $F4_OUT"
 
@@ -1235,7 +1235,7 @@ _g_check_extraction() {
         while IFS= read -r _sym; do
             [[ -z "$_sym" ]] && continue
             # _sym must appear as a whole word (command position) in the body.
-            echo "$_body" | grep -qE "(^|[^A-Za-z0-9_])${_sym}([^A-Za-z0-9_]|\$)" || continue
+            echo "$_body" | grep -E "(^|[^A-Za-z0-9_])${_sym}([^A-Za-z0-9_]|\$)" >/dev/null || continue
             local _home_lib
             _home_lib=$(grep -lE "^${_sym}\(\)" "$_libdir"/*-lib.sh 2>/dev/null \
                 | xargs -n1 basename 2>/dev/null | head -1 || true)

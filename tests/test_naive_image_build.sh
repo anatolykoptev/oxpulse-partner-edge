@@ -22,7 +22,7 @@ if [[ "${DOCKER_BUILD:-0}" == "1" ]] && command -v docker >/dev/null 2>&1; then
     [[ "$size" -lt 80000000 ]] \
         || { echo "FAIL: image too large ($size bytes — expect <80MB)"; exit 1; }
 
-    docker run --rm partner-edge-naive:test --version 2>&1 | grep -qE 'naive|^v?[0-9]+' \
+    docker run --rm partner-edge-naive:test --version 2>&1 | grep -E 'naive|^v?[0-9]+' >/dev/null \
         || { echo "FAIL: naive binary missing or wrong"; exit 1; }
     echo "OK: naive image builds + binary works"
 else

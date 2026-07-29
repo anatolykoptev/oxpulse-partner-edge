@@ -95,13 +95,13 @@ STDERR1=$(PATH="$T1:/usr/bin:/bin" \
     bash "$SCRIPT" --dry-run 2>&1 >/dev/null)
 set -e
 
-if printf '%s\n' "$STDERR1" | grep -q 'ch0 not yet wired on edge — skipping'; then
+if printf '%s\n' "$STDERR1" | grep 'ch0 not yet wired on edge — skipping' >/dev/null; then
     ok "test1: id=ch0 → honest 'not yet wired' skip"
 else
     fail "test1: expected 'ch0 not yet wired on edge — skipping'; got: $STDERR1"
 fi
 
-if printf '%s\n' "$STDERR1" | grep -qi "unknown channel"; then
+if printf '%s\n' "$STDERR1" | grep -i "unknown channel" >/dev/null; then
     fail "test1: id=ch0 must NOT hit the 'unknown channel' catch-all"
 else
     ok "test1: id=ch0 does not hit the 'unknown channel' catch-all"
@@ -126,13 +126,13 @@ STDERR2=$(PATH="$T2:/usr/bin:/bin" \
     bash "$SCRIPT" --dry-run 2>&1 >/dev/null)
 set -e
 
-if printf '%s\n' "$STDERR2" | grep -q 'naive not yet wired on edge — skipping'; then
+if printf '%s\n' "$STDERR2" | grep 'naive not yet wired on edge — skipping' >/dev/null; then
     ok "test2: id=naive → honest 'not yet wired' skip"
 else
     fail "test2: expected 'naive not yet wired on edge — skipping'; got: $STDERR2"
 fi
 
-if printf '%s\n' "$STDERR2" | grep -qi "unknown channel"; then
+if printf '%s\n' "$STDERR2" | grep -i "unknown channel" >/dev/null; then
     fail "test2: id=naive must NOT hit the 'unknown channel' catch-all"
 else
     ok "test2: id=naive does not hit the 'unknown channel' catch-all"
@@ -165,7 +165,7 @@ else
     fail "test3: expected 3 channel entries (ch1/ch2/ch3), got $COUNT3; output: $OUTPUT3"
 fi
 
-if printf '%s\n' "$OUTPUT3" | grep -qE '"channel_name":"ch0"'; then
+if printf '%s\n' "$OUTPUT3" | grep -E '"channel_name":"ch0"' >/dev/null; then
     fail "test3: ch0 must not appear in JSON output (no probe exists yet)"
 else
     ok "test3: ch0 correctly absent from JSON output"

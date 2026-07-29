@@ -72,7 +72,7 @@ NODE_CFG="/dev/null" # not used in this branch
 systemctl() {
     case "$*" in
         "list-unit-files oxpulse-partner-edge.service --no-legend"*)
-            return 0  # exit 0, no output → grep -q fails → else branch taken
+            return 0  # exit 0, no output → grep fails → else branch taken
             ;;
         *) return 0 ;;
     esac
@@ -80,7 +80,7 @@ systemctl() {
 export -f systemctl
 
 if systemctl list-unit-files oxpulse-partner-edge.service --no-legend 2>/dev/null \
-        | grep -q oxpulse-partner-edge; then
+        | grep oxpulse-partner-edge >/dev/null; then
     log "reloading oxpulse-partner-edge.service"
     if systemctl reload oxpulse-partner-edge.service 2>>"$LOG_FILE"; then
         log "reload OK"
@@ -115,7 +115,7 @@ set -e
     || fail "test5: harness exited $HARNESS_EXIT (expected 0); output: $(cat "$T/stdout.txt")"
 
 COMBINED=$(cat "$T/stdout.txt" "$LOG" 2>/dev/null || true)
-printf '%s' "$COMBINED" | grep -q "skipping reload (custom stack node)" \
+printf '%s' "$COMBINED" | grep "skipping reload (custom stack node)" >/dev/null \
     || fail "test5: expected skip message in output; got: $COMBINED"
 pass "test5: behavioral harness exits 0 + emits skip message when unit absent"
 

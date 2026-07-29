@@ -86,7 +86,7 @@ fi
 # 2. Wiring: _reconcile_emit_prom_gauge delegates to _emit_prom_gauge_file.
 # ---------------------------------------------------------------------------
 BODY=$(awk '/^_reconcile_emit_prom_gauge\(\)/{found=1} found{print} /^}$/ && found{exit}' "$RECONCILE_LIB")
-if echo "$BODY" | grep -q '_emit_prom_gauge_file "\$@"'; then
+if echo "$BODY" | grep '_emit_prom_gauge_file "\$@"' >/dev/null; then
     pass "_reconcile_emit_prom_gauge delegates to _emit_prom_gauge_file"
 else
     fail "_reconcile_emit_prom_gauge does not call _emit_prom_gauge_file — delegation missing"
@@ -138,7 +138,7 @@ for fn in _reconcile_xray_emit_gauge _reconcile_caddy_emit_drift_gauge _reconcil
         continue
     fi
     FBODY=$(awk "/^${fn}\\(\\)/{found=1} found{print} /^}\$/ && found{exit}" "$RECONCILE_LIB")
-    if echo "$FBODY" | grep -q '_reconcile_emit_prom_gauge '; then
+    if echo "$FBODY" | grep '_reconcile_emit_prom_gauge ' >/dev/null; then
         pass "$fn is unchanged and still routes through _reconcile_emit_prom_gauge"
     else
         fail "$fn no longer calls _reconcile_emit_prom_gauge — caller was touched unexpectedly"

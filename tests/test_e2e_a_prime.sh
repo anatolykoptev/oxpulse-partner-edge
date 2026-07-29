@@ -113,7 +113,7 @@ done
 
 # ─── 6. Confirm no H3 UDP listener (R1 Layer 0) ─────────────────────────────
 log "6/7 Verify UDP :443 closed (H3 drop)"
-if ss -lnu | awk '{print $5}' | grep -qE ":443$"; then
+if ss -lnu | awk '{print $5}' | grep -E ":443$" >/dev/null; then
   echo "FAIL: UDP :443 listener present — H3 drop regressed"
   exit 1
 fi
@@ -122,12 +122,12 @@ log "  UDP :443 closed — H3 drop intact"
 # ─── 7. Confirm Via/Alt-Svc absent in response ──────────────────────────────
 log "7/7 Verify Via/Alt-Svc headers stripped (R1 Layer 0)"
 headers=$(curl -sI --max-time 10 "https://$TEST_DOMAIN/")
-if echo "$headers" | grep -qi '^via:'; then
+if echo "$headers" | grep -i '^via:' >/dev/null; then
   echo "FAIL: Via header leaked"
   echo "$headers" | grep -i via
   exit 1
 fi
-if echo "$headers" | grep -qi '^alt-svc:'; then
+if echo "$headers" | grep -i '^alt-svc:' >/dev/null; then
   echo "FAIL: Alt-Svc header leaked"
   echo "$headers" | grep -i alt-svc
   exit 1

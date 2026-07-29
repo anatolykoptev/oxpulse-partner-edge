@@ -115,7 +115,7 @@ check_migration() {
     fi
 
     # Test B: MIGRATE_OK in output (function ran to completion)
-    if echo "$output" | grep -q "MIGRATE_OK"; then
+    if echo "$output" | grep "MIGRATE_OK" >/dev/null; then
         pass "$vintage: migrate_state ran to completion"
     else
         fail "$vintage: MIGRATE_OK not in output — $output"
@@ -154,7 +154,7 @@ check_migration() {
     fi
 
     # Test F: no "re-run install.sh" in output
-    if echo "$output" | grep -qi "re-run install"; then
+    if echo "$output" | grep -i "re-run install" >/dev/null; then
         fail "$vintage: output contains 're-run install.sh' — migrate_state should converge, not bail"
     else
         pass "$vintage: no 're-run install.sh' demanded"
@@ -317,7 +317,7 @@ SCHEMA_VERSION=1
 EOF
 
 IDEM_OUT=$(run_migrate "$STATE_V1" "$ETC_V1") || { fail "idempotency: migrate_state exited non-zero"; }
-if echo "$IDEM_OUT" | grep -q "MIGRATE_OK"; then
+if echo "$IDEM_OUT" | grep "MIGRATE_OK" >/dev/null; then
     pass "idempotency: second run completes successfully"
 else
     fail "idempotency: second run failed: $IDEM_OUT"
@@ -363,7 +363,7 @@ if grep -q "println \." "$RECONCILE_LIB"; then
 elif grep -q "range .Config.Env" "$RECONCILE_LIB"; then
     # Check what format it uses
     FORMAT=$(grep 'range .Config.Env' "$RECONCILE_LIB" | head -1)
-    if echo "$FORMAT" | grep -q 'println'; then
+    if echo "$FORMAT" | grep 'println' >/dev/null; then
         pass "tier-3 fix: lib/reconcile.sh uses {{println .}} (real newlines)"
     else
         fail "tier-3 fix: lib/reconcile.sh still has broken format: $FORMAT"

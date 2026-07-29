@@ -27,7 +27,7 @@ grep -q './cover:/srv/cover:ro' "$CP" || { echo "FAIL: cover volume mount missin
 # Regression guard: the @probe cover decoy must stay removed (SW-bug fix,
 # 2026-04-20). Exclude comment lines — the header documents the removal and
 # legitimately mentions "@probe".
-if grep -vE '^[[:space:]]*#' "$CF" | grep -qE '@probe|handle @probe'; then
+if grep -vE '^[[:space:]]*#' "$CF" | grep -E '@probe|handle @probe' >/dev/null; then
   echo "FAIL: @probe cover decoy re-introduced in Caddyfile.tpl (removed 2026-04-20 for SW bug)"
   exit 1
 fi

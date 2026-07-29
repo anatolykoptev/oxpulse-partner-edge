@@ -27,7 +27,7 @@ grep -q '^Type=oneshot' "$UNITS/oxpulse-partner-cert-watch.service" \
 
 # Basic systemd unit render sanity
 sed -e 's/{{TURNS_SUBDOMAIN}}/turns/g' -e 's/{{PARTNER_DOMAIN}}/example.test/g' \
-  "$UNITS/oxpulse-partner-cert-watch.path" | grep -q '^PathChanged=/var/lib/docker/' \
+  "$UNITS/oxpulse-partner-cert-watch.path" | grep '^PathChanged=/var/lib/docker/' >/dev/null \
   || { echo "FAIL: placeholder substitution malformed"; exit 1; }
 
 echo "PASS: cert-watch systemd units + placeholder rendering"

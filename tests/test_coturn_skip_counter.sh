@@ -92,9 +92,9 @@ echo "DONE"
 SHELLEOF
 )
 
-if echo "$_sk1_out" | grep -q "SKIP_NO_LIB"; then
+if echo "$_sk1_out" | grep "SKIP_NO_LIB" >/dev/null; then
     fail "SK1: lib/reconcile.sh not found"
-elif echo "$_sk1_out" | grep -q "DONE"; then
+elif echo "$_sk1_out" | grep "DONE" >/dev/null; then
     _count=$(echo "$_sk1_out" | grep '^COUNT=' | cut -d= -f2)
     if [[ "${_count:-0}" -ge 1 ]]; then
         pass "SK1: first SKIP writes COTURN_SKIP_CONSECUTIVE=${_count} (≥1)"
@@ -159,9 +159,9 @@ SHELLEOF
 
 rm -rf "$_tmpdir2"
 
-if echo "$_sk2_out" | grep -q "SKIP_NO_LIB"; then
+if echo "$_sk2_out" | grep "SKIP_NO_LIB" >/dev/null; then
     fail "SK2: lib/reconcile.sh not found"
-elif echo "$_sk2_out" | grep -q "DONE"; then
+elif echo "$_sk2_out" | grep "DONE" >/dev/null; then
     _count=$(echo "$_sk2_out" | grep '^COUNT=' | cut -d= -f2)
     if [[ "${_count:-0}" -ge 3 ]]; then
         pass "SK2: 3 consecutive SKIPs → COTURN_SKIP_CONSECUTIVE=${_count} (accumulated)"
@@ -246,9 +246,9 @@ SHELLEOF
 
 rm -rf "$_tmpdir3"
 
-if echo "$_sk3_out" | grep -q "SKIP_NO_LIB"; then
+if echo "$_sk3_out" | grep "SKIP_NO_LIB" >/dev/null; then
     fail "SK3: lib/reconcile.sh not found"
-elif echo "$_sk3_out" | grep -q "DONE"; then
+elif echo "$_sk3_out" | grep "DONE" >/dev/null; then
     _before=$(echo "$_sk3_out" | grep '^BEFORE=' | cut -d= -f2)
     _after=$(echo "$_sk3_out"  | grep '^AFTER='  | cut -d= -f2)
     if [[ "${_before:-0}" -ge 5 && "${_after:-1}" -eq 0 ]]; then
@@ -337,9 +337,9 @@ SHELLEOF
 
 rm -rf "$_tmpdir4"
 
-if echo "$_sk4_out" | grep -q "SKIP_NO_LIB"; then
+if echo "$_sk4_out" | grep "SKIP_NO_LIB" >/dev/null; then
     fail "SK4: lib/reconcile.sh not found"
-elif echo "$_sk4_out" | grep -q "DONE"; then
+elif echo "$_sk4_out" | grep "DONE" >/dev/null; then
     _before=$(echo "$_sk4_out" | grep '^BEFORE='    | cut -d= -f2)
     _after=$(echo "$_sk4_out"  | grep '^AFTER='     | cut -d= -f2)
     _inst=$(echo "$_sk4_out"   | grep '^INSTALLED=' | cut -d= -f2)
@@ -438,9 +438,9 @@ SHELLEOF
 
 rm -rf "$_tmpdir5"
 
-if echo "$_sk5_out" | grep -q "SKIP_NO_LIB"; then
+if echo "$_sk5_out" | grep "SKIP_NO_LIB" >/dev/null; then
     fail "SK5: lib/reconcile.sh not found"
-elif echo "$_sk5_out" | grep -q "DONE"; then
+elif echo "$_sk5_out" | grep "DONE" >/dev/null; then
     _before=$(echo "$_sk5_out" | grep '^BEFORE=' | cut -d= -f2)
     _after=$(echo "$_sk5_out"  | grep '^AFTER='  | cut -d= -f2)
     if [[ "${_before:-0}" -ge 9 && "${_after:-1}" -eq 0 ]]; then
@@ -530,9 +530,9 @@ SHELLEOF
 
 rm -rf "$_tmpdir6"
 
-if echo "$_sk6_out" | grep -q "SKIP_NO_LIB"; then
+if echo "$_sk6_out" | grep "SKIP_NO_LIB" >/dev/null; then
     fail "SK6: lib/reconcile.sh not found"
-elif echo "$_sk6_out" | grep -q "DONE"; then
+elif echo "$_sk6_out" | grep "DONE" >/dev/null; then
     _before=$(echo "$_sk6_out" | grep '^BEFORE=' | cut -d= -f2)
     _after=$(echo "$_sk6_out"  | grep '^AFTER='  | cut -d= -f2)
     if [[ "${_before:-0}" -ge 3 && "${_after:-1}" -eq 0 ]]; then
@@ -556,7 +556,7 @@ echo "=== Results: PASS=$PASS FAIL=$FAIL ==="
 test_mktemp_failure_warns() {
     local fn_body
     fn_body=$(grep -A20 "^_write_coturn_skip_count()" "$LIB")
-    echo "$fn_body" | grep -q "mktemp.*failed\|WARNING.*mktemp" \
+    echo "$fn_body" | grep "mktemp.*failed\|WARNING.*mktemp" >/dev/null \
         && pass "SK5: mktemp failure logs warning" \
         || fail "SK5: mktemp failure does not log warning"
 }

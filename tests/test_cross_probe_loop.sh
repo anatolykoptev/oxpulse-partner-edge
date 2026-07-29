@@ -229,7 +229,7 @@ ERR3=$(PATH="$T3:/usr/bin:/bin" \
     OXPULSE_TURN_SECRET="s" \
     bash "$SCRIPT" --dry-run 2>&1 >/dev/null)
 set -e
-if ! printf '%s' "$ERR3" | grep -q 'DIALED'; then
+if ! printf '%s' "$ERR3" | grep 'DIALED' >/dev/null; then
     ok "test3: empty roster → no dial"
 else
     fail "test3: empty roster still dialed a peer"
@@ -297,12 +297,12 @@ ERR5=$(PATH="$T5:/usr/bin:/bin" \
     OXPULSE_TURN_SECRET="s" OXPULSE_GETENT_BIN="$T5/getent" \
     bash "$SCRIPT" --dry-run 2>&1 >/dev/null)
 set -e
-if ! printf '%s' "$ERR5" | grep -q 'DIALED'; then
+if ! printf '%s' "$ERR5" | grep 'DIALED' >/dev/null; then
     ok "test5: no cross-probe token → no dial (fail-closed)"
 else
     fail "test5: probed despite missing cross-probe token"
 fi
-if printf '%s' "$ERR5" | grep -qi 'no cross-probe token'; then
+if printf '%s' "$ERR5" | grep -i 'no cross-probe token' >/dev/null; then
     ok "test5: skip is logged (graceful degrade)"
 else
     fail "test5: expected a 'no cross-probe token' skip log; got: $ERR5"

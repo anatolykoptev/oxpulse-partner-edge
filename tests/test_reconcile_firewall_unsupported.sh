@@ -111,14 +111,14 @@ if [[ -s "$TMP/tg_alert.log" ]]; then
 	# must classify as critical under dozor's classifyMonitorMessage lexical
 	# match (see lib/telegram-alert-lib.sh header) — assert a critical token
 	# is present, not just that *some* alert fired.
-	if echo "$_tg_call" | grep -qiE 'critical|failed|unreachable|blocked'; then
+	if echo "$_tg_call" | grep -iE 'critical|failed|unreachable|blocked' >/dev/null; then
 		pass "T3a: tg_alert (AM-webhook notify path) called with a critical-classified message"
 	else
 		fail "T3a: tg_alert called but message has no critical-severity token: $_tg_call"
 	fi
 	# force bypasses the 600s rate-limit floor — an unenforced firewall must
 	# alert every converge cycle, not just the first.
-	if echo "$_tg_call" | grep -qE $'\t''(force|1)$'; then
+	if echo "$_tg_call" | grep -E $'\t''(force|1)$' >/dev/null; then
 		pass "T3b: tg_alert called with force (bypasses rate-limit floor)"
 	else
 		fail "T3b: tg_alert not forced — rate-limit could swallow a real incident: $_tg_call"

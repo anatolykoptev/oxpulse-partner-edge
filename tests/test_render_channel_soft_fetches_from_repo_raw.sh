@@ -61,7 +61,7 @@ warn() { printf '!!  %s\n' "\$*" >&2; }
 $LOADER_BLOCK
 
 warn_out=\$(render_channel_soft xray /tmp/f.tpl /tmp/f.out 2>&1 || true)
-if echo "\$warn_out" | grep -q "lib/render-channel-lib.sh not found"; then
+if echo "\$warn_out" | grep "lib/render-channel-lib.sh not found" >/dev/null; then
   echo "CURRENT_USES_INLINE_STUBS"
 else
   echo "CURRENT_FETCHES_LIB"
@@ -71,9 +71,9 @@ chmod +x "$CASE1_SCRIPT"
 
 case1_out=$(bash "$CASE1_SCRIPT" 2>&1)
 echo "  case1_out=[$case1_out]"
-if echo "$case1_out" | grep -q "CURRENT_USES_INLINE_STUBS"; then
+if echo "$case1_out" | grep "CURRENT_USES_INLINE_STUBS" >/dev/null; then
     pass "case 1 (RED confirmed): current install.sh falls back to inline stubs"
-elif echo "$case1_out" | grep -q "CURRENT_FETCHES_LIB"; then
+elif echo "$case1_out" | grep "CURRENT_FETCHES_LIB" >/dev/null; then
     pass "case 1: install.sh already has fetch fallback (pre-patched)"
 else
     fail "case 1: unexpected output: $case1_out"
@@ -114,7 +114,7 @@ $LOADER_BLOCK
 
 declare -f render_channel_soft > /dev/null || { echo "FAIL_UNDEF"; exit 1; }
 warn_out=\$(render_channel_soft xray /tmp/f.tpl /tmp/f.out 2>&1 || true)
-if echo "\$warn_out" | grep -q "lib/render-channel-lib.sh not found"; then
+if echo "\$warn_out" | grep "lib/render-channel-lib.sh not found" >/dev/null; then
     echo "INLINE_STUB_USED"
     exit 1
 fi
@@ -125,11 +125,11 @@ chmod +x "$CASE3_SCRIPT"
 
 case3_out=$(bash "$CASE3_SCRIPT" 2>&1)
 echo "  case3_out=[$case3_out]"
-if echo "$case3_out" | grep -q "CASE3_PASS"; then
+if echo "$case3_out" | grep "CASE3_PASS" >/dev/null; then
     pass "case 3 (install.sh actual loader): fetched lib used, persisted to INSTALL_LIB_DIR"
-elif echo "$case3_out" | grep -q "INLINE_STUB_USED"; then
+elif echo "$case3_out" | grep "INLINE_STUB_USED" >/dev/null; then
     fail "case 3: install.sh loader uses inline stubs — Bug M not yet fixed in install.sh"
-elif echo "$case3_out" | grep -q "NOT_PERSISTED"; then
+elif echo "$case3_out" | grep "NOT_PERSISTED" >/dev/null; then
     fail "case 3: lib not persisted to INSTALL_LIB_DIR after fetch"
 else
     fail "case 3 unexpected: $case3_out"

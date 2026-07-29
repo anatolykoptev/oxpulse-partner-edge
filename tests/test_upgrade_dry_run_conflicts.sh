@@ -183,11 +183,11 @@ make_docker_shim "$T1_SHIM" \
 
 output=$(run_dry "$T1_ETC" "$T1_LIB" "$T1_SHIM")
 
-echo "$output" | grep -q "CATASTROPHIC" \
+echo "$output" | grep "CATASTROPHIC" >/dev/null \
     || { echo "FAIL: Check 1 did not emit CATASTROPHIC"; echo "$output"; exit 1; }
-echo "$output" | grep -q "maxmind_geolocation\|Caddyfile" \
+echo "$output" | grep "maxmind_geolocation\|Caddyfile" >/dev/null \
     || { echo "FAIL: Check 1 CATASTROPHIC missing caddyfile error text"; echo "$output"; exit 1; }
-echo "$output" | grep -q "Exit code: 1" \
+echo "$output" | grep "Exit code: 1" >/dev/null \
     || { echo "FAIL: Check 1 CATASTROPHIC — summary missing 'Exit code: 1'"; echo "$output"; exit 1; }
 echo "OK: Test 1 — Check 1 CATASTROPHIC emitted correctly"
 
@@ -213,9 +213,9 @@ SHIM
 chmod +x "$T2_SHIM"
 
 output=$(run_dry "$T2_ETC" "$T2_LIB" "$T2_SHIM")
-echo "$output" | grep -q "CATASTROPHIC" \
+echo "$output" | grep "CATASTROPHIC" >/dev/null \
     && { echo "FAIL: Test 2 — absent container should NOT be CATASTROPHIC"; echo "$output"; exit 1; }
-echo "$output" | grep -qi "INFO\|not running\|skipped" \
+echo "$output" | grep -i "INFO\|not running\|skipped" >/dev/null \
     || { echo "FAIL: Test 2 — absent container should produce INFO in report"; echo "$output"; exit 1; }
 echo "OK: Test 2 — absent caddy container treated as INFO"
 
@@ -238,7 +238,7 @@ make_docker_shim "$T3_SHIM" "partner-edge-caddy:v0.12.26" 0 ""
 # Check 2 compares live compose vs fetched template and should detect the drift.
 
 output=$(run_dry "$T3_ETC" "$T3_LIB" "$T3_SHIM")
-echo "$output" | grep -q "WARNING\|9080\|drift" \
+echo "$output" | grep "WARNING\|9080\|drift" >/dev/null \
     || { echo "FAIL: Test 3 — compose drift not detected"; echo "$output"; exit 1; }
 echo "OK: Test 3 — compose port drift detected as WARNING"
 
@@ -255,9 +255,9 @@ make_docker_shim "$T4_SHIM" "partner-edge-caddy:v0.12.26" 0 ""
 # Current IMAGE_VERSION in install.env is v0.12.26. Propose v0.12.25 (downgrade).
 output=$(run_dry "$T4_ETC" "$T4_LIB" "$T4_SHIM" "v0.12.25")
 
-echo "$output" | grep -q "CATASTROPHIC" \
+echo "$output" | grep "CATASTROPHIC" >/dev/null \
     || { echo "FAIL: Test 4 — downgrade not detected as CATASTROPHIC"; echo "$output"; exit 1; }
-echo "$output" | grep -qi "downgrade\|v0.12.25\|v0.12.26" \
+echo "$output" | grep -i "downgrade\|v0.12.25\|v0.12.26" >/dev/null \
     || { echo "FAIL: Test 4 — downgrade CATASTROPHIC missing version info"; echo "$output"; exit 1; }
 echo "OK: Test 4 — downgrade detected as CATASTROPHIC"
 
@@ -274,7 +274,7 @@ make_docker_shim "$T5_SHIM" "partner-edge-caddy:v0.12.26" 0 ""
 output=$(run_dry "$T5_ETC" "$T5_LIB" "$T5_SHIM" "v0.12.27")
 
 # Should not be CATASTROPHIC for image tag direction.
-echo "$output" | grep -q "\[CHECK 3\].*CATASTROPHIC" \
+echo "$output" | grep "\[CHECK 3\].*CATASTROPHIC" >/dev/null \
     && { echo "FAIL: Test 5 — upgrade incorrectly flagged as CATASTROPHIC"; echo "$output"; exit 1; }
 echo "OK: Test 5 — upgrade correctly passes Check 3"
 
@@ -293,11 +293,11 @@ rm -f "$T6_ETC/ghcr.token"
 
 output=$(run_dry "$T6_ETC" "$T6_LIB" "$T6_SHIM")
 
-echo "$output" | grep -q "CATASTROPHIC" \
+echo "$output" | grep "CATASTROPHIC" >/dev/null \
     || { echo "FAIL: Test 6 — missing ghcr.token not CATASTROPHIC"; echo "$output"; exit 1; }
-echo "$output" | grep -qi "ghcr\|token\|401" \
+echo "$output" | grep -i "ghcr\|token\|401" >/dev/null \
     || { echo "FAIL: Test 6 — CATASTROPHIC missing ghcr token hint"; echo "$output"; exit 1; }
-echo "$output" | grep -q "Exit code: 1" \
+echo "$output" | grep "Exit code: 1" >/dev/null \
     || { echo "FAIL: Test 6 — summary missing 'Exit code: 1'"; echo "$output"; exit 1; }
 echo "OK: Test 6 — missing ghcr.token detected as CATASTROPHIC"
 
@@ -316,12 +316,12 @@ rm -f "$T7_ETC/ghcr.token"
 output=$(run_dry "$T7_ETC" "$T7_LIB" "$T7_SHIM" --skip-check=1,7)
 
 # Skipped checks should show SKIP in table.
-echo "$output" | grep -q "\[CHECK 1\].*SKIP" \
+echo "$output" | grep "\[CHECK 1\].*SKIP" >/dev/null \
     || { echo "FAIL: Test 7 — Check 1 not skipped"; echo "$output"; exit 1; }
-echo "$output" | grep -q "\[CHECK 7\].*SKIP" \
+echo "$output" | grep "\[CHECK 7\].*SKIP" >/dev/null \
     || { echo "FAIL: Test 7 — Check 7 not skipped"; echo "$output"; exit 1; }
 # No CATASTROPHIC should remain from checks 1 or 7.
-echo "$output" | grep -q "\[CHECK 1\].*CATASTROPHIC\|\[CHECK 7\].*CATASTROPHIC" \
+echo "$output" | grep "\[CHECK 1\].*CATASTROPHIC\|\[CHECK 7\].*CATASTROPHIC" >/dev/null \
     && { echo "FAIL: Test 7 — skipped checks still emitting CATASTROPHIC"; echo "$output"; exit 1; }
 echo "OK: Test 7 — --skip-check=1,7 correctly bypasses both checks"
 
@@ -351,7 +351,7 @@ exit_code=$(echo "$raw_output" | grep 'EXIT_CODE:' | tail -1 | sed 's/EXIT_CODE:
 output=$(echo "$raw_output" | grep -v 'EXIT_CODE:')
 
 # Should not have any CATASTROPHIC.
-echo "$output" | grep -q "CATASTROPHIC" \
+echo "$output" | grep "CATASTROPHIC" >/dev/null \
     && { echo "FAIL: Test 8 — unexpected CATASTROPHIC"; echo "$output"; exit 1; }
 echo "OK: Test 8 — clean run produces no CATASTROPHIC"
 
@@ -433,7 +433,7 @@ _lock_out=$(DOCKER_BIN="$T11_SHIM" \
 flock -u 19
 exec 19>&-
 
-if echo "$_lock_out" | grep -qi "another upgrade\|lock"; then
+if echo "$_lock_out" | grep -i "another upgrade\|lock" >/dev/null; then
     echo "OK: Test 11 — second invocation blocked by flock: $(echo "$_lock_out" | grep -i 'lock\|another' | head -1)"
 else
     echo "FAIL: Test 11 — expected lock-rejection message, got: $_lock_out"

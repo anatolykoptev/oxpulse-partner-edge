@@ -45,7 +45,7 @@ register_block=$(awk '/X POST.*api\/partner\/register/,/-o.*tmp_resp/' "$SCRIPT"
 if [[ -z "$register_block" ]]; then
     echo "  FAIL: could not locate register POST curl block in hydrate.sh"; FAIL=1
 else
-    if printf '%s\n' "$register_block" | grep -qE 'X-Installer-Version.*IMAGE_VERSION'; then
+    if printf '%s\n' "$register_block" | grep -E 'X-Installer-Version.*IMAGE_VERSION' >/dev/null; then
         echo "  PASS: X-Installer-Version header with IMAGE_VERSION found in register POST block"
     else
         echo "  FAIL: X-Installer-Version header missing from register POST curl block"
@@ -68,7 +68,7 @@ fi
 # ── Case 4: header uses variable, not a hardcoded version string ──────────────
 # The header value must reference $IMAGE_VERSION or ${IMAGE_VERSION}, not a
 # hardcoded semver like "0.12.72". This prevents the classic copy-paste freeze.
-if grep -E 'X-Installer-Version.*\$\{?IMAGE_VERSION\}?' "$SCRIPT" | grep -qvE 'X-Installer-Version.*"[0-9]+\.[0-9]+\.[0-9]+"'; then
+if grep -E 'X-Installer-Version.*\$\{?IMAGE_VERSION\}?' "$SCRIPT" | grep -vE 'X-Installer-Version.*"[0-9]+\.[0-9]+\.[0-9]+"' >/dev/null; then
     echo "  PASS: X-Installer-Version uses \$IMAGE_VERSION variable (not hardcoded)"
 else
     echo "  FAIL: X-Installer-Version does not reference IMAGE_VERSION variable"; FAIL=1

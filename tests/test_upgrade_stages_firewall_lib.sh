@@ -106,7 +106,7 @@ source '$STAGE_FN'
 _stage_lib 'install-firewall.sh' '$FW_LIB' '/nonexistent/installed/install-firewall.sh' 'http://127.0.0.1:0/nope' '$STAGE_DEST'
 echo STAGED
 " 2>&1) || true
-if echo "$SF_OUT" | grep -q STAGED && [[ -f "$STAGE_DEST/install-firewall.sh" ]] \
+if echo "$SF_OUT" | grep STAGED >/dev/null && [[ -f "$STAGE_DEST/install-firewall.sh" ]] \
    && grep -q 'firewall_apply' "$STAGE_DEST/install-firewall.sh"; then
     pass "SF1: _stage_lib copies a local lib into the staging dir (real content)"
 else
@@ -138,7 +138,7 @@ _RECONCILE_FIREWALL_APPLIED=0
 reconcile_firewall_surface
 echo SURVIVED
 " 2>&1) && BUG_RC=0 || BUG_RC=$?
-if [[ "$BUG_RC" -ne 0 ]] && echo "$BUG_OUT" | grep -qi 'firewall-lib.sh not found'; then
+if [[ "$BUG_RC" -ne 0 ]] && echo "$BUG_OUT" | grep -i 'firewall-lib.sh not found' >/dev/null; then
     pass "BUG: curl|bash tmpdir + no LIB_DIR => reconcile_firewall_surface die()s (repro confirmed)"
 else
     fail "BUG: expected die on missing firewall-lib.sh; rc=$BUG_RC out: $BUG_OUT"
@@ -164,7 +164,7 @@ _RECONCILE_FIREWALL_APPLIED=0
 reconcile_firewall_surface
 echo \"SURVIVED APPLIED=\$_RECONCILE_FIREWALL_APPLIED\"
 " 2>&1) && FIX_RC=0 || FIX_RC=$?
-if [[ "$FIX_RC" -eq 0 ]] && echo "$FIX_OUT" | grep -q 'SURVIVED'; then
+if [[ "$FIX_RC" -eq 0 ]] && echo "$FIX_OUT" | grep 'SURVIVED' >/dev/null; then
     pass "FIX: LIB_DIR→staging dir with firewall-lib.sh => no die, firewall surface proceeds"
 else
     fail "FIX: staging dir did not cure the die; rc=$FIX_RC out: $FIX_OUT"
@@ -185,7 +185,7 @@ _RECONCILE_FIREWALL_APPLIED=0
 reconcile_firewall_surface
 echo SURVIVED
 " 2>&1) && FIX2_RC=0 || FIX2_RC=$?
-if [[ "$FIX2_RC" -eq 0 ]] && echo "$FIX2_OUT" | grep -q 'SURVIVED'; then
+if [[ "$FIX2_RC" -eq 0 ]] && echo "$FIX2_OUT" | grep 'SURVIVED' >/dev/null; then
     pass "FIX2: FIREWALL_LIB explicit override also cures the die"
 else
     fail "FIX2: FIREWALL_LIB override did not cure the die; rc=$FIX2_RC out: $FIX2_OUT"
@@ -252,7 +252,7 @@ else
 fi
 
 # T3-MATCH: correct checksum → stages.
-if echo "$_out" | grep -q 'STAGED'; then
+if echo "$_out" | grep 'STAGED' >/dev/null; then
     pass "T3-MATCH: checksum match => lib staged"
 else
     fail "T3-MATCH: expected STAGED with matching checksum; got: $_out"
@@ -260,7 +260,7 @@ fi
 
 # T3-MISMATCH: tampered checksum → die (refuses to stage untrusted code).
 _out=$(_stage3 "$CK_BAD" 0)
-if echo "$_out" | grep -qi 'checksum mismatch'; then
+if echo "$_out" | grep -i 'checksum mismatch' >/dev/null; then
     pass "T3-MISMATCH: checksum mismatch => die (tamper refused, no stage)"
 else
     fail "T3-MISMATCH: expected checksum-mismatch die; got: $_out"
@@ -272,7 +272,7 @@ fi
 # fail OPEN on this exact case, closed by the same review-HIGH fix). A truncated /
 # captive-portal / stale manifest must never silently stage a root-sourced lib.
 _out=$(_stage3 "$CK_NOENTRY" 0)
-if echo "$_out" | grep -qi 'without a verified checksum is unsafe'; then
+if echo "$_out" | grep -i 'without a verified checksum is unsafe' >/dev/null; then
     pass "T3-NOENTRY: manifest omits entry + no override => fail-closed die (matches _source_lib)"
 else
     fail "T3-NOENTRY: expected fail-closed die for unlisted lib; got: $_out"
@@ -280,7 +280,7 @@ fi
 
 # T3-NOENTRY-OVERRIDE: manifest omits entry + OXPULSE_UPGRADE_NO_INTEGRITY=1 → stages (risk accepted).
 _out=$(_stage3 "$CK_NOENTRY" 1)
-if echo "$_out" | grep -q 'STAGED'; then
+if echo "$_out" | grep 'STAGED' >/dev/null; then
     pass "T3-NOENTRY-OVERRIDE: OXPULSE_UPGRADE_NO_INTEGRITY=1 stages an unlisted lib (escape hatch)"
 else
     fail "T3-NOENTRY-OVERRIDE: expected STAGED with override; got: $_out"
@@ -288,7 +288,7 @@ fi
 
 # T3-NOCK-FAILCLOSED: no checksums anywhere + no override → fail-closed die.
 _out=$(_stage3 "" 0)
-if echo "$_out" | grep -qi 'without a lib-checksums.txt is unsafe'; then
+if echo "$_out" | grep -i 'without a lib-checksums.txt is unsafe' >/dev/null; then
     pass "T3-NOCK-FAILCLOSED: no checksums + no override => fail-closed die"
 else
     fail "T3-NOCK-FAILCLOSED: expected fail-closed die; got: $_out"
@@ -296,7 +296,7 @@ fi
 
 # T3-NOCK-OVERRIDE: no checksums + OXPULSE_UPGRADE_NO_INTEGRITY=1 → stages (risk accepted).
 _out=$(_stage3 "" 1)
-if echo "$_out" | grep -q 'STAGED'; then
+if echo "$_out" | grep 'STAGED' >/dev/null; then
     pass "T3-NOCK-OVERRIDE: OXPULSE_UPGRADE_NO_INTEGRITY=1 bypasses verify (escape hatch)"
 else
     fail "T3-NOCK-OVERRIDE: expected STAGED with override; got: $_out"
