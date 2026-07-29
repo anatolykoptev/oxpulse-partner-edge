@@ -121,11 +121,11 @@ for f in tests/test_*.sh; do
     fi
 done
 if [ "$FAIL" -ne 0 ]; then
-    echo "FAIL: piped grep -q found in pipefail test files:" >&2
+    echo "FAIL: ${GREPQ_SITES_TOTAL} piped grep -q sites found in pipefail test files:" >&2
     cat /tmp/grepq_violations.txt >&2 2>/dev/null || true
     rm -f /tmp/grepq_violations.txt
 else
-    echo "OK: zero piped grep -q in pipefail test files"
+    echo "OK: ${GREPQ_SITES_TOTAL} piped grep -q sites in ${PIPEFAIL_FILES_SCANNED} pipefail test files"
 fi
 rm -f /tmp/grepq_violations.txt
 
@@ -191,3 +191,6 @@ if [ "$FAIL" -ne 0 ]; then
     exit 1
 fi
 echo "PASS: pipefail early-exit guard clean"
+
+
+
