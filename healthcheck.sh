@@ -370,7 +370,21 @@ fi
 unset _chr_unit _chr_state _chr_active
 
 # --- 21. Per-channel status (Phase 5.5 resilient install) ---
-# Reads channels-status.env written by install.sh / update.sh.
+# Reads channels-status.env written by install.sh / update.sh / refresh.sh
+# (refresh.sh's _rederive_channels_status re-evaluates skipped→active on each
+# refresh — oxpulse-partner-edge#505).
+#
+# Status transitions and what this check reports:
+#   skipped → active:  active_count +1, failed_count unchanged, total unchanged.
+#     Verdict stays healthy (or degraded→healthy if it was the last failed).
+#     This is NOT a new failure — a channel that legitimately gained its
+#     inputs + a running container must read as an improvement, not a
+#     regression. The `active)` arm (line below) handles it explicitly; it
+#     never falls into the `*)` unknown-status catch-all.
+#   skipped → skipped: no change (inputs still absent).
+#   failed_at_* → unchanged: stays in failed_count (sticky failures).
+#   active → active: no change.
+#
 # overall = healthy  when all channels active
 # overall = degraded when some channels failed but ≥1 active
 # overall = failed   when zero channels active (no bypass path)
