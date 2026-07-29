@@ -110,42 +110,16 @@ if [[ -z "$TOKEN" && ! -f "$NODE_CFG" ]]; then
         cp ${NODE_CFG}.bak.<timestamp> $NODE_CFG"
 fi
 
-# If no token, skip API re-fetch and warn.
-if [[ -z "$TOKEN" ]]; then
-    warn "no token at $TOKEN_FILE — skipping API re-fetch, using local node-config.json"
-fi
-
 # ---------------------------------------------------------------------------
 # Step 1: Re-fetch node-config.json from API (if token available)
+#
+# Delegated to channel-render-lib::refetch_node_config — the canonical
+# implementation shared with upgrade.sh.  Behaviour-preserving extraction:
+# same Bearer auth, same endpoint, same fallback-to-local on failure.
+# The lib adds temp-then-rename + JSON/field validation so a truncated or
+# malformed response never overwrites the good local file.
 # ---------------------------------------------------------------------------
-if [[ -n "$TOKEN" ]]; then
-    log "token found — attempting to re-fetch node-config.json from API"
-    _node_id=""
-    if [[ -f "$NODE_CFG" ]]; then
-        _node_id=$(jq -r '.node_id // .partner_id // empty' "$NODE_CFG" 2>/dev/null || true)
-    fi
-
-    _api_resp=""
-    _api_ok=0
-    _api_resp=$(curl -fsSL --max-time 15 \
-        -H "Authorization: Bearer $TOKEN" \
-        ${_node_id:+-H "X-Node-Id: $_node_id"} \
-        "$BACKEND_URL/api/partner/node-config" 2>/dev/null) && _api_ok=1 || true
-
-    if [[ $_api_ok -eq 1 && -n "$_api_resp" ]]; then
-        _fetched_id=$(printf '%s' "$_api_resp" | jq -r '.node_id // empty' 2>/dev/null || true)
-        if [[ -n "$_fetched_id" ]]; then
-            install -d -m 0755 "$PREFIX_ETC"
-            [[ -f "$NODE_CFG" ]] && cp -a "$NODE_CFG" "${NODE_CFG}.bak.$(date +%s)" 2>/dev/null || true
-            printf '%s\n' "$_api_resp" | install -m 0600 /dev/stdin "$NODE_CFG"
-            log "node-config.json refreshed from API (node_id=$_fetched_id)"
-        else
-            warn "API response missing node_id — ignoring, using local node-config.json"
-        fi
-    else
-        warn "API re-fetch failed or returned empty — using local node-config.json"
-    fi
-fi
+refetch_node_config
 
 # ---------------------------------------------------------------------------
 # Step 2: Verify node-config.json is present and has required fields

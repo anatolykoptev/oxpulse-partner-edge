@@ -842,6 +842,7 @@ fi
 # --templates-only: re-render channel client configs from upstream templates, skip image ops.
 if [[ "$MODE" == templates ]]; then
 	log "--templates-only: refreshing channel client configs from upstream templates"
+	refetch_node_config
 	re_render_xray
 	# Phase 1.7 — render hy2 too if creds available
 	if [[ -n "${HY2_AUTH_PASS:-${OXPULSE_HY2_AUTH_PASS:-}}" \
@@ -3248,6 +3249,7 @@ if [[ "$MODE" == with_templates ]]; then
 	rm -f "${_wt_baseline_snap:-}"
 
 	log "--with-templates upgrade to $TARGET complete"
+	refetch_node_config
 	re_render_xray
 	exit 0
 fi
@@ -3455,6 +3457,7 @@ rm -f "${_baseline_snapshot:-}"
 
 log "upgraded to $TARGET successfully"
 
+refetch_node_config
 re_render_xray
 
 if [[ "$V01_TO_V02" -eq 1 ]]; then
