@@ -53,17 +53,41 @@ die()  { log "ERR  $*"; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Source channel-render-lib.sh (owns re_render_xray and _esc helpers)
+#
+# Content-aware resolution: a candidate that exists but lacks refetch_node_config
+# (a stale pre-PR copy from a sync skew where oxpulse-xray-update.sh landed but
+# channel-render-lib.sh did not — sync_host_scripts verifies and skips per file,
+# so that skew is reachable) is NOT a hit — source it, re-check, keep going.  The
+# previous existence-only resolution sourced a stale lib and returned, leaving
+# refetch_node_config undefined → exit 127 at the call site (update.sh:122) under
+# `set -euo pipefail`, in the operator's explicit remediation tool.  A named die
+# when no candidate provides it never reaches 127.
 # ---------------------------------------------------------------------------
 _chan_lib_local="${_script_dir}/channel-render-lib.sh"
 _chan_lib_installed="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
 if [[ -f "$_chan_lib_local" ]]; then
     # shellcheck source=channel-render-lib.sh
     source "$_chan_lib_local"
-elif [[ -f "$_chan_lib_installed" ]]; then
+fi
+if ! command -v refetch_node_config >/dev/null 2>&1 \
+   && [[ -f "$_chan_lib_installed" && "$_chan_lib_installed" != "$_chan_lib_local" ]]; then
     # shellcheck source=/dev/null
     source "$_chan_lib_installed"
-else
-    die "channel-render-lib.sh not found (looked at $_chan_lib_local and $_chan_lib_installed)"
+fi
+# The same argument that makes --templates-only degrade rather than die applies
+# here verbatim: update.sh is the operator's explicit remediation tool, run when
+# an edge is ALREADY degraded.  Pre-PR it worked under this skew, because the
+# refetch was inline and the stale lib still supplied re_render_xray; dying here
+# would be a capability regression against main.  Render from the local
+# node-config and say so.  Die only when the lib cannot render either.
+if ! command -v refetch_node_config >/dev/null 2>&1; then
+    if command -v re_render_xray >/dev/null 2>&1; then
+        warn "channel-render-lib.sh provides re_render_xray but not refetch_node_config (looked at $_chan_lib_local and $_chan_lib_installed) — sync skew: oxpulse-xray-update.sh landed but channel-render-lib.sh did not. Rendering from the LOCAL node-config WITHOUT API re-fetch. Run 'oxpulse-partner-edge-upgrade' to sync host scripts and pick up the fresh config."
+    elif [[ -f "$_chan_lib_local" || -f "$_chan_lib_installed" ]]; then
+        die "channel-render-lib.sh provides neither refetch_node_config nor re_render_xray (looked at $_chan_lib_local and $_chan_lib_installed) — the installed lib is stale. Re-run 'oxpulse-partner-edge-upgrade' to sync host scripts."
+    else
+        die "channel-render-lib.sh not found (looked at $_chan_lib_local and $_chan_lib_installed). Re-run 'oxpulse-partner-edge-upgrade' to install host scripts."
+    fi
 fi
 unset _chan_lib_local _chan_lib_installed
 
@@ -110,41 +134,17 @@ if [[ -z "$TOKEN" && ! -f "$NODE_CFG" ]]; then
         cp ${NODE_CFG}.bak.<timestamp> $NODE_CFG"
 fi
 
-# If no token, skip API re-fetch and warn.
-if [[ -z "$TOKEN" ]]; then
-    warn "no token at $TOKEN_FILE — skipping API re-fetch, using local node-config.json"
-fi
-
 # ---------------------------------------------------------------------------
 # Step 1: Re-fetch node-config.json from API (if token available)
+#
+# Delegated to channel-render-lib::refetch_node_config — the canonical
+# implementation shared with upgrade.sh.  Behaviour-preserving extraction:
+# same Bearer auth, same endpoint, same fallback-to-local on failure.
+# The lib adds temp-then-rename + JSON/field validation so a truncated or
+# malformed response never overwrites the good local file.
 # ---------------------------------------------------------------------------
-if [[ -n "$TOKEN" ]]; then
-    log "token found — attempting to re-fetch node-config.json from API"
-    _node_id=""
-    if [[ -f "$NODE_CFG" ]]; then
-        _node_id=$(jq -r '.node_id // .partner_id // empty' "$NODE_CFG" 2>/dev/null || true)
-    fi
-
-    _api_resp=""
-    _api_ok=0
-    _api_resp=$(curl -fsSL --max-time 15 \
-        -H "Authorization: Bearer $TOKEN" \
-        ${_node_id:+-H "X-Node-Id: $_node_id"} \
-        "$BACKEND_URL/api/partner/node-config" 2>/dev/null) && _api_ok=1 || true
-
-    if [[ $_api_ok -eq 1 && -n "$_api_resp" ]]; then
-        _fetched_id=$(printf '%s' "$_api_resp" | jq -r '.node_id // empty' 2>/dev/null || true)
-        if [[ -n "$_fetched_id" ]]; then
-            install -d -m 0755 "$PREFIX_ETC"
-            [[ -f "$NODE_CFG" ]] && cp -a "$NODE_CFG" "${NODE_CFG}.bak.$(date +%s)" 2>/dev/null || true
-            printf '%s\n' "$_api_resp" | install -m 0600 /dev/stdin "$NODE_CFG"
-            log "node-config.json refreshed from API (node_id=$_fetched_id)"
-        else
-            warn "API response missing node_id — ignoring, using local node-config.json"
-        fi
-    else
-        warn "API re-fetch failed or returned empty — using local node-config.json"
-    fi
+if command -v refetch_node_config >/dev/null 2>&1; then
+    refetch_node_config
 fi
 
 # ---------------------------------------------------------------------------

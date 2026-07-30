@@ -21,6 +21,9 @@ PREFIX_ETC="${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
 PREFIX_LIB="${PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
 NODE_CFG="${NODE_CFG:-$PREFIX_ETC/node-config.json}"
 XRAY_CFG="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
+TOKEN_FILE="${TOKEN_FILE:-$PREFIX_ETC/token}"
+BACKEND_URL="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
+BACKEND_URL="${BACKEND_URL%/}"
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/anatolykoptev/oxpulse-partner-edge/main}"
 
 # Source fleet-wide infrastructure defaults.
@@ -38,6 +41,102 @@ else
     : # defaults not found — callers set explicit vars or fall through to per-var defaults below
 fi
 unset _defaults_local _defaults_installed
+
+# Re-fetch node-config.json from the registry API over Bearer auth.
+# Extracted from update.sh Step-1 so upgrade.sh can self-heal the same way.
+#
+# Contract:
+#   - Authenticated: same Bearer token + X-Node-Id header as update.sh.
+#   - Idempotent: safe to call when node-config is already current.
+#   - Config-only: writes node-config.json and a .bak — never restarts
+#     containers, rotates keys, or touches anything else.
+#   - Graceful fallback: on any failure (no token, network error, auth
+#     error, malformed/truncated response, missing required fields) the
+#     local node-config.json is left untouched and the function returns 0
+#     so the caller can continue with the local file.
+#   - Atomic write: the response is written to a temp file, validated as
+#     JSON with the fields the renderer needs, then renamed into place.
+#     A truncated or malformed response never reaches node-config.json.
+#   - Loud fallback: failures are announced via warn() (the same level
+#     the rest of the script uses for operator-visible conditions), not
+#     debug — a silent fallback reproduces the bug this function fixes.
+refetch_node_config() {
+    local token=""
+    if [[ -f "$TOKEN_FILE" ]]; then
+        token="$(tr -d '\r\n[:space:]' < "$TOKEN_FILE")"
+    fi
+
+    if [[ -z "$token" ]]; then
+        warn "no token at $TOKEN_FILE — skipping API re-fetch, using local node-config.json"
+        return 0
+    fi
+
+    log "token found — attempting to re-fetch node-config.json from API"
+
+    local node_id=""
+    if [[ -f "$NODE_CFG" ]]; then
+        node_id=$(jq -r '.node_id // .partner_id // empty' "$NODE_CFG" 2>/dev/null || true)
+    fi
+
+    local api_resp=""
+    local api_ok=0
+    api_resp=$(curl -fsSL --max-time 15 \
+        -H "Authorization: Bearer $token" \
+        ${node_id:+-H "X-Node-Id: $node_id"} \
+        "$BACKEND_URL/api/partner/node-config" 2>/dev/null) && api_ok=1 || true
+
+    if [[ $api_ok -ne 1 || -z "$api_resp" ]]; then
+        warn "API re-fetch failed or returned empty — using local node-config.json"
+        return 0
+    fi
+
+    # Write the response to a temp file in the same directory so the
+    # rename is atomic on the target filesystem.  A truncated or malformed
+    # response never reaches node-config.json — the temp is removed on
+    # validation failure and only renamed on success.
+    install -d -m 0755 "$PREFIX_ETC"
+    local tmp
+    tmp=$(mktemp --tmpdir="$PREFIX_ETC" ".node-config.json.XXXXXX.tmp" 2>/dev/null) || {
+        warn "refetch_node_config: mktemp failed in $PREFIX_ETC — using local node-config.json"
+        return 0
+    }
+
+    printf '%s\n' "$api_resp" > "$tmp"
+
+    # Validate: parses as JSON + has node_id (same gate as update.sh Step-1).
+    local fetched_id
+    fetched_id=$(jq -r '.node_id // empty' "$tmp" 2>/dev/null || true)
+    if [[ -z "$fetched_id" ]]; then
+        warn "API response missing node_id or not valid JSON — using local node-config.json"
+        rm -f "$tmp"
+        return 0
+    fi
+
+    # Validate: carries the fields the renderer needs (flat reality_* OR
+    # channels[] schema).  Mirrors update.sh Step-2 field check so a
+    # response that would render a broken xray config is rejected at the
+    # refetch gate, not after it has overwritten the good local file.
+    local has_flat=1 _rf _val
+    for _rf in reality_uuid reality_public_key backend_endpoint; do
+        _val=$(jq -r ".$_rf // empty" "$tmp" 2>/dev/null || true)
+        [[ -n "$_val" ]] || has_flat=0
+    done
+    if [[ $has_flat -eq 0 ]]; then
+        local ch_count
+        ch_count=$(jq '.channels // [] | length' "$tmp" 2>/dev/null || echo 0)
+        if [[ "$ch_count" -eq 0 ]]; then
+            warn "API response missing required fields (reality_uuid, reality_public_key, backend_endpoint) and has no channels[] — using local node-config.json"
+            rm -f "$tmp"
+            return 0
+        fi
+    fi
+
+    # Atomic install: backup old, rename validated temp into place (0600 — contains secrets).
+    [[ -f "$NODE_CFG" ]] && cp -a "$NODE_CFG" "${NODE_CFG}.bak.$(date +%s)" 2>/dev/null || true
+    mv -f "$tmp" "$NODE_CFG"
+    chmod 0600 "$NODE_CFG"
+    log "node-config.json refreshed from API (node_id=$fetched_id)"
+}
 
 # Generic mustache-style template renderer — Phase 1 dedupe target.
 # Substitutes every {{NAME}} placeholder in $src with the matching env var,
