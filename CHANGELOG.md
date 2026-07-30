@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.9](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.8...v0.16.9) (2026-07-30)
+
+
+### Bug Fixes
+
+* **upgrade:** re-fetch node-config before rendering, instead of trusting a stale local file ([#508](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/508)) ([786914b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/786914bbc72064fb8672eb58b2fc7399257fe9ff))
+
 ## [0.16.8](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.7...v0.16.8) (2026-07-29)
 
 
