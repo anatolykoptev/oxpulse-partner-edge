@@ -1046,6 +1046,84 @@ trap - EXIT
 rm -rf "$t11"
 
 # ---------------------------------------------------------------------------
+# Test 11b (F1b): SOFT mode does not weaken the integrity gate, and the tamper
+# message REACHES THE OPERATOR.  Same tampered-manifest setup as test 11, but
+# with MODE=templates so _ensure_channel_render_lib takes the SOFT_FETCH_FAIL
+# branch.  A sha256 mismatch must still die, the mismatched lib must not be
+# sourced, and "checksum mismatch" must appear in the output.
+#
+# Falsification, both measured:
+#   • hoist the soft-fail branch above the mismatch die in _source_lib (soft
+#     bypasses integrity) → the lib is sourced → REFETCH_RAN → RED.  That mutant
+#     previously SURVIVED the whole suite 31/0.
+#   • restore `2>/dev/null` on the templates-mode _source_lib call → output is
+#     empty → RED.  log/warn/die all write to stderr, so redirecting the call
+#     discards the tamper alert and leaves the operator a bare exit 1.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 11b (F1b): SOFT mode still refuses a hash mismatch, and says so ==="
+t11b=$(mktemp -d)
+trap 'rm -rf "$t11b"' EXIT
+setup_env "$t11b/stub" "$t11b/etc"
+mkdir -p "$t11b/var" "$t11b/sbin"
+
+OLD_LIB11B="$t11b/old_lib.sh"
+sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB11B"
+install -m 0644 "$OLD_LIB11B" "$t11b/sbin/channel-render-lib.sh"
+extract_lib_funcs "$t11b/sbin/funcs.sh"
+
+write_sha256sums "$t11b/sbin/SHA256SUMS" "channel-render-lib.sh=0000000000000000000000000000000000000000000000000000000000000000"
+
+write_fresh_node_config_json > "$t11b/fresh_resp.json"
+curl_log11b="$t11b/curl.log"
+make_curl_stub_lib "$t11b/stub/curl" "$LIB" "$t11b/fresh_resp.json" 0 "$curl_log11b"
+
+set +e
+out11b=$(
+    PATH="$t11b/stub:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+    PREFIX_ETC="$t11b/etc" \
+    PREFIX_LIB="$t11b/var" \
+    PREFIX_SBIN="$t11b/sbin" \
+    NODE_CFG="$t11b/etc/node-config.json" \
+    XRAY_CFG="$t11b/etc/xray-client.json" \
+    TOKEN_FILE="$t11b/etc/token" \
+    OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
+    REPO_RAW="file://$REPO_ROOT" \
+    RELEASES_BASE="file://$t11b/releases" \
+    OXPULSE_UPGRADE_TAG="@RELEASE_TAG@" \
+    RETRY_OPTS=() \
+    OXPULSE_UPGRADE_NO_INTEGRITY=0 \
+    MODE=templates \
+    LOG_FILE="$t11b/var/render.log" \
+    bash -c '
+        set -euo pipefail
+        log()  { printf "%s\n" "$*" >&2; }
+        warn() { log "WARN $*"; }
+        die()  { log "ERR $*"; exit 1; }
+        _CLEANUP_PATHS=()
+        source "'"$OLD_LIB11B"'"
+        source "'"$t11b"'/sbin/funcs.sh"
+        _ensure_channel_render_lib
+        refetch_node_config
+        echo "REFETCH_RAN"
+    ' 2>&1
+)
+exit11b=$?
+set -e
+
+if [[ $exit11b -eq 0 ]]; then
+    fail "test11b/F1b: SOFT mode accepted a mismatched lib (exit 0) — the integrity gate is bypassable via --templates-only; output: $out11b"
+elif [[ "$out11b" == *"REFETCH_RAN"* ]]; then
+    fail "test11b/F1b: SOFT mode sourced the mismatched lib (REFETCH_RAN present, exit $exit11b); output: $out11b"
+elif [[ "$out11b" != *"checksum mismatch"* ]]; then
+    fail "test11b/F1b: died (exit $exit11b) but the tamper message never reached the operator — a bare exit reads as a network problem; output: '$out11b'"
+else
+    pass "test11b/F1b: SOFT mode refused the mismatch (exit $exit11b), lib not sourced, operator told why"
+fi
+trap - EXIT
+rm -rf "$t11b"
+
+# ---------------------------------------------------------------------------
 # Test 12 (F3): the file is ABSENT from the manifest → dies with "without a
 # verified checksum", does NOT fall through to sourcing it.
 # Falsification: treat a missing entry as a pass (source anyway) → exit 0 +
@@ -1187,15 +1265,19 @@ rm -rf "$t13"
 
 # ---------------------------------------------------------------------------
 # Test 14 (F5): update.sh with a STALE installed lib (has re_render_xray but NOT
-# refetch_node_config) → dies with a NAMED message ("does not provide
-# refetch_node_config"), NEVER reaches exit 127.  Runs the REAL update.sh (copied
-# into a tmpdir so _script_dir points at the stale adjacent lib) — not an
-# extraction — so the content-aware resolution + named die are exercised
-# end-to-end.  The die fires at the lib-resolution stage, before any dependency
-# checks or the refetch call site, so no docker/jq stubs are needed.
+# refetch_node_config) → DEGRADES with a named warn and renders from the local
+# node-config; NEVER reaches exit 127.  update.sh is the operator's explicit
+# remediation tool, run when an edge is already degraded, and pre-PR it worked
+# under exactly this skew because the refetch was inline and the stale lib still
+# supplied re_render_xray.  Dying here would be a capability regression against
+# main, so the degrade — not a die — is the contract.  Test 14b covers the case
+# where the lib can do neither, which DOES die.
+# Runs the REAL update.sh (copied into a tmpdir so _script_dir points at the
+# stale adjacent lib), so the content-aware resolution is exercised end-to-end.
 # Falsification: revert to existence-only resolution → sources the stale lib,
 # returns, refetch_node_config at the call site → command not found → exit 127 →
-# RED (the test asserts exit != 127).
+# RED (the test asserts exit != 127).  Restore the unconditional die → the warn
+# is absent → RED.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Test 14 (F5): update.sh stale installed lib → named die, never 127 ==="
@@ -1230,15 +1312,64 @@ set -e
 
 if [[ $exit14 -eq 127 ]]; then
     fail "test14/F5: update.sh exited 127 (command not found) — existence-only regression; output: $out14"
-elif [[ $exit14 -eq 0 ]]; then
-    fail "test14/F5: update.sh exited 0 with a stale lib — should have died; output: $out14"
-elif [[ "$out14" == *"does not provide refetch_node_config"* ]]; then
-    pass "test14/F5: update.sh stale lib → named die (exit $exit14), never 127"
+elif [[ "$out14" == *"provides re_render_xray but not refetch_node_config"* ]]; then
+    pass "test14/F5: update.sh stale lib → degraded with a named warn (exit $exit14), never 127"
+elif [[ "$out14" == *"does not provide refetch_node_config"* ]] \
+  || [[ "$out14" == *"provides neither"* ]]; then
+    fail "test14/F5: update.sh DIED on a skew it should degrade through — that is a capability regression against main; output: $out14"
 else
-    fail "test14/F5: update.sh died (exit $exit14) but not with the named message; output: $out14"
+    fail "test14/F5: update.sh neither degraded nor named the skew (exit $exit14); output: $out14"
 fi
 trap - EXIT
 rm -rf "$t14"
+
+# ---------------------------------------------------------------------------
+# Test 14b (F5b): update.sh with a lib that provides NEITHER refetch_node_config
+# NOR re_render_xray → dies with a named message, NEVER 127.  The degrade in
+# test 14 is conditional on the lib still being able to render; without that
+# there is nothing to fall back to and a die is correct.
+# Falsification: make the degrade unconditional (warn and continue regardless) →
+# no named die → RED.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 14b (F5b): update.sh lib provides neither → named die, never 127 ==="
+t14b=$(mktemp -d)
+trap 'rm -rf "$t14b"' EXIT
+mkdir -p "$t14b/sbin" "$t14b/etc"
+
+cp "$UPDATE_SH" "$t14b/update.sh"
+
+# Adjacent lib with BOTH functions stripped.
+OLD_LIB14B="$t14b/channel-render-lib.sh"
+sed -e '/^refetch_node_config() {/,/^}/d' -e '/^re_render_xray() {/,/^}/d' "$LIB" > "$OLD_LIB14B"
+
+echo "test-token" > "$t14b/etc/token"
+cat > "$t14b/etc/node-config.json" <<'JSON'
+{"short_id":"STALE","xray_host":"127.0.0.1","xray_port":443,"xray_uuid":"00000000-0000-0000-0000-000000000000"}
+JSON
+
+set +e
+out14b=$(
+    PATH="/usr/bin:/bin" \
+    PARTNER_EDGE_PREFIX_ETC="$t14b/etc" \
+    PREFIX_SBIN="$t14b/sbin" \
+    LOG_FILE="$t14b/update.log" \
+    bash "$t14b/update.sh" 2>&1
+)
+exit14b=$?
+set -e
+
+if [[ $exit14b -eq 127 ]]; then
+    fail "test14b/F5b: update.sh exited 127 (command not found); output: $out14b"
+elif [[ $exit14b -eq 0 ]]; then
+    fail "test14b/F5b: update.sh exited 0 with a lib that cannot render — the degrade must be conditional; output: $out14b"
+elif [[ "$out14b" == *"provides neither"* ]] || [[ "$out14b" == *"not found (looked at"* ]]; then
+    pass "test14b/F5b: update.sh unusable lib → named die (exit $exit14b), never 127"
+else
+    fail "test14b/F5b: died (exit $exit14b) but not with the named message; output: $out14b"
+fi
+trap - EXIT
+rm -rf "$t14b"
 echo ""
 echo "=== Syntax check ==="
 bash -n "$LIB" && pass "channel-render-lib.sh syntax clean" || fail "channel-render-lib.sh has syntax errors"

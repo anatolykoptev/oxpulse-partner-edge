@@ -74,8 +74,21 @@ if ! command -v refetch_node_config >/dev/null 2>&1 \
     # shellcheck source=/dev/null
     source "$_chan_lib_installed"
 fi
-command -v refetch_node_config >/dev/null 2>&1 \
-    || die "channel-render-lib.sh does not provide refetch_node_config (looked at $_chan_lib_local and $_chan_lib_installed) — the installed lib is stale (sync skew: oxpulse-xray-update.sh landed but channel-render-lib.sh did not). Re-run 'oxpulse-partner-edge-upgrade' to sync host scripts."
+# The same argument that makes --templates-only degrade rather than die applies
+# here verbatim: update.sh is the operator's explicit remediation tool, run when
+# an edge is ALREADY degraded.  Pre-PR it worked under this skew, because the
+# refetch was inline and the stale lib still supplied re_render_xray; dying here
+# would be a capability regression against main.  Render from the local
+# node-config and say so.  Die only when the lib cannot render either.
+if ! command -v refetch_node_config >/dev/null 2>&1; then
+    if command -v re_render_xray >/dev/null 2>&1; then
+        warn "channel-render-lib.sh provides re_render_xray but not refetch_node_config (looked at $_chan_lib_local and $_chan_lib_installed) — sync skew: oxpulse-xray-update.sh landed but channel-render-lib.sh did not. Rendering from the LOCAL node-config WITHOUT API re-fetch. Run 'oxpulse-partner-edge-upgrade' to sync host scripts and pick up the fresh config."
+    elif [[ -f "$_chan_lib_local" || -f "$_chan_lib_installed" ]]; then
+        die "channel-render-lib.sh provides neither refetch_node_config nor re_render_xray (looked at $_chan_lib_local and $_chan_lib_installed) — the installed lib is stale. Re-run 'oxpulse-partner-edge-upgrade' to sync host scripts."
+    else
+        die "channel-render-lib.sh not found (looked at $_chan_lib_local and $_chan_lib_installed). Re-run 'oxpulse-partner-edge-upgrade' to install host scripts."
+    fi
+fi
 unset _chan_lib_local _chan_lib_installed
 
 # Phase 5.5 MAJOR 1: load fail-soft render helpers.
@@ -130,7 +143,9 @@ fi
 # The lib adds temp-then-rename + JSON/field validation so a truncated or
 # malformed response never overwrites the good local file.
 # ---------------------------------------------------------------------------
-refetch_node_config
+if command -v refetch_node_config >/dev/null 2>&1; then
+    refetch_node_config
+fi
 
 # ---------------------------------------------------------------------------
 # Step 2: Verify node-config.json is present and has required fields

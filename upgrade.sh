@@ -496,7 +496,7 @@ _ensure_channel_render_lib() {
         # can proceed offline.  A sha256 MISMATCH still dies inside _source_lib
         # (tampering is security-critical, never soft).
         if _source_lib "channel-render-lib.sh" "$_adjacent" "$_installed" \
-            "$REPO_RAW/channel-render-lib.sh" "refetch_node_config" "soft" 2>/dev/null; then
+            "$REPO_RAW/channel-render-lib.sh" "refetch_node_config" "soft"; then
             return 0
         fi
         # Fetch failed (soft) or the verified remote still lacked the symbol.
