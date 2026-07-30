@@ -75,6 +75,17 @@ _systemd_install_lib_scripts() {
 		chmod 0644 "$PREFIX_SBIN/channel-render-lib.sh"
 	fi
 
+	# Shared SNI selection helper — sourced by channel-render-lib.sh (every
+	# render) AND oxpulse-partner-edge-sni-rotate.sh (daily timer). Single
+	# source of the sha256(node_id:date) mod pool_size arithmetic; co-installed
+	# to PREFIX_SBIN so both callers resolve it as a sibling.
+	if [[ -n "$src_dir" && -f "$src_dir/sni-select-lib.sh" ]]; then
+		install -m 0644 "$src_dir/sni-select-lib.sh" "$PREFIX_SBIN/sni-select-lib.sh"
+	else
+		curl -fsSL "$REPO_RAW/sni-select-lib.sh" -o "$PREFIX_SBIN/sni-select-lib.sh"
+		chmod 0644 "$PREFIX_SBIN/sni-select-lib.sh"
+	fi
+
 	# Phase 5.5 MAJOR 1: fail-soft render helpers (render_channel_soft, CHANNELS_FAILED,
 	# compose_strip_failed_channels) — sourced by install.sh, hydrate.sh, update.sh, refresh.sh.
 	# Bug 17 fix: install to BOTH PREFIX_SBIN (tier-3) and PREFIX_LIBDIR (tier-2) so that
@@ -434,6 +445,7 @@ EXPECTED_SBIN_FILES=(
 	oxpulse-xray-update.sh
 	ghcr-auth-lib.sh
 	channel-render-lib.sh
+	sni-select-lib.sh
 	render-channel-lib.sh
 	oxpulse-token-lib.sh
 	# CL-2: split-routing scripts (suffixless executables — matches sbin convention)

@@ -9,10 +9,10 @@
 # Called by oxpulse-partner-edge-sni-rotate.timer (daily, random 04-06 UTC).
 set -euo pipefail
 
-PREFIX_ETC=/etc/oxpulse-partner-edge
-NODE_CFG="$PREFIX_ETC/node-config.json"
-XRAY_CFG="$PREFIX_ETC/xray-client.json"
-LOG=/var/log/oxpulse-partner-edge-sni-rotate.log
+PREFIX_ETC="${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+NODE_CFG="${NODE_CFG:-$PREFIX_ETC/node-config.json}"
+XRAY_CFG="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
+LOG="${LOG:-/var/log/oxpulse-partner-edge-sni-rotate.log}"
 
 # Source fleet-wide infrastructure defaults.
 _defaults_installed="/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
@@ -21,6 +21,23 @@ if [[ -f "$_defaults_installed" ]]; then
     source "$_defaults_installed"
 fi
 unset _defaults_installed
+
+# Source the shared SNI selection helper (sibling in PREFIX_SBIN at install
+# time, or next to this script in a dev/test checkout). This is the SINGLE
+# source of the sha256(node_id:date) mod pool_size arithmetic — the renderer
+# (channel-render-lib.sh) sources the same file so the two can never disagree.
+_sni_lib="$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)/sni-select-lib.sh"
+if [[ -f "$_sni_lib" ]]; then
+    # shellcheck source=sni-select-lib.sh
+    source "$_sni_lib"
+elif [[ -f /usr/local/sbin/sni-select-lib.sh ]]; then
+    # shellcheck source=/dev/null
+    source /usr/local/sbin/sni-select-lib.sh
+else
+    echo "ERR: sni-select-lib.sh not found (looked: $_sni_lib, /usr/local/sbin/sni-select-lib.sh)" >&2
+    exit 1
+fi
+unset _sni_lib
 
 ts()  { date -Iseconds; }
 log() { printf '%s %s\n' "$(ts)" "$*" | tee -a "$LOG"; }
@@ -44,22 +61,20 @@ if [[ "$POOL_SIZE" -lt 1 ]]; then
     exit 0
 fi
 
-# Deterministic pick: sha256(node_id:today) mod pool_size.
+# Deterministic pick via the shared helper: sha256(node_id:today) mod pool_size.
+# node_id read raw (empty when missing) so sni_select applies the unified rule
+# (missing/empty node_id -> index 0 + warn) instead of the old 'unknown' hash.
 NODE_ID=$(python3 -c "
 import json, sys
-print(json.load(open(sys.argv[1])).get('node_id', 'unknown'))
+print(json.load(open(sys.argv[1])).get('node_id', '') or '')
 " "$NODE_CFG")
 
-PICK_IDX=$(python3 -c "
-import hashlib, sys, datetime
-seed = '{}:{}'.format(sys.argv[1], datetime.date.today().isoformat())
-h = int(hashlib.sha256(seed.encode()).hexdigest(), 16)
-print(h % int(sys.argv[2]))
-" "$NODE_ID" "$POOL_SIZE")
-
-NEW_SNI=$(printf '%s\n' "$POOL" | sed -n "$((PICK_IDX + 1))p")
+NEW_SNI=$(sni_select "$NODE_ID" "$(date -I)" "$POOL") || {
+    log "could not select SNI (pool_size=$POOL_SIZE) — skip"
+    exit 1
+}
 if [[ -z "$NEW_SNI" ]]; then
-    log "could not select SNI (idx=$PICK_IDX pool_size=$POOL_SIZE) — skip"
+    log "could not select SNI (pool_size=$POOL_SIZE) — skip"
     exit 1
 fi
 
@@ -74,11 +89,11 @@ except Exception:
 " "$XRAY_CFG" 2>/dev/null || echo "")
 
 if [[ "$CURRENT_SNI" == "$NEW_SNI" ]]; then
-    log "SNI unchanged: $NEW_SNI (idx=$PICK_IDX/$POOL_SIZE)"
+    log "SNI unchanged: $NEW_SNI (pool_size=$POOL_SIZE)"
     exit 0
 fi
 
-log "rotating SNI: ${CURRENT_SNI:-<unset>} → $NEW_SNI (idx=$PICK_IDX/$POOL_SIZE)"
+log "rotating SNI: ${CURRENT_SNI:-<unset>} → $NEW_SNI (pool_size=$POOL_SIZE)"
 
 # Patch xray-client.json in place.
 python3 -c "

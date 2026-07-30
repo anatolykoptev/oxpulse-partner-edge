@@ -1020,6 +1020,21 @@ _HOST_SCRIPT_SBIN_FILES=(
 	oxpulse-partner-edge-upgrade
 	oxpulse-partner-edge-hydrate
 	oxpulse-partner-edge-refresh
+	# SNI selection helper — sourced as a SAME-DIR sibling by
+	# channel-render-lib.sh (every render) and oxpulse-partner-edge-sni-rotate
+	# (every daily tick). Both resolve it via dirname("${BASH_SOURCE[0]}"/"$0")
+	# → PREFIX_SBIN/sni-select-lib.sh on a live node. If this entry is missing,
+	# the renderer silently falls back to pool index 0 (the exact regression
+	# the helper exists to remove) AND the rotator exit 1s every night — the
+	# only SNI-diversity restorer currently working. Same fetch+sha256-verify
+	# path as channel-render-lib.sh below.
+	# ORDERING: sync_host_scripts installs each file independently (no cross-
+	# file transaction), so this helper MUST precede its consumers in the
+	# array. A partial sync that lands a NEW rotator (which exit 1s on a
+	# missing helper) without the helper would break SNI rotation every night
+	# until the next upgrade; shipping the helper first means a failed consumer
+	# fetch leaves the OLD consumer (which does not source the helper) intact.
+	sni-select-lib.sh
 	oxpulse-partner-edge-sni-rotate
 	oxpulse-channels-health-report
 	oxpulse-geoip-refresh
@@ -1145,7 +1160,7 @@ _host_script_install_dir() {
 _host_script_mode() {
 	local installed_name="$1"
 	case "$installed_name" in
-		channel-render-lib.sh|ghcr-auth-lib.sh|render-channel-lib.sh|oxpulse-token-lib.sh|cross-probe-lib.sh|metric-sink-lib.sh|surgical-restart-lib.sh|xprb-refresh-lib.sh)
+		channel-render-lib.sh|ghcr-auth-lib.sh|render-channel-lib.sh|oxpulse-token-lib.sh|cross-probe-lib.sh|metric-sink-lib.sh|surgical-restart-lib.sh|xprb-refresh-lib.sh|sni-select-lib.sh)
 			echo "0644" ;;
 		*)  echo "0755" ;;
 	esac
