@@ -577,6 +577,313 @@ trap - EXIT
 rm -rf "$t6"
 
 # ---------------------------------------------------------------------------
+# make_curl_stub_lib: curl stub for the content-aware resolution tests below.
+#   $1 = stub path
+#   $2 = fresh lib path   (served when URL contains channel-render-lib.sh)
+#   $3 = node-config resp (served when URL contains node-config)
+#   $4 = lib-fetch exit   (0 reachable, 7 unreachable)
+#   $5 = invocation log   (every http/file URL appended)
+# Handles three fetch types: channel-render-lib.sh, node-config, xray-client
+# template.  Ignores --proto/--tlsv1.2/--retry flags (it is a bash stub).
+# ---------------------------------------------------------------------------
+make_curl_stub_lib() {
+    local stub="$1" lib="$2" resp="$3" lib_exit="${4:-0}" log="$5"
+    write_stub "$stub" '
+_out_file=""; _prev=""
+for arg in "$@"; do
+    if [[ "$_prev" == "-o" ]]; then _out_file="$arg"; fi
+    _prev="$arg"
+done
+_is_lib=0; _is_tpl=0; _is_nodecfg=0
+for arg in "$@"; do
+    case "$arg" in
+        *channel-render-lib.sh*) _is_lib=1 ;;
+        *xray-client.json.tpl*)  _is_tpl=1 ;;
+        *node-config*)           _is_nodecfg=1 ;;
+    esac
+done
+for arg in "$@"; do
+    case "$arg" in http://*|https://*|file://*) echo "$arg" >> "'"$log"'"; break;; esac
+done
+if [[ "$_is_tpl" -eq 1 ]]; then
+    if [[ -n "$_out_file" ]]; then cat "'"$TPL"'" > "$_out_file"; else cat "'"$TPL"'"; fi
+    exit 0
+fi
+if [[ "$_is_lib" -eq 1 ]]; then
+    if [[ '"$lib_exit"' -ne 0 ]]; then echo "curl: ('"$lib_exit"') Failed to connect" >&2; exit '"$lib_exit"'; fi
+    if [[ -n "$_out_file" ]]; then cp "'"$lib"'" "$_out_file"; else cat "'"$lib"'"; fi
+    exit 0
+fi
+if [[ -n "$_out_file" ]]; then cp "'"$resp"'" "$_out_file"; else cat "'"$resp"'"; fi
+exit 0
+'
+}
+
+# Extract _ensure_channel_render_lib from upgrade.sh (real function, NOT
+# stubbed — the point of these tests is to exercise the real resolution).
+extract_ensure_fn() {
+    local out="$1"
+    awk '/^_ensure_channel_render_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE_SH" > "$out"
+}
+
+# ---------------------------------------------------------------------------
+# Test 7 (F1): installed lib STALE, REPO_RAW reachable → upgrade completes 0
+# and node-config IS refetched.  Reproduces the production tier-collapse
+# (adjacent == installed == same stale file) by placing the extracted helper
+# inside PREFIX_SBIN so dirname(BASH_SOURCE[0]) == PREFIX_SBIN.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 7 (F1): stale installed lib, REPO_RAW reachable → refetch completes ==="
+t7=$(mktemp -d)
+trap 'rm -rf "$t7"' EXIT
+setup_env "$t7/stub" "$t7/etc"
+mkdir -p "$t7/var" "$t7/sbin"
+
+# Stale lib: repo copy with refetch_node_config removed (pre-PR shape).
+OLD_LIB7="$t7/old_lib.sh"
+sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB7"
+
+# Install the STALE lib at PREFIX_SBIN (the only on-disk copy).
+install -m 0644 "$OLD_LIB7" "$t7/sbin/channel-render-lib.sh"
+
+# Helper extracted INTO sbin so BASH_SOURCE[0] dirname == PREFIX_SBIN (collapse).
+extract_ensure_fn "$t7/sbin/ensure_fn.sh"
+
+write_fresh_node_config_json > "$t7/fresh_resp.json"
+curl_log7="$t7/curl.log"
+make_curl_stub_lib "$t7/stub/curl" "$LIB" "$t7/fresh_resp.json" 0 "$curl_log7"
+
+set +e
+out7=$(
+    PATH="$t7/stub:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+    PREFIX_ETC="$t7/etc" \
+    PREFIX_LIB="$t7/var" \
+    PREFIX_SBIN="$t7/sbin" \
+    NODE_CFG="$t7/etc/node-config.json" \
+    XRAY_CFG="$t7/etc/xray-client.json" \
+    TOKEN_FILE="$t7/etc/token" \
+    OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
+    REPO_RAW="file://$REPO_ROOT" \
+    LOG_FILE="$t7/var/render.log" \
+    RETRY_OPTS=() \
+    bash -c '
+        set -euo pipefail
+        log()  { printf "%s\n" "$*" >&2; }
+        warn() { log "WARN $*"; }
+        die()  { log "ERR $*"; exit 1; }
+        _CLEANUP_PATHS=()
+        source "'"$OLD_LIB7"'"
+        source "'"$t7"'/sbin/ensure_fn.sh"
+        _ensure_channel_render_lib
+        refetch_node_config
+        re_render_xray
+    ' 2>&1
+)
+exit7=$?
+set -e
+
+if [[ $exit7 -ne 0 ]]; then
+    fail "test7/F1: stale-lib refetch exited $exit7; output: $out7"
+else
+    rendered_sid7=$(extract_short_id "$t7/etc/xray-client.json")
+    if [[ "$rendered_sid7" == "FRESH_NEW" ]]; then
+        pass "test7/F1: stale installed lib fell through to REPO_RAW; xray rendered with FRESH_NEW"
+    else
+        fail "test7/F1: rendered short_id '$rendered_sid7', expected FRESH_NEW; output: $out7"
+    fi
+fi
+trap - EXIT
+rm -rf "$t7"
+
+# ---------------------------------------------------------------------------
+# Test 8 (F2): installed lib STALE, REPO_RAW UNREACHABLE → die with a named
+# reason; NOT exit 127, NOT a silent success.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 8 (F2): stale installed lib, REPO_RAW unreachable → die loudly ==="
+t8=$(mktemp -d)
+trap 'rm -rf "$t8"' EXIT
+setup_env "$t8/stub" "$t8/etc"
+mkdir -p "$t8/var" "$t8/sbin"
+
+OLD_LIB8="$t8/old_lib.sh"
+sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB8"
+install -m 0644 "$OLD_LIB8" "$t8/sbin/channel-render-lib.sh"
+extract_ensure_fn "$t8/sbin/ensure_fn.sh"
+
+write_fresh_node_config_json > "$t8/fresh_resp.json"
+curl_log8="$t8/curl.log"
+# lib-fetch exit 7 (unreachable)
+make_curl_stub_lib "$t8/stub/curl" "$LIB" "$t8/fresh_resp.json" 7 "$curl_log8"
+
+set +e
+out8=$(
+    PATH="$t8/stub:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+    PREFIX_ETC="$t8/etc" \
+    PREFIX_LIB="$t8/var" \
+    PREFIX_SBIN="$t8/sbin" \
+    NODE_CFG="$t8/etc/node-config.json" \
+    XRAY_CFG="$t8/etc/xray-client.json" \
+    TOKEN_FILE="$t8/etc/token" \
+    OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
+    REPO_RAW="file://$REPO_ROOT" \
+    LOG_FILE="$t8/var/render.log" \
+    RETRY_OPTS=() \
+    bash -c '
+        set -euo pipefail
+        log()  { printf "%s\n" "$*" >&2; }
+        warn() { log "WARN $*"; }
+        die()  { log "ERR $*"; exit 1; }
+        _CLEANUP_PATHS=()
+        source "'"$OLD_LIB8"'"
+        source "'"$t8"'/sbin/ensure_fn.sh"
+        _ensure_channel_render_lib
+        refetch_node_config
+        re_render_xray
+    ' 2>&1
+)
+exit8=$?
+set -e
+
+# Must NOT be 127 (command-not-found) and must NOT be 0 (silent success).
+if [[ $exit8 -eq 127 ]]; then
+    fail "test8/F2: exited 127 (command not found) — the blocker; output: $out8"
+elif [[ $exit8 -eq 0 ]]; then
+    fail "test8/F2: exited 0 (silent success with stale lib) — worse than 127; output: $out8"
+elif [[ "$out8" == *"command not found"* ]]; then
+    fail "test8/F2: output contains 'command not found' (exit $exit8); output: $out8"
+else
+    pass "test8/F2: stale lib + unreachable REPO_RAW died loudly (exit $exit8) with a named reason"
+fi
+trap - EXIT
+rm -rf "$t8"
+
+# ---------------------------------------------------------------------------
+# Test 9 (F3): installed lib FRESH → resolves locally, NO lib fetch.
+# Asserts the curl log does NOT contain channel-render-lib.sh.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 9 (F3): fresh installed lib → no REPO_RAW lib fetch ==="
+t9=$(mktemp -d)
+trap 'rm -rf "$t9"' EXIT
+setup_env "$t9/stub" "$t9/etc"
+mkdir -p "$t9/var" "$t9/sbin"
+
+# FRESH lib at PREFIX_SBIN (the post-sync shape).
+install -m 0644 "$LIB" "$t9/sbin/channel-render-lib.sh"
+extract_ensure_fn "$t9/sbin/ensure_fn.sh"
+
+write_fresh_node_config_json > "$t9/fresh_resp.json"
+curl_log9="$t9/curl.log"
+make_curl_stub_lib "$t9/stub/curl" "$LIB" "$t9/fresh_resp.json" 0 "$curl_log9"
+
+set +e
+out9=$(
+    PATH="$t9/stub:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+    PREFIX_ETC="$t9/etc" \
+    PREFIX_LIB="$t9/var" \
+    PREFIX_SBIN="$t9/sbin" \
+    NODE_CFG="$t9/etc/node-config.json" \
+    XRAY_CFG="$t9/etc/xray-client.json" \
+    TOKEN_FILE="$t9/etc/token" \
+    OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
+    REPO_RAW="file://$REPO_ROOT" \
+    LOG_FILE="$t9/var/render.log" \
+    RETRY_OPTS=() \
+    bash -c '
+        set -euo pipefail
+        log()  { printf "%s\n" "$*" >&2; }
+        warn() { log "WARN $*"; }
+        die()  { log "ERR $*"; exit 1; }
+        _CLEANUP_PATHS=()
+        source "'"$t9"'/sbin/channel-render-lib.sh"
+        source "'"$t9"'/sbin/ensure_fn.sh"
+        _ensure_channel_render_lib
+        refetch_node_config
+        re_render_xray
+    ' 2>&1
+)
+exit9=$?
+set -e
+
+if [[ $exit9 -ne 0 ]]; then
+    fail "test9/F3: fresh-lib run exited $exit9; output: $out9"
+elif grep -q "channel-render-lib.sh" "$curl_log9" 2>/dev/null; then
+    fail "test9/F3: REPO_RAW lib fetch happened with a fresh local lib (curl log: $(cat "$curl_log9"))"
+else
+    rendered_sid9=$(extract_short_id "$t9/etc/xray-client.json")
+    if [[ "$rendered_sid9" == "FRESH_NEW" ]]; then
+        pass "test9/F3: fresh lib resolved locally (no lib fetch); xray rendered with FRESH_NEW"
+    else
+        fail "test9/F3: rendered short_id '$rendered_sid9', expected FRESH_NEW; output: $out9"
+    fi
+fi
+trap - EXIT
+rm -rf "$t9"
+
+# ---------------------------------------------------------------------------
+# Test 10 (F4): lib adjacent to upgrade.sh in a tmpdir, NO installed copy
+# (dev/CI shape).  Resolves via the adjacent tier with no network call.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 10 (F4): adjacent lib, no installed copy → no network ==="
+t10=$(mktemp -d)
+trap 'rm -rf "$t10"' EXIT
+setup_env "$t10/stub" "$t10/etc"
+mkdir -p "$t10/var" "$t10/sbin"
+
+# FRESH lib adjacent to the extracted helper (NOT in sbin).
+install -m 0644 "$LIB" "$t10/channel-render-lib.sh"
+extract_ensure_fn "$t10/ensure_fn.sh"
+
+write_fresh_node_config_json > "$t10/fresh_resp.json"
+curl_log10="$t10/curl.log"
+make_curl_stub_lib "$t10/stub/curl" "$LIB" "$t10/fresh_resp.json" 0 "$curl_log10"
+
+set +e
+out10=$(
+    PATH="$t10/stub:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+    PREFIX_ETC="$t10/etc" \
+    PREFIX_LIB="$t10/var" \
+    PREFIX_SBIN="$t10/sbin" \
+    NODE_CFG="$t10/etc/node-config.json" \
+    XRAY_CFG="$t10/etc/xray-client.json" \
+    TOKEN_FILE="$t10/etc/token" \
+    OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
+    REPO_RAW="file://$REPO_ROOT" \
+    LOG_FILE="$t10/var/render.log" \
+    RETRY_OPTS=() \
+    bash -c '
+        set -euo pipefail
+        log()  { printf "%s\n" "$*" >&2; }
+        warn() { log "WARN $*"; }
+        die()  { log "ERR $*"; exit 1; }
+        _CLEANUP_PATHS=()
+        source "'"$t10"'/ensure_fn.sh"
+        _ensure_channel_render_lib
+        refetch_node_config
+        re_render_xray
+    ' 2>&1
+)
+exit10=$?
+set -e
+
+if [[ $exit10 -ne 0 ]]; then
+    fail "test10/F4: adjacent-lib run exited $exit10; output: $out10"
+elif grep -q "channel-render-lib.sh" "$curl_log10" 2>/dev/null; then
+    fail "test10/F4: REPO_RAW lib fetch happened with an adjacent fresh lib (curl log: $(cat "$curl_log10"))"
+else
+    rendered_sid10=$(extract_short_id "$t10/etc/xray-client.json")
+    if [[ "$rendered_sid10" == "FRESH_NEW" ]]; then
+        pass "test10/F4: adjacent lib resolved locally (no lib fetch); xray rendered with FRESH_NEW"
+    else
+        fail "test10/F4: rendered short_id '$rendered_sid10', expected FRESH_NEW; output: $out10"
+    fi
+fi
+trap - EXIT
+rm -rf "$t10"
+
+# ---------------------------------------------------------------------------
 # Syntax check
 # ---------------------------------------------------------------------------
 echo ""
