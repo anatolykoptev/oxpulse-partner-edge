@@ -470,17 +470,27 @@ rm -rf "$t4"
 echo ""
 echo "=== Test 5: upgrade.sh wiring — refetch before every re_render_xray ==="
 
-# 5a: upgrade.sh calls refetch_node_config.
-refetch_count=$(grep -c 'refetch_node_config' "$UPGRADE_SH" || true)
+# 5a: upgrade.sh calls refetch_node_config.  Count CALL LINES only — lines that
+# END with `refetch_node_config` (a bare call or a guarded `... && refetch_node_
+# config`), excluding comment lines and the function definition `refetch_node_
+# config() {` (which ends with `{`, not the function name).  Counting every
+# textual occurrence would include ~11 comment-block mentions in
+# _ensure_channel_render_lib alone and pass with all real call sites deleted
+# (a vacuous oracle).  The three call sites are upgrade.sh's templates (guarded)
+# / with-templates / apply re_render_xray blocks.
+refetch_count=$(grep -nE 'refetch_node_config$' "$UPGRADE_SH" | grep -vE '^[0-9]+:[[:space:]]*#' | wc -l)
 if [[ "$refetch_count" -ge 3 ]]; then
-    pass "test5a: upgrade.sh calls refetch_node_config ($refetch_count sites)"
+    pass "test5a: upgrade.sh calls refetch_node_config ($refetch_count call sites)"
 else
-    fail "test5a: upgrade.sh has $refetch_count refetch_node_config calls (expected >= 3)"
+    fail "test5a: upgrade.sh has $refetch_count refetch_node_config call lines (expected >= 3)"
 fi
 
 # 5b: every re_render_xray call is preceded by a refetch_node_config call.
-# Check each of the 3 call sites by looking for the pattern
-# "refetch_node_config" immediately before "re_render_xray" in the script.
+# Check each call site by looking for the pattern "refetch_node_config"
+# immediately before "re_render_xray" in the script.  Filter ALL comment lines
+# (column-0 AND indented) so an indented comment mentioning the name does not
+# score as a call site — the previous `grep -v '^[0-9]*:#'` only dropped
+# column-0 comments.
 mismatch=0
 while IFS= read -r line_num; do
     # Look backwards from the re_render_xray line for refetch_node_config
@@ -490,7 +500,7 @@ while IFS= read -r line_num; do
         mismatch=$((mismatch + 1))
         echo "  re_render_xray at line $line_num has no preceding refetch_node_config" >&2
     fi
-done < <(grep -n 're_render_xray' "$UPGRADE_SH" | grep -v '^[0-9]*:#' | awk -F: '{print $1}')
+done < <(grep -nE '^[[:space:]]*re_render_xray$' "$UPGRADE_SH" | awk -F: '{print $1}')
 
 if [[ "$mismatch" -eq 0 ]]; then
     pass "test5b: every re_render_xray call site is preceded by refetch_node_config"
@@ -498,13 +508,77 @@ else
     fail "test5b: $mismatch re_render_xray call site(s) missing preceding refetch_node_config"
 fi
 
+# 5c: the --templates-only block guards refetch_node_config with command -v.
+# In the degrade path (stale local lib + unreachable REPO_RAW) the function is
+# undefined; an unguarded call would exit 127 under set -e.  A static source
+# check: the templates block (between 'if [[ "$MODE" == templates ]]' and its
+# closing 'fi') must contain 'command -v refetch_node_config' before the
+# refetch_node_config call.  Uses bash-native patterns (no piped grep/head —
+# the pipefail early-exit guard scans test files for those).
+templates_start=""
+while IFS=: read -r ln rest; do
+    templates_start="$ln"; break
+done < <(grep -n 'if \[\[ "$MODE" == templates \]\]' "$UPGRADE_SH")
+if [[ -n "$templates_start" ]]; then
+    # Read forward from templates_start until the closing fi (max 30 lines).
+    templates_block=""
+    _idx=0
+    while IFS= read -r bline; do
+        templates_block+="$bline"$'\n'
+        _idx=$((_idx + 1))
+        [[ "$bline" == "fi" || "$_idx" -ge 30 ]] && break
+    done < <(sed -n "${templates_start},\$p" "$UPGRADE_SH")
+    if [[ "$templates_block" == *"command -v refetch_node_config"* ]]; then
+        pass "test5c: --templates-only block guards refetch_node_config with command -v"
+    else
+        fail "test5c: --templates-only block does NOT guard refetch_node_config — degrade path would exit 127"
+    fi
+else
+    fail "test5c: could not locate --templates-only block in upgrade.sh"
+fi
+
+# Extract _lookup_expected_hash + _source_lib + _ensure_channel_render_lib from
+# upgrade.sh (the real functions, NOT stubbed — the point of these tests is to
+# exercise the real resolution + the real tier-3 sha256 verify).  Sourced as one
+# file so BASH_SOURCE[0] inside each function resolves to that file's directory
+# (the tier-1 adjacent path and the ${_sd}/SHA256SUMS manifest lookup both key
+# off dirname(BASH_SOURCE[0])).
+extract_lib_funcs() {
+    local out="$1"
+    {
+        awk '/^_lookup_expected_hash\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE_SH"
+        echo
+        awk '/^_source_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE_SH"
+        echo
+        awk '/^_ensure_channel_render_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE_SH"
+    } > "$out"
+}
+
+# write_sha256sums FILE ENTRIES... — write a SHA256SUMS manifest.  Each ENTRIES
+# arg is "name=hash"; a literal "name=REAL:<path>" resolves the hash from the
+# file at <path> (so the entry matches that file's actual bytes).
+write_sha256sums() {
+    local out="$1"; shift
+    : > "$out"
+    local entry name val
+    for entry in "$@"; do
+        name="${entry%%=*}"
+        val="${entry#*=}"
+        if [[ "$val" == REAL:* ]]; then
+            val=$(sha256sum "${val#REAL:}" | awk '{print $1}')
+        fi
+        printf '%s  %s\n' "$val" "$name" >> "$out"
+    done
+}
+
 # ---------------------------------------------------------------------------
 # Test 6: first-upgrade re-source — stale in-memory lib, fresh installed lib
 #
 # Reproduces the re-exec'd child on the first upgrade: the old
 # channel-render-lib.sh (no refetch_node_config) is already loaded in this
 # shell, but sync_host_scripts has since installed the new one under
-# PREFIX_SBIN.  _ensure_channel_render_lib must re-source from the installed
+# PREFIX_SBIN.  _ensure_channel_render_lib (now via _source_lib with
+# refetch_node_config as the required symbol) must re-source from the installed
 # copy before the call, otherwise the upgrade dies with
 # "refetch_node_config: command not found" (exit 127).
 # ---------------------------------------------------------------------------
@@ -516,7 +590,7 @@ trap 'rm -rf "$t6"' EXIT
 setup_env "$t6/stub" "$t6/etc"
 mkdir -p "$t6/var" "$t6/sbin"
 
-# New lib installed by sync_host_scripts (repo copy).
+# New lib installed by sync_host_scripts (repo copy) at PREFIX_SBIN.
 install -m 0644 "$LIB" "$t6/sbin/channel-render-lib.sh"
 
 # Stale in-memory lib: the same file with refetch_node_config removed,
@@ -528,11 +602,12 @@ sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB"
 write_fresh_node_config_json > "$t6/fresh_resp.json"
 make_curl_stub "$t6/stub/curl" "$t6/fresh_resp.json" 0
 
-# Extract _ensure_channel_render_lib from upgrade.sh (uses _source_lib in
-# fallback; stub it so a missed re-source fails the test rather than
-# accidentally fetching from the network).
-HELPER_FN="$t6/ensure_fn.sh"
-awk '/^_ensure_channel_render_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE_SH" > "$HELPER_FN"
+# Extract the real _lookup_expected_hash + _source_lib + _ensure_channel_render_lib
+# into PREFIX_SBIN so dirname(BASH_SOURCE[0]) == PREFIX_SBIN (the production
+# collapse where adjacent == installed).  The fresh lib is the adjacent/installed
+# candidate; _source_lib's content-aware tier-1 sources it and finds
+# refetch_node_config → returns 0 without any network fetch.
+extract_lib_funcs "$t6/sbin/funcs.sh"
 
 set +e
 out6=$(
@@ -545,15 +620,19 @@ out6=$(
     TOKEN_FILE="$t6/etc/token" \
     OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
     REPO_RAW="file://$REPO_ROOT" \
+    RELEASES_BASE="file://$t6/releases" \
+    OXPULSE_UPGRADE_TAG="@RELEASE_TAG@" \
+    RETRY_OPTS=() \
+    OXPULSE_UPGRADE_NO_INTEGRITY=0 \
     LOG_FILE="$t6/var/render.log" \
     bash -c '
         set -euo pipefail
         log()  { printf "%s\n" "$*" >&2; }
         warn() { log "WARN $*"; }
         die()  { log "ERR $*"; exit 1; }
-        _source_lib() { return 1; }
+        _CLEANUP_PATHS=()
         source "'"$OLD_LIB"'"
-        source "'"$HELPER_FN"'"
+        source "'"$t6"'/sbin/funcs.sh"
         _ensure_channel_render_lib
         refetch_node_config
         re_render_xray
@@ -619,21 +698,17 @@ exit 0
 '
 }
 
-# Extract _ensure_channel_render_lib from upgrade.sh (real function, NOT
-# stubbed — the point of these tests is to exercise the real resolution).
-extract_ensure_fn() {
-    local out="$1"
-    awk '/^_ensure_channel_render_lib\(\)/{f=1} f{print} /^}$/ && f{exit}' "$UPGRADE_SH" > "$out"
-}
-
 # ---------------------------------------------------------------------------
-# Test 7 (F1): installed lib STALE, REPO_RAW reachable → upgrade completes 0
-# and node-config IS refetched.  Reproduces the production tier-collapse
-# (adjacent == installed == same stale file) by placing the extracted helper
-# inside PREFIX_SBIN so dirname(BASH_SOURCE[0]) == PREFIX_SBIN.
+# Test 7 (F2): installed lib STALE, REPO_RAW reachable, manifest hash MATCHES
+# → the verified tier-3 fetch is accepted, refetch_node_config resolves, and the
+# render completes.  Reproduces the production tier-collapse (adjacent ==
+# installed == same stale file) by placing the extracted funcs inside PREFIX_SBIN
+# so dirname(BASH_SOURCE[0]) == PREFIX_SBIN.  The adjacent SHA256SUMS carries the
+# REAL hash of the fresh lib the curl stub serves, so _source_lib's tier-3
+# sha256 verify PASSES and sources the fetched lib.
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Test 7 (F1): stale installed lib, REPO_RAW reachable → refetch completes ==="
+echo "=== Test 7 (F2): stale installed lib, REPO_RAW reachable, hash matches → refetch completes ==="
 t7=$(mktemp -d)
 trap 'rm -rf "$t7"' EXIT
 setup_env "$t7/stub" "$t7/etc"
@@ -646,8 +721,11 @@ sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB7"
 # Install the STALE lib at PREFIX_SBIN (the only on-disk copy).
 install -m 0644 "$OLD_LIB7" "$t7/sbin/channel-render-lib.sh"
 
-# Helper extracted INTO sbin so BASH_SOURCE[0] dirname == PREFIX_SBIN (collapse).
-extract_ensure_fn "$t7/sbin/ensure_fn.sh"
+# Funcs extracted INTO sbin so BASH_SOURCE[0] dirname == PREFIX_SBIN (collapse).
+extract_lib_funcs "$t7/sbin/funcs.sh"
+
+# Adjacent SHA256SUMS with the REAL hash of the fresh lib the stub serves.
+write_sha256sums "$t7/sbin/SHA256SUMS" "channel-render-lib.sh=REAL:$LIB"
 
 write_fresh_node_config_json > "$t7/fresh_resp.json"
 curl_log7="$t7/curl.log"
@@ -664,8 +742,11 @@ out7=$(
     TOKEN_FILE="$t7/etc/token" \
     OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
     REPO_RAW="file://$REPO_ROOT" \
-    LOG_FILE="$t7/var/render.log" \
+    RELEASES_BASE="file://$t7/releases" \
+    OXPULSE_UPGRADE_TAG="@RELEASE_TAG@" \
     RETRY_OPTS=() \
+    OXPULSE_UPGRADE_NO_INTEGRITY=0 \
+    LOG_FILE="$t7/var/render.log" \
     bash -c '
         set -euo pipefail
         log()  { printf "%s\n" "$*" >&2; }
@@ -673,7 +754,7 @@ out7=$(
         die()  { log "ERR $*"; exit 1; }
         _CLEANUP_PATHS=()
         source "'"$OLD_LIB7"'"
-        source "'"$t7"'/sbin/ensure_fn.sh"
+        source "'"$t7"'/sbin/funcs.sh"
         _ensure_channel_render_lib
         refetch_node_config
         re_render_xray
@@ -683,24 +764,25 @@ exit7=$?
 set -e
 
 if [[ $exit7 -ne 0 ]]; then
-    fail "test7/F1: stale-lib refetch exited $exit7; output: $out7"
+    fail "test7/F2: stale-lib refetch exited $exit7; output: $out7"
 else
     rendered_sid7=$(extract_short_id "$t7/etc/xray-client.json")
     if [[ "$rendered_sid7" == "FRESH_NEW" ]]; then
-        pass "test7/F1: stale installed lib fell through to REPO_RAW; xray rendered with FRESH_NEW"
+        pass "test7/F2: stale installed lib fell through to verified REPO_RAW fetch; xray rendered with FRESH_NEW"
     else
-        fail "test7/F1: rendered short_id '$rendered_sid7', expected FRESH_NEW; output: $out7"
+        fail "test7/F2: rendered short_id '$rendered_sid7', expected FRESH_NEW; output: $out7"
     fi
 fi
 trap - EXIT
 rm -rf "$t7"
 
 # ---------------------------------------------------------------------------
-# Test 8 (F2): installed lib STALE, REPO_RAW UNREACHABLE → die with a named
-# reason; NOT exit 127, NOT a silent success.
+# Test 8: installed lib STALE, REPO_RAW UNREACHABLE → die with a named reason;
+# NOT exit 127, NOT a silent success.  The tier-3 fetch fails inside _source_lib
+# (strict mode — MODE defaults to apply), which dies before any manifest check.
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Test 8 (F2): stale installed lib, REPO_RAW unreachable → die loudly ==="
+echo "=== Test 8: stale installed lib, REPO_RAW unreachable → die loudly ==="
 t8=$(mktemp -d)
 trap 'rm -rf "$t8"' EXIT
 setup_env "$t8/stub" "$t8/etc"
@@ -709,7 +791,7 @@ mkdir -p "$t8/var" "$t8/sbin"
 OLD_LIB8="$t8/old_lib.sh"
 sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB8"
 install -m 0644 "$OLD_LIB8" "$t8/sbin/channel-render-lib.sh"
-extract_ensure_fn "$t8/sbin/ensure_fn.sh"
+extract_lib_funcs "$t8/sbin/funcs.sh"
 
 write_fresh_node_config_json > "$t8/fresh_resp.json"
 curl_log8="$t8/curl.log"
@@ -727,8 +809,11 @@ out8=$(
     TOKEN_FILE="$t8/etc/token" \
     OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
     REPO_RAW="file://$REPO_ROOT" \
-    LOG_FILE="$t8/var/render.log" \
+    RELEASES_BASE="file://$t8/releases" \
+    OXPULSE_UPGRADE_TAG="@RELEASE_TAG@" \
     RETRY_OPTS=() \
+    OXPULSE_UPGRADE_NO_INTEGRITY=0 \
+    LOG_FILE="$t8/var/render.log" \
     bash -c '
         set -euo pipefail
         log()  { printf "%s\n" "$*" >&2; }
@@ -736,7 +821,7 @@ out8=$(
         die()  { log "ERR $*"; exit 1; }
         _CLEANUP_PATHS=()
         source "'"$OLD_LIB8"'"
-        source "'"$t8"'/sbin/ensure_fn.sh"
+        source "'"$t8"'/sbin/funcs.sh"
         _ensure_channel_render_lib
         refetch_node_config
         re_render_xray
@@ -747,23 +832,23 @@ set -e
 
 # Must NOT be 127 (command-not-found) and must NOT be 0 (silent success).
 if [[ $exit8 -eq 127 ]]; then
-    fail "test8/F2: exited 127 (command not found) — the blocker; output: $out8"
+    fail "test8: exited 127 (command not found) — the blocker; output: $out8"
 elif [[ $exit8 -eq 0 ]]; then
-    fail "test8/F2: exited 0 (silent success with stale lib) — worse than 127; output: $out8"
+    fail "test8: exited 0 (silent success with stale lib) — worse than 127; output: $out8"
 elif [[ "$out8" == *"command not found"* ]]; then
-    fail "test8/F2: output contains 'command not found' (exit $exit8); output: $out8"
+    fail "test8: output contains 'command not found' (exit $exit8); output: $out8"
 else
-    pass "test8/F2: stale lib + unreachable REPO_RAW died loudly (exit $exit8) with a named reason"
+    pass "test8: stale lib + unreachable REPO_RAW died loudly (exit $exit8) with a named reason"
 fi
 trap - EXIT
 rm -rf "$t8"
 
 # ---------------------------------------------------------------------------
-# Test 9 (F3): installed lib FRESH → resolves locally, NO lib fetch.
+# Test 9: installed lib FRESH → resolves locally, NO lib fetch.
 # Asserts the curl log does NOT contain channel-render-lib.sh.
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Test 9 (F3): fresh installed lib → no REPO_RAW lib fetch ==="
+echo "=== Test 9: fresh installed lib → no REPO_RAW lib fetch ==="
 t9=$(mktemp -d)
 trap 'rm -rf "$t9"' EXIT
 setup_env "$t9/stub" "$t9/etc"
@@ -771,7 +856,7 @@ mkdir -p "$t9/var" "$t9/sbin"
 
 # FRESH lib at PREFIX_SBIN (the post-sync shape).
 install -m 0644 "$LIB" "$t9/sbin/channel-render-lib.sh"
-extract_ensure_fn "$t9/sbin/ensure_fn.sh"
+extract_lib_funcs "$t9/sbin/funcs.sh"
 
 write_fresh_node_config_json > "$t9/fresh_resp.json"
 curl_log9="$t9/curl.log"
@@ -788,8 +873,11 @@ out9=$(
     TOKEN_FILE="$t9/etc/token" \
     OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
     REPO_RAW="file://$REPO_ROOT" \
-    LOG_FILE="$t9/var/render.log" \
+    RELEASES_BASE="file://$t9/releases" \
+    OXPULSE_UPGRADE_TAG="@RELEASE_TAG@" \
     RETRY_OPTS=() \
+    OXPULSE_UPGRADE_NO_INTEGRITY=0 \
+    LOG_FILE="$t9/var/render.log" \
     bash -c '
         set -euo pipefail
         log()  { printf "%s\n" "$*" >&2; }
@@ -797,7 +885,7 @@ out9=$(
         die()  { log "ERR $*"; exit 1; }
         _CLEANUP_PATHS=()
         source "'"$t9"'/sbin/channel-render-lib.sh"
-        source "'"$t9"'/sbin/ensure_fn.sh"
+        source "'"$t9"'/sbin/funcs.sh"
         _ensure_channel_render_lib
         refetch_node_config
         re_render_xray
@@ -807,34 +895,34 @@ exit9=$?
 set -e
 
 if [[ $exit9 -ne 0 ]]; then
-    fail "test9/F3: fresh-lib run exited $exit9; output: $out9"
+    fail "test9: fresh-lib run exited $exit9; output: $out9"
 elif grep -q "channel-render-lib.sh" "$curl_log9" 2>/dev/null; then
-    fail "test9/F3: REPO_RAW lib fetch happened with a fresh local lib (curl log: $(cat "$curl_log9"))"
+    fail "test9: REPO_RAW lib fetch happened with a fresh local lib (curl log: $(cat "$curl_log9"))"
 else
     rendered_sid9=$(extract_short_id "$t9/etc/xray-client.json")
     if [[ "$rendered_sid9" == "FRESH_NEW" ]]; then
-        pass "test9/F3: fresh lib resolved locally (no lib fetch); xray rendered with FRESH_NEW"
+        pass "test9: fresh lib resolved locally (no lib fetch); xray rendered with FRESH_NEW"
     else
-        fail "test9/F3: rendered short_id '$rendered_sid9', expected FRESH_NEW; output: $out9"
+        fail "test9: rendered short_id '$rendered_sid9', expected FRESH_NEW; output: $out9"
     fi
 fi
 trap - EXIT
 rm -rf "$t9"
 
 # ---------------------------------------------------------------------------
-# Test 10 (F4): lib adjacent to upgrade.sh in a tmpdir, NO installed copy
+# Test 10: lib adjacent to upgrade.sh in a tmpdir, NO installed copy
 # (dev/CI shape).  Resolves via the adjacent tier with no network call.
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Test 10 (F4): adjacent lib, no installed copy → no network ==="
+echo "=== Test 10: adjacent lib, no installed copy → no network ==="
 t10=$(mktemp -d)
 trap 'rm -rf "$t10"' EXIT
 setup_env "$t10/stub" "$t10/etc"
 mkdir -p "$t10/var" "$t10/sbin"
 
-# FRESH lib adjacent to the extracted helper (NOT in sbin).
+# FRESH lib adjacent to the extracted funcs (NOT in sbin).
 install -m 0644 "$LIB" "$t10/channel-render-lib.sh"
-extract_ensure_fn "$t10/ensure_fn.sh"
+extract_lib_funcs "$t10/funcs.sh"
 
 write_fresh_node_config_json > "$t10/fresh_resp.json"
 curl_log10="$t10/curl.log"
@@ -851,15 +939,18 @@ out10=$(
     TOKEN_FILE="$t10/etc/token" \
     OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
     REPO_RAW="file://$REPO_ROOT" \
-    LOG_FILE="$t10/var/render.log" \
+    RELEASES_BASE="file://$t10/releases" \
+    OXPULSE_UPGRADE_TAG="@RELEASE_TAG@" \
     RETRY_OPTS=() \
+    OXPULSE_UPGRADE_NO_INTEGRITY=0 \
+    LOG_FILE="$t10/var/render.log" \
     bash -c '
         set -euo pipefail
         log()  { printf "%s\n" "$*" >&2; }
         warn() { log "WARN $*"; }
         die()  { log "ERR $*"; exit 1; }
         _CLEANUP_PATHS=()
-        source "'"$t10"'/ensure_fn.sh"
+        source "'"$t10"'/funcs.sh"
         _ensure_channel_render_lib
         refetch_node_config
         re_render_xray
@@ -869,23 +960,285 @@ exit10=$?
 set -e
 
 if [[ $exit10 -ne 0 ]]; then
-    fail "test10/F4: adjacent-lib run exited $exit10; output: $out10"
+    fail "test10: adjacent-lib run exited $exit10; output: $out10"
 elif grep -q "channel-render-lib.sh" "$curl_log10" 2>/dev/null; then
-    fail "test10/F4: REPO_RAW lib fetch happened with an adjacent fresh lib (curl log: $(cat "$curl_log10"))"
+    fail "test10: REPO_RAW lib fetch happened with an adjacent fresh lib (curl log: $(cat "$curl_log10"))"
 else
     rendered_sid10=$(extract_short_id "$t10/etc/xray-client.json")
     if [[ "$rendered_sid10" == "FRESH_NEW" ]]; then
-        pass "test10/F4: adjacent lib resolved locally (no lib fetch); xray rendered with FRESH_NEW"
+        pass "test10: adjacent lib resolved locally (no lib fetch); xray rendered with FRESH_NEW"
     else
-        fail "test10/F4: rendered short_id '$rendered_sid10', expected FRESH_NEW; output: $out10"
+        fail "test10: rendered short_id '$rendered_sid10', expected FRESH_NEW; output: $out10"
     fi
 fi
 trap - EXIT
 rm -rf "$t10"
 
 # ---------------------------------------------------------------------------
-# Syntax check
+# Test 11 (F1): tier-3 fetch whose bytes do NOT match the manifest entry is
+# REFUSED — the run dies with "checksum mismatch", the fetched lib is NOT
+# sourced (refetch_node_config stays undefined, REFETCH_RAN marker absent).
+# Falsification: disable the mismatch die (`false && die`) → the mismatched lib
+# is sourced → exit 0 + REFETCH_RAN → this test goes RED.
 # ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 11 (F1): tier-3 hash MISMATCH → refused, dies, lib not sourced ==="
+t11=$(mktemp -d)
+trap 'rm -rf "$t11"' EXIT
+setup_env "$t11/stub" "$t11/etc"
+mkdir -p "$t11/var" "$t11/sbin"
+
+OLD_LIB11="$t11/old_lib.sh"
+sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB11"
+install -m 0644 "$OLD_LIB11" "$t11/sbin/channel-render-lib.sh"
+extract_lib_funcs "$t11/sbin/funcs.sh"
+
+# SHA256SUMS with a WRONG hash (all zeros) — the stub serves the real fresh lib,
+# so the sha256 of the fetched bytes will NOT match this entry.
+write_sha256sums "$t11/sbin/SHA256SUMS" "channel-render-lib.sh=0000000000000000000000000000000000000000000000000000000000000000"
+
+write_fresh_node_config_json > "$t11/fresh_resp.json"
+curl_log11="$t11/curl.log"
+make_curl_stub_lib "$t11/stub/curl" "$LIB" "$t11/fresh_resp.json" 0 "$curl_log11"
+
+set +e
+out11=$(
+    PATH="$t11/stub:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+    PREFIX_ETC="$t11/etc" \
+    PREFIX_LIB="$t11/var" \
+    PREFIX_SBIN="$t11/sbin" \
+    NODE_CFG="$t11/etc/node-config.json" \
+    XRAY_CFG="$t11/etc/xray-client.json" \
+    TOKEN_FILE="$t11/etc/token" \
+    OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
+    REPO_RAW="file://$REPO_ROOT" \
+    RELEASES_BASE="file://$t11/releases" \
+    OXPULSE_UPGRADE_TAG="@RELEASE_TAG@" \
+    RETRY_OPTS=() \
+    OXPULSE_UPGRADE_NO_INTEGRITY=0 \
+    LOG_FILE="$t11/var/render.log" \
+    bash -c '
+        set -euo pipefail
+        log()  { printf "%s\n" "$*" >&2; }
+        warn() { log "WARN $*"; }
+        die()  { log "ERR $*"; exit 1; }
+        _CLEANUP_PATHS=()
+        source "'"$OLD_LIB11"'"
+        source "'"$t11"'/sbin/funcs.sh"
+        _ensure_channel_render_lib
+        refetch_node_config
+        echo "REFETCH_RAN"
+    ' 2>&1
+)
+exit11=$?
+set -e
+
+if [[ $exit11 -eq 0 ]]; then
+    fail "test11/F1: mismatched lib was accepted (exit 0) — checksum verify bypassed; output: $out11"
+elif [[ "$out11" == *"REFETCH_RAN"* ]]; then
+    fail "test11/F1: mismatched lib was sourced (REFETCH_RAN present, exit $exit11); output: $out11"
+elif [[ "$out11" == *"checksum mismatch"* ]]; then
+    pass "test11/F1: tier-3 hash mismatch refused (exit $exit11), lib not sourced"
+else
+    fail "test11/F1: died (exit $exit11) but not with 'checksum mismatch'; output: $out11"
+fi
+trap - EXIT
+rm -rf "$t11"
+
+# ---------------------------------------------------------------------------
+# Test 12 (F3): the file is ABSENT from the manifest → dies with "without a
+# verified checksum", does NOT fall through to sourcing it.
+# Falsification: treat a missing entry as a pass (source anyway) → exit 0 +
+# REFETCH_RAN → RED.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 12 (F3): file absent from manifest → dies, not sourced ==="
+t12=$(mktemp -d)
+trap 'rm -rf "$t12"' EXIT
+setup_env "$t12/stub" "$t12/etc"
+mkdir -p "$t12/var" "$t12/sbin"
+
+OLD_LIB12="$t12/old_lib.sh"
+sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB12"
+install -m 0644 "$OLD_LIB12" "$t12/sbin/channel-render-lib.sh"
+extract_lib_funcs "$t12/sbin/funcs.sh"
+
+# SHA256SUMS with an entry for a DIFFERENT file — channel-render-lib.sh is absent.
+write_sha256sums "$t12/sbin/SHA256SUMS" "some-other-file.sh=0000000000000000000000000000000000000000000000000000000000000000"
+
+write_fresh_node_config_json > "$t12/fresh_resp.json"
+curl_log12="$t12/curl.log"
+make_curl_stub_lib "$t12/stub/curl" "$LIB" "$t12/fresh_resp.json" 0 "$curl_log12"
+
+set +e
+out12=$(
+    PATH="$t12/stub:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+    PREFIX_ETC="$t12/etc" \
+    PREFIX_LIB="$t12/var" \
+    PREFIX_SBIN="$t12/sbin" \
+    NODE_CFG="$t12/etc/node-config.json" \
+    XRAY_CFG="$t12/etc/xray-client.json" \
+    TOKEN_FILE="$t12/etc/token" \
+    OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
+    REPO_RAW="file://$REPO_ROOT" \
+    RELEASES_BASE="file://$t12/releases" \
+    OXPULSE_UPGRADE_TAG="@RELEASE_TAG@" \
+    RETRY_OPTS=() \
+    OXPULSE_UPGRADE_NO_INTEGRITY=0 \
+    LOG_FILE="$t12/var/render.log" \
+    bash -c '
+        set -euo pipefail
+        log()  { printf "%s\n" "$*" >&2; }
+        warn() { log "WARN $*"; }
+        die()  { log "ERR $*"; exit 1; }
+        _CLEANUP_PATHS=()
+        source "'"$OLD_LIB12"'"
+        source "'"$t12"'/sbin/funcs.sh"
+        _ensure_channel_render_lib
+        refetch_node_config
+        echo "REFETCH_RAN"
+    ' 2>&1
+)
+exit12=$?
+set -e
+
+if [[ $exit12 -eq 0 ]]; then
+    fail "test12/F3: unverified lib was accepted (exit 0) — missing-entry guard bypassed; output: $out12"
+elif [[ "$out12" == *"REFETCH_RAN"* ]]; then
+    fail "test12/F3: unverified lib was sourced (REFETCH_RAN, exit $exit12); output: $out12"
+elif [[ "$out12" == *"without a verified checksum"* ]]; then
+    pass "test12/F3: file absent from manifest → died (exit $exit12), lib not sourced"
+else
+    fail "test12/F3: died (exit $exit12) but not with 'without a verified checksum'; output: $out12"
+fi
+trap - EXIT
+rm -rf "$t12"
+
+# ---------------------------------------------------------------------------
+# Test 13 (F4): --templates-only with a STALE local lib (has re_render_xray but
+# NOT refetch_node_config) and REPO_RAW UNREACHABLE → DEGRADES (warn + render
+# from the local node-config), does NOT die.  This is the recovery command: a
+# stale render is the correct outcome on the recovery path; a die is not.
+# Falsification: restore the unconditional die (remove the templates degrade
+# path) → exit != 0 → RED.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 13 (F4): --templates-only stale local + unreachable → degrade, render from local ==="
+t13=$(mktemp -d)
+trap 'rm -rf "$t13"' EXIT
+setup_env "$t13/stub" "$t13/etc"
+mkdir -p "$t13/var" "$t13/sbin"
+
+OLD_LIB13="$t13/old_lib.sh"
+sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB13"
+install -m 0644 "$OLD_LIB13" "$t13/sbin/channel-render-lib.sh"
+extract_lib_funcs "$t13/sbin/funcs.sh"
+
+write_fresh_node_config_json > "$t13/fresh_resp.json"
+curl_log13="$t13/curl.log"
+# lib-fetch exit 7 (unreachable); template + node-config fetches succeed.
+make_curl_stub_lib "$t13/stub/curl" "$LIB" "$t13/fresh_resp.json" 7 "$curl_log13"
+
+set +e
+out13=$(
+    PATH="$t13/stub:$(dirname "$(command -v python3)"):/usr/bin:/bin" \
+    PREFIX_ETC="$t13/etc" \
+    PREFIX_LIB="$t13/var" \
+    PREFIX_SBIN="$t13/sbin" \
+    NODE_CFG="$t13/etc/node-config.json" \
+    XRAY_CFG="$t13/etc/xray-client.json" \
+    TOKEN_FILE="$t13/etc/token" \
+    OXPULSE_BACKEND_URL="http://test-control-plane.invalid" \
+    REPO_RAW="file://$REPO_ROOT" \
+    RELEASES_BASE="file://$t13/releases" \
+    OXPULSE_UPGRADE_TAG="@RELEASE_TAG@" \
+    RETRY_OPTS=() \
+    OXPULSE_UPGRADE_NO_INTEGRITY=0 \
+    MODE=templates \
+    LOG_FILE="$t13/var/render.log" \
+    bash -c '
+        set -euo pipefail
+        log()  { printf "%s\n" "$*" >&2; }
+        warn() { log "WARN $*"; }
+        die()  { log "ERR $*"; exit 1; }
+        _CLEANUP_PATHS=()
+        source "'"$OLD_LIB13"'"
+        source "'"$t13"'/sbin/funcs.sh"
+        _ensure_channel_render_lib
+        # Mirror the templates block: guard refetch (absent in degrade), then render.
+        command -v refetch_node_config >/dev/null 2>&1 && refetch_node_config
+        re_render_xray
+    ' 2>&1
+)
+exit13=$?
+set -e
+
+if [[ $exit13 -ne 0 ]]; then
+    fail "test13/F4: --templates-only died (exit $exit13) instead of degrading; output: $out13"
+elif [[ "$out13" != *"degraded"* ]]; then
+    fail "test13/F4: completed (exit 0) but no 'degraded' warn in output; output: $out13"
+elif [[ ! -s "$t13/etc/xray-client.json" ]]; then
+    fail "test13/F4: degraded but xray-client.json was not rendered; output: $out13"
+else
+    pass "test13/F4: --templates-only degraded (stale local render) instead of dying — exit 0"
+fi
+trap - EXIT
+rm -rf "$t13"
+
+# ---------------------------------------------------------------------------
+# Test 14 (F5): update.sh with a STALE installed lib (has re_render_xray but NOT
+# refetch_node_config) → dies with a NAMED message ("does not provide
+# refetch_node_config"), NEVER reaches exit 127.  Runs the REAL update.sh (copied
+# into a tmpdir so _script_dir points at the stale adjacent lib) — not an
+# extraction — so the content-aware resolution + named die are exercised
+# end-to-end.  The die fires at the lib-resolution stage, before any dependency
+# checks or the refetch call site, so no docker/jq stubs are needed.
+# Falsification: revert to existence-only resolution → sources the stale lib,
+# returns, refetch_node_config at the call site → command not found → exit 127 →
+# RED (the test asserts exit != 127).
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test 14 (F5): update.sh stale installed lib → named die, never 127 ==="
+t14=$(mktemp -d)
+trap 'rm -rf "$t14"' EXIT
+mkdir -p "$t14/sbin" "$t14/etc"
+
+# Copy the REAL update.sh into the tmpdir so _script_dir == tmpdir.
+cp "$UPDATE_SH" "$t14/update.sh"
+
+# Stale lib adjacent to update.sh (the local tier) — no refetch_node_config.
+OLD_LIB14="$t14/channel-render-lib.sh"
+sed '/^refetch_node_config() {/,/^}/d' "$LIB" > "$OLD_LIB14"
+
+# PREFIX_SBIN points at an empty dir (no installed lib either).
+# A token + node-config so any later pre-condition (unreached) does not trip.
+echo "test-token" > "$t14/etc/token"
+cat > "$t14/etc/node-config.json" <<'JSON'
+{"short_id":"STALE","xray_host":"127.0.0.1","xray_port":443,"xray_uuid":"00000000-0000-0000-0000-000000000000"}
+JSON
+
+set +e
+out14=$(
+    PATH="/usr/bin:/bin" \
+    PARTNER_EDGE_PREFIX_ETC="$t14/etc" \
+    PREFIX_SBIN="$t14/sbin" \
+    LOG_FILE="$t14/update.log" \
+    bash "$t14/update.sh" 2>&1
+)
+exit14=$?
+set -e
+
+if [[ $exit14 -eq 127 ]]; then
+    fail "test14/F5: update.sh exited 127 (command not found) — existence-only regression; output: $out14"
+elif [[ $exit14 -eq 0 ]]; then
+    fail "test14/F5: update.sh exited 0 with a stale lib — should have died; output: $out14"
+elif [[ "$out14" == *"does not provide refetch_node_config"* ]]; then
+    pass "test14/F5: update.sh stale lib → named die (exit $exit14), never 127"
+else
+    fail "test14/F5: update.sh died (exit $exit14) but not with the named message; output: $out14"
+fi
+trap - EXIT
+rm -rf "$t14"
 echo ""
 echo "=== Syntax check ==="
 bash -n "$LIB" && pass "channel-render-lib.sh syntax clean" || fail "channel-render-lib.sh has syntax errors"

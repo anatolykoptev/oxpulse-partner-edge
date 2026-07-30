@@ -308,14 +308,38 @@ _lookup_expected_hash() {
 # tag snapshot, not main HEAD.
 _source_lib() {
     local name="$1" local_path="$2" installed_path="$3" raw_path="$4"
+    # Optional 5th param REQUIRED_SYMBOL + 6th param SOFT_FETCH_FAIL (both default
+    # empty → the original existence-only + die-on-fail contract for the existing
+    # 4-arg callers at upgrade.sh:613/619, byte-identical behaviour):
+    #   • REQUIRED_SYMBOL — content-aware resolution: a local tier (1/2) counts as
+    #     a hit only if, AFTER sourcing, the symbol is defined; otherwise the
+    #     search continues to the next tier. This is what lets _ensure_channel_
+    #     render_lib walk past a stale adjacent/installed copy (the production
+    #     tier-collapse where adjacent == installed == the same stale pre-PR file)
+    #     and reach the verified tier-3 fetch instead of short-circuiting on
+    #     existence. When empty, tier-1/2 return 0 immediately after sourcing
+    #     (existence-only — the original contract).
+    #   • SOFT_FETCH_FAIL — when non-empty, a tier-3 FETCH FAILURE or a
+    #     no-manifest-entry outcome returns 1 with a warn instead of dying, so the
+    #     caller can DEGRADE (used ONLY by --templates-only, the recovery command
+    #     that must stay usable offline — see _ensure_channel_render_lib). A sha256
+    #     MISMATCH always dies regardless — tampering is security-critical and
+    #     never degrades. When empty, fetch-failure and no-manifest die (original).
+    local _req_sym="${5:-}" _soft_fail="${6:-}"
     if [[ -f "$local_path" ]]; then
         # shellcheck source=/dev/null
         source "$local_path"
-        return 0
-    elif [[ -f "$installed_path" ]]; then
+        # No required symbol → existence is enough: return 0, exactly as before
+        # this parameter existed (the 4-arg callers).
+        [[ -z "$_req_sym" ]] && return 0
+        # Required symbol → content-aware: only a hit if the symbol is now defined.
+        command -v "$_req_sym" >/dev/null 2>&1 && return 0
+    fi
+    if [[ -f "$installed_path" && "$installed_path" != "$local_path" ]]; then
         # shellcheck source=/dev/null
         source "$installed_path"
-        return 0
+        [[ -z "$_req_sym" ]] && return 0
+        command -v "$_req_sym" >/dev/null 2>&1 && return 0
     fi
     # Tier 3: TLS-pinned fetch + fail-closed sha256 verify for standalone runs.
     local _fetch_tmp _man="" _man_tmp="" _expected="" _actual _sd _cand
@@ -327,6 +351,10 @@ _source_lib() {
     # run — the hostile-network case this hardening targets (review LOW).
     _CLEANUP_PATHS+=("$_fetch_tmp")
     if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "${RETRY_OPTS[@]}" "$raw_path" -o "$_fetch_tmp" 2>/dev/null; then
+        if [[ -n "$_soft_fail" ]]; then
+            warn "_source_lib: tier-3 fetch of $name from $raw_path failed (offline / rate-limited / wrong tag?) — soft-fail (caller may degrade)"
+            return 1
+        fi
         die "$name not found (tried: $local_path, $installed_path, $raw_path).
 On a standalone upgrade.sh download ensure network access to REPO_RAW or stage
 the lib files adjacent to upgrade.sh."
@@ -382,12 +410,17 @@ the lib files adjacent to upgrade.sh."
     # candidate that resolved but omitted the entry already fell through above and left
     # no trace here. The three possible outcomes: (a) entry found + matches → source;
     # (b) entry found + mismatch → die immediately, no further fallthrough; (c) no
-    # candidate (local or remote) had an entry → die unless OXPULSE_UPGRADE_NO_INTEGRITY.
+    # candidate (local or remote) had an entry → die unless OXPULSE_UPGRADE_NO_INTEGRITY
+    # (or SOFT_FETCH_FAIL — the --templates-only degrade path; a sha256 MISMATCH is
+    # never soft, only fetch-failure and no-manifest are).
     if [[ -n "$_expected" ]]; then
         _actual=$(sha256sum "$_fetch_tmp" | awk '{print $1}')
         [[ "$_actual" != "$_expected" ]] && die "_source_lib: tier-3 checksum mismatch for $name — refusing to source untrusted code (expected ${_expected:0:16}… got ${_actual:0:16}…)"
     elif [[ "${OXPULSE_UPGRADE_NO_INTEGRITY:-0}" -eq 1 ]]; then
         warn "_source_lib: no verified checksum for $name (no manifest resolved, or the manifest that did has no entry for it) + OXPULSE_UPGRADE_NO_INTEGRITY set — sourcing UNVERIFIED (operator accepts risk)"
+    elif [[ -n "$_soft_fail" ]]; then
+        warn "_source_lib: no verified checksum for $name (no manifest resolved, or the manifest that did has no entry for it) — soft-fail (caller may degrade)"
+        return 1
     else
         die "_source_lib: tier-3 fetch of $name without a verified checksum is unsafe — no manifest resolved, or the manifest that did resolve has no entry for it (a truncated / captive-portal / wrong-version manifest also produces this). Install from a release tarball or pass --allow-unverified (OXPULSE_UPGRADE_NO_INTEGRITY=1) to acknowledge the risk"
     fi
@@ -395,6 +428,16 @@ the lib files adjacent to upgrade.sh."
     warn "For verified install run 'oxpulse-partner-edge-upgrade' after the sync completes"
     # shellcheck source=/dev/null
     source "$_fetch_tmp"
+    # Content-aware tier 3: a verified fetch that STILL does not define the required
+    # symbol is a stale/corrupt remote — there is no further tier to fall to. Strict
+    # mode dies; soft-fail mode returns 1 so the caller can degrade to the local lib.
+    if [[ -n "$_req_sym" ]] && ! command -v "$_req_sym" >/dev/null 2>&1; then
+        if [[ -n "$_soft_fail" ]]; then
+            warn "_source_lib: fetched $name from $raw_path but $_req_sym is still undefined — soft-fail (caller may degrade)"
+            return 1
+        fi
+        die "_source_lib: fetched $name from $raw_path but $_req_sym is still undefined — the remote copy is stale or corrupt; verify OXPULSE_UPGRADE_TAG / REPO_RAW points at a release that includes $_req_sym"
+    fi
     return 0
 }
 
@@ -405,68 +448,72 @@ the lib files adjacent to upgrade.sh."
 # so a re-source is required before refetch_node_config is called.  This is the
 # post-re-exec/post-sync seam for the refetch fix.
 #
-# Resolution is CONTENT-AWARE, not existence-aware: a candidate that exists but
-# lacks refetch_node_config (a stale pre-PR copy) is NOT a hit — source it, re-
-# check, keep going.  This fixes the tier-collapse where, in production,
-# upgrade.sh is installed at /usr/local/sbin/oxpulse-partner-edge-upgrade so
-# dirname(BASH_SOURCE[0]) == PREFIX_SBIN == /usr/local/sbin, making the adjacent
-# and installed candidates the SAME stale file.  An existence-only check (the
-# previous _source_lib fallback) sources it and returns 0 with the function
-# still undefined; the caller then hits "refetch_node_config: command not found"
+# Resolution is delegated to _source_lib with refetch_node_config as the
+# REQUIRED_SYMBOL (5th param): a local tier (adjacent / installed) counts as a
+# hit only if, after sourcing, refetch_node_config is defined — otherwise the
+# search continues to the next tier.  This fixes the tier-collapse where, in
+# production, upgrade.sh is installed at /usr/local/sbin/oxpulse-partner-edge-
+# upgrade so dirname(BASH_SOURCE[0]) == PREFIX_SBIN == /usr/local/sbin, making
+# the adjacent and installed candidates the SAME stale pre-PR file: an
+# existence-only check sources it and returns 0 with the function still
+# undefined; the caller then hits "refetch_node_config: command not found"
 # (exit 127) AFTER "upgraded to $TARGET successfully", skipping re_render_xray.
-# _source_lib is NOT used here: its tier-1/tier-2 are existence-only by design
-# (for its other callers at upgrade.sh:575/582) and would re-source the same
-# stale file and return 0 before reaching its remote tier.
+#
+# SECURITY (BLOCKER fix): routing through _source_lib inherits its tier-3
+# TLS-pinned + sha256-verified-FAIL-CLOSED fetch against the release SHA256SUMS
+# — the previous tier-3 here curled-and-sourced REPO_RAW with NO verification,
+# so a hostile mirror (OXPULSE_MIRROR_BASE / OXPULSE_REPO_RAW, operator/state-
+# derived) got arbitrary root RCE on every edge that reached tier 3.  These are
+# anti-censorship relays; a hostile mirror is the threat model.  channel-render-
+# lib.sh ships unsubstituted into the release (release.yml stages it as-is, no
+# @RELEASE_TAG@ sed), so the REPO_RAW-at-tag bytes equal the SHA256SUMS entry
+# and _lookup_expected_hash is a drop-in.  The escape hatch is the EXISTING
+# OXPULSE_UPGRADE_NO_INTEGRITY (upgrade.sh:599) — no new env var or flag.  A
+# sha256 MISMATCH always dies, in every mode (tampering never degrades).
+#
+# MODE-DEPENDENT FAILURE (MAJOR 1): the apply / with-templates paths DIE on a
+# tier-3 fetch failure (an upgrade that cannot load the fresh refetch logic must
+# not walk on into a render with a stale lib).  --templates-only is the RECOVERY
+# command, run when an edge is degraded — frequently behind ТСПУ where GitHub
+# reachability is the unreliable variable — so it DEGRADES instead: a fetch
+# failure (or no-manifest) returns 1 via _source_lib's SOFT_FETCH_FAIL (6th
+# param), and if the stale local lib (sourced by _source_lib's tier-1/2 before
+# it reached tier-3) still provides re_render_xray, we warn and render from the
+# LOCAL node-config.  A stale render is the correct outcome on the recovery
+# path; a die is not — that is the OPPOSITE of the apply-path tradeoff, made
+# explicit here rather than incidental.
 _ensure_channel_render_lib() {
     # Fast path: a previous call (or a dev/CI run with the repo copy adjacent
     # to upgrade.sh) already loaded a lib that defines refetch_node_config.
     command -v refetch_node_config >/dev/null 2>&1 && return 0
 
-    local _installed="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
-    local _adjacent
+    local _adjacent _installed
     _adjacent="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/channel-render-lib.sh"
+    _installed="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
 
-    # Tier 1: adjacent to upgrade.sh (dev/CI checkout, or a curl|bash run that
-    # co-locates the lib).  Content-aware: only a hit if it defines the function.
-    if [[ -f "$_adjacent" ]]; then
-        # shellcheck source=/dev/null
-        source "$_adjacent"
-        command -v refetch_node_config >/dev/null 2>&1 && return 0
+    if [[ "${MODE:-apply}" == templates ]]; then
+        # --templates-only: soft-fail the tier-3 fetch so a stale-local render
+        # can proceed offline.  A sha256 MISMATCH still dies inside _source_lib
+        # (tampering is security-critical, never soft).
+        if _source_lib "channel-render-lib.sh" "$_adjacent" "$_installed" \
+            "$REPO_RAW/channel-render-lib.sh" "refetch_node_config" "soft" 2>/dev/null; then
+            return 0
+        fi
+        # Fetch failed (soft) or the verified remote still lacked the symbol.
+        # Degrade ONLY if the stale local lib (sourced by _source_lib's tier-1/2
+        # before it reached tier-3) can still re_render_xray — otherwise die.
+        if command -v re_render_xray >/dev/null 2>&1; then
+            warn "_ensure_channel_render_lib: --templates-only degraded — local channel-render-lib.sh is stale (no refetch_node_config) and the fetch from $REPO_RAW failed (offline / rate-limited / wrong tag?). Rendering from the LOCAL node-config WITHOUT API re-fetch. A stale render is the correct outcome on the recovery path; a die is not. Re-run 'oxpulse-partner-edge-upgrade' when network is available for the fresh lib + API re-fetch."
+            return 0
+        fi
+        die "_ensure_channel_render_lib: --templates-only cannot render — channel-render-lib.sh provides neither refetch_node_config nor re_render_xray and REPO_RAW is unreachable; re-run 'oxpulse-partner-edge-upgrade' when network is available"
     fi
 
-    # Tier 2: installed copy (post-sync).  Skip the re-source when it is the
-    # same file as the adjacent tier (the production collapse) — already sourced
-    # and checked above.  Content-aware: a stale copy is not a hit, keep going.
-    if [[ -f "$_installed" && "$_installed" != "$_adjacent" ]]; then
-        # shellcheck source=/dev/null
-        source "$_installed"
-        command -v refetch_node_config >/dev/null 2>&1 && return 0
-    fi
-
-    # Tier 3: no local candidate provides refetch_node_config (stale installed
-    # lib on the first upgrade after this PR, --templates-only with no sync, or
-    # a sync_host_scripts best-effort skip).  Fetch directly from REPO_RAW —
-    # unconditionally, NOT routed through _source_lib (whose existence-only
-    # local tiers would short-circuit on the stale file and return 0 before
-    # reaching its remote tier).  Same TLS-pinned + retry conventions as
-    # _source_lib's tier-3 (upgrade.sh:329) and the self-update fetch
-    # (upgrade.sh:2009).  Fail-loud: die on fetch failure OR a fetched copy that
-    # STILL lacks refetch_node_config — never fall through into the caller's
-    # exit 127 after a "success" log.
-    local _fetch_tmp
-    _fetch_tmp=$(mktemp)
-    _CLEANUP_PATHS+=("$_fetch_tmp")
-    if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "${RETRY_OPTS[@]}" \
-        "$REPO_RAW/channel-render-lib.sh" -o "$_fetch_tmp" 2>/dev/null; then
-        die "_ensure_channel_render_lib: local channel-render-lib.sh lacks refetch_node_config and the fetch from $REPO_RAW failed (offline / rate-limited / wrong tag?) — cannot continue; re-run 'oxpulse-partner-edge-upgrade' when network is available"
-    fi
-    # shellcheck source=/dev/null
-    source "$_fetch_tmp"
-    if ! command -v refetch_node_config >/dev/null 2>&1; then
-        die "_ensure_channel_render_lib: fetched channel-render-lib.sh from $REPO_RAW but refetch_node_config is still undefined — the remote copy is stale or corrupt; verify OXPULSE_UPGRADE_TAG / REPO_RAW points at a release that includes the refetch fix"
-    fi
-    warn "_ensure_channel_render_lib: local channel-render-lib.sh was stale; sourced refetch_node_config from $REPO_RAW"
-    return 0
+    # Apply / with-templates: strict — die on fetch-failure / no-manifest /
+    # mismatch / stale-remote (all inside _source_lib).  Never fall through into
+    # the caller's exit 127 after a "success" log.
+    _source_lib "channel-render-lib.sh" "$_adjacent" "$_installed" \
+        "$REPO_RAW/channel-render-lib.sh" "refetch_node_config"
 }
 
 # _stage_lib NAME LOCAL_PATH INSTALLED_PATH REPO_RAW_PATH DEST_DIR — resolve a
@@ -912,7 +959,14 @@ fi
 if [[ "$MODE" == templates ]]; then
 	log "--templates-only: refreshing channel client configs from upstream templates"
 	_ensure_channel_render_lib
-	refetch_node_config
+	# refetch_node_config is only available when the fresh lib loaded.  In the
+	# --templates-only DEGRADE path (stale local lib + unreachable REPO_RAW)
+	# _ensure_channel_render_lib returned 0 WITHOUT it (a stale render from the
+	# local node-config is the correct outcome on the recovery path), so guard
+	# the API re-fetch and render straight from local when it is absent.  The
+	# apply path (upgrade.sh bottom) calls refetch_node_config unconditionally —
+	# it dies if the lib did not load, the opposite tradeoff.
+	command -v refetch_node_config >/dev/null 2>&1 && refetch_node_config
 	re_render_xray
 	# Phase 1.7 — render hy2 too if creds available
 	if [[ -n "${HY2_AUTH_PASS:-${OXPULSE_HY2_AUTH_PASS:-}}" \

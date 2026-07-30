@@ -53,18 +53,29 @@ die()  { log "ERR  $*"; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Source channel-render-lib.sh (owns re_render_xray and _esc helpers)
+#
+# Content-aware resolution: a candidate that exists but lacks refetch_node_config
+# (a stale pre-PR copy from a sync skew where oxpulse-xray-update.sh landed but
+# channel-render-lib.sh did not — sync_host_scripts verifies and skips per file,
+# so that skew is reachable) is NOT a hit — source it, re-check, keep going.  The
+# previous existence-only resolution sourced a stale lib and returned, leaving
+# refetch_node_config undefined → exit 127 at the call site (update.sh:122) under
+# `set -euo pipefail`, in the operator's explicit remediation tool.  A named die
+# when no candidate provides it never reaches 127.
 # ---------------------------------------------------------------------------
 _chan_lib_local="${_script_dir}/channel-render-lib.sh"
 _chan_lib_installed="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
 if [[ -f "$_chan_lib_local" ]]; then
     # shellcheck source=channel-render-lib.sh
     source "$_chan_lib_local"
-elif [[ -f "$_chan_lib_installed" ]]; then
+fi
+if ! command -v refetch_node_config >/dev/null 2>&1 \
+   && [[ -f "$_chan_lib_installed" && "$_chan_lib_installed" != "$_chan_lib_local" ]]; then
     # shellcheck source=/dev/null
     source "$_chan_lib_installed"
-else
-    die "channel-render-lib.sh not found (looked at $_chan_lib_local and $_chan_lib_installed)"
 fi
+command -v refetch_node_config >/dev/null 2>&1 \
+    || die "channel-render-lib.sh does not provide refetch_node_config (looked at $_chan_lib_local and $_chan_lib_installed) — the installed lib is stale (sync skew: oxpulse-xray-update.sh landed but channel-render-lib.sh did not). Re-run 'oxpulse-partner-edge-upgrade' to sync host scripts."
 unset _chan_lib_local _chan_lib_installed
 
 # Phase 5.5 MAJOR 1: load fail-soft render helpers.
