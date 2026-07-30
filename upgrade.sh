@@ -426,8 +426,8 @@ _ensure_channel_render_lib() {
     # and --allow-unverified / OXPULSE_UPGRADE_NO_INTEGRITY permits a dev/CI
     # placeholder-tag run where no SHA256SUMS exists.
     _source_lib "channel-render-lib.sh" \
-        "/nonexistent" \
-        "/nonexistent" \
+        "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/channel-render-lib.sh" \
+        "${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh" \
         "$REPO_RAW/channel-render-lib.sh"
 }
 
