@@ -42,6 +42,38 @@ else
 fi
 unset _defaults_local _defaults_installed
 
+# Source the shared SNI selection helper (sibling of this lib at install time
+# = PREFIX_SBIN, or next to this file in a dev/test checkout). SINGLE source of
+# BOTH the sha256(node_id:date) mod pool_size arithmetic AND the pool
+# derivation (sni_pool_from_config) — the daily SNI rotator
+# (oxpulse-partner-edge-sni-rotate.sh) sources the same file, so the renderer
+# and the rotator can never disagree on which SNI a node presents OR on the
+# pool.
+#
+# Two live paths source THIS file from a mktemp file, where
+# readlink -f "${BASH_SOURCE[0]}" resolves to /tmp and the sibling lookup
+# misses. Mirror the rotator's installed-path fallback (PREFIX_SBIN) so the
+# helper is still found; warn when neither resolves — without it the renderer
+# falls back to pool index 0, the exact regression this helper exists to remove.
+#
+# The fallback rescues upgrade.sh's _source_lib tier-3 (source "$_fetch_tmp"),
+# where PREFIX_SBIN is already populated by a previous install. It does NOT
+# rescue install.sh's curl|bash fresh install: that sources this lib around
+# install.sh:414 while nothing writes $PREFIX_SBIN/sni-select-lib.sh until
+# systemd_run at :1679, so on a brand-new box neither path resolves and the
+# warn branch is correct rather than avoidable.
+_sni_lib="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" 2>/dev/null && pwd)/sni-select-lib.sh"
+if [[ -f "$_sni_lib" ]]; then
+    # shellcheck source=sni-select-lib.sh
+    source "$_sni_lib"
+elif [[ -f "${PREFIX_SBIN:-/usr/local/sbin}/sni-select-lib.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${PREFIX_SBIN:-/usr/local/sbin}/sni-select-lib.sh"
+else
+    warn "sni-select-lib.sh not found (looked: $_sni_lib, ${PREFIX_SBIN:-/usr/local/sbin}/sni-select-lib.sh) — SNI selection will fall back to pool index 0"
+fi
+unset _sni_lib
+
 # Re-fetch node-config.json from the registry API over Bearer auth.
 # Extracted from update.sh Step-1 so upgrade.sh can self-heal the same way.
 #
@@ -217,12 +249,55 @@ import json,sys; d=json.load(open(sys.argv[1]))
 ch=d.get('channels',[])
 x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
 print(x.get('short_id','') or d.get('reality_short_id',''))" "$NODE_CFG")
-    server_name=$(python3 -c "
+    # SNI selection — ONE rule, shared with the daily rotator via sni-select-lib.sh.
+    # The POOL is derived by the shared helper (sni_pool_from_config) — same
+    # function the rotator uses, so the two can never disagree on pool_size or
+    # on which schema (channels[0].xray.server_names vs flat reality_server_names)
+    # is preferred. The pick is delegated to sni_select (sha256(node_id:date)
+    # mod pool_size). Blank/whitespace-only pool entries are stripped inside the
+    # helper, so an empty slot can never be selected.
+    local sni_pool sni_node_id sni_fallback
+    if command -v sni_pool_from_config >/dev/null 2>&1; then
+        sni_pool=$(sni_pool_from_config "$NODE_CFG" 2>/dev/null || true)
+    else
+        # Helper not sourced (sni-select-lib.sh missing) — derive the pool
+        # inline. NOT identical to sni_pool_from_config: no singular-field
+        # fallback, which only fails to matter because sni_fallback covers the
+        # same case below. And when the helper is missing so is sni_select, so
+        # this branch ends at index 0 either way — it exists to keep the
+        # fallback chain intact, not to preserve the pick.
+        sni_pool=$(python3 -c "
 import json,sys; d=json.load(open(sys.argv[1]))
 ch=d.get('channels',[])
 x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
-names=x.get('server_names') or d.get('reality_server_names')
-print((names[0] if names else None) or x.get('server_name','') or d.get('reality_server_name','') or os.environ.get('OXPULSE_REALITY_SERVER_NAME','www.samsung.com'))" "$NODE_CFG")
+names=x.get('server_names') or d.get('reality_server_names') or []
+names=[n for n in names if n and n.strip()]
+print('\n'.join(names))" "$NODE_CFG" 2>/dev/null || true)
+    fi
+    sni_node_id=$(python3 -c "
+import json,sys; d=json.load(open(sys.argv[1]))
+print(d.get('node_id','') or '')" "$NODE_CFG")
+    # Pool-absent fallback chain (preserved verbatim from the prior inline pick):
+    # x.server_name -> d.reality_server_name -> OXPULSE_REALITY_SERVER_NAME ->
+    # hardcoded default. This is the FALLBACK for when there is no pool at all
+    # (www.samsung.com is NOT a pool member — see sni-select-lib.sh).
+    sni_fallback=$(python3 -c "
+import json,os,sys; d=json.load(open(sys.argv[1]))
+ch=d.get('channels',[])
+x=ch[0].get('xray',{}) if ch and ch[0].get('protocol','')=='vless-reality' else {}
+print(x.get('server_name','') or d.get('reality_server_name','') or os.environ.get('OXPULSE_REALITY_SERVER_NAME','') or 'www.samsung.com')" "$NODE_CFG")
+
+    if [[ -n "$sni_pool" ]]; then
+        if command -v sni_select >/dev/null 2>&1; then
+            server_name=$(sni_select "$sni_node_id" "$(date -I)" "$sni_pool") || server_name="$sni_fallback"
+        else
+            warn "sni_select helper not available — falling back to first pool entry (index 0)"
+            server_name=$(printf '%s\n' "$sni_pool" | sed -n '1p')
+        fi
+        [[ -n "$server_name" ]] || server_name="$sni_fallback"
+    else
+        server_name="$sni_fallback"
+    fi
     backend=$(python3 -c "
 import json,sys; d=json.load(open(sys.argv[1]))
 ch=d.get('channels',[])

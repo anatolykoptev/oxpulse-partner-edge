@@ -610,6 +610,7 @@ jobs:
             oxpulse-partner-edge-sni-rotate.sh \
             ghcr-auth-lib.sh \
             channel-render-lib.sh \
+            sni-select-lib.sh \
             oxpulse-token-lib.sh \
             telegram-alert-lib.sh \
             peer-ip-guard-lib.sh \
@@ -682,6 +683,7 @@ jobs:
             oxpulse-partner-edge-sni-rotate.sh \
             ghcr-auth-lib.sh \
             channel-render-lib.sh \
+            sni-select-lib.sh \
             oxpulse-token-lib.sh \
             telegram-alert-lib.sh \
             peer-ip-guard-lib.sh \
