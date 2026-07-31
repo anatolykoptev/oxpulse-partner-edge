@@ -90,9 +90,9 @@ print('\n'.join(names))
 
 # sni_select <node_id> <date_YYYY-MM-DD> <pool_newline_separated>
 #
-# Prints the chosen SNI to stdout. Sets the global SNI_PICK_IDX to the chosen
-# 0-based index (for observability — the rotator logs it and emits it as a
-# metric; the renderer ignores it). Returns 0 on success, 1 if the pool is
+# Prints the chosen SNI to stdout. The 0-based index is NOT returned here —
+# use sni_select_indexed for that; a global cannot carry it out of the
+# $(command substitution) every caller uses. Returns 0 on success, 1 if the pool is
 # empty or the computed index is invalid.
 #
 # If node_id is empty/missing, warns and falls back to index 0 — the ONLY

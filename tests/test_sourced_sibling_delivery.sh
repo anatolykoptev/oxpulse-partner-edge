@@ -220,11 +220,11 @@ done
 # the upgrade array and the release assets say nothing about a new install
 # (review finding M6).
 #
-# Two distinct assertions, because the first version of this test conflated
-# them and reported a false blocker: EXPECTED_SBIN_FILES is a post-install
-# verification list, NOT the installer. A file can be installed and unverified
-# (E1 passes, E2 fails), which is a real but much smaller gap than not being
-# installed at all.
+# Two distinct assertions. E1 is the delivery check: lib/install-systemd.sh
+# must actually write the file into PREFIX_SBIN. E2 is weaker and often inert —
+# EXPECTED_SBIN_FILES is the --clean-sbin prune allowlist, not a verification
+# list (see the comment at the E2 branch). The first version of this test
+# conflated the two and reported a false blocker on that basis.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Test E: fresh install writes each sibling (E1); prune allowlist covers it (E2) ==="
@@ -254,7 +254,7 @@ else
             # Collected first, then matched from a here-string: piping into
             # `grep -q` trips this repo's pipefail early-exit guard, because the
             # -q exits on the first hit and the upstream stage dies on SIGPIPE.
-            _e1_writes=$(sed 's/#.*//' "$INSTALL_SYSTEMD" | grep -E '(install -m|-o |cp )' || true)
+            _e1_writes=$(sed 's/#.*//' "$INSTALL_SYSTEMD" | grep -E '(install -m|curl .*-o |cp )' || true)
             if grep -qF "$_e1_needle" <<<"$_e1_writes"; then
                 pass "E1: '$sib' is installed into PREFIX_SBIN by the fresh-install path"
             else

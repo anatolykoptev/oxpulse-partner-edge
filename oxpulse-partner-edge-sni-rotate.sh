@@ -113,7 +113,7 @@ if command -v emit_gauge >/dev/null 2>&1; then
     # node_exporter drops the WHOLE file — every other metric on the box with
     # it. Node ids are <partner>-<hex> today; this costs nothing and removes the
     # dependency on that staying true.
-    _lbl_node=${NODE_ID//\\/_}; _lbl_node=${_lbl_node//\"/_}
+    _lbl_node=${NODE_ID//\\/_}; _lbl_node=${_lbl_node//\"/_}; _lbl_node=${_lbl_node//$'\n'/_}
     emit_gauge partner_edge_sni_pick_index "node_id=\"$_lbl_node\",pool_size=\"$POOL_SIZE\"" "$SNI_PICK_IDX" || true
 fi
 

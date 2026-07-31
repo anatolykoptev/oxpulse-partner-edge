@@ -50,13 +50,18 @@ unset _defaults_local _defaults_installed
 # and the rotator can never disagree on which SNI a node presents OR on the
 # pool.
 #
-# Two live paths source THIS file from a mktemp file (upgrade.sh's _source_lib
-# tier-3 → source "$_fetch_tmp"; install.sh's curl|bash fresh install), where
+# Two live paths source THIS file from a mktemp file, where
 # readlink -f "${BASH_SOURCE[0]}" resolves to /tmp and the sibling lookup
 # misses. Mirror the rotator's installed-path fallback (PREFIX_SBIN) so the
-# helper is still found; fail-closed (warn) when neither resolves — without
-# the helper the renderer would silently fall back to pool index 0, the exact
-# regression this helper exists to remove.
+# helper is still found; warn when neither resolves — without it the renderer
+# falls back to pool index 0, the exact regression this helper exists to remove.
+#
+# The fallback rescues upgrade.sh's _source_lib tier-3 (source "$_fetch_tmp"),
+# where PREFIX_SBIN is already populated by a previous install. It does NOT
+# rescue install.sh's curl|bash fresh install: that sources this lib around
+# install.sh:414 while nothing writes $PREFIX_SBIN/sni-select-lib.sh until
+# systemd_run at :1679, so on a brand-new box neither path resolves and the
+# warn branch is correct rather than avoidable.
 _sni_lib="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" 2>/dev/null && pwd)/sni-select-lib.sh"
 if [[ -f "$_sni_lib" ]]; then
     # shellcheck source=sni-select-lib.sh
@@ -255,9 +260,12 @@ print(x.get('short_id','') or d.get('reality_short_id',''))" "$NODE_CFG")
     if command -v sni_pool_from_config >/dev/null 2>&1; then
         sni_pool=$(sni_pool_from_config "$NODE_CFG" 2>/dev/null || true)
     else
-        # Helper not sourced (sni-select-lib.sh missing) — inline the same
-        # derivation so a render never silently collapses to index 0 from a
-        # stale/empty pool read. Mirrors sni_pool_from_config exactly.
+        # Helper not sourced (sni-select-lib.sh missing) — derive the pool
+        # inline. NOT identical to sni_pool_from_config: no singular-field
+        # fallback, which only fails to matter because sni_fallback covers the
+        # same case below. And when the helper is missing so is sni_select, so
+        # this branch ends at index 0 either way — it exists to keep the
+        # fallback chain intact, not to preserve the pick.
         sni_pool=$(python3 -c "
 import json,sys; d=json.load(open(sys.argv[1]))
 ch=d.get('channels',[])
