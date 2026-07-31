@@ -32,9 +32,39 @@ fail() { echo "FAIL: $*"; FAIL=1; }
 # a collapse-to-index-0 is visible. node_id chosen so the rotator's hash-pick
 # does NOT land on index 0 (verified empirically in the RED run).
 POOL=("www.samsung.com" "www.apple.com" "www.microsoft.com" "www.google.com" "www.cloudflare.com")
-NODE_ID="edge-relay-north-42"
 DATE="2026-07-30"
 pool_str() { printf '%s\n' "${POOL[@]}"; }
+
+# Part 1 pins DATE, but Part 2 drives the real rotator and renderer, which read
+# `date -I` themselves — so its node_id must avoid index 0 for TODAY, not for
+# the day this test was written. A hardcoded id fails roughly one day in five
+# (it did, on 2026-07-31, one day after being chosen).
+#
+# Picking it at runtime keeps the non-vacuity guarantee without putting a
+# date-injection seam into a production script.
+NODE_ID="edge-relay-north-42"
+if [[ -f "$HELPER" ]]; then
+	# shellcheck source=/dev/null
+	source "$HELPER"
+	# Part 2 runs the rotator and renderer under `env -i`, which strips TZ, so
+	# they resolve the date in the machine's local zone regardless of the
+	# test's own TZ. Compute it the same way or the selection is for a
+	# different day than the code under test uses.
+	_today=$(env -i "$(command -v date)" -I)
+	for _n in $(seq 1 200); do
+		_cand="edge-relay-north-$_n"
+		_sel=$(sni_select_indexed "$_cand" "$_today" "$(pool_str)" 2>/dev/null) || continue
+		if [[ "${_sel%%	*}" != "0" ]]; then
+			NODE_ID="$_cand"
+			break
+		fi
+	done
+	if [[ "$(sni_select_indexed "$NODE_ID" "$_today" "$(pool_str)" 2>/dev/null | cut -f1)" == "0" ]]; then
+		echo "FAIL: no node_id in 200 candidates lands off index 0 for $_today — the hash is not spreading" >&2
+		exit 1
+	fi
+	echo "==> Part 2 node_id for $_today: $NODE_ID (index $(sni_select_indexed "$NODE_ID" "$_today" "$(pool_str)" | cut -f1))"
+fi
 
 # ── Part 1: unit tests on sni_select (the shared helper) ─────────────────────
 # Skips gracefully when the helper is absent (pre-implementation RED state) so
