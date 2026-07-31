@@ -84,15 +84,20 @@ print(json.load(open(sys.argv[1])).get('node_id', '') or '')
 " "$NODE_CFG")
 
 # Deterministic pick via the shared helper: sha256(node_id:today) mod pool_size.
-# sni_select sets the global SNI_PICK_IDX (the chosen 0-based index) for logging
-# + the metric — the only observable that distinguishes a real hash pick from an
-# index-0 fallback (M1/M3 both silently produced index 0 before the fix).
-NEW_SNI=$(sni_select "$NODE_ID" "$(date -I)" "$POOL") || {
+# sni_select_indexed prints "<idx>\t<name>". The index is the only observable
+# that distinguishes a real hash pick from an index-0 fallback, and both of the
+# silent-index-0 bugs this file just fixed would have been visible in it.
+#
+# It comes back on stdout, not through a global: this is a command substitution,
+# so a global set inside the helper stays in the subshell.
+_SNI_SEL=$(sni_select_indexed "$NODE_ID" "$(date -I)" "$POOL") || {
     log "could not select SNI (pool_size=$POOL_SIZE) — skip"
     exit 1
 }
+SNI_PICK_IDX=${_SNI_SEL%%	*}
+NEW_SNI=${_SNI_SEL#*	}
 if [[ -z "$NEW_SNI" ]]; then
-    log "could not select SNI (idx=$SNI_PICK_IDX pool_size=$POOL_SIZE) — skip"
+    log "could not select SNI (idx=${SNI_PICK_IDX:-?} pool_size=$POOL_SIZE) — skip"
     exit 1
 fi
 

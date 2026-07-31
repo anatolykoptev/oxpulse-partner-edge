@@ -99,9 +99,8 @@ print('\n'.join(names))
 # silent collapse to index 0, the exact behaviour this helper exists to
 # remove. Note set -euo pipefail does NOT save this: both callers invoke
 # sni_select in an `||` context, which suppresses set -e for the whole body.
-sni_select() {
+sni_select_indexed() {
     local node_id="$1" date="$2" pool="$3"
-    SNI_PICK_IDX=0
     # Normalize ONCE: read into an array, stripping blank + whitespace-only
     # entries, then count AND index that same array (M3 — never count one
     # shape and sed another).
@@ -118,8 +117,7 @@ sni_select() {
     fi
     if [[ -z "$node_id" ]]; then
         warn "sni_select: node_id empty — falling back to index 0"
-        SNI_PICK_IDX=0
-        printf '%s\n' "${_names[0]}"
+        printf '0\t%s\n' "${_names[0]}"
         return 0
     fi
     local pick_idx
@@ -138,6 +136,18 @@ print(h % int(sys.argv[3]))
         warn "sni_select: invalid pick_idx='$pick_idx' (pool_size=$pool_size) — refusing to fall back to index 0"
         return 1
     fi
-    SNI_PICK_IDX="$pick_idx"
-    printf '%s\n' "${_names[$pick_idx]}"
+    printf '%s\t%s\n' "$pick_idx" "${_names[$pick_idx]}"
+}
+
+# sni_select <node_id> <date> <pool> — the name only, for callers that do not
+# need the index (the renderer). Thin wrapper so there is still ONE
+# implementation of the pick.
+#
+# The index is returned on stdout rather than through a global: every caller
+# uses $(sni_select ...), which runs in a subshell, so a global assignment is
+# invisible to the parent and reading it under `set -u` aborts the script.
+sni_select() {
+    local _out
+    _out=$(sni_select_indexed "$@") || return 1
+    printf '%s\n' "${_out#*$'\t'}"
 }
