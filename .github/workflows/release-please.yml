@@ -12,7 +12,12 @@ permissions: {}
 
 # Two rapid pushes to main would otherwise race the same
 # release-please--branches--main branch. Never cancel-in-progress: a
-# release-please cancelled mid-tag is worse than one that waits.
+# release-please cancelled mid-tag leaves corrupt state, whereas a queued
+# run is harmless (release-please derives everything from git history, so
+# the newest run subsumes any it displaces).
+#
+# NOTE: promote-stable (rollout to live relays) stays a DELIBERATE manual
+# gate for DPI-canary safety — it is intentionally NOT automated here.
 concurrency:
   group: release-please-${{ github.ref }}
   cancel-in-progress: false
@@ -46,8 +51,6 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      # NOTE: promote-stable (rollout to live relays) stays a DELIBERATE manual
-      # gate for DPI-canary safety — it is intentionally NOT automated here.
       - uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
