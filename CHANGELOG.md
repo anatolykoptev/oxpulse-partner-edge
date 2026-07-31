@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.10](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.9...v0.16.10) (2026-07-31)
+
+
+### Bug Fixes
+
+* **sni:** renderer uses the same deterministic pick as the daily rotator, and the helper actually ships ([#526](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/526)) ([f27c29e](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/f27c29ea984b0595ac9f58d48407d22d5c89ff21))
+
 ## [0.16.9](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.8...v0.16.9) (2026-07-30)
 
 
