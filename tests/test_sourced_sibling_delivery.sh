@@ -85,6 +85,58 @@ UPLOAD_STAGED=$(awk '/gh release upload/{f=1;next} f&&/--clobber/{exit} f{print}
 # Subdir sources like lib/compose-lib.sh are EXCLUDED (the / in the path breaks
 # the single-component basename match) — those are not PREFIX_SBIN siblings.
 # ---------------------------------------------------------------------------
+# selfdir_siblings <file> — every same-dir .sh this script resolves against its
+# own location, one per line.
+#
+# Two passes, because the repo's dominant idiom splits the directory from the
+# basename across two lines:
+#
+#     _dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+#     source "${_dir}/some-lib.sh"
+#
+# A single-line pattern sees neither half. Measured over the 24 shipped sbin
+# scripts, the split form is the majority; the one-line form this test
+# originally matched is the exception. That mattered: the guard passed on
+# hydrate.sh and install.sh while deriving nothing from either.
+selfdir_siblings() {
+    # A pass that matches nothing is a normal outcome — grep's exit 1 must not
+    # abort the function under the caller's `set -e` (this silently reduced the
+    # scanner to its first pass and made the widening a no-op).
+    local src="$1"
+
+    # 1a. One line carries both halves:  "$(... dirname ...)/name.sh"
+    grep -E '(dirname|readlink)[^#]*(BASH_SOURCE|\$0)' "$src" 2>/dev/null \
+        | grep -oE '\)/[A-Za-z0-9._-]+\.sh' | sed 's#^)/##' || true
+
+    # 1b. No dirname at all:  "${BASH_SOURCE[0]%/*}/name.sh"
+    grep -oE '\$\{BASH_SOURCE\[0\]%[^}]*\}/[A-Za-z0-9._-]+\.sh' "$src" 2>/dev/null \
+        | sed 's#.*/##' || true
+
+    # 2. A variable holding this script's own DIRECTORY, then any .sh built on
+    #    it. Assignments that already end in a file component are excluded —
+    #    those hold a path, not a directory, and 1a has them.
+    local -a dirvars=()
+    mapfile -t dirvars < <(
+        grep -E '^[[:space:]]*(local[[:space:]]+|declare[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=.*((dirname|readlink)[^#]*(BASH_SOURCE|\$0)|BASH_SOURCE\[0\]%)' "$src" 2>/dev/null \
+            | grep -vE '\)/[A-Za-z0-9._-]+\.[A-Za-z0-9]+"?[[:space:]]*$' \
+            | sed -E 's/^[[:space:]]*(local[[:space:]]+|declare[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/' \
+            | sort -u || true
+    )
+    local v
+    for v in "${dirvars[@]}"; do
+        [[ -n "$v" ]] || continue
+        grep -oE "\\$\{?${v}\}?/[A-Za-z0-9._-]+\.sh" "$src" 2>/dev/null | sed 's#.*/##' || true
+    done
+
+    # 3. Rooted at PREFIX_SBIN rather than reached via dirname:
+    #        _TOKEN_LIB="${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-token-lib.sh"
+    #    Same delivery dependency — the file has to BE in PREFIX_SBIN at runtime
+    #    — so the same assertion applies. Not reached by pass 2 because no
+    #    variable here holds the script's own directory.
+    grep -oE '\$\{PREFIX_SBIN[^}]*\}/[A-Za-z0-9._-]+\.sh|/usr/local/sbin/[A-Za-z0-9._-]+\.sh' "$src" 2>/dev/null \
+        | sed 's#.*/##' || true
+}
+
 declare -A sibling_to_sourcers=()   # sibling basename -> "sourcer:sourcer ..."
 declare -A sibling_seen=()
 
@@ -95,16 +147,12 @@ for f in "${SBIN_FILES[@]}"; do
         fail "shipped sbin '$f' repo path '$repo_path' not found on disk"
         continue
     fi
-    # Lines resolving a path relative to this script's own dir.
+    # Paths resolved relative to this script's own dir (see selfdir_siblings).
     while IFS= read -r sib; do
         [[ -n "$sib" ]] || continue
         sibling_to_sourcers["$sib"]+="${f} "
         sibling_seen["$sib"]=1
-    done < <(
-        grep -E 'dirname.*(BASH_SOURCE|\$0|readlink)' "$src" 2>/dev/null \
-            | grep -oE '\)/[A-Za-z0-9._-]+\.sh' \
-            | sed 's#^)/##' | sort -u
-    )
+    done < <(selfdir_siblings "$src" | sort -u)
 done
 
 # ---------------------------------------------------------------------------
@@ -164,6 +212,59 @@ done
 # ---------------------------------------------------------------------------
 # Summary.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Test E: the fresh-install path both installs each sibling and verifies it.
+#
+# upgrade.sh never calls _systemd_install_lib_scripts — that is install.sh's
+# path, and it is the only thing that puts these libs on a brand-new box, so
+# the upgrade array and the release assets say nothing about a new install
+# (review finding M6).
+#
+# Two distinct assertions, because the first version of this test conflated
+# them and reported a false blocker: EXPECTED_SBIN_FILES is a post-install
+# verification list, NOT the installer. A file can be installed and unverified
+# (E1 passes, E2 fails), which is a real but much smaller gap than not being
+# installed at all.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Test E: fresh install ships each sibling (E1) and verifies it (E2) ==="
+INSTALL_SYSTEMD="$REPO_ROOT/lib/install-systemd.sh"
+if [[ ! -f "$INSTALL_SYSTEMD" ]]; then
+    fail "E: lib/install-systemd.sh not found — cannot check the fresh-install list"
+else
+    mapfile -t EXPECTED_SBIN < <(
+        awk '/^EXPECTED_SBIN_FILES=\(/{f=1;next} f&&/^\)$/{exit} f{
+            gsub(/#.*/,""); gsub(/^[[:space:]]+/,""); gsub(/[[:space:]]+$/,"");
+            if(length($0)>0) print
+        }' "$INSTALL_SYSTEMD"
+    )
+    if [[ "${#EXPECTED_SBIN[@]}" -eq 0 ]]; then
+        fail "E: EXPECTED_SBIN_FILES extracted empty — the awk anchor no longer matches"
+    else
+        for sib in "${!sibling_seen[@]}"; do
+            # E1 — the fresh-install path must actually write it into PREFIX_SBIN.
+            # This is the delivery assertion. EXPECTED_SBIN_FILES is a separate,
+            # weaker thing (see E2): a post-install verification list, not the
+            # code that installs.
+            _e1_needle='"$PREFIX_SBIN/'"${sib}"'"'
+            if grep -qF "$_e1_needle" "$INSTALL_SYSTEMD"; then
+                pass "E1: '$sib' is installed into PREFIX_SBIN by the fresh-install path"
+            else
+                fail "E1: '$sib' is never written to PREFIX_SBIN by lib/install-systemd.sh — sourced as a same-dir sibling by: ${sibling_to_sourcers[$sib]}. upgrade.sh does not call that path, so a brand-new box would not have it."
+            fi
+            # E2 — and the post-install verification must cover it, or a silent
+            # install failure passes unnoticed.
+            hit=0
+            for e in "${EXPECTED_SBIN[@]}"; do [[ "$e" == "$sib" ]] && { hit=1; break; }; done
+            if [[ "$hit" -eq 1 ]]; then
+                pass "E2: '$sib' in EXPECTED_SBIN_FILES (post-install check covers it)"
+            else
+                fail "E2: '$sib' MISSING from EXPECTED_SBIN_FILES — it may still be installed, but nothing verifies that it landed."
+            fi
+        done
+    fi
+fi
+
 echo ""
 echo "==================================================================="
 echo "sourced-sibling delivery guard: PASS=$PASS FAIL=$FAIL"

@@ -446,6 +446,12 @@ EXPECTED_SBIN_FILES=(
 	ghcr-auth-lib.sh
 	channel-render-lib.sh
 	sni-select-lib.sh
+	metric-sink-lib.sh
+	telegram-alert-lib.sh
+	xprb-refresh-lib.sh
+	surgical-restart-lib.sh
+	cross-probe-lib.sh
+	channel-health-lib.sh
 	render-channel-lib.sh
 	oxpulse-token-lib.sh
 	# CL-2: split-routing scripts (suffixless executables — matches sbin convention)
