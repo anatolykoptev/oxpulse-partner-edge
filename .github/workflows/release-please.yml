@@ -3,6 +3,8 @@ name: release-please
 on:
   push:
     branches: [main]
+  # Recovery: re-run release-please without a throwaway commit.
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -12,22 +14,26 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      # Mint a short-lived installation token from the krolik-release-bot
+      # GitHub App. GITHUB_TOKEN-created PRs/tags do NOT trigger other
+      # workflows (GitHub recursion guard): with the default token the release
+      # PR gets no CI (required checks never run → needs admin-merge) and the
+      # cut tag never fires release.yml's `push: tags` image build, leaving a
+      # release with zero assets until an operator runs workflow_dispatch by
+      # hand — v0.16.7 and v0.16.8 are still assetless because nobody did.
+      # The App token fixes both. Fleet standard — see release-please-setup.
+      #
+      # NOTE: promote-stable (rollout to live relays) stays a DELIBERATE manual
+      # gate for DPI-canary safety — it is intentionally NOT automated here.
+      - name: Mint bot token
+        uses: actions/create-github-app-token@v2
+        id: bot-token
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
       - uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          # Full auto-release. GITHUB_TOKEN-created PRs/tags do NOT trigger other
-          # workflows (GitHub recursion guard), so with the default token the
-          # release PR gets no CI (required checks never run → needs admin-merge)
-          # and the tag never fires release.yml's `push: tags` image build (needs a
-          # manual workflow_dispatch). A non-GITHUB_TOKEN actor fixes BOTH: the PR
-          # runs CI → auto-mergeable, and its tag triggers release.yml.
-          #
-          # OPERATOR STEP to activate: add repo secret RELEASE_PLEASE_TOKEN — a
-          # fine-grained PAT or GitHub App token with contents:write +
-          # pull-requests:write + actions:write on this repo. Until it is set, this
-          # falls back to GITHUB_TOKEN = today's behavior (no regression).
-          #
-          # NOTE: promote-stable (rollout to live relays) stays a DELIBERATE manual
-          # gate for DPI-canary safety — it is intentionally NOT automated here.
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          token: ${{ steps.bot-token.outputs.token }}
