@@ -6,32 +6,48 @@ on:
   # Recovery: re-run release-please without a throwaway commit.
   workflow_dispatch: {}
 
-permissions:
-  contents: write
-  pull-requests: write
+# Least privilege: the job below never uses GITHUB_TOKEN — release-please runs
+# entirely on the minted App token — so the default token gets nothing.
+permissions: {}
+
+# Two rapid pushes to main would otherwise race the same
+# release-please--branches--main branch. Never cancel-in-progress: a
+# release-please cancelled mid-tag is worse than one that waits.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
-      # Mint a short-lived installation token from the krolik-release-bot
+      # Mint a short-lived installation token from the fleet release-bot
       # GitHub App. GITHUB_TOKEN-created PRs/tags do NOT trigger other
       # workflows (GitHub recursion guard): with the default token the release
       # PR gets no CI (required checks never run → needs admin-merge) and the
       # cut tag never fires release.yml's `push: tags` image build, leaving a
       # release with zero assets until an operator runs workflow_dispatch by
       # hand — v0.16.7 and v0.16.8 are still assetless because nobody did.
-      # The App token fixes both. Fleet standard — see release-please-setup.
+      # The App token fixes both.
       #
-      # NOTE: promote-stable (rollout to live relays) stays a DELIBERATE manual
-      # gate for DPI-canary safety — it is intentionally NOT automated here.
+      # The action is pinned to a commit SHA, not a floating major: this step
+      # consumes the App private key, which is a write credential across every
+      # repo the App is installed on. A retagged v2 would exfiltrate it.
+      #
+      # permission-* narrows the minted token to what release-please needs.
+      # Without them the token inherits the whole installation grant (which
+      # includes actions/packages/workflows write).
       - name: Mint bot token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         id: bot-token
         with:
           app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
 
+      # NOTE: promote-stable (rollout to live relays) stays a DELIBERATE manual
+      # gate for DPI-canary safety — it is intentionally NOT automated here.
       - uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
