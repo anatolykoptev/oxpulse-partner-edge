@@ -70,7 +70,12 @@ POOL=$(sni_pool_from_config "$NODE_CFG") || {
     exit 0
 }
 
-POOL_SIZE=$(printf '%s\n' "$POOL" | grep -c .)
+# `grep -c` exits 1 when it counts zero, and under `set -euo pipefail` that
+# killed the script HERE — before the empty-pool guard three lines down could
+# log anything. The unit went `failed` nightly with an empty log file.
+# sni_pool_from_config already strips blanks, so this count and the helper's
+# internal one agree by construction.
+POOL_SIZE=$(printf '%s\n' "$POOL" | grep -c . || true)
 if [[ "$POOL_SIZE" -lt 1 ]]; then
     log "empty SNI pool — skip"
     exit 0
@@ -104,7 +109,12 @@ fi
 # Emit the selected index as a gauge so fleet-wide SNI spread is observable
 # without per-box xray-client.json reads. Best-effort (emit_gauge is fail-soft).
 if command -v emit_gauge >/dev/null 2>&1; then
-    emit_gauge partner_edge_sni_pick_index "node_id=\"$NODE_ID\",pool_size=\"$POOL_SIZE\"" "$SNI_PICK_IDX" || true
+    # A label value containing " or \ produces malformed exposition and
+    # node_exporter drops the WHOLE file — every other metric on the box with
+    # it. Node ids are <partner>-<hex> today; this costs nothing and removes the
+    # dependency on that staying true.
+    _lbl_node=${NODE_ID//\\/_}; _lbl_node=${_lbl_node//\"/_}
+    emit_gauge partner_edge_sni_pick_index "node_id=\"$_lbl_node\",pool_size=\"$POOL_SIZE\"" "$SNI_PICK_IDX" || true
 fi
 
 # Read current SNI from live xray config.

@@ -75,6 +75,13 @@ except Exception:
 ch = d.get('channels', []) or []
 x = ch[0].get('xray', {}) if (ch and ch[0].get('protocol', '') == 'vless-reality') else {}
 names = x.get('server_names') or d.get('reality_server_names') or []
+# A node configured with only the singular field has a pool of exactly one. The
+# old rotator reached the same outcome via a fallback chain that ALSO injected a
+# hardcoded 'www.samsung.com'; that injection is not reproduced — a name the
+# operator never configured must not enter the pool.
+if not names:
+    single = x.get('server_name') or d.get('reality_server_name') or ''
+    names = [single] if single else []
 # strip blank + whitespace-only so count and index agree (M3)
 names = [n for n in names if n and n.strip()]
 print('\n'.join(names))

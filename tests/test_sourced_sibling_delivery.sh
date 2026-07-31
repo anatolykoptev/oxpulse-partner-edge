@@ -227,7 +227,7 @@ done
 # installed at all.
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Test E: fresh install ships each sibling (E1) and verifies it (E2) ==="
+echo "=== Test E: fresh install writes each sibling (E1); prune allowlist covers it (E2) ==="
 INSTALL_SYSTEMD="$REPO_ROOT/lib/install-systemd.sh"
 if [[ ! -f "$INSTALL_SYSTEMD" ]]; then
     fail "E: lib/install-systemd.sh not found — cannot check the fresh-install list"
@@ -246,20 +246,34 @@ else
             # This is the delivery assertion. EXPECTED_SBIN_FILES is a separate,
             # weaker thing (see E2): a post-install verification list, not the
             # code that installs.
+            # Must match a line that WRITES the file, not merely mentions it:
+            # a plain fixed-string search also hits comments, `[[ -f ... ]]`
+            # probes and `rm -f`. Proved by mutation — commenting out all three
+            # install lines left this assertion green.
             _e1_needle='"$PREFIX_SBIN/'"${sib}"'"'
-            if grep -qF "$_e1_needle" "$INSTALL_SYSTEMD"; then
+            # Collected first, then matched from a here-string: piping into
+            # `grep -q` trips this repo's pipefail early-exit guard, because the
+            # -q exits on the first hit and the upstream stage dies on SIGPIPE.
+            _e1_writes=$(sed 's/#.*//' "$INSTALL_SYSTEMD" | grep -E '(install -m|-o |cp )' || true)
+            if grep -qF "$_e1_needle" <<<"$_e1_writes"; then
                 pass "E1: '$sib' is installed into PREFIX_SBIN by the fresh-install path"
             else
                 fail "E1: '$sib' is never written to PREFIX_SBIN by lib/install-systemd.sh — sourced as a same-dir sibling by: ${sibling_to_sourcers[$sib]}. upgrade.sh does not call that path, so a brand-new box would not have it."
             fi
-            # E2 — and the post-install verification must cover it, or a silent
-            # install failure passes unnoticed.
+            # E2 — EXPECTED_SBIN_FILES is NOT a post-install verification list. Its
+            # only consumer is sbin_cleanup_zombies (lib/install-systemd.sh:464),
+            # a --clean-sbin prune ALLOWLIST: anything in PREFIX_SBIN matching
+            # its globs and absent from this array gets deleted. Membership buys
+            # protection from that prune and nothing more — and for a name the
+            # globs do not match, nothing at all. Asserted anyway because those
+            # globs have been widened before, and a helper removed by a cleanup
+            # fails exactly like one that was never delivered.
             hit=0
             for e in "${EXPECTED_SBIN[@]}"; do [[ "$e" == "$sib" ]] && { hit=1; break; }; done
             if [[ "$hit" -eq 1 ]]; then
-                pass "E2: '$sib' in EXPECTED_SBIN_FILES (post-install check covers it)"
+                pass "E2: '$sib' in EXPECTED_SBIN_FILES (protected from the --clean-sbin prune)"
             else
-                fail "E2: '$sib' MISSING from EXPECTED_SBIN_FILES — it may still be installed, but nothing verifies that it landed."
+                fail "E2: '$sib' MISSING from EXPECTED_SBIN_FILES — the --clean-sbin prune allowlist. This says nothing about whether it installed; no post-install check exists for these libs at all."
             fi
         done
     fi
