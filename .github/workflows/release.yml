@@ -5,13 +5,13 @@ on:
     tags:
       - 'v*'
   # Manual escape hatch: re-trigger image build/publish for any existing
-  # tag without having to delete+re-push it. Why we need this: the
-  # release-please action creates the tag via GITHUB_TOKEN which by
-  # GitHub anti-recursion design does NOT trigger downstream workflows
-  # (push events authored by GITHUB_TOKEN are filtered out). Result: a
-  # release-please-merged version-bump leaves a tag with no image
-  # built. Until release-please is configured with a Personal Access
-  # Token, this workflow_dispatch is the operator-facing escape hatch.
+  # tag without having to delete+re-push it. This used to be MANDATORY after
+  # every release: release-please cut the tag with GITHUB_TOKEN, which by
+  # GitHub anti-recursion design does not trigger downstream workflows, so a
+  # merged version-bump left a tag with no image and no assets (v0.16.7 and
+  # v0.16.8 are still assetless for exactly that reason). release-please.yml
+  # now runs on a GitHub App token, whose tag push DOES fire this workflow —
+  # so this input is a recovery path, not a required step.
   # Tag form: vX.Y.Z (no component prefix — single package repo).
   workflow_dispatch:
     inputs:
