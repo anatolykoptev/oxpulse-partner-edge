@@ -32,5 +32,5 @@ serde_norway = "0.9.42"
 [dev-dependencies]
 assert_cmd = "2"
 serial_test = "3"
-predicates = "3"
+predicates = "3.1.4"
 mockito = "1"
