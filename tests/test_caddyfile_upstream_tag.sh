@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 # Both tunnel_upstream + tunnel_upstream_default snippets must propagate the
 # upstream hostport as X-Channel-Tag. Backend uses this to attribute requests
 # to channel; Prometheus uses it to label metrics.
-for snippet in tunnel_upstream tunnel_upstream_default; do
+for snippet in tunnel_upstream tunnel_upstream_default tunnel_upstream_dpi_resistant; do
     # Extract snippet body (between '(snippet_name) {' and matching '}')
     body=$(awk -v name="$snippet" '
         $0 ~ "\\(" name "\\)[[:space:]]*\\{" { in_block=1; depth=1; next }

@@ -66,10 +66,12 @@ grep -q '(tunnel_upstream)' "$TPL" \
   || { echo "FAIL: tunnel_upstream snippet definition missing"; exit 1; }
 grep -q '(tunnel_upstream_default)' "$TPL" \
   || { echo "FAIL: tunnel_upstream_default snippet definition missing"; exit 1; }
+grep -q '(tunnel_upstream_dpi_resistant)' "$TPL" \
+  || { echo "FAIL: tunnel_upstream_dpi_resistant snippet definition missing"; exit 1; }
 grep -qE 'import tunnel_upstream /api/\*' "$TPL" \
   || { echo "FAIL: import tunnel_upstream /api/* missing"; exit 1; }
-grep -qE 'import tunnel_upstream /ws/\*' "$TPL" \
-  || { echo "FAIL: import tunnel_upstream /ws/* missing"; exit 1; }
+grep -qE 'import tunnel_upstream_dpi_resistant /ws/\*' "$TPL" \
+  || { echo "FAIL: import tunnel_upstream_dpi_resistant /ws/* missing"; exit 1; }
 grep -qE 'import tunnel_upstream /events/\*' "$TPL" \
   || { echo "FAIL: import tunnel_upstream /events/* missing"; exit 1; }
 grep -q 'import tunnel_upstream_default' "$TPL" \
