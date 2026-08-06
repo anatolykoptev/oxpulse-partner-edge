@@ -52,16 +52,18 @@ if grep -v '^[[:space:]]*#' "$TPL" | grep 'href=.*api\.oxpulse\.chat\|src=.*api\
 fi
 echo "OK: handle_errors block present with status passthrough and same-origin retry"
 
-echo "==> Test 3: lb_retries 2 present in both tunnel snippets"
+echo "==> Test 3: lb_retries 2 present in all three tunnel snippets"
 retry_count=$(grep -c 'lb_retries 2' "$TPL")
-[[ "$retry_count" -ge 2 ]] \
-    || { echo "FAIL: expected lb_retries 2 in >= 2 snippets, found $retry_count"; exit 1; }
-# Confirm in both named snippets.
+[[ "$retry_count" -ge 3 ]] \
+    || { echo "FAIL: expected lb_retries 2 in >= 3 snippets, found $retry_count"; exit 1; }
+# Confirm in all named snippets.
 grep -A 20 '(tunnel_upstream)' "$TPL" | grep 'lb_retries 2' >/dev/null \
     || { echo "FAIL: lb_retries 2 missing from (tunnel_upstream) snippet"; exit 1; }
 grep -A 20 '(tunnel_upstream_default)' "$TPL" | grep 'lb_retries 2' >/dev/null \
     || { echo "FAIL: lb_retries 2 missing from (tunnel_upstream_default) snippet"; exit 1; }
-echo "OK: lb_retries 2 found in both tunnel snippets (count=$retry_count)"
+grep -A 20 '(tunnel_upstream_dpi_resistant)' "$TPL" | grep 'lb_retries 2' >/dev/null \
+    || { echo "FAIL: lb_retries 2 missing from (tunnel_upstream_dpi_resistant) snippet"; exit 1; }
+echo "OK: lb_retries 2 found in all three tunnel snippets (count=$retry_count)"
 
 echo "==> Test 4: rendered Caddyfile passes caddy validate (Docker required)"
 if ! docker info >/dev/null 2>&1; then

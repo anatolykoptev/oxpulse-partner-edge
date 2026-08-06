@@ -82,3 +82,16 @@ render_tpl() {
     return 1
   fi
 }
+
+@test "tunnel_upstream_dpi_resistant snippet: primary upstream is VLESS-Reality xray-client:3080 (CH1)" {
+  # DPI-resistant pool for /ws/* — VLESS-Reality (TCP/TLS disguise) is primary
+  # because ТСПУ drops UDP upstream payloads >1KB (SDP answers, ICE candidates).
+  # AWG (CH2, UDP) is second as fallback. See Caddyfile.tpl comment + plan
+  # 2026-08-06-dpi-resistant-ws-routing.md for the full DPI analysis.
+  if ! grep -qF 'reverse_proxy {args[0]} xray-client:3080 {{AWG_MOTHERLY_IP}}:8907 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}}' "$TPL"; then
+    echo "FAIL: tunnel_upstream_dpi_resistant snippet does not start with xray-client:3080" >&2
+    echo "      Expected: reverse_proxy {args[0]} xray-client:3080 {{AWG_MOTHERLY_IP}}:8907 ..." >&2
+    grep 'reverse_proxy' "$TPL" >&2
+    return 1
+  fi
+}

@@ -473,10 +473,10 @@
 																	},
 																	"upstreams": [
 																		{
-																			"dial": "10.9.0.2:8907"
+																			"dial": "xray-client:3080"
 																		},
 																		{
-																			"dial": "xray-client:3080"
+																			"dial": "10.9.0.2:8907"
 																		},
 																		{
 																			"dial": "host.docker.internal:18443"
@@ -768,7 +768,7 @@
 														{
 															"handle": [
 																{
-																	"body": "6cfcba248a101a0fb3a0b7f3e199bad03b854252384edc314e93655d01b67ac6",
+																	"body": "ec4b4222a1d3d435337c7e246ad3a30985b090e8b43f7f87aefa8861acb84a5c",
 																	"handler": "static_response",
 																	"status_code": 200
 																}

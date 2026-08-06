@@ -124,6 +124,39 @@
     }
 }
 
+# DPI-resistant upstream pool for /ws/* — VLESS-Reality (TCP/TLS disguise) first,
+# AWG (UDP) fallback. ТСПУ DPI drops UDP upstream payloads >1KB (SDP answers,
+# ICE candidates) while small REST requests survive. WebSocket signaling frames
+# are large/sustained → must avoid UDP transport. REST API (/api/*) and event
+# telemetry (/events/*) stay on the AWG-first tunnel_upstream snippet because
+# their payloads are small and AWG is the lower-latency path (~300ms RTT).
+# Health check limitation: /api/health (~200 bytes) may pass through AWG even
+# when larger WS payloads are DPI-dropped — health reflects reachability, not
+# DPI behavior on specific payload sizes. This is a pre-existing limitation;
+# this snippet reduces exposure by trying VLESS-Reality first for /ws/*.
+(tunnel_upstream_dpi_resistant) {
+    reverse_proxy {args[0]} xray-client:3080 {{AWG_MOTHERLY_IP}}:8907 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
+        lb_policy first
+        lb_retries 2
+        lb_try_duration 5s
+        lb_try_interval 250ms
+        health_uri /api/health
+        health_interval 10s
+        health_timeout 3s
+        health_status 2xx
+        health_passes 2
+        health_fails 3
+        header_up X-Forwarded-Host {{PARTNER_DOMAIN}}
+        header_up X-Forwarded-Proto https
+        header_up Host oxpulse.chat
+        header_up X-Geo-Country {vars.maxmind_country_code}
+        # Phase 5.8 Task 4: propagate selected upstream as X-Channel-Tag header.
+        # Backend uses this for request attribution; Prometheus uses it as a
+        # label on caddy_reverse_proxy_upstreams_healthy{upstream=...} metrics.
+        header_up X-Channel-Tag {upstream_hostport}
+    }
+}
+
 {{PARTNER_DOMAIN}} {
     encode gzip zstd
 
@@ -177,8 +210,9 @@
         # API — preserve partner domain so backend branding resolver picks right config.
         import tunnel_upstream /api/*
 
-        # WebSocket — Caddy auto-upgrades on Upgrade: websocket.
-        import tunnel_upstream /ws/*
+        # WebSocket — DPI-resistant pool (VLESS-Reality first, AWG fallback).
+        # Caddy auto-upgrades on Upgrade: websocket.
+        import tunnel_upstream_dpi_resistant /ws/*
 
         # Event telemetry.
         import tunnel_upstream /events/*

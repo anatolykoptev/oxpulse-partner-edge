@@ -7,7 +7,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-for snippet in tunnel_upstream tunnel_upstream_default; do
+for snippet in tunnel_upstream tunnel_upstream_default tunnel_upstream_dpi_resistant; do
     # Extract the reverse_proxy line inside the snippet
     line=$(awk -v name="$snippet" '
         $0 ~ "\\(" name "\\)[[:space:]]*\\{" { in_block=1; next }
