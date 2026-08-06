@@ -27,15 +27,21 @@ section will reflect it.
 
 ### Warrant canary
 
-As of 2026-05-02, OxPulse has not received any:
+As of 2026-08-06, OxPulse has not received any:
 - National Security Letter
 - FISA court order
 - gag order requiring undisclosed compliance with surveillance demands
 - request to insert a backdoor into source code or build artifacts
 
 This canary statement is updated quarterly. Absence of an updated
-statement after 90 days should be treated as a signal that the
+statement after 120 days should be treated as a signal that the
 canary has been triggered.
+
+The window is 120 days rather than 90 so that a quarterly cadence has
+real slack: a quarter is already about 91 days, so a 90-day trigger left
+no margin for an ordinary scheduling slip and would fire on one.
+
+Previous statements, so the chain can be checked: 2026-05-02.
 
 ## Partner nodes disconnected
 
@@ -58,8 +64,8 @@ None during this reporting period. The current set is documented in
 
 ## Independent code audits
 
-None completed during this reporting period. Application to OTF Red
-Team Lab is in preparation.
+None completed during this reporting period. An application to the OTF
+Security Lab — formerly the Red Team Lab — is in preparation.
 
 ## Funding received
 
@@ -67,4 +73,5 @@ Team Lab is in preparation.
 
 ## Next report
 
-Quarterly update due 2026-08-15. Annual report due 2027-01-15.
+Next quarterly update due 2026-11-06; the canary trigger window closes
+2026-12-04. Annual report due 2027-01-15.
