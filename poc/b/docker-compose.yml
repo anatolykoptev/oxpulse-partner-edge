@@ -11,7 +11,7 @@ services:
     depends_on: [caddy, coturn]
 
   caddy:
-    image: caddy:2.10
+    image: caddy:2.11
     container_name: poc-b-caddy
     # Only reached via nginx-sni — no external port
     expose: ["8443"]
