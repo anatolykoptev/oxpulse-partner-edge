@@ -28,6 +28,7 @@ on:
       - 'lib/healthcheck-lib.sh'
       - 'tests/test_settle_serveability.sh'
       - 'tests/test_settle_dual_pin_consistency.sh'
+      - 'tests/test_caddy_admin_origins.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
@@ -59,6 +60,7 @@ on:
       - 'lib/healthcheck-lib.sh'
       - 'tests/test_settle_serveability.sh'
       - 'tests/test_settle_dual_pin_consistency.sh'
+      - 'tests/test_caddy_admin_origins.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
@@ -128,3 +130,5 @@ jobs:
 
       - name: Settle dual-pin fitness — inline vs lib health primitives stay identical
         run: bash tests/test_settle_dual_pin_consistency.sh
+      - name: Caddy admin origins carry the host:port form (#518 regression)
+        run: bash tests/test_caddy_admin_origins.sh
