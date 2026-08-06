@@ -48,7 +48,7 @@ aws-lc-rs = { version = "1", optional = true }
 # browser session lifecycle, and the udp_loop iteration cadence —
 # anything per-packet stays out of the span budget.
 opentelemetry = "0.31"
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace"] }
 opentelemetry-semantic-conventions = "0.31"
 tracing-opentelemetry = "0.32"
