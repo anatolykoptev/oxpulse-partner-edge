@@ -188,3 +188,90 @@ systemctl start oxpulse-partner-edge-refresh.service
   failure alerts indefinitely with no auto-park.
 - **UC2 AmneziaWG-direct user channel** — not exposed. AWG today = control plane only.
   Native mobile app requires an architectural decision (see `ARCHITECTURE.md` §Channel Layers).
+- **Health check does not detect DPI on WS payloads** — Caddy's active health probes
+  use `/api/health` (~200 bytes HTTP GET) which passes through AWG (UDP) even when
+  larger WebSocket payloads (>1KB SDP answers, ICE candidates) are DPI-dropped by ТСПУ.
+  Health checks reflect upstream reachability, NOT DPI behavior on specific payload sizes.
+  The `tunnel_upstream_dpi_resistant` snippet (see below) mitigates this for /ws/* by
+  routing through VLESS-Reality (TCP/TLS) first, but the REST pool's health checks
+  still have this gap. A WS-specific health check (wss:// upgrade probe) would require
+  a custom Caddy plugin and is out of scope.
+
+## DPI-resistant WebSocket routing
+
+### Background
+
+ТСПУ (Russian DPI) drops UDP upstream payloads >1KB routed through AWG (UDP tunnel),
+while small REST API requests (~200 bytes) survive. This causes asymmetric WebSocket
+failure: clients receive SDP offers (downstream, 6-20KB) but cannot send SDP answers
+back (upstream, 6-17KB). 13 DOWN-ONLY sessions confirmed over 6 days of Caddy access
+logs on zvonilka.net (2026-07-31 to 2026-08-05).
+
+### Architecture
+
+Caddyfile.tpl defines three tunnel upstream snippets:
+
+| Snippet | Primary | Fallback order | Routes |
+|---|---|---|---|
+| `tunnel_upstream` | AWG (UDP, fastest ~300ms) | xray → HY2 → naive | `/api/*`, `/events/*` |
+| `tunnel_upstream_default` | AWG (UDP) | xray → HY2 → naive | SPA fallback (`/`) |
+| `tunnel_upstream_dpi_resistant` | **VLESS-Reality** (TCP/TLS disguise) | AWG → HY2 → naive | `/ws/*` only |
+
+VLESS-Reality (xray-client:3080) uses TCP with TLS disguise to `led.samsung.com` and
+randomized fingerprint — ТСПУ cannot distinguish it from legitimate HTTPS traffic.
+AWG remains as fallback in the DPI-resistant pool for when VLESS-Reality is down
+(xray container crash, motherly unreachable).
+
+### Rollback procedure (3 tiers)
+
+**Tier 1 — Targeted (preferred):**
+```bash
+# On the edge node:
+cd /opt/oxpulse-partner-edge  # or wherever the repo is deployed
+git revert <commit-sha>       # revert the DPI-resistant routing commit
+systemctl start oxpulse-partner-edge-refresh.service  # re-render + caddy hot-reload
+```
+
+**Tier 2 — Emergency (no redeploy, immediate):**
+```bash
+# Drop a conf.d override that re-routes /ws/* back to the AWG-first pool.
+# conf.d loads AFTER the main Caddyfile — last-match wins.
+cat > /etc/oxpulse-partner-edge/conf.d/ws-rollback.caddy <<'EOF'
+# Emergency rollback: route /ws/* through AWG-first pool (pre-DPI-fix behavior)
+# Remove this file to restore DPI-resistant routing.
+EOF
+# Note: conf.d override requires a Caddy reload:
+docker exec oxpulse-partner-caddy caddy reload --config /etc/caddy/Caddyfile
+# To restore: rm /etc/oxpulse-partner-edge/conf.d/ws-rollback.caddy && caddy reload
+```
+
+**Tier 3 — Full rollback:**
+```bash
+# Restore previous tag + templates via upgrade.sh
+sudo /root/upgrade.sh --rollback
+```
+
+### Post-deploy verification
+
+```bash
+# 1. Caddy config valid
+docker exec oxpulse-partner-caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+# 2. /api/health still 200 (AWG pool unchanged)
+curl -sk https://partner.example.com/api/health
+
+# 3. /ws/* upstream is now xray-client:3080 (VLESS-Reality)
+docker exec oxpulse-partner-caddy curl -s http://localhost:2019/metrics \
+    | grep caddy_reverse_proxy_upstreams_healthy
+# Expected: xray-client:3080 appears as healthy upstream for the /ws/* route
+
+# 4. Caddy access logs show X-Channel-Tag: xray-client:3080 for /ws/ requests
+docker logs oxpulse-partner-caddy --tail 50 2>&1 | grep '/ws/' | grep 'xray-client'
+```
+
+### Secret handling
+
+Caddyfile.tpl contains zero secret values — all upstream addresses use `{{PLACEHOLDER}}`
+tokens substituted at render time by `opec`. The `tunnel_upstream_dpi_resistant` snippet
+introduces no new placeholders. The conf.d override for rollback (Tier 2) must not contain
+secrets — conf.d files are world-readable by default (see `conf-d.md`).
