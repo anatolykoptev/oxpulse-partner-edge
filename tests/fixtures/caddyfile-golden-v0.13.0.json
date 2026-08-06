@@ -3,7 +3,9 @@
 		"listen": "localhost:2019",
 		"origins": [
 			"localhost",
-			"127.0.0.1"
+			"127.0.0.1",
+			"localhost:2019",
+			"127.0.0.1:2019"
 		]
 	},
 	"logging": {
@@ -768,7 +770,7 @@
 														{
 															"handle": [
 																{
-																	"body": "6cfcba248a101a0fb3a0b7f3e199bad03b854252384edc314e93655d01b67ac6",
+																	"body": "7ccd293e027b53dc1d1f14da15748ec24fc63356cb2ae575218850c8fddd6dc8",
 																	"handler": "static_response",
 																	"status_code": 200
 																}

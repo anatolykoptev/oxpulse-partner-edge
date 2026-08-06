@@ -22,7 +22,7 @@ cat > "$BAK_FILE" << 'BAKEOF'
 
 {
     admin localhost:2019 {
-        origins localhost 127.0.0.1
+        origins localhost 127.0.0.1 localhost:2019 127.0.0.1:2019
     }
     email admin@edge-a.example
     servers {

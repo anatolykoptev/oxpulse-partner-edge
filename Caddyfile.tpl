@@ -18,8 +18,14 @@
     # healthcheck (`wget http://127.0.0.1:2019/config/`) started getting 403
     # "host not allowed" even though production traffic was fine. Explicit
     # origins list fixes the healthcheck without exposing admin beyond loopback.
+    # Both bare and host:port forms are needed: Caddy's checkHost (admin.go)
+    # matches r.Host against each origin by exact string equality. A request to
+    # http://127.0.0.1:2019/ sends Host: 127.0.0.1:2019 (WITH port) — bare
+    # `127.0.0.1` never matches. `caddy reload` sends Host: localhost:2019 —
+    # bare `localhost` never matches. Bare forms cover the compose healthcheck's
+    # --header=Host:localhost override; port forms cover caddy reload and wget.
     admin localhost:2019 {
-        origins localhost 127.0.0.1
+        origins localhost 127.0.0.1 localhost:2019 127.0.0.1:2019
     }
     email admin@{{PARTNER_DOMAIN}}
 
