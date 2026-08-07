@@ -227,9 +227,37 @@ services:
     #
     # Round-2 review fix: gate the client_ws / relay-API probes on the
     # same env vars main.rs gates the listeners on, and honour
-    # SFU_CLIENT_WS_PORT / SFU_RELAY_API_PORT env overrides. CMD-SHELL
-    # is a /bin/sh -c context, so $VAR expands at container runtime
-    # against the service's environment block.
+    # SFU_CLIENT_WS_PORT / SFU_RELAY_API_PORT env overrides.
+    #
+    # 2026-08-07: those two gates were INERT for three months, and this is the
+    # comment that made them so. CMD-SHELL is indeed a /bin/sh -c context — but
+    # docker compose interpolates `$VAR` in the YAML BEFORE the container ever
+    # sees the string, and it interpolates against ITS OWN environment (the
+    # shell + the .env beside the compose file), not against this service's
+    # `environment:` block. The secrets live only in the latter, so compose
+    # substituted the empty string and baked in:
+    #
+    #   ... && { [ -z "" ] || nc -z 127.0.0.1 "8920"; } && { [ -z "" ] || ... }
+    #
+    # `[ -z "" ]` is TRUE, `||` short-circuits, and NEITHER `nc -z` ever runs.
+    # Measured on a live edge 2026-08-07 via `docker inspect .Config.Healthcheck`
+    # — the only place the truth is visible, since the YAML still reads `$VAR`.
+    # That is exactly the pre-fix state the 2026-05-06 post-mortem above
+    # describes: only /metrics is probed, and it stays green through a disabled
+    # client_ws. The fix for that incident was neutralised by the mechanism
+    # documented as making it work.
+    #
+    # `$$` escapes the interpolation, so compose emits a literal `$` and the
+    # CONTAINER's shell expands it — which is what the comment always claimed.
+    #
+    # Escaped here ONLY for the four vars measured present inside the running
+    # container (`SIGNALING_SFU_SECRET`, `RELAY_JWT_SECRET`,
+    # `SFU_CLIENT_WS_PORT`, `SFU_RELAY_API_PORT`). SFU_METRICS_BIND and
+    # SFU_RELAY_API_BIND are deliberately left UNescaped: they are NOT in the
+    # container's environment (measured — both absent), so escaping them would
+    # expand to empty, point wget at `http://:PORT`, and turn a passing probe
+    # into a fleet-wide unhealthy. They resolve only via compose interpolation,
+    # which is the accident that keeps the metrics probe working at all.
     #
     # Bug #4 fix (2026-05-28 edge-d): SFU metrics and relay-API listeners bind
     # on the mesh IP (mesh-only, not 0.0.0.0). Probing 127.0.0.1 for those
@@ -255,7 +283,7 @@ services:
     # disabled) → probe fails → unhealthy (correct: SFU shouldn't run
     # without mesh) — same fail-closed behaviour as before.
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://${SFU_METRICS_BIND}:{{SFU_METRICS_PORT}}/metrics >/dev/null 2>&1 && { [ -z \"$SIGNALING_SFU_SECRET\" ] || nc -z 127.0.0.1 \"${SFU_CLIENT_WS_PORT:-8920}\"; } && { [ -z \"$RELAY_JWT_SECRET\" ] || nc -z ${SFU_RELAY_API_BIND} \"${SFU_RELAY_API_PORT:-8912}\"; } || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://${SFU_METRICS_BIND}:{{SFU_METRICS_PORT}}/metrics >/dev/null 2>&1 && { [ -z \"$$SIGNALING_SFU_SECRET\" ] || nc -z 127.0.0.1 \"$${SFU_CLIENT_WS_PORT:-8920}\"; } && { [ -z \"$$RELAY_JWT_SECRET\" ] || nc -z ${SFU_RELAY_API_BIND} \"$${SFU_RELAY_API_PORT:-8912}\"; } || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
