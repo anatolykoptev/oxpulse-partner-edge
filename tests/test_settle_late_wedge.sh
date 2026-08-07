@@ -206,7 +206,11 @@ bash -c "source '$PRE'
     unset OXPULSE_UPGRADE_SETTLE_RECHECK_SECS
     export OXPULSE_UPGRADE_SETTLE_RECHECK_INTERVAL=1
     _settle_docker_health_watch t" >/dev/null 2>&1 || true
-logged=$(sed -n 's/.*late-wedge watch for \([0-9]*\)s.*/\1/p' "$TC/logs" 2>/dev/null | head -1)
+# First match only, without piping into a truncating reader: under
+# `set -o pipefail` such a reader exits early, SIGPIPEs its producer and can
+# mask a failure, which the repo's pipefail guard rejects. `q` after the first
+# substitution does the same job inside sed.
+logged=$(sed -n '/late-wedge watch for/{s/.*late-wedge watch for \([0-9]*\)s.*/\1/p;q;}' "$TC/logs" 2>/dev/null)
 if [[ "${logged:-0}" =~ ^[0-9]+$ ]] && [[ "$logged" -ge 130 ]]; then
     ok "T8: the watch opens for the DERIVED budget (${logged}s), not a fixed default"
 else
@@ -219,7 +223,11 @@ printf 'oxpulse-partner-xray\n' > "$TC/names"
 printf '30 30 10 3\n' > "$TC/hcfg_oxpulse-partner-xray"
 printf 'unhealthy\n'  > "$TC/health_oxpulse-partner-xray"
 rc=$(WINDOW=7 _watch)
-logged=$(sed -n 's/.*late-wedge watch for \([0-9]*\)s.*/\1/p' "$TC/logs" 2>/dev/null | head -1)
+# First match only, without piping into a truncating reader: under
+# `set -o pipefail` such a reader exits early, SIGPIPEs its producer and can
+# mask a failure, which the repo's pipefail guard rejects. `q` after the first
+# substitution does the same job inside sed.
+logged=$(sed -n '/late-wedge watch for/{s/.*late-wedge watch for \([0-9]*\)s.*/\1/p;q;}' "$TC/logs" 2>/dev/null)
 [[ "$logged" == "7" ]] && ok "T9: OXPULSE_UPGRADE_SETTLE_RECHECK_SECS overrides the derivation (${logged}s)" \
                        || bad "T9: explicit override ignored — logged ${logged:-?}s instead of 7s"
 
