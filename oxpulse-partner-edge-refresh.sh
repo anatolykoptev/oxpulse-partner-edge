@@ -623,6 +623,19 @@ _emit_sfu_applied_gauge() {
     _written=$(sed -n 's/^SFU_SIGNING_PUBLIC_KEY=//p' "$SFU_KEYS_ENV" | tail -n1)
     _written="${_written%\"}"; _written="${_written#\"}"
     _written="${_written%\'}"; _written="${_written#\'}"
+    # #550: make the comparison representation-independent on NEWLINES too, not
+    # just on quotes. The env file stores the PEM on ONE line with the newlines
+    # escaped as the two characters \n; `printenv` hands back the real
+    # multi-line PEM. Measured on rvpn/zvonilka/ruoxp: written 114 chars / 1
+    # line vs live 112 chars / 3 lines — 114 = 112 + 2 across exactly two
+    # newlines, i.e. the same key in two representations. Without this decode
+    # the equality below can never hold, so the gauge sits at 0 on every node
+    # and the stale-key WARNING below is a permanent false alarm.
+    #
+    # Narrow ON PURPOSE: only the literal \n sequence is decoded. Trimming
+    # whitespace or comparing first lines would let a genuinely DIFFERENT key
+    # compare equal — the same defect pointed the other way, and just as silent.
+    _written="${_written//\\n/$'\n'}"
     [[ -n "$_written" ]] || return 0
     docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$SFU_CONTAINER_NAME" || return 0
     # Read the running value via the exec's EXIT STATUS, not just its output. A
