@@ -11,8 +11,13 @@
 # looked alive from every angle except the end-to-end probe, and the control
 # plane had already dropped rvpn-seed from the handout pool.
 #
-# The load-bearing test is T5: the FUNCTIONAL snapshot is clean and the gate
-# must STILL fail because a watched container went unhealthy after it passed.
+# Two load-bearing cases:
+#   T5 — the FUNCTIONAL snapshot is clean and the gate must STILL fail because
+#        a watched container went unhealthy after it passed.
+#   T8 — the watch stays open long enough for that signal to be able to EXIST.
+#        Docker writes `unhealthy` only after `retries` consecutive failures
+#        following start_period, so a watch shorter than that can never fire
+#        and reads as coverage while catching nothing.
 #
 # Plain bash, no bats (repo convention).
 set -euo pipefail
@@ -33,10 +38,11 @@ _extract_fn() { awk -v fn="$1" '$0 ~ "^"fn"\\(\\) \\{"{f=1} f{print} /^\}$/ && f
 
 PRE="$TC/preamble.sh"
 {
-    echo 'log(){ :; }'
+    echo 'log(){ printf "LOG: %s\n" "$*" >> "'"$TC"'/logs"; }'
     echo 'warn(){ printf "WARN: %s\n" "$*" >> "'"$TC"'/warns"; }'
     echo '_settle_emit_rollback_metric(){ printf "%s\n" "$1" >> "'"$TC"'/metrics"; }'
     _extract_fn settle_healthcheck_with_retry
+    _extract_fn _settle_derive_recheck_window
     _extract_fn _settle_docker_health_watch
 } > "$PRE"
 
@@ -47,23 +53,28 @@ else
 fi
 
 # ── docker stub ─────────────────────────────────────────────────────────────
-# `docker ps ... --format {{.Names}}`      -> $TC/names
-# `docker inspect -f {{.State.Health.Status}} NAME` -> $TC/health_NAME (empty if absent)
+# `docker ps ... --format {{.Names}}`                -> $TC/names
+# `docker inspect -f {{.State.Health.Status}} NAME`  -> $TC/health_NAME
+# `docker inspect -f {{...Config.Healthcheck...}}`   -> $TC/hcfg_NAME
+# An absent file means an absent HEALTHCHECK: the real docker emits a template
+# ERROR there, not an empty field, and upgrade.sh discards it to empty.
 mkdir -p "$TC/bin"
 cat > "$TC/bin/docker" <<STUB
 #!/usr/bin/env bash
 if [ "\$1" = "ps" ]; then cat "$TC/names" 2>/dev/null; exit 0; fi
 if [ "\$1" = "inspect" ]; then
   _n="\${!#}"
-  [ -f "$TC/health_\$_n" ] && cat "$TC/health_\$_n"
-  exit 0
+  case "\$*" in
+    *Config.Healthcheck*) [ -f "$TC/hcfg_\$_n" ]   && cat "$TC/hcfg_\$_n";   exit 0 ;;
+    *)                    [ -f "$TC/health_\$_n" ] && cat "$TC/health_\$_n"; exit 0 ;;
+  esac
 fi
 exit 0
 STUB
 chmod +x "$TC/bin/docker"
 export PATH="$TC/bin:$PATH"
 
-_reset() { : > "$TC/warns"; : > "$TC/metrics"; rm -f "$TC"/health_*; }
+_reset() { : > "$TC/warns"; : > "$TC/metrics"; : > "$TC/logs"; rm -f "$TC"/health_* "$TC"/hcfg_*; }
 
 # _watch -> echoes rc of _settle_docker_health_watch
 _watch() {
@@ -159,6 +170,58 @@ rc=$(bash -c "source '$PRE2'
     | sed -n 's/^rc=//p')
 [[ "$rc" == "0" ]] && ok "T6: without the helper the guard is a no-op (isolation harness unchanged)" \
                    || bad "T6: guard changed behaviour when the helper is absent (rc=$rc)"
+
+# ── T7 — the detection budget must outlast TIME-TO-UNHEALTHY (arithmetic) ───
+# Measured on rvpn 2026-08-07: oxpulse-partner-xray declares
+#   start_period=30s  interval=30s  retries=3  timeout=10s
+# Docker cannot write `unhealthy` before start_period + retries*interval = 120s.
+# A budget shorter than that closes before the signal can exist.
+_reset
+printf 'oxpulse-partner-xray\n' > "$TC/names"
+printf '30 30 10 3\n' > "$TC/hcfg_oxpulse-partner-xray"
+w=$(bash -c "source '$PRE'; _settle_derive_recheck_window \"\$(cat '$TC/names')\"" 2>/dev/null)
+if [[ "${w:-0}" =~ ^[0-9]+$ ]] && [[ "$w" -ge 130 ]]; then
+    ok "T7: budget derived from the container's own healthcheck config (${w}s >= 130s)"
+else
+    bad "T7: derived budget ${w:-?}s cannot outlast time-to-unhealthy (30+3*30+10=130s) — the watch would close before the signal exists"
+fi
+
+# ── T7b — a container with no HEALTHCHECK still yields the floor, not 0 ─────
+# An old docker whose inspect template lacks these fields must degrade to the
+# previous fixed behaviour, never to a disabled watch.
+_reset
+printf 'oxpulse-partner-awg\n' > "$TC/names"
+w=$(bash -c "source '$PRE'; _settle_derive_recheck_window \"\$(cat '$TC/names')\"" 2>/dev/null)
+[[ "${w:-0}" -ge 60 ]] && ok "T7b: no derivable config -> floor (${w}s), watch never silently disabled" \
+                       || bad "T7b: undeclared healthcheck collapsed the budget to ${w:-?}s"
+
+# ── T8 — the WATCH uses the derived budget (the call site, not the helper) ──
+# Run with the container already unhealthy so the watch returns on the first
+# poll and the test does not actually sleep the derived window.
+_reset
+printf 'oxpulse-partner-xray\n' > "$TC/names"
+printf '30 30 10 3\n' > "$TC/hcfg_oxpulse-partner-xray"
+printf 'unhealthy\n'  > "$TC/health_oxpulse-partner-xray"
+bash -c "source '$PRE'
+    unset OXPULSE_UPGRADE_SETTLE_RECHECK_SECS
+    export OXPULSE_UPGRADE_SETTLE_RECHECK_INTERVAL=1
+    _settle_docker_health_watch t" >/dev/null 2>&1 || true
+logged=$(sed -n 's/.*late-wedge watch for \([0-9]*\)s.*/\1/p' "$TC/logs" 2>/dev/null | head -1)
+if [[ "${logged:-0}" =~ ^[0-9]+$ ]] && [[ "$logged" -ge 130 ]]; then
+    ok "T8: the watch opens for the DERIVED budget (${logged}s), not a fixed default"
+else
+    bad "T8: watch opened for ${logged:-?}s — it is not using the derived budget, so it closes before docker can report unhealthy"
+fi
+
+# ── T9 — an explicit override still wins (the escape hatch stays real) ─────
+_reset
+printf 'oxpulse-partner-xray\n' > "$TC/names"
+printf '30 30 10 3\n' > "$TC/hcfg_oxpulse-partner-xray"
+printf 'unhealthy\n'  > "$TC/health_oxpulse-partner-xray"
+rc=$(WINDOW=7 _watch)
+logged=$(sed -n 's/.*late-wedge watch for \([0-9]*\)s.*/\1/p' "$TC/logs" 2>/dev/null | head -1)
+[[ "$logged" == "7" ]] && ok "T9: OXPULSE_UPGRADE_SETTLE_RECHECK_SECS overrides the derivation (${logged}s)" \
+                       || bad "T9: explicit override ignored — logged ${logged:-?}s instead of 7s"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

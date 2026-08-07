@@ -1894,16 +1894,75 @@ settle_healthcheck_with_retry() {
 # critical path, and skipping answers it without weakening anything.
 #
 # Honest about its limits: the window is a DETECTION BUDGET, not a proof of
-# absence. A wedge that appears after it closes is still missed. Widen via
-# OXPULSE_UPGRADE_SETTLE_RECHECK_SECS; 0 disables the watch entirely.
+# absence. A wedge that appears after it closes is still missed. The budget is
+# DERIVED from the containers' own healthcheck config — see
+# _settle_derive_recheck_window, and note why a fixed default was wrong.
+# OXPULSE_UPGRADE_SETTLE_RECHECK_SECS overrides it; 0 disables the watch.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# _settle_derive_recheck_window NAMES — how long the late-wedge watch must stay
+# open, in whole seconds, derived from what the containers themselves declare.
+#
+# A GUESSED budget is worse than none. Docker cannot write `unhealthy` until a
+# container has failed `retries` consecutive checks AFTER its start_period, so
+# the signal this watch exists to see has a floor of
+#
+#     start_period + retries * interval
+#
+# Measured on rvpn 2026-08-07, oxpulse-partner-xray declares
+# start_period=30s interval=30s retries=3 timeout=10s => 130s. The first cut of
+# this watch used a fixed 60s default, which closes roughly a minute BEFORE the
+# 2026-07-30 wedge could have become visible: it would have passed that upgrade
+# exactly as the unguarded gate did, while reading as coverage. Deriving the
+# budget also means a compose change to interval/retries carries automatically
+# instead of silently outgrowing a constant nobody re-checks.
+#
+# Clamped to [MIN, MAX] so this is never weaker than the old fixed default and
+# a pathological config cannot park an upgrade indefinitely. A container whose
+# image declares no HEALTHCHECK contributes nothing; if NONE of them declare
+# one the floor is returned rather than 0, so an old docker whose inspect
+# template lacks these fields degrades to today's behaviour instead of
+# disabling the watch.
+# ---------------------------------------------------------------------------
+_settle_derive_recheck_window() {
+	local _names="${1:-}"
+	local _docker="${DOCKER_BIN:-docker}"
+	local _floor="${OXPULSE_UPGRADE_SETTLE_RECHECK_MIN_SECS:-60}"
+	local _cap="${OXPULSE_UPGRADE_SETTLE_RECHECK_MAX_SECS:-300}"
+	local _n _cfg _sp _iv _to _rt _need _max=0
+
+	while IFS= read -r _n; do
+		[[ -z "$_n" ]] && continue
+		# Guarded template: a container with no HEALTHCHECK yields an empty line.
+		# The unguarded form is a template ERROR on such a container, not an empty
+		# field (measured on docker 27, rvpn).
+		_cfg=$("$_docker" inspect -f '{{if .Config.Healthcheck}}{{.Config.Healthcheck.StartPeriod.Seconds}} {{.Config.Healthcheck.Interval.Seconds}} {{.Config.Healthcheck.Timeout.Seconds}} {{.Config.Healthcheck.Retries}}{{end}}' "$_n" 2>/dev/null || true)
+		[[ -z "$_cfg" ]] && continue
+		read -r _sp _iv _to _rt <<< "$_cfg"
+		# .Seconds is a float64 — truncate. A zero means "docker's own default".
+		_sp="${_sp%%.*}"; _iv="${_iv%%.*}"; _to="${_to%%.*}"
+		[[ "$_sp" =~ ^[0-9]+$ ]] || _sp=0
+		[[ "$_to" =~ ^[0-9]+$ ]] || _to=0
+		{ [[ "$_iv" =~ ^[0-9]+$ ]] && [[ "$_iv" -gt 0 ]]; } || _iv=30
+		{ [[ "$_rt" =~ ^[0-9]+$ ]] && [[ "$_rt" -gt 0 ]]; } || _rt=3
+		_need=$(( _sp + _rt * _iv + _to ))
+		[[ "$_need" -gt "$_max" ]] && _max="$_need"
+	done <<< "$_names"
+
+	[[ "$_max" -lt "$_floor" ]] && _max="$_floor"
+	[[ "$_max" -gt "$_cap" ]] && _max="$_cap"
+	printf '%s\n' "$_max"
+}
+
 _settle_docker_health_watch() {
 	local _label="${1:-post-upgrade}"
-	local _window="${OXPULSE_UPGRADE_SETTLE_RECHECK_SECS:-60}"
+	local _window="${OXPULSE_UPGRADE_SETTLE_RECHECK_SECS:-}"
 	local _interval="${OXPULSE_UPGRADE_SETTLE_RECHECK_INTERVAL:-5}"
 	local _docker="${DOCKER_BIN:-docker}"
 
-	if ! [[ "$_window" =~ ^[0-9]+$ ]] || [[ "$_window" -le 0 ]]; then
+	# An explicit 0 (or anything non-numeric) disables the watch outright, before
+	# any docker call. Unset means "derive it" — see below.
+	if [[ -n "$_window" ]] && { ! [[ "$_window" =~ ^[0-9]+$ ]] || [[ "$_window" -le 0 ]]; }; then
 		log "settle_healthcheck: late-wedge watch disabled (window=${_window})"
 		return 0
 	fi
@@ -1912,6 +1971,14 @@ _settle_docker_health_watch() {
 	_names=$("$_docker" ps --filter name=oxpulse-partner- --format '{{.Names}}' 2>/dev/null || true)
 	if [[ -z "$_names" ]]; then
 		log "settle_healthcheck: late-wedge watch — no oxpulse-partner-* containers running, nothing to watch"
+		return 0
+	fi
+
+	if [[ -z "$_window" ]]; then
+		_window=$(_settle_derive_recheck_window "$_names")
+	fi
+	if ! [[ "$_window" =~ ^[0-9]+$ ]] || [[ "$_window" -le 0 ]]; then
+		log "settle_healthcheck: late-wedge watch disabled (window=${_window})"
 		return 0
 	fi
 
