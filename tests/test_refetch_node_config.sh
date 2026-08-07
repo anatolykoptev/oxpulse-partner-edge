@@ -476,13 +476,22 @@ echo "=== Test 5: upgrade.sh wiring — refetch before every re_render_xray ==="
 # config() {` (which ends with `{`, not the function name).  Counting every
 # textual occurrence would include ~11 comment-block mentions in
 # _ensure_channel_render_lib alone and pass with all real call sites deleted
-# (a vacuous oracle).  The three call sites are upgrade.sh's templates (guarded)
-# / with-templates / apply re_render_xray blocks.
+# (a vacuous oracle).
+#
+# The count dropped from three to TWO in #547 (#514): the with-templates and
+# apply paths previously each called refetch + re_render inline, and now share
+# the single pair inside _render_gate, which brackets them with a health gate
+# and a render-scoped rollback. The remaining two call sites are _render_gate
+# and the --templates-only path (still ungated — tracked in #548).
+#
+# This is a non-vacuity floor only. The invariant this test actually protects is
+# the PAIRING, asserted by 5b below, and that is unchanged: refetch_node_config
+# still immediately precedes every re_render_xray.
 refetch_count=$(grep -nE 'refetch_node_config$' "$UPGRADE_SH" | grep -vE '^[0-9]+:[[:space:]]*#' | wc -l)
-if [[ "$refetch_count" -ge 3 ]]; then
+if [[ "$refetch_count" -ge 2 ]]; then
     pass "test5a: upgrade.sh calls refetch_node_config ($refetch_count call sites)"
 else
-    fail "test5a: upgrade.sh has $refetch_count refetch_node_config call lines (expected >= 3)"
+    fail "test5a: upgrade.sh has $refetch_count refetch_node_config call lines (expected >= 2)"
 fi
 
 # 5b: every re_render_xray call is preceded by a refetch_node_config call.

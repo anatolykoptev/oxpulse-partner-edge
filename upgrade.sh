@@ -2015,6 +2015,77 @@ _settle_docker_health_watch() {
 }
 
 # ---------------------------------------------------------------------------
+# _render_gate LABEL — run refetch + re-render UNDER a health gate (#514).
+#
+# re_render_xray does not merely write a file that something might later read:
+# it rewrites xray-client.json and restarts the tunnel
+# (channel-render-lib.sh). Until this helper existed that ran after the main
+# settle gate, after `rm -f "$_baseline_snapshot"` had discarded the rollback
+# baseline, and after "upgraded successfully" had already been logged — so the
+# single change most likely to break traffic was outside the gate that exists
+# to catch exactly that, outside the rollback, and after the success claim.
+#
+# The fix is additive rather than a reorder, for two measured reasons:
+#   - moving the render ahead of the main gate would place it before the
+#     container recreation it has to render against;
+#   - the main gate's rollback restores compose, state and host-scripts but NOT
+#     xray-client.json, so an earlier render still would not be undone by it.
+#
+# The rollback here is deliberately RENDER-SCOPED. Images and compose already
+# passed their own gate; reverting them because a render regressed would undo a
+# change that is not the one that broke. So this restores the pre-render channel
+# config and restarts, and leaves the upgrade's images in place.
+#
+# Baselines are taken from the POST-UPGRADE state the main gate has just
+# certified green, so a regression measured against them is attributable to the
+# render and to nothing earlier in the run.
+#
+# No metric is emitted here: _settle_emit_rollback_metric is defined INSIDE
+# settle_healthcheck_with_retry and is not in scope at top level. Counting this
+# outcome belongs with the refetch observability work (#511).
+# ---------------------------------------------------------------------------
+_render_gate() {
+	local _label="${1:-render}"
+	local _base="" _serve="" _snapdir="" _restored=0
+	local _xray_cfg="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
+
+	if [[ -x "$HEALTHCHECK" ]]; then
+		_base=$(mktemp)
+		health_snapshot "$HEALTHCHECK" "$_base" || { rm -f "$_base"; _base=""; }
+	fi
+	_serve=$(mktemp)
+	_settle_serveability_snapshot "$_serve" || true
+
+	# Snapshot exactly what the render is about to overwrite. The existing
+	# ${XRAY_CFG}.bak.<epoch> copies are NOT a safety net — nothing reads them.
+	_snapdir=$(mktemp -d)
+	[[ -f "$_xray_cfg" ]] && cp -a "$_xray_cfg" "$_snapdir/xray-client.json"
+
+	refetch_node_config
+	re_render_xray
+
+	if settle_healthcheck_with_retry "$_label" "$_base" "$_serve"; then
+		rm -rf "$_snapdir"; rm -f "$_base" "$_serve"
+		return 0
+	fi
+
+	warn "render gate: RENDER REGRESSION (${_label}) — the re-render broke a check that was green immediately after the upgrade gate passed"
+	if [[ -f "$_snapdir/xray-client.json" ]]; then
+		install -m 0600 "$_snapdir/xray-client.json" "$_xray_cfg" && _restored=1
+	fi
+	if [[ "$_restored" -eq 1 ]]; then
+		warn "render gate: restored the pre-render xray-client.json; images and compose are NOT reverted (they passed their own gate)"
+		if ! (cd "$PREFIX_ETC" && $DOCKER_BIN compose restart xray-client >/dev/null 2>&1); then
+			warn "render gate: restart after restore FAILED — the rolled-back config is on disk but NOT in effect until xray-client restarts"
+		fi
+	else
+		warn "render gate: no pre-render xray-client.json to restore — leaving the rendered config in place"
+	fi
+	rm -rf "$_snapdir"; rm -f "$_base" "$_serve"
+	return 1
+}
+
+# ---------------------------------------------------------------------------
 # Serve-ability adjudication (P3 — multi-homed false-rollback fix).
 #
 # These three TOP-LEVEL helpers are called by settle_healthcheck_with_retry via
@@ -3545,10 +3616,13 @@ if [[ "$MODE" == with_templates ]]; then
 	fi
 	rm -f "${_wt_baseline_snap:-}"
 
-	log "--with-templates upgrade to $TARGET complete"
+	# #514 — see the plain path below; same gate, same render-scoped rollback.
 	_ensure_channel_render_lib
-	refetch_node_config
-	re_render_xray
+	if ! _render_gate "with-templates-upgrade-render"; then
+		die "--with-templates upgrade applied but the post-upgrade re-render regressed health — pre-render channel config restored; images and compose left on $TARGET"
+	fi
+
+	log "--with-templates upgrade to $TARGET complete"
 	exit 0
 fi
 
@@ -3753,11 +3827,14 @@ if ! settle_healthcheck_with_retry "plain-upgrade" "${_baseline_snapshot:-}" "${
 fi
 rm -f "${_baseline_snapshot:-}"
 
-log "upgraded to $TARGET successfully"
-
+# #514: the re-render below rewrites xray-client.json and restarts the tunnel.
+# It is gated, and success is not claimed until that gate passes.
 _ensure_channel_render_lib
-refetch_node_config
-re_render_xray
+if ! _render_gate "plain-upgrade-render"; then
+	die "upgrade applied but the post-upgrade re-render regressed health — pre-render channel config restored; images and compose left on $TARGET"
+fi
+
+log "upgraded to $TARGET successfully"
 
 if [[ "$V01_TO_V02" -eq 1 ]]; then
 	log "v0.1→v0.2: re-seeding templates via hydrate --reseed"

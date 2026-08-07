@@ -146,3 +146,5 @@ jobs:
         run: bash tests/test_settle_late_wedge.sh
       - name: Embedded python snippets import what they reference (#513)
         run: bash tests/test_embedded_python_imports.sh
+      - name: Post-upgrade re-render runs under a health gate (#514)
+        run: bash tests/test_render_gate.sh
