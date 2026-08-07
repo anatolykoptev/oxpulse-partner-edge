@@ -30,6 +30,9 @@ on:
       - 'tests/test_settle_dual_pin_consistency.sh'
       - 'tests/test_settle_late_wedge.sh'
       - 'tests/test_caddy_admin_origins.sh'
+      - 'tests/test_embedded_python_imports.sh'
+      - 'tests/scan_embedded_python.py'
+      - '**/*.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
@@ -63,6 +66,9 @@ on:
       - 'tests/test_settle_dual_pin_consistency.sh'
       - 'tests/test_settle_late_wedge.sh'
       - 'tests/test_caddy_admin_origins.sh'
+      - 'tests/test_embedded_python_imports.sh'
+      - 'tests/scan_embedded_python.py'
+      - '**/*.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
       - '.github/workflows/installer-tests.yml'
@@ -136,3 +142,5 @@ jobs:
         run: bash tests/test_caddy_admin_origins.sh
       - name: Upgrade gate does not declare success over a late wedge (#522)
         run: bash tests/test_settle_late_wedge.sh
+      - name: Embedded python snippets import what they reference (#513)
+        run: bash tests/test_embedded_python_imports.sh
