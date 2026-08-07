@@ -46,6 +46,7 @@ PRE="$TC/preamble.sh"
     echo '_settle_serveability_snapshot(){ : > "$1"; }'
     _extract_fn settle_healthcheck_with_retry
     _extract_fn _settle_docker_health_watch
+    _extract_fn _assert_node_cfg_renderable
     _extract_fn _render_gate
 } > "$PRE"
 
@@ -81,6 +82,8 @@ _reset() {
 # _run POST_STATE -> echoes rc of _render_gate
 # hc_pre is always all-GREEN; POST_STATE is what the render leaves behind.
 _run() {
+    # A renderable node-config by default — T9+ override it deliberately.
+    printf '{"node_id":"n","reality_uuid":"u","reality_public_key":"p","backend_endpoint":"h:1"}\n' > "$TC/node-config.json"
     printf 'check_01=GREEN\ncheck_02=GREEN\n' > "$TC/hc_pre"
     printf 'check_01=GREEN\ncheck_02=GREEN\n' > "$TC/hc_post"
     printf '%s' "$1" > "$TC/hc_after_render"
@@ -90,6 +93,7 @@ _run() {
         export PREFIX_ETC='$TC'
         export DOCKER_BIN=docker
         export XRAY_CFG='$TC/xray-client.json'
+        export NODE_CFG='$TC/node-config.json'
         export OXPULSE_UPGRADE_HEALTH_TIMEOUT=3
         export OXPULSE_UPGRADE_SETTLE_RECHECK_SECS=0
         _render_gate probe; echo rc=\$?" 2>/dev/null | sed -n 's/^rc=//p'
@@ -193,6 +197,80 @@ elif grep -q 'xray-client restart FAILED' "$CRL"; then
     ok "T8: a failed xray-client restart is reported as a failure, not logged as success"
 else
     bad "T8: no failure branch for the xray-client restart"
+fi
+
+# ── #512: the node-config in use must be renderable, loudly ────────────────
+# update.sh:153-168 die()d when the local node-config carried neither the flat
+# reality_* fields nor a non-empty channels[]. The #508 extraction did not carry
+# that check over: refetch_node_config warns and returns 0 on every failure path,
+# then re_render_xray declines soft on the same missing fields — so the node
+# silently keeps its old xray-client.json while the upgrade reports success.
+
+_assert_cfg() {
+    printf '%s\n' "$1" > "$TC/node-config.json"
+    bash -c "source '$PRE'
+        export NODE_CFG='$TC/node-config.json'
+        export PREFIX_ETC='$TC'
+        _assert_node_cfg_renderable; echo rc=\$?" 2>/dev/null | sed -n 's/^rc=//p'
+}
+
+rc=$(_assert_cfg '{"node_id":"n","reality_uuid":"u","reality_public_key":"p","backend_endpoint":"h:1"}')
+[[ "$rc" == "0" ]] && ok "T9: flat reality_* schema is renderable" \
+                   || bad "T9: a valid flat config was rejected (rc=$rc)"
+
+rc=$(_assert_cfg '{"node_id":"n","channels":[{"protocol":"vless-reality","xray":{"uuid":"u"}}]}')
+[[ "$rc" == "0" ]] && ok "T10: channels[] schema is renderable" \
+                   || bad "T10: a valid channels[] config was rejected (rc=$rc)"
+
+rc=$(_assert_cfg '{"node_id":"n","channels":[]}')
+[[ "$rc" != "0" ]] && ok "T11: neither flat fields nor channels[] -> loud failure (rc=$rc)" \
+                   || bad "T11: an unrenderable node-config passed — this is #512, the node would keep a stale config while the upgrade reports success"
+
+_reset
+rm -f "$TC/node-config.json"
+rc=$(bash -c "source '$PRE'
+    export NODE_CFG='$TC/node-config.json'
+    export PREFIX_ETC='$TC'
+    _assert_node_cfg_renderable; echo rc=\$?" 2>/dev/null | sed -n 's/^rc=//p')
+# An ABSENT node-config is deliberately NOT a failure here. re_render_xray
+# already treats it as a legitimate skip, and three upgrade harnesses (C1, D3,
+# F2a) run with no node-config at all — asserting loudly on absence turned those
+# into exit 1. update.sh die()d on it because applying node-config is update.sh's
+# purpose; it is not the upgrade's. #512 is the config that EXISTS and cannot
+# render.
+[[ "$rc" == "0" ]] && ok "T12: an absent node-config.json is left to the render's own skip, not a failure" \
+                   || bad "T12: a missing node-config.json failed the assertion (rc=$rc) — that breaks upgrades on nodes not yet handed one"
+
+# ── T13 — the gate fails on an unrenderable config, and does NOT render ────
+# Placement is the claim: the assertion must fire BEFORE anything is overwritten,
+# so there is nothing to roll back and the old config is untouched rather than
+# restored.
+_reset
+printf 'check_01=GREEN\ncheck_02=GREEN\n' > "$TC/hc_pre"
+printf 'check_01=GREEN\ncheck_02=GREEN\n' > "$TC/hc_post"
+printf 'check_01=GREEN\ncheck_02=GREEN\n' > "$TC/hc_after_render"
+printf '{"node_id":"n","channels":[]}\n' > "$TC/node-config.json"
+rc=$(bash -c "source '$PRE'
+    export HEALTHCHECK='$TC/hc'
+    export HC_POST='$TC/hc_post'
+    export PREFIX_ETC='$TC'
+    export DOCKER_BIN=docker
+    export XRAY_CFG='$TC/xray-client.json'
+    export NODE_CFG='$TC/node-config.json'
+    export OXPULSE_UPGRADE_HEALTH_TIMEOUT=3
+    export OXPULSE_UPGRADE_SETTLE_RECHECK_SECS=0
+    _render_gate probe; echo rc=\$?" 2>/dev/null | sed -n 's/^rc=//p')
+[[ "$rc" != "0" ]] && ok "T13: the gate fails on an unrenderable node-config (rc=$rc)" \
+                   || bad "T13: the gate passed over an unrenderable node-config (rc=$rc)"
+if grep -q 'render' "$TC/calls" 2>/dev/null; then
+    bad "T13b: re_render_xray ran anyway — the assertion fired too late to prevent it"
+else
+    ok "T13b: the render never ran, so nothing needed rolling back"
+fi
+if [[ "$(cat "$TC/xray-client.json")" == "PRE-RENDER-CONFIG" ]]; then
+    ok "T13c: the existing xray-client.json is untouched"
+else
+    bad "T13c: xray-client.json was modified despite the assertion failing"
 fi
 
 echo

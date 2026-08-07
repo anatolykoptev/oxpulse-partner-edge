@@ -2044,6 +2044,52 @@ _settle_docker_health_watch() {
 # settle_healthcheck_with_retry and is not in scope at top level. Counting this
 # outcome belongs with the refetch observability work (#511).
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# _assert_node_cfg_renderable — the node-config in use must be renderable (#512).
+#
+# Mirrors update.sh:153-168, which the #508 extraction did not carry over. Note
+# the SUBJECT: this checks the local file that is about to be rendered, not the
+# API response. refetch_node_config validates the response and discards it on
+# failure — a good gate, but it says nothing about the stale file left behind.
+#
+# Why it has to be loud: refetch_node_config returns 0 on every failure path (no
+# token, API down, bad response), and re_render_xray then declines soft on the
+# same missing fields. Without this the node silently keeps its old
+# xray-client.json while the upgrade reports success — and stays healthy, which
+# is why it survives unnoticed.
+#
+# Returns 0 when the config carries either the flat reality_* fields or a
+# non-empty channels[]; 1 otherwise, with the reason named.
+# ---------------------------------------------------------------------------
+_assert_node_cfg_renderable() {
+	local _cfg="${NODE_CFG:-$PREFIX_ETC/node-config.json}"
+	# An ABSENT node-config is not this issue. re_render_xray already treats it
+	# as a legitimate skip, and a node can reach an upgrade before it has ever
+	# been handed one. update.sh die()d here because applying node-config is
+	# update.sh's entire purpose; it is not the upgrade's. #512 is the config
+	# that EXISTS and cannot render — the stale file left behind by a soft-failed
+	# refetch.
+	if [[ ! -f "$_cfg" ]]; then
+		log "render gate: no node-config.json at $_cfg — nothing to validate, leaving the render to skip"
+		return 0
+	fi
+	local _has_flat=1 _f _v
+	for _f in reality_uuid reality_public_key backend_endpoint; do
+		_v=$(jq -r ".$_f // empty" "$_cfg" 2>/dev/null || true)
+		[[ -n "$_v" ]] || _has_flat=0
+	done
+	[[ "$_has_flat" -eq 1 ]] && return 0
+	local _ch
+	_ch=$(jq '.channels // [] | length' "$_cfg" 2>/dev/null || echo 0)
+	[[ "$_ch" =~ ^[0-9]+$ ]] || _ch=0
+	if [[ "$_ch" -gt 0 ]]; then
+		return 0
+	fi
+	warn "render gate: node-config.json is missing the required fields (reality_uuid, reality_public_key, backend_endpoint) and has no channels[] — it cannot render an xray config"
+	warn "render gate: this is the state update.sh used to die on; the node would otherwise keep its previous xray-client.json while the upgrade reported success (#512)"
+	return 1
+}
+
 _render_gate() {
 	local _label="${1:-render}"
 	local _base="" _serve="" _snapdir="" _restored=0
@@ -2062,6 +2108,10 @@ _render_gate() {
 	[[ -f "$_xray_cfg" ]] && cp -a "$_xray_cfg" "$_snapdir/xray-client.json"
 
 	refetch_node_config
+	# #512 — see _assert_node_cfg_renderable. Placed BEFORE the render so it fires
+	# while nothing has been overwritten, and kept adjacent so the refetch/render
+	# pairing asserted by tests/test_refetch_node_config.sh test5b still holds.
+	_assert_node_cfg_renderable || { rm -rf "$_snapdir"; rm -f "$_base" "$_serve"; return 1; }
 	re_render_xray
 
 	if settle_healthcheck_with_retry "$_label" "$_base" "$_serve"; then
