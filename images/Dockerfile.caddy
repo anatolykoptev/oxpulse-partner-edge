@@ -9,6 +9,12 @@
 #   caddy-l4@v0.1.0 — only stable release (SHA 6bee9cf), marked
 #                    "breaking changes may occur" upstream — do not bump
 #                    without deliberate re-validation
+#   cache-handler@v0.16.0 — Souin HTTP cache, linked for the /_app/immutable
+#                    route ONLY (see Caddyfile.tpl). Its dependency graph
+#                    pulls AWS/GCP/gonum, but -w -s -trimpath plus dead-code
+#                    elimination means none of it links: measured 154 MB vs
+#                    155 MB without it. Do not re-raise the size concern
+#                    without re-measuring.
 
 # ─── Stage 1: xcaddy build with caddy-l4 plugin ─────────────────────────────
 FROM caddy:2.11.2-builder AS builder
@@ -18,7 +24,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     xcaddy build \
     --with github.com/mholt/caddy-l4@v0.1.0 \
-    --with github.com/porech/caddy-maxmind-geolocation@v1.0.3
+    --with github.com/porech/caddy-maxmind-geolocation@v1.0.3 \
+    --with github.com/caddyserver/cache-handler@v0.16.0
 
 # ─── Stage 2: runtime image ─────────────────────────────────────────────────
 FROM caddy:2.11.2-alpine
@@ -30,7 +37,7 @@ LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.version="${VERSION}"
 LABEL oxpulse.component="partner-edge-caddy"
 LABEL oxpulse.version="${VERSION}"
-LABEL oxpulse.plugins="caddy-l4@v0.1.0,caddy-maxmind-geolocation@v1.0.3 (porech fork — aksdb deleted upstream)"
+LABEL oxpulse.plugins="caddy-l4@v0.1.0,caddy-maxmind-geolocation@v1.0.3 (porech fork — aksdb deleted upstream),cache-handler@v0.16.0"
 
 # Swap in the xcaddy-built binary (has the caddy-l4 module linked)
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
