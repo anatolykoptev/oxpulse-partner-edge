@@ -65,6 +65,8 @@ with open(sys.argv[1]) as f:
 
 src = strip_block(src, 'servers')           # contains listener_wrappers/layer4
 src = strip_block(src, 'maxmind_geolocation')
+src = strip_block(src, 'cache')             # Souin global block (cache-handler plugin)
+src = re.sub(r'(?m)^[ \t]*cache[ \t]*$\n', '', src)  # its route-level directive
 src = strip_block(src, 'turns.example.test')  # TURNS stub site needs real domain
 src = re.sub(r'\n{3,}', '\n\n', src)       # collapse excess blank lines
 
