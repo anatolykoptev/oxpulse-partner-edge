@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.12](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.11...v0.16.12) (2026-08-07)
+
+
+### Bug Fixes
+
+* **refresh:** let partner_edge_sfu_pubkey_applied reach 1 ([#550](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/550)) ([#551](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/551)) ([177ebb9](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/177ebb9cadb10d99acff89e5b9d43a08d886a311))
+
 ## [0.16.11](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.10...v0.16.11) (2026-08-07)
 
 
