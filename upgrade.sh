@@ -1853,6 +1853,164 @@ settle_healthcheck_with_retry() {
 		log "settle_healthcheck: post snapshot clean on attempt $_attempt/$max_attempts (${label})"
 		_settle_emit_rollback_metric none 0
 	fi
+	# #522: the functional gate has passed. Watch for a LATE wedge before
+	# declaring success — see _settle_docker_health_watch. declare -F guard so
+	# the awk-extracted isolation harness (which extracts only this function)
+	# keeps its current behaviour.
+	if declare -F _settle_docker_health_watch >/dev/null 2>&1; then
+		if ! _settle_docker_health_watch "$label"; then
+			_settle_emit_rollback_metric late_unhealthy 1
+			return 1
+		fi
+	fi
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# _settle_docker_health_watch LABEL — late-wedge watch (#522).
+#
+# The comment above on the functional gate is right that healthcheck.sh
+# --snapshot is a stronger signal than docker's State.Health.Status: a GREEN
+# check proves the tunnel actually serves. It is stronger in WHAT it proves —
+# not in WHEN. That is the gap this closes.
+#
+# Measured, converging the fleet onto v0.16.9 on 2026-07-30: upgrade.sh printed
+# `upgraded to latest successfully` on rvpn and ruoxp and settle_healthcheck saw
+# no regression. MINUTES LATER both nodes' oxpulse-partner-xray were unhealthy
+# (FailingStreak 10 and 9), `wget http://127.0.0.1:3080/api/health/live`
+# returning `Connection reset by peer` every 30s without recovering — a stale
+# outbound left over from the compose recreate, fixed instantly by
+# `docker restart`. While wedged, xray kept ACCEPTING and forwarding client
+# connections, so it looked alive from every angle except the one end-to-end
+# probe. The control plane had already dropped rvpn-seed from the handout pool.
+#
+# An upgrade gate that closes before the thing it upgraded can fail will keep
+# reporting success over exactly that class, whatever the cause.
+#
+# This does NOT replace the functional gate — it runs only after that gate has
+# already passed, and it watches for a transition INTO `unhealthy`. A container
+# that declares no HEALTHCHECK is SKIPPED, never failed: that "absent
+# healthcheck" edge case is precisely why a docker-health gate was kept off the
+# critical path, and skipping answers it without weakening anything.
+#
+# Honest about its limits: the window is a DETECTION BUDGET, not a proof of
+# absence. A wedge that appears after it closes is still missed. The budget is
+# DERIVED from the containers' own healthcheck config — see
+# _settle_derive_recheck_window, and note why a fixed default was wrong.
+# OXPULSE_UPGRADE_SETTLE_RECHECK_SECS overrides it; 0 disables the watch.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# _settle_derive_recheck_window NAMES — how long the late-wedge watch must stay
+# open, in whole seconds, derived from what the containers themselves declare.
+#
+# A GUESSED budget is worse than none. Docker cannot write `unhealthy` until a
+# container has failed `retries` consecutive checks AFTER its start_period, so
+# the signal this watch exists to see has a floor of
+#
+#     start_period + retries * interval
+#
+# Measured on rvpn 2026-08-07, oxpulse-partner-xray declares
+# start_period=30s interval=30s retries=3 timeout=10s => 130s. The first cut of
+# this watch used a fixed 60s default, which closes roughly a minute BEFORE the
+# 2026-07-30 wedge could have become visible: it would have passed that upgrade
+# exactly as the unguarded gate did, while reading as coverage. Deriving the
+# budget also means a compose change to interval/retries carries automatically
+# instead of silently outgrowing a constant nobody re-checks.
+#
+# Clamped to [MIN, MAX] so this is never weaker than the old fixed default and
+# a pathological config cannot park an upgrade indefinitely. A container whose
+# image declares no HEALTHCHECK contributes nothing; if NONE of them declare
+# one the floor is returned rather than 0, so an old docker whose inspect
+# template lacks these fields degrades to today's behaviour instead of
+# disabling the watch.
+# ---------------------------------------------------------------------------
+_settle_derive_recheck_window() {
+	local _names="${1:-}"
+	local _docker="${DOCKER_BIN:-docker}"
+	local _floor="${OXPULSE_UPGRADE_SETTLE_RECHECK_MIN_SECS:-60}"
+	local _cap="${OXPULSE_UPGRADE_SETTLE_RECHECK_MAX_SECS:-300}"
+	local _n _cfg _sp _iv _to _rt _need _max=0
+
+	while IFS= read -r _n; do
+		[[ -z "$_n" ]] && continue
+		# Guarded template: a container with no HEALTHCHECK yields an empty line.
+		# The unguarded form is a template ERROR on such a container, not an empty
+		# field (measured on docker 27, rvpn).
+		_cfg=$("$_docker" inspect -f '{{if .Config.Healthcheck}}{{.Config.Healthcheck.StartPeriod.Seconds}} {{.Config.Healthcheck.Interval.Seconds}} {{.Config.Healthcheck.Timeout.Seconds}} {{.Config.Healthcheck.Retries}}{{end}}' "$_n" 2>/dev/null || true)
+		[[ -z "$_cfg" ]] && continue
+		read -r _sp _iv _to _rt <<< "$_cfg"
+		# .Seconds is a float64 — truncate. A zero means "docker's own default".
+		_sp="${_sp%%.*}"; _iv="${_iv%%.*}"; _to="${_to%%.*}"
+		[[ "$_sp" =~ ^[0-9]+$ ]] || _sp=0
+		[[ "$_to" =~ ^[0-9]+$ ]] || _to=0
+		{ [[ "$_iv" =~ ^[0-9]+$ ]] && [[ "$_iv" -gt 0 ]]; } || _iv=30
+		{ [[ "$_rt" =~ ^[0-9]+$ ]] && [[ "$_rt" -gt 0 ]]; } || _rt=3
+		_need=$(( _sp + _rt * _iv + _to ))
+		[[ "$_need" -gt "$_max" ]] && _max="$_need"
+	done <<< "$_names"
+
+	[[ "$_max" -lt "$_floor" ]] && _max="$_floor"
+	[[ "$_max" -gt "$_cap" ]] && _max="$_cap"
+	printf '%s\n' "$_max"
+}
+
+_settle_docker_health_watch() {
+	local _label="${1:-post-upgrade}"
+	local _window="${OXPULSE_UPGRADE_SETTLE_RECHECK_SECS:-}"
+	local _interval="${OXPULSE_UPGRADE_SETTLE_RECHECK_INTERVAL:-5}"
+	local _docker="${DOCKER_BIN:-docker}"
+
+	# An explicit 0 (or anything non-numeric) disables the watch outright, before
+	# any docker call. Unset means "derive it" — see below.
+	if [[ -n "$_window" ]] && { ! [[ "$_window" =~ ^[0-9]+$ ]] || [[ "$_window" -le 0 ]]; }; then
+		log "settle_healthcheck: late-wedge watch disabled (window=${_window})"
+		return 0
+	fi
+
+	local _names
+	_names=$("$_docker" ps --filter name=oxpulse-partner- --format '{{.Names}}' 2>/dev/null || true)
+	if [[ -z "$_names" ]]; then
+		log "settle_healthcheck: late-wedge watch — no oxpulse-partner-* containers running, nothing to watch"
+		return 0
+	fi
+
+	if [[ -z "$_window" ]]; then
+		_window=$(_settle_derive_recheck_window "$_names")
+	fi
+	if ! [[ "$_window" =~ ^[0-9]+$ ]] || [[ "$_window" -le 0 ]]; then
+		log "settle_healthcheck: late-wedge watch disabled (window=${_window})"
+		return 0
+	fi
+
+	log "settle_healthcheck: late-wedge watch for ${_window}s (${_label})"
+	local _elapsed=0 _n _st _unhealthy _watched _skipped
+	while [[ "$_elapsed" -lt "$_window" ]]; do
+		_unhealthy=""; _watched=0; _skipped=0
+		while IFS= read -r _n; do
+			[[ -z "$_n" ]] && continue
+			# Empty output = the image declares no HEALTHCHECK. Skip, never fail.
+			_st=$("$_docker" inspect -f '{{.State.Health.Status}}' "$_n" 2>/dev/null || true)
+			if [[ -z "$_st" || "$_st" == "<no value>" ]]; then
+				_skipped=$(( _skipped + 1 ))
+				continue
+			fi
+			_watched=$(( _watched + 1 ))
+			[[ "$_st" == "unhealthy" ]] && _unhealthy="${_unhealthy}${_n} "
+		done <<< "$_names"
+
+		if [[ -n "$_unhealthy" ]]; then
+			warn "settle_healthcheck: LATE WEDGE — container(s) went unhealthy after the gate passed: ${_unhealthy}(${_label})"
+			warn "settle_healthcheck: this is #522 — the functional snapshot was clean and the container failed afterwards"
+			return 1
+		fi
+		if [[ "$_watched" -eq 0 ]]; then
+			log "settle_healthcheck: late-wedge watch — no container declares a HEALTHCHECK (${_skipped} skipped), nothing to watch"
+			return 0
+		fi
+		sleep "$_interval"
+		_elapsed=$(( _elapsed + _interval ))
+	done
+	log "settle_healthcheck: late-wedge watch clean after ${_window}s — ${_watched} container(s) watched, ${_skipped} without a HEALTHCHECK skipped (${_label})"
 	return 0
 }
 

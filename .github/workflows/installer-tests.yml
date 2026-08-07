@@ -28,6 +28,7 @@ on:
       - 'lib/healthcheck-lib.sh'
       - 'tests/test_settle_serveability.sh'
       - 'tests/test_settle_dual_pin_consistency.sh'
+      - 'tests/test_settle_late_wedge.sh'
       - 'tests/test_caddy_admin_origins.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
@@ -60,6 +61,7 @@ on:
       - 'lib/healthcheck-lib.sh'
       - 'tests/test_settle_serveability.sh'
       - 'tests/test_settle_dual_pin_consistency.sh'
+      - 'tests/test_settle_late_wedge.sh'
       - 'tests/test_caddy_admin_origins.sh'
       - 'manifest.yaml'
       - 'healthcheck.sh'
@@ -132,3 +134,5 @@ jobs:
         run: bash tests/test_settle_dual_pin_consistency.sh
       - name: Caddy admin origins carry the host:port form (#518 regression)
         run: bash tests/test_caddy_admin_origins.sh
+      - name: Upgrade gate does not declare success over a late wedge (#522)
+        run: bash tests/test_settle_late_wedge.sh
