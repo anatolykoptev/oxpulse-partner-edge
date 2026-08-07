@@ -5,6 +5,16 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.11](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.10...v0.16.11) (2026-08-07)
+
+
+### Bug Fixes
+
+* **caddy:** port-qualified admin origins — unbreaks healthcheck and caddy reload ([#542](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/542)) ([b69621a](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/b69621a2e882c8d959ca9a2a3ceac1df22d81bf6))
+* **upgrade:** do not declare success over a container that wedges after the gate ([#522](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/522)) ([#545](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/545)) ([69d6156](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/69d615688e188155ba70c5218aa29d2d03871c90))
+* **upgrade:** fail loudly when the node-config in use cannot be rendered ([#512](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/512)) ([#549](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/549)) ([3c2ccc8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3c2ccc8d7bf5fdc6843a42edd0df8bb94f2fb00e))
+* **upgrade:** run the post-upgrade re-render under a health gate ([#514](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/514)) ([#547](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/547)) ([feecc31](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/feecc31c70967d7d526aeaaa76168cfdce0197a4))
+
 ## [0.16.10](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.9...v0.16.10) (2026-07-31)
 
 
