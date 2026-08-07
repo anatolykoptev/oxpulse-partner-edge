@@ -127,7 +127,10 @@ warn() { printf '!! %s\n'  "$*" >&2; }
 die()  { printf 'ERR %s\n' "$*" >&2; exit 1; }
 PREFIX_BIN="${PREFIX_BIN:-${OXPULSE_PREFIX_BIN:-/usr/local/bin}}"
 HELPERS
-    awk '/^_HOST_SCRIPT_SBIN_FILES=\(/{found=1} found{print} found && /^\)$/{exit}' "$UPGRADE"
+    # Every _HOST_SCRIPT_* array by pattern — naming them one at a time silently
+    # omits a newly-added array, which then expands to nothing inside
+    # sync_host_scripts and makes the cases below vacuous instead of red.
+    awk '/^_HOST_SCRIPT_[A-Z_]+=\(/{f=1} f{print} f && /^\)$/{f=0}' "$UPGRADE"
     awk '/^_host_script_remote_name\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^_host_script_install_dir\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^_host_script_mode\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"

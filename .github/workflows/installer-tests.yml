@@ -150,3 +150,7 @@ jobs:
         run: bash tests/test_render_gate.sh
       - name: SFU signing-pubkey gauge can reach 1 (#550)
         run: bash tests/test_sfu_pubkey_gauge.sh
+      - name: Upgrade enable-set matches the installer's, and every unit is delivered
+        run: bash tests/test_upgrade_enable_set_matches_installer.sh
+      - name: Upgrade converges the systemd surface (templated units + enablement)
+        run: bash tests/test_upgrade_converges_systemd_units.sh

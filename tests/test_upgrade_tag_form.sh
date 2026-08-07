@@ -260,11 +260,13 @@ trap "rm -f '$PREAMBLE_TAG' '$PREAMBLE_SYNC'" EXIT
     printf 'die()  { while IFS= read -r _line; do printf "ERR %%s\\n" "$_line" >&2; done <<< "$*"; exit 1; }\n'
     printf 'PREFIX_BIN="${PREFIX_BIN:-${OXPULSE_PREFIX_BIN:-/usr/local/bin}}"\n'
     printf 'ALLOW_UNVERIFIED="${ALLOW_UNVERIFIED:-0}"\n'
-    awk '/^_HOST_SCRIPT_SBIN_FILES=\(/{found=1} found{print} found && /^\)$/{exit}' "$UPGRADE"
+    # Every _HOST_SCRIPT_* array by pattern — naming them one at a time silently
+    # omits a newly-added array, which then expands to nothing inside
+    # sync_host_scripts and makes the cases below vacuous instead of red.
+    awk '/^_HOST_SCRIPT_[A-Z_]+=\(/{f=1} f{print} f && /^\)$/{f=0}' "$UPGRADE"
     awk '/^_host_script_remote_name\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^_host_script_install_dir\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^_host_script_mode\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
-    awk '/^_HOST_SCRIPT_RESTART_UNITS=\(/{found=1} found{print} found && /^\)$/{exit}' "$UPGRADE"
     # snapshot_host_scripts/restore_host_scripts/sync_host_scripts are now
     # thin lazy-source forwarders in upgrade.sh (Phase 4 strangler-harden,
     # task p4) — the awk-extracted stubs below can't resolve

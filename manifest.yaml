@@ -108,6 +108,18 @@ surfaces:
     checksum_source: SHA256SUMS
     on_failure_alert: "oxpulse-alert@%n.service"
     wired: false                        # Phase 5 (OnFailure wiring)
+    # STILL wired:false here, and that is honest — the reconcile ENGINE does not
+    # own this surface yet. Delivery and enablement live in sync_host_scripts
+    # (lib/host-scripts-lib.sh, Steps 5/5b/5c) because reconcile_all has exactly
+    # ONE call site, on the --with-templates path, and the fleet's own rollout
+    # (_maybe_self_upgrade in oxpulse-partner-edge-refresh.sh) invokes
+    # `oxpulse-partner-edge-upgrade v<tag>` with no flags. A handler wired into
+    # the engine would therefore never execute for an automated rollout —
+    # correct-looking code that the fleet never runs. sync_host_scripts is on
+    # all four apply paths, so that is where the convergence had to go.
+    # Moving it under the engine means giving reconcile_all a call site on the
+    # plain path first; that is the Phase 5 work, not this.
+    enable_set_authority: "lib/install-systemd.sh:_systemd_enable_units (BAKE_MODE=0 branch)"
 
 unmanaged:
   # Documented EXCLUSIONS — never read or written by the reconcile engine.
@@ -117,6 +129,16 @@ unmanaged:
     reason: "data feed, own lifecycle (ru-subnets-update timer)"
   - files: [reality.priv, awg-private.key, token]
     reason: "secrets, generate-once; never re-rendered from template"
+  - units: [oxpulse-partner-edge-split-routing.service,
+            oxpulse-partner-edge-ru-subnets-update.service,
+            oxpulse-partner-edge-ru-subnets-update.timer]
+    reason: >-
+      RU split-routing profile. The unit FILES are delivered to every node
+      (_HOST_SCRIPT_SYSTEMD_FILES) so they are current wherever they run, but
+      their ENABLED state is a per-node operator decision — cheburator enables
+      them, the other four do not. sync_host_scripts's Step 5c is enable-only
+      for exactly this reason: converging to an exact set would disable them on
+      cheburator at its next upgrade. Delivery is fleet-wide; activation is not.
 
 state_schema:
   version: 1          # ADR-002 freeze; migrate_state() forward-only

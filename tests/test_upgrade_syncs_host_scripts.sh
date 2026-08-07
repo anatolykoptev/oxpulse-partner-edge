@@ -122,16 +122,17 @@ die()  { printf 'ERR %s\n' "$*" >&2; exit 1; }
 PREFIX_BIN="${PREFIX_BIN:-${OXPULSE_PREFIX_BIN:-/usr/local/bin}}"
 HELPERS
 
-    # _HOST_SCRIPT_SBIN_FILES array
-    awk '/^_HOST_SCRIPT_SBIN_FILES=\(/{found=1} found{print} found && /^\)$/{exit}' "$UPGRADE"
+    # EVERY _HOST_SCRIPT_* array, matched by pattern rather than named one at a
+    # time. A hand-listed extraction silently omits a newly-added array, which
+    # then expands to nothing inside sync_host_scripts — turning the cases below
+    # vacuous instead of red. Found 2026-08-07, when the templated-unit and
+    # enable-set arrays were added and this preamble could not see them.
+    awk '/^_HOST_SCRIPT_[A-Z_]+=\(/{f=1} f{print} f && /^\)$/{f=0}' "$UPGRADE"
 
     # helper functions
     awk '/^_host_script_remote_name\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^_host_script_install_dir\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
     awk '/^_host_script_mode\(\)/{found=1} found{print} /^}$/ && found{exit}' "$UPGRADE"
-
-    # _HOST_SCRIPT_RESTART_UNITS array
-    awk '/^_HOST_SCRIPT_RESTART_UNITS=\(/{found=1} found{print} found && /^\)$/{exit}' "$UPGRADE"
 
     # main exported functions — snapshot_host_scripts/restore_host_scripts/
     # sync_host_scripts are now thin lazy-source forwarders in upgrade.sh
