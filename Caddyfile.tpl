@@ -3,7 +3,7 @@
 #
 # Traffic split on partner edge:
 #   / (SPA)         → xray-client:3080 (backend renders branded index.html)
-#   /_app/immutable → xray-client:3080 BUT cached 1 year at Caddy
+#   /_app/immutable → cached AT THIS EDGE (Souin), 1y browser TTL, tunnel on miss
 #   /api/*          → xray-client:3080 with X-Forwarded-Host header
 #   /ws/*           → xray-client:3080 (WebSocket upgrade preserved by Caddy)
 #   {{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}} TLS passthrough → coturn:5349
@@ -28,6 +28,15 @@
         origins localhost 127.0.0.1 localhost:2019 127.0.0.1:2019
     }
     email admin@{{PARTNER_DOMAIN}}
+
+    # Edge cache, used by the @immutable route below and nowhere else.
+    # Storage is in-memory by design: ~50 content-hashed files, ~266 KB per
+    # build. Souin logs a startup warning that its default store is
+    # dev-grade; that warning is about heavy workloads, not this one.
+    # Revisit only if a partner reports memory pressure.
+    cache {
+        ttl 8760h
+    }
 
     # M2b.2: DB-IP country lookup — DISABLED 2026-05-16.
     # The aksdb fork registered maxmind_geolocation as a global option;
@@ -174,12 +183,31 @@
     handle /sfu/ws/* {
         reverse_proxy host.docker.internal:8920
     }
+    # Content-hashed SPA assets — the ONLY cacheable surface on this edge.
+    #
+    # Measured 2026-08-07: a visitor in Russia loads 69 assets, each tunnelled
+    # Moscow → San Jose over AWG → xray → HY2 → naive, the slowest and most
+    # fragile path in the system. Proven by firing 8 requests at one chunk on
+    # zvonilka.net and watching the origin's own counter move by exactly 8.
+    #
+    # Filenames carry a content hash, so a new build produces new names: there
+    # is no invalidation problem and no way to serve a stale bundle. That
+    # property is what makes a one-year TTL safe HERE and nowhere else.
+    #
+    # NEVER widen this matcher. The document itself is branded per-partner at
+    # serve time by the Rust SPA fallback (__BRANDING_*__ substitution); a
+    # cached document would serve one partner's branding to another partner's
+    # users — a worse bug than the latency this fixes. API, /ws, /events,
+    # /sfu and /relay stay on the tunnel unconditionally.
+    @immutable path /_app/immutable/*
+    handle @immutable {
+        header Cache-Control "public, max-age=31536000, immutable"
+        cache
+        import tunnel_upstream_default
+    }
+
     # Every GET / just serves the SPA.
     handle {
-        # Cache SvelteKit hashed assets for a year (immutable by filename hash).
-        @immutable path_regexp /_app/immutable/.*
-        header @immutable Cache-Control "public, max-age=31536000, immutable"
-
         # API — preserve partner domain so backend branding resolver picks right config.
         import tunnel_upstream /api/*
 
