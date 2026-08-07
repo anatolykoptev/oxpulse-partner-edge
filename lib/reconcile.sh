@@ -278,6 +278,10 @@ reconcile_caddy_surface() {
     # (after change-detection so the substituted value does not affect comparison).
     sed -i "s|__CADDYFILE_SHA__|${_rendered_sha}|g" "$_out_path"
 
+    # Fail-closed BEFORE the swap: once the file is on disk, a failed reload
+    # falls back to force-recreate, which reads it and crashloops caddy.
+    _assert_caddyfile_loads "$_out_path"
+
     # Atomic swap (rename(2) on same filesystem — no partial-write window).
     atomic_swap "$_installed_path" "$_out_path" 0644
     log "reconcile_caddy: Caddyfile updated (sha256=$_rendered_sha)"
@@ -510,13 +514,14 @@ mark_caddy_reload() {
 # skips silently if the source Caddyfile or the log dir is unavailable/unwritable.
 # Timestamp is read from the system clock (UTC), never hardcoded.
 _reconcile_persist_failed_caddyfile() {
-    local _src="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/Caddyfile"
+    local _src="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}/Caddyfile}"
+    local _label="${2:-caddy-reload-fail}"
     [[ -f "$_src" ]] || return 0
     local _logdir="${PARTNER_EDGE_LOG_DIR:-/var/log/oxpulse-partner-edge}"
     mkdir -p "$_logdir" 2>/dev/null || return 0
     local _ts _dst
     _ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || printf 'unknown')
-    _dst="$_logdir/caddy-reload-fail-${_ts}.caddy"
+    _dst="$_logdir/${_label}-${_ts}.caddy"
     if cp -f "$_src" "$_dst" 2>/dev/null; then
         # Restrict the post-mortem copy to the operator (0600). The live Caddyfile must
         # carry NO secrets (invariant asserted in Caddyfile.tpl:387 / docs/runbooks/
@@ -528,6 +533,98 @@ _reconcile_persist_failed_caddyfile() {
         warn "reconcile: saved un-loadable Caddyfile for post-mortem -> $_dst"
     fi
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# _assert_caddyfile_loads CANDIDATE
+#
+# Fail-closed gate: a rendered Caddyfile must be loadable by the caddy binary
+# that is ACTUALLY RUNNING before it is allowed to reach disk.
+#
+# Why the swap is the dangerous step, not the reload: apply_caddy_reloads
+# hot-reloads via the admin API and, on failure, falls back to
+# `up -d --force-recreate caddy`. A Caddyfile the binary cannot parse survives
+# neither path — the recreate reads the already-swapped file, caddy crashloops,
+# and :443 on that edge goes dark. By the time the reload reports failure the
+# bad file is live.
+#
+# upgrade.sh already owns this exact test — conflict check 1 (upgrade.sh:2806),
+# whose hint already names the remedy ("upgrade image first --image-only"). It
+# runs ONLY on the --dry-run report path, so the paths that actually apply a
+# template never execute it. Check 3 had precisely this shape and was promoted
+# to the apply path as _assert_apply_not_downgrade, with a comment recording
+# that a plain upgrade would otherwise SILENTLY downgrade. Check 1 was never
+# promoted. This is that promotion, placed in the render path so install,
+# upgrade, refresh and --templates-only all inherit it from one place.
+#
+# Scope is deliberately narrow: it gates ONLY when a caddy container is already
+# running. With no running caddy there is nothing to take down, and a fresh
+# install renders its Caddyfile before the image is ever pulled — failing closed
+# there would break first-install to defend against a risk that does not exist
+# yet. That is a real skip, so it is logged rather than silent.
+# ---------------------------------------------------------------------------
+_assert_caddyfile_loads() {
+    local _candidate="$1"
+    local _docker="${DOCKER_BIN:-docker}"
+    local _etc="${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+
+    case " ${SKIPPED_CHECKS:-} " in
+        *" 1 "*)
+            warn "reconcile_caddy: caddy config validation SKIPPED via --skip-check=1"
+            return 0
+            ;;
+    esac
+    if [[ "${OXPULSE_SKIP_CADDY_VALIDATE:-0}" -eq 1 ]]; then
+        warn "reconcile_caddy: caddy config validation SKIPPED via OXPULSE_SKIP_CADDY_VALIDATE=1"
+        return 0
+    fi
+
+    # The image of the RUNNING caddy — that binary, not a tag in a template, is
+    # what has to parse this file. Resolve via compose first (authoritative for
+    # this project), falling back to the conventional container name.
+    local _cid=""
+    if [[ -n "${COMPOSE_FILE:-}" && -f "${COMPOSE_FILE:-}" ]]; then
+        _cid=$("$_docker" compose -f "$COMPOSE_FILE" ps -q caddy 2>/dev/null | head -1 || true)
+    fi
+    [[ -z "$_cid" ]] && _cid=$("$_docker" ps -q -f name='^oxpulse-partner-caddy$' 2>/dev/null | head -1 || true)
+    if [[ -z "$_cid" ]]; then
+        log "reconcile_caddy: no running caddy container — config validation skipped (nothing to take down)"
+        return 0
+    fi
+
+    local _image
+    _image=$("$_docker" inspect -f '{{.Config.Image}}' "$_cid" 2>/dev/null || true)
+    if [[ -z "$_image" ]]; then
+        warn "reconcile_caddy: could not resolve the running caddy image — validation skipped"
+        return 0
+    fi
+
+    # Mount the same inputs Caddy will read at load time. conf.d is included on
+    # purpose: those operator overrides are imported by the rendered Caddyfile
+    # (Caddyfile.tpl tail), so a validation without them tests a config that
+    # never exists on this box.
+    local -a _mounts=(-v "${_candidate}:/etc/caddy/Caddyfile:ro")
+    [[ -d "$_etc/conf.d" ]] && _mounts+=(-v "$_etc/conf.d:$_etc/conf.d:ro")
+    [[ -d "$_etc/cover" ]] && _mounts+=(-v "$_etc/cover:/srv/cover:ro")
+
+    local _out _rc=0
+    _out=$("$_docker" run --rm "${_mounts[@]}" "$_image" \
+        caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) || _rc=$?
+    if [[ $_rc -eq 0 ]]; then
+        log "reconcile_caddy: rendered Caddyfile validates against the running image ($_image)"
+        return 0
+    fi
+
+    _reconcile_persist_failed_caddyfile "$_candidate" "caddy-validate-fail"
+    local _err
+    _err=$(printf '%s' "$_out" | grep -m1 -iE 'error|unrecognized|unknown' || printf '%s' "$_out" | tail -1)
+    die "reconcile_caddy: the rendered Caddyfile is NOT loadable by the running caddy image — refusing to install it.
+  Image: $_image
+  Error: $_err
+  The previous Caddyfile is untouched and caddy keeps serving; nothing was swapped.
+  This is almost always ORDERING: a template using a directive the running binary
+  lacks. Update the image first (oxpulse-partner-edge-upgrade --image-only), then
+  re-run. Override with --skip-check=1 only when the directive is known to exist."
 }
 
 # apply_caddy_reloads — hot-reload caddy via admin API; no peer containers down.
