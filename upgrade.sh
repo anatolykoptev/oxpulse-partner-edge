@@ -1207,6 +1207,49 @@ _HOST_SCRIPT_SYSTEMD_FILES=(
 	oxpulse-awg-params-agent.service
 )
 
+# TEMPLATED systemd units — rendered from STATE before install (Step 5b of
+# sync_host_scripts). These carry {{TURNS_SUBDOMAIN}} / {{PARTNER_DOMAIN}}
+# placeholders that install.sh substitutes at install time
+# (_systemd_install_cert_watch_units, lib/install-systemd.sh), which is exactly
+# why they are NOT in _HOST_SCRIPT_SYSTEMD_FILES above: that loop is a verbatim
+# checksum-verified copy, and it would install the raw template.
+#
+# Consequence of having neither path deliver them, measured on the fleet
+# 2026-08-07: the two oldest nodes (rvpn-seed, zvonilka-cc7cf842800b) carry no
+# cert-watch units at all, so a renewed TURNS certificate never signals coturn
+# on either box — and no upgrade could ever have fixed it, because delivery was
+# reachable only from a fresh install.
+_HOST_SCRIPT_SYSTEMD_TEMPLATED_FILES=(
+	oxpulse-partner-cert-watch.path
+	oxpulse-partner-cert-watch.service
+)
+
+# Systemd units the managed set keeps ENABLED (Step 5c of sync_host_scripts).
+#
+# This is a DERIVED contract, not an independent list: it must equal the set
+# that lib/install-systemd.sh's _systemd_enable_units enables in its
+# BAKE_MODE=0 branch, because a fresh install's enabled state IS the desired
+# state. tests/test_upgrade_enable_set_matches_installer.sh extracts that
+# branch and asserts set equality, so adding a unit on one side and not the
+# other fails CI rather than shipping a fleet that disagrees with itself.
+#
+# Deliberately NOT here:
+#   • oxpulse-partner-edge-hydrate.service — bake-mode only (first-boot oneshot
+#     after snapshot→clone); enabling it on a live node is wrong.
+#   • split-routing / ru-subnets-update — manifest.yaml declares them
+#     `unmanaged`. cheburator enables them by hand for its RU split-routing
+#     profile; the convergence below is enable-only precisely so that decision
+#     survives every upgrade untouched.
+_HOST_SCRIPT_ENABLE_UNITS=(
+	oxpulse-partner-edge.service
+	oxpulse-partner-cert-watch.path
+	oxpulse-partner-edge-refresh.timer
+	oxpulse-partner-edge-sni-rotate.timer
+	oxpulse-xray-update.timer
+	oxpulse-geoip-refresh.timer
+	oxpulse-channels-health-report.timer
+)
+
 # snapshot_host_scripts / restore_host_scripts / sync_host_scripts — thin
 # forwarders (Phase 4 strangler-harden) — the real implementations moved to
 # lib/host-scripts-lib.sh under these SAME names. _upgrade_resolve_host_scripts_lib

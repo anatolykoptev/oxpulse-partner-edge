@@ -83,9 +83,13 @@ snapshot_host_scripts() {
 	done
 
 	# Systemd units for the affected timers/services.
-	# Driven by _HOST_SCRIPT_SYSTEMD_FILES — same set as sync_host_scripts installs.
+	# Driven by _HOST_SCRIPT_SYSTEMD_FILES + _HOST_SCRIPT_SYSTEMD_TEMPLATED_FILES —
+	# the same two sets sync_host_scripts installs (Step 5 and Step 5b). The
+	# templated ones must be snapshotted too: their installed bytes are the
+	# RENDERED form, which no fetch can reproduce, so a rollback that skipped
+	# them would leave the node on the new render with no way back.
 	local unit
-	for unit in "${_HOST_SCRIPT_SYSTEMD_FILES[@]}"; do
+	for unit in "${_HOST_SCRIPT_SYSTEMD_FILES[@]}" "${_HOST_SCRIPT_SYSTEMD_TEMPLATED_FILES[@]}"; do
 		[[ -f "$SYSTEMD_DIR/$unit" ]] && cp -a "$SYSTEMD_DIR/$unit" "$snap_dir/systemd/$unit" || true
 	done
 
@@ -201,6 +205,8 @@ sync_host_scripts() {
 		log "[dry-run]   scripts: ${_HOST_SCRIPT_SBIN_FILES[*]}"
 		log "[dry-run]   BACKEND_API for channel-health drop-in: $_backend_api"
 		log "[dry-run]   units: oxpulse-channels-health-report.{service,timer} + refresh/sni-rotate/xray-update/geoip-refresh"
+		log "[dry-run]   templated units (rendered from STATE): ${_HOST_SCRIPT_SYSTEMD_TEMPLATED_FILES[*]}"
+		log "[dry-run]   enable (enable-only, never disable): ${_HOST_SCRIPT_ENABLE_UNITS[*]}"
 		log "[dry-run]   reload: $SYSTEMCTL_BIN daemon-reload + restart affected timers"
 		log "[dry-run]   idempotency: sha256 comparison (no-op if already current)"
 		log "[dry-run]   VERSION: would install to $PREFIX_SHARE/oxpulse-partner-edge/VERSION"
@@ -468,6 +474,158 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 		install -m 0644 "$unit_tmp" "$unit_dst"
 		log "  host-script: installed systemd/$unit"
 		_any_changed=1
+	done
+
+	# ------------------------------------------------------------------
+	# Step 5b: TEMPLATED systemd units — render from STATE, then install.
+	# Driven by _HOST_SCRIPT_SYSTEMD_TEMPLATED_FILES (see its header in
+	# upgrade.sh for why these cannot ride the verbatim copy loop above).
+	#
+	# FAIL-CLOSED on an unresolved placeholder. A cert-watch .path whose
+	# {{TURNS_SUBDOMAIN}} never got substituted installs cleanly, reads
+	# `enabled` under systemctl, and watches a path ending in "..crt"
+	# forever — an inert unit that every probe reports as converged. Leaving
+	# it ABSENT is strictly better: absence is what the fleet fingerprint
+	# already measures, and a silently-inert watcher is what it cannot see.
+	# ------------------------------------------------------------------
+	local _tpl_turns _tpl_domain
+	_tpl_turns="${TURNS_SUBDOMAIN:-}"
+	_tpl_domain="${PARTNER_DOMAIN:-}"
+	if [[ ( -z "$_tpl_turns" || -z "$_tpl_domain" ) && -r "$STATE_FILE" ]]; then
+		# shellcheck disable=SC1090
+		[[ -z "$_tpl_turns" ]]  && _tpl_turns=$(. "$STATE_FILE" 2>/dev/null && printf '%s' "${TURNS_SUBDOMAIN:-}")
+		# shellcheck disable=SC1090
+		[[ -z "$_tpl_domain" ]] && _tpl_domain=$(. "$STATE_FILE" 2>/dev/null && printf '%s' "${PARTNER_DOMAIN:-}")
+	fi
+
+	local _tu _tu_rendered
+	for _tu in "${_HOST_SCRIPT_SYSTEMD_TEMPLATED_FILES[@]}"; do
+		if [[ -z "$_tpl_turns" || -z "$_tpl_domain" ]]; then
+			warn "host-script sync: cannot render systemd/$_tu — TURNS_SUBDOMAIN and/or PARTNER_DOMAIN absent from $STATE_FILE. Leaving the unit ABSENT rather than installing one with unresolved {{placeholders}} (an inert watcher reads as converged; an absent one does not)."
+			continue
+		fi
+		unit_url="$REPO_RAW/systemd/$_tu"
+		unit_tmp="$tmpdir/$_tu"
+		unit_dst="$SYSTEMD_DIR/$_tu"
+		_tu_rendered="$tmpdir/$_tu.rendered"
+		if ! curl -fsSL --max-time 30 "$unit_url" -o "$unit_tmp" 2>/dev/null; then
+			warn "host-script sync: could not fetch systemd/$_tu — skipping"
+			continue
+		fi
+		# Checksum guard runs on the TEMPLATE bytes as released — the rendered
+		# output is per-node and has no entry in SHA256SUMS by construction.
+		unit_expected_sha=$(_lookup_sha256 "$_tu")
+		if [[ -n "$unit_expected_sha" ]]; then
+			unit_actual_sha=$(sha256sum "$unit_tmp" | awk '{print $1}')
+			if [[ "$unit_actual_sha" != "$unit_expected_sha" ]]; then
+				warn "host-script sync: SHA256 MISMATCH for systemd/$_tu (expected=$unit_expected_sha actual=$unit_actual_sha) — skipping (possible MITM or stale CDN)"
+				continue
+			fi
+		fi
+		# Same substitution install.sh performs (_systemd_install_cert_watch_units).
+		sed -e "s|{{TURNS_SUBDOMAIN}}|${_tpl_turns}|g" \
+		    -e "s|{{PARTNER_DOMAIN}}|${_tpl_domain}|g" \
+		    "$unit_tmp" > "$_tu_rendered"
+		if grep -qF '{{' "$_tu_rendered"; then
+			warn "host-script sync: systemd/$_tu still contains an unresolved {{placeholder}} after substitution — NOT installing (the template gained a placeholder this renderer does not know about)"
+			continue
+		fi
+		if [[ -f "$unit_dst" ]]; then
+			installed_sha=$(sha256sum "$unit_dst" | awk '{print $1}')
+			actual_sha=$(sha256sum "$_tu_rendered" | awk '{print $1}')
+			if [[ "$installed_sha" == "$actual_sha" ]]; then
+				continue
+			fi
+		fi
+		install -m 0644 "$_tu_rendered" "$unit_dst"
+		log "  host-script: installed systemd/$_tu (rendered from STATE)"
+		_any_changed=1
+	done
+
+	# ------------------------------------------------------------------
+	# Step 5c: ENABLEMENT convergence.
+	#
+	# Delivery was never the whole job. sync_host_scripts has installed unit
+	# FILES for as long as it has existed, but nothing on any apply path ever
+	# ran `systemctl enable` — only install.sh does, in
+	# _systemd_enable_units (lib/install-systemd.sh). So a node whose install
+	# predates a unit, or whose operator ever disabled one, stays that way
+	# through every subsequent upgrade forever.
+	#
+	# Measured on the fleet 2026-08-07: on rvpn-seed and
+	# zvonilka-cc7cf842800b, oxpulse-partner-edge.service itself is DISABLED
+	# — those two boxes do not bring their containers back after a reboot —
+	# along with the xray-update and geoip-refresh timers. The other three
+	# nodes have all seven enabled.
+	#
+	# ENABLE-ONLY, never disable. cheburator hand-enables split-routing and
+	# ru-subnets-update for its RU profile; manifest.yaml declares those
+	# `unmanaged`, and a converge-to-exact-set would rip them out on the next
+	# upgrade. Enable-only is monotonic, so every unmanaged decision on every
+	# node survives untouched.
+	#
+	# START policy is derived from the unit SUFFIX, never a second list:
+	#   .timer / .path → enable + start. Arming a timer or a path watch has
+	#     no data-path effect, and a newly-enabled timer does nothing at all
+	#     until the next boot unless it is also started. A Persistent=true
+	#     timer catching up can fire refresh.service, which may attempt a
+	#     self-upgrade — upgrade.sh's own `flock -n` (FIX 5) makes that a
+	#     clean die-and-retry, not a concurrent run.
+	#   .service       → enable ONLY, never --now. oxpulse-partner-edge.service
+	#     is `ExecStart=docker compose up -d`, and on BOTH apply paths this
+	#     function runs AFTER the compose image tags are rewritten to the
+	#     target but BEFORE ghcr_login_from_file and the pull. `enable --now`
+	#     here would compose-up against tags that are not on the box yet,
+	#     outside the zero-downtime recreate. The defect being fixed is
+	#     "does not survive a reboot"; `enable` fixes exactly that, and the
+	#     containers are already up under `restart: unless-stopped`.
+	#
+	# IR-5 lesson (lib/install-split-routing.sh:113): `systemctl enable`
+	# exiting 0 is NOT sufficient evidence — verify with is-enabled after.
+	#
+	# A MASKED unit is left masked, deliberately. `enable` cannot lift a mask,
+	# so the post-enable verification below fails and warns on every upgrade.
+	# That noise is the correct outcome: masking is an explicit operator
+	# action, force-unmasking it would break the enable-only contract above,
+	# and a recurring warn is how an operator finds out their mask is now
+	# fighting the managed set.
+	# ------------------------------------------------------------------
+	if [[ "$_any_changed" -eq 1 ]]; then
+		# Units may have just landed on disk; let systemd see them before we
+		# ask it to enable them. Step 7's reload stays — it is idempotent.
+		"$SYSTEMCTL_BIN" daemon-reload 2>/dev/null || true
+	fi
+
+	local _eu _eu_state
+	for _eu in "${_HOST_SCRIPT_ENABLE_UNITS[@]}"; do
+		if [[ ! -f "$SYSTEMD_DIR/$_eu" ]]; then
+			warn "unit-enable: $_eu is not installed at $SYSTEMD_DIR — cannot enable (see the Step 5/5b warnings above for why it is missing)"
+			continue
+		fi
+		_eu_state=$("$SYSTEMCTL_BIN" is-enabled "$_eu" 2>/dev/null || true)
+		# `static` and `indirect` units have no [Install] to enable; `enabled`
+		# is already converged. All three are no-ops, not failures.
+		case "$_eu_state" in
+			enabled | enabled-runtime | static | indirect) continue ;;
+		esac
+
+		"$SYSTEMCTL_BIN" enable "$_eu" >/dev/null 2>&1 \
+			|| warn "unit-enable: systemctl enable $_eu returned non-zero"
+
+		_eu_state=$("$SYSTEMCTL_BIN" is-enabled "$_eu" 2>/dev/null || true)
+		if [[ "$_eu_state" != "enabled" ]]; then
+			warn "unit-enable: $_eu still reads is-enabled='${_eu_state:-<none>}' after enable — NOT converged; this node will not start it at boot"
+			continue
+		fi
+		log "  unit-enable: $_eu enabled"
+		_any_changed=1
+
+		case "$_eu" in
+			*.timer | *.path)
+				"$SYSTEMCTL_BIN" start "$_eu" >/dev/null 2>&1 \
+					|| warn "unit-enable: could not start $_eu now — it will arm at the next boot"
+				;;
+		esac
 	done
 
 	# ------------------------------------------------------------------
