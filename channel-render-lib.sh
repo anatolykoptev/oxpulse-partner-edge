@@ -377,8 +377,14 @@ except Exception:
     rm -f "$out"
 
     log "xray-client.json refreshed from template"
-    (cd "$PREFIX_ETC" && docker compose restart xray-client 2>/dev/null || true)
-    log "xray-client restarted"
+    # The result used to be swallowed by `2>/dev/null || true` while the next
+    # line asserted the restart had happened, so a restart that did not occur
+    # was reported to the operator as one that did (#514).
+    if (cd "$PREFIX_ETC" && docker compose restart xray-client >/dev/null 2>&1); then
+        log "xray-client restarted"
+    else
+        warn "xray-client restart FAILED — the rendered config is on disk but NOT in effect until the container restarts"
+    fi
 }
 
 # ── hysteria2 (Phase 1.7 CH3) ────────────────────────────────────────────
