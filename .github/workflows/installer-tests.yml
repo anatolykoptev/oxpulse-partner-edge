@@ -148,3 +148,5 @@ jobs:
         run: bash tests/test_embedded_python_imports.sh
       - name: Post-upgrade re-render runs under a health gate (#514)
         run: bash tests/test_render_gate.sh
+      - name: SFU signing-pubkey gauge can reach 1 (#550)
+        run: bash tests/test_sfu_pubkey_gauge.sh
