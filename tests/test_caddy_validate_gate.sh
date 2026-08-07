@@ -121,10 +121,22 @@ else
 fi
 
 # --- T4: the refusal names the remedy and the untouched state -------------
-if [[ "$out" == *"--image-only"* && "$out" == *"previous Caddyfile is untouched"* ]]; then
-	pass "T4: refusal names the ordering remedy and states nothing was swapped"
+# This asserted the literal string "--image-only" until 2026-08-07. That flag
+# has never existed in upgrade.sh's parser — so the test was pinning a remedy an
+# operator would type at 3am and get "unknown option". Assert the two things
+# that actually matter instead: the message points at upgrading the image first,
+# and it states nothing was swapped. The flag-is-real question is answered
+# generally by tests/test_operator_hints_name_real_flags.sh, which derives the
+# valid set from the parser rather than from a string typed here.
+if [[ "$out" == *"upgrade image first"* || "$out" == *"Update the image first"* ]]; then
+	pass "T4a: refusal names the ordering remedy (upgrade the image first)"
 else
-	fail "T4: refusal message lacks the remedy or the reassurance: $out"
+	fail "T4a: refusal message lacks the ordering remedy: $out"
+fi
+if [[ "$out" == *"previous Caddyfile is untouched"* ]]; then
+	pass "T4b: refusal states nothing was swapped"
+else
+	fail "T4b: refusal message lacks the reassurance: $out"
 fi
 
 # --- T5: --skip-check=1 escape hatch --------------------------------------

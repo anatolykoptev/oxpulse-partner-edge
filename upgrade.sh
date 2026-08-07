@@ -2901,7 +2901,8 @@ _conflict_check_1() {
 		CHECK_DETAIL[1]="  Image: $current_image
   Error: $err_line
   Hint:  This would crashloop caddy on apply. Either upgrade image first
-         (oxpulse-partner-edge-upgrade --image-only) or pin to compatible Caddyfile."
+         (oxpulse-partner-edge-upgrade latest — no mode flag upgrades images
+         without touching templates) or pin to compatible Caddyfile."
 	fi
 }
 

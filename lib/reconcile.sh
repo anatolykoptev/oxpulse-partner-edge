@@ -549,7 +549,7 @@ _reconcile_persist_failed_caddyfile() {
 # bad file is live.
 #
 # upgrade.sh already owns this exact test — conflict check 1 (upgrade.sh:2806),
-# whose hint already names the remedy ("upgrade image first --image-only"). It
+# whose hint already names the remedy (upgrade the image first). It
 # runs ONLY on the --dry-run report path, so the paths that actually apply a
 # template never execute it. Check 3 had precisely this shape and was promoted
 # to the apply path as _assert_apply_not_downgrade, with a comment recording
@@ -623,7 +623,8 @@ _assert_caddyfile_loads() {
   Error: $_err
   The previous Caddyfile is untouched and caddy keeps serving; nothing was swapped.
   This is almost always ORDERING: a template using a directive the running binary
-  lacks. Update the image first (oxpulse-partner-edge-upgrade --image-only), then
+  lacks. Update the image first (oxpulse-partner-edge-upgrade latest — with no
+  mode flag, which upgrades images WITHOUT touching templates), then
   re-run. Override with --skip-check=1 only when the directive is known to exist."
 }
 
