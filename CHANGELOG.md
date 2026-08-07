@@ -5,6 +5,14 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.14](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.13...v0.16.14) (2026-08-07)
+
+
+### Features
+
+* **edge:** cache /_app/immutable at the partner edges ([#553](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/553)) ([689ecda](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/689ecda1bbade4fa556f22d3fd922cc8eda3adc7))
+* **upgrade:** converge the systemd surface, not just the unit files ([#558](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/558)) ([40bffa2](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/40bffa2a62f0f2e8beabf0d4f14ae58fc6c14db9))
+
 ## [0.16.13](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.12...v0.16.13) (2026-08-07)
 
 
