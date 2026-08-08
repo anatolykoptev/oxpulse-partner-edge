@@ -130,6 +130,55 @@ emit_metric() {
     fi
 }
 
+# metric_sink_discard_pre328_prom — one-shot migration for files the #328 fix
+# cannot repair.
+#
+# #328 fixed emit_metric, but it did not clean up what the broken version had
+# already written. Measured 2026-08-08 on all five production edges: every one
+# carries a partner_edge.prom dated 2026-05-26 or 2026-06-17 with duplicate
+# `# TYPE` lines and duplicate series — invalid exposition, exactly the format
+# the fix exists to prevent.
+#
+# Nothing repairs them. emit_metric regenerates the file from its state side
+# file, but these predate the state file (none of the five has one), and the
+# only callers are FAILURE counters — keys-fetch and heartbeat. No failure, no
+# call, no regeneration. Two of the five have sat untouched since May.
+#
+# That was harmless while nothing read the directory. It stops being harmless
+# the moment the collector added in #570 reaches a node: the textfile collector
+# rejects a duplicate series by discarding the WHOLE file and raising
+# node_textfile_scrape_error, so the first thing the new collector would report
+# is a parse error instead of data.
+#
+# The absence of a state file is what makes this safe to key on. partner_edge.prom
+# is written by emit_metric alone (emit_gauge owns its own per-metric files), and
+# emit_metric has written the state file beside it since #328. So .prom without
+# .state means "written by the pre-#328 code and unrecoverable" — its counter
+# values exist nowhere else and cannot be reconstructed. Deleting is strictly
+# better than keeping: a missing file collects nothing, an invalid one collects
+# nothing AND reports an error that will read as a broken collector.
+#
+# Self-limiting by construction: the next emit_metric writes both files, after
+# which this is a single `[[ -f ]]` test that always returns early.
+#
+# Prints the discarded path on stdout, nothing when there was none, and always
+# returns 0. It deliberately does not signal via exit code: every caller runs
+# under `set -e`, and a "yes, I cleaned something" non-zero return would take
+# the whole refresh down on the one run where it had work to do.
+metric_sink_discard_pre328_prom() {
+    local dir="${1:-$TEXTFILE_DIR}"
+    local prom_file="$dir/partner_edge.prom"
+    local state_file="$dir/partner_edge.prom.state"
+
+    [[ -f "$prom_file" ]]  || return 0
+    [[ -f "$state_file" ]] && return 0
+
+    if rm -f "$prom_file" 2>/dev/null; then
+        printf '%s' "$prom_file"
+    fi
+    return 0
+}
+
 # ============================================================================
 # emit_gauge / _emit_prom_gauge_file — current-state GAUGE emission, ATOMIC.
 #
