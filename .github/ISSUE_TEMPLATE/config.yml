@@ -1,0 +1,14 @@
+# Blank issues stay enabled on purpose. The templates below are a prompt for
+# what we find useful, not a form to satisfy — a well-measured report that
+# fits none of them is worth more than a filled-in one that fits.
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/anatolykoptev/oxpulse-partner-edge/security/policy
+    about: >-
+      Do not open a public issue. Partner edges are deployed as root on
+      third-party VPSes, so a public report is an exploitation window. Follow
+      SECURITY.md instead.
+  - name: Question about running an edge
+    url: https://github.com/anatolykoptev/oxpulse-partner-edge/discussions
+    about: Operational questions and setup help belong in Discussions.
