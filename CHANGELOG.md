@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.16](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.15...v0.16.16) (2026-08-08)
+
+
+### Bug Fixes
+
+* **upgrade:** converge the compose profile set, or [#570](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/570) reaches no existing node ([#574](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/574)) ([abcc6a9](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/abcc6a976c1af1e60edc6ccd6cb4d55b6e39fa6c))
+
 ## [0.16.15](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.14...v0.16.15) (2026-08-08)
 
 
