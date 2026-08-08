@@ -338,6 +338,52 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # ── Metrics collector ───────────────────────────────────────────────────────
+  # Serves host metrics AND the partner_edge_* series that host scripts write
+  # into the textfile directory via emit_gauge (lib/metric-sink-lib.sh).
+  #
+  # Why this exists: measured across all five production edges on 2026-08-08,
+  # the textfile collector was enabled on NONE of them, and three had no
+  # exporter installed at all. Every emit_gauge call ever added has been
+  # writing into a directory nothing on the box was configured to read, while
+  # reading as instrumentation in review. See #411.
+  #
+  # profiles: [metrics] — activated by install.sh ONLY when AWG_HOST_IP is
+  # non-empty. That gate is deliberate and fail-closed: with an empty mesh IP
+  # the listen address renders as ":9100", which binds every interface and
+  # publishes host inventory from a censorship-facing relay. No mesh, no
+  # exporter. Same reasoning as SFU_METRICS_BIND above, which the 2026-05-21
+  # audit found leaking on the public NIC across all three partners then live.
+  #
+  # No healthcheck on purpose. This image ships without a shell, so a
+  # CMD-SHELL probe would fail permanently — and a permanently-unhealthy
+  # container makes the upgrade settle gate roll back every future upgrade
+  # (#563). The scrape itself is the health signal: if the central Prometheus
+  # cannot reach this endpoint, that is visible centrally, which is the point.
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:v1.8.2
+    container_name: oxpulse-partner-node-exporter
+    profiles: [metrics]
+    restart: unless-stopped
+    # Host networking so the mesh address is bindable and host metrics are
+    # real rather than the container's namespace.
+    network_mode: host
+    pid: host
+    command:
+      - "--path.rootfs=/host"
+      - "--web.listen-address={{AWG_HOST_IP}}:9100"
+      - "--collector.textfile.directory=/textfile"
+    volumes:
+      - /:/host:ro,rslave
+      - /var/lib/prometheus-node-exporter/textfile:/textfile:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      oxpulse.role: "metrics"
+
 volumes:
   caddy-data:
   caddy-config:
