@@ -190,8 +190,13 @@ REFRESH="$REPO_ROOT/oxpulse-partner-edge-refresh.sh"
 if [[ ! -f "$REFRESH" ]]; then
     _fail "S6: $REFRESH not found"
 else
-    call_line=$(grep -n 'metric_sink_discard_pre328_prom' "$REFRESH" | grep -v '^\s*#' | head -1 | cut -d: -f1)
-    source_line=$(grep -n 'source "\$_MSL_LOCAL"' "$REFRESH" | head -1 | cut -d: -f1)
+    # awk reads the file directly, so there is no pipeline here at all. Piping
+    # into an early-exiting reader SIGPIPEs the upstream writer, which under
+    # `set -o pipefail` turns a successful match into a non-zero pipeline —
+    # the class tests/test_pipefail_early_exit_guard.sh forbids, and which it
+    # caught in the revision of this file before this one.
+    call_line=$(awk '/metric_sink_discard_pre328_prom/ && $0 !~ /^[[:space:]]*#/ { print NR; exit }' "$REFRESH")
+    source_line=$(awk '/source "\$_MSL_LOCAL"/ { print NR; exit }' "$REFRESH")
     if [[ -z "$call_line" ]]; then
         _fail "S6: oxpulse-partner-edge-refresh.sh never calls metric_sink_discard_pre328_prom — the migration would never run on a real node"
     elif [[ -z "$source_line" ]]; then
