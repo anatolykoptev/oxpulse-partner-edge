@@ -122,85 +122,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq bats
 
+      # Both steps call scripts/run-shell-tests.sh so that `make check-sh`
+      # locally and this job enumerate the SAME set. The enumeration used to
+      # live here inline, which meant there was no way to run what CI runs
+      # without pushing — see the script's header for the cost that carried.
+      # Skip lists and their reasons live in the script, not in this YAML.
       - name: Run plain-bash tests
-        # Only test_update_sh.sh is excluded — it needs a local HTTP fallback
-        # server not available in CI. Every other plain-bash test either passes
-        # or self-SKIPs (exit 0) when a live prerequisite is absent: a <domain>
-        # arg / running edge (test_headers, test_e2e_a_prime,
-        # test_installer_production_readiness), a locally-built Docker image or a
-        # reachable daemon (test_caddy_image, test_cover_page, caddyfile_template,
-        # caddyfile_golden, canary_endpoints), or the opec binary
-        # (test_install_ships_cover's dry-run block).
-        run: |
-          set +e
-          PASS=0; FAIL=0
-          SKIP_LIST="test_update_sh.sh"
-          # Guard: every SKIP_LIST entry must exist; stale entries fail the job.
-          for entry in $SKIP_LIST; do
-            if [ ! -f "tests/$entry" ]; then
-              echo "ERROR: SKIP_LIST entry 'tests/$entry' does not exist — remove stale exclusion" >&2
-              exit 1
-            fi
-          done
-          for f in tests/test_*.sh; do
-            name=$(basename "$f")
-            # Skip bats-format files (handled in next step)
-            if head -1 "$f" | grep -qE '^#!.*\bbats\b'; then continue; fi
-            # Skip excluded tests
-            if echo "$SKIP_LIST" | grep -qw "$name"; then
-              echo "SKIP (excluded): $name"; continue
-            fi
-            echo "--- $name ---"
-            if bash "$f"; then
-              PASS=$((PASS+1))
-            else
-              echo "FAILED: $name" >&2
-              FAIL=$((FAIL+1))
-            fi
-          done
-          echo ""
-          echo "Plain-bash: PASS=$PASS FAIL=$FAIL"
-          [ "$FAIL" -eq 0 ]
+        run: scripts/run-shell-tests.sh --plain
 
       - name: Run bats tests
-        # Bats files run as whole units; if even one @test inside fails, the
-        # file is marked FAIL. BATS_SKIP excludes whole files with stale
-        # assertions (pre-existing drift after refactors). See followup
-        # tracking issue for each entry's root cause.
-        run: |
-          set +e
-          PASS=0; FAIL=0
-          # Whole-file skip list (pre-existing drift on origin/main):
-          #   test_hydrate_render_identical.sh — Caddyfile upstream refactored from
-          #     `10.9.0.2:8907 host.docker.internal:18443` to `xray-client:3080`;
-          #     fixture not updated.
-          #   test_install_opec_parity.sh — install.sh `render_with_opec xray`
-          #     call-site removed during OPEC Phase 3 absorb; assertion stale.
-          #   test_release_assets.sh — release.yml uninstall.sh staging path
-          #     changed (Bug15 closed differently); test asserts old pattern.
-          # test_install_lib_checksum.sh — REMOVED from skip list: checksums drift fixed
-          #     (lib/lib-checksums.txt regenerated to match release pipeline, PR #285).
-          BATS_SKIP="test_hydrate_render_identical.sh \
-            test_install_opec_parity.sh test_release_assets.sh"
-          for entry in $BATS_SKIP; do
-            if [ ! -f "tests/$entry" ]; then
-              echo "ERROR: BATS_SKIP entry 'tests/$entry' does not exist — remove stale exclusion" >&2
-              exit 1
-            fi
-          done
-          for f in tests/test_*.sh; do
-            head -1 "$f" | grep -qE '^#!.*\bbats\b' || continue
-            name=$(basename "$f")
-            if echo "$BATS_SKIP" | grep -qw "$name"; then
-              echo "SKIP (excluded): $name"; continue
-            fi
-            echo "--- $name ---"
-            if bats "$f"; then
-              PASS=$((PASS+1))
-            else
-              FAIL=$((FAIL+1))
-            fi
-          done
-          echo ""
-          echo "Bats: PASS=$PASS FAIL=$FAIL"
-          [ "$FAIL" -eq 0 ]
+        run: scripts/run-shell-tests.sh --bats
