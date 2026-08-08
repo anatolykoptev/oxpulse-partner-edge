@@ -89,12 +89,18 @@ fi
 # ---------------------------------------------------------------------------
 compose_env_ensure_profile metrics "$f" >/dev/null
 compose_env_ensure_profile metrics "$f" >/dev/null
-n=$(grep -c 'metrics' "$f")
+# Count OCCURRENCES, not matching lines. `grep -c` counts lines, and every
+# duplicate lands on the same COMPOSE_PROFILES line — so `grep -c` returns 1
+# whether the value is "metrics" or "metrics,metrics,metrics". The first
+# version of this check used it and a mutant that disabled the membership
+# test survived, which is the whole reason the matrix is run.
+value=$(awk -F= '/^COMPOSE_PROFILES=/{ print $2; exit }' "$f")
+n=$(awk -v v="$value" 'BEGIN{ n=split(v, a, ","); c=0; for(i=1;i<=n;i++) if(a[i]=="metrics") c++; print c }')
 lines=$(grep -c '^COMPOSE_PROFILES=' "$f")
-if [[ "$(cat "$f")" == *"ch3,ch5,metrics"* ]] && (( n == 1 )) && (( lines == 1 )); then
-    _ok "S4: repeat calls are a no-op (one profile line, one 'metrics')"
+if [[ "$value" == "ch3,ch5,metrics" ]] && (( n == 1 )) && (( lines == 1 )); then
+    _ok "S4: repeat calls are a no-op (value='$value', one 'metrics' entry)"
 else
-    _fail "S4: duplicated — file: $(cat "$f")"
+    _fail "S4: duplicated or reordered — value='$value' metrics_count=$n profile_lines=$lines"
 fi
 
 # ---------------------------------------------------------------------------
