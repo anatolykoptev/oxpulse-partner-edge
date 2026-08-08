@@ -37,7 +37,7 @@ fn frozen_env() -> Vec<(&'static str, &'static str)> {
         ("PUBLIC_IP", "157.22.204.190"),
         ("PRIVATE_IP", ""),
         ("EXTERNAL_IP_LINE", "157.22.204.190"),
-        ("IMAGE_VERSION", "stable"),
+        ("IMAGE_VERSION", "0.16.14"),
         ("SFU_UDP_PORT", "7878"),
         ("SFU_METRICS_PORT", "9317"),
         ("SFU_EDGE_ID", "edge-b1"),
