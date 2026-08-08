@@ -3658,6 +3658,28 @@ if [[ "$MODE" == with_templates ]]; then
 	# `$?` after `|| true` is always 0. The `if ! var=$(...)` form is
 	# correct and is structurally tested by test_upgrade_pull_scope_and_rollback.sh
 	# Section A (A1-A3) + Section E (rollback branch runs on pull failure).
+	# Converge the compose profile set before any compose command in this run.
+	#
+	# COMPOSE_PROFILES was written only by install.sh, so a profile-gated
+	# service added to the template could reach a fresh install and NO existing
+	# node. Measured 2026-08-08 while rolling #570: four of the five production
+	# edges have no $PREFIX_ETC/.env at all and the fifth carries only
+	# COMPOSE_FILE, so the metrics collector would have shipped, passed CI, and
+	# been wired on exactly zero edges.
+	#
+	# Gated on the mesh address, read from the compose file the render just
+	# produced — SFU_METRICS_BIND is AWG_HOST_IP, the same value install.sh
+	# gates on. Empty means no mesh, and an exporter with no mesh address binds
+	# every interface, which is not something to do to a relay whose job is to
+	# be unremarkable. No mesh, no profile.
+	_wt_mesh_ip=$(awk -F'"' '/SFU_METRICS_BIND:/ { print $2; exit }' "$COMPOSE_FILE" 2>/dev/null || true)
+	if [[ -n "${_wt_mesh_ip:-}" ]] && declare -f compose_env_ensure_profile >/dev/null 2>&1; then
+		_wt_profiles=$(compose_env_ensure_profile "metrics" "$PREFIX_ETC/.env")
+		log "  compose profiles: ${_wt_profiles:-unchanged} (metrics -> node-exporter on ${_wt_mesh_ip}:9100, mesh-only)"
+	elif [[ -z "${_wt_mesh_ip:-}" ]]; then
+		warn "  no mesh address in $COMPOSE_FILE — metrics profile NOT enabled (an exporter would bind every interface)"
+	fi
+
 	if ! pull_out=$(cd "$PREFIX_ETC" && $DOCKER_BIN compose pull "${_wt_edge_svcs[@]}" 2>&1); then
 		printf '%s\n' "$pull_out" >&2
 		if ! ghcr_pull_diagnose "$pull_out"; then

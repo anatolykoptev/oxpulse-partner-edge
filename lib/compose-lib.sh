@@ -150,3 +150,59 @@ compose_diff_recreate_resolve_pulled_digests() {
     done
     return 0
 }
+
+# ============================================================================
+# compose_env_ensure_profile — add a compose profile to $PREFIX_ETC/.env
+# without destroying what else is in there.
+#
+# Two defects this replaces, both found 2026-08-08 while trying to roll the
+# metrics collector (#570) to the fleet:
+#
+# 1. The profile set was written ONLY by install.sh, so an upgrade could never
+#    activate a newly-shipped profile. A compose service added to the template
+#    would reach a fresh install and no existing node — code shipped, wired on
+#    exactly zero of the five production edges, and green everywhere.
+#
+# 2. install.sh wrote it with `printf 'COMPOSE_PROFILES=%s\n' > .env`, which
+#    TRUNCATES. rvpn's .env holds
+#    `COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml` — the line
+#    that decides which compose files load at all. A profile write there would
+#    have silently dropped the override file.
+#
+# So: merge, never truncate. Idempotent, atomic, and returns 0 unconditionally
+# because every caller runs under `set -e` — signalling "already present"
+# through a non-zero exit would abort an upgrade on the common path.
+# Prints the resulting profile list.
+compose_env_ensure_profile() {
+    local profile="$1" env_file="$2"
+    [[ -n "$profile" && -n "$env_file" ]] || return 0
+
+    local current=""
+    if [[ -f "$env_file" ]]; then
+        current=$(awk '/^COMPOSE_PROFILES=/{ print substr($0, index($0,"=") + 1); exit }' "$env_file")
+    fi
+
+    # Already present — comma-delimited compare so "metrics" cannot match
+    # inside "metrics-extra", and so a repeat run is a no-op rather than
+    # appending a duplicate the way the ch3 path once did.
+    case ",${current}," in
+        *",${profile},"*) printf '%s' "$current"; return 0 ;;
+    esac
+
+    local merged="$profile"
+    [[ -n "$current" ]] && merged="${current},${profile}"
+
+    local tmp
+    tmp=$(mktemp "${env_file}.XXXXXX" 2>/dev/null) || return 0
+    if [[ -f "$env_file" ]]; then
+        grep -v '^COMPOSE_PROFILES=' "$env_file" > "$tmp" 2>/dev/null || true
+    fi
+    printf 'COMPOSE_PROFILES=%s\n' "$merged" >> "$tmp"
+    chmod 0644 "$tmp" 2>/dev/null || true
+    if mv -f "$tmp" "$env_file" 2>/dev/null; then
+        printf '%s' "$merged"
+    else
+        rm -f "$tmp" 2>/dev/null || true
+    fi
+    return 0
+}
