@@ -5,6 +5,19 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.15](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.14...v0.16.15) (2026-08-08)
+
+
+### Features
+
+* **metrics:** collect the partner_edge_* series the edges have always written ([#570](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/570)) ([012f0ac](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/012f0acac100aeb51475b454a1f742599472ee2f))
+
+
+### Bug Fixes
+
+* **metrics:** discard the pre-[#328](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/328) partner_edge.prom before anything scrapes it ([#571](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/571)) ([c305e4d](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c305e4d67dda485e9b0a3506d695229b27b02c77))
+* the SFU healthcheck's secret gates were inert, and an operator hint named a flag that does not exist ([#565](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/565)) ([7f655ce](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/7f655ce77ae7c4566cfe55d2f2723e9ca5b82061))
+
 ## [0.16.14](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.13...v0.16.14) (2026-08-07)
 
 
