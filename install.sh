@@ -1458,6 +1458,27 @@ if [[ -n "${NAIVE_SERVER:-}" ]]; then
 		_naive_status="failed_at_render"
 	fi
 fi
+
+# Metrics collector — enabled only when this edge has a mesh address.
+#
+# The node-exporter service renders its listen address from AWG_HOST_IP. An
+# empty value would render "--web.listen-address=:9100", which binds every
+# interface and publishes host inventory (kernel, filesystems, uptime,
+# process counts) from a box whose whole purpose is to be unremarkable to a
+# censor. So the gate is on the address being present, and it fails closed:
+# no mesh, no exporter, and the operator is told which one they got.
+#
+# Guarding on AWG_HOST_IP rather than on "is the mesh up" is deliberate — the
+# address is what the template actually interpolates, so the condition and the
+# risk are the same fact. A liveness check would let a rendered-but-empty
+# address through whenever the interface happened to be down at install time.
+if [[ -n "${AWG_HOST_IP:-}" ]]; then
+	COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}metrics"
+	log "  metrics profile enabled (node-exporter on ${AWG_HOST_IP}:9100, mesh-only)"
+else
+	warn "  no mesh address — metrics profile SKIPPED (an exporter would bind every interface)"
+fi
+
 rm -rf "$stage"
 
 # Phase 5.5: all-channels-failed guard.
