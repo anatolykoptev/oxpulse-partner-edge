@@ -30,6 +30,61 @@ component partners deploy on their own VPS. We take changes here seriously.
 6. **Sign the CLA** — see below.
 7. **Review** — at least one maintainer review is required before merge.
 
+## Your patch must contain the change your message describes
+
+This is the bar we enforce most strictly, because it is the one that has
+actually cost us. A commit message, a PR title and a `Fixes #N` trailer are
+all read by humans and by automation as claims about the diff. When they
+describe work the diff does not contain, review degrades into trusting the
+narration — and on a repository that partners deploy as root on their own
+VPS, that is not an acceptable failure mode.
+
+Concretely:
+
+- **Every behaviour your message names must be visible in the diff.** If
+  the message says a metric is added, `git grep` for that metric name in
+  the patch has to find it. We check this.
+- **A closing keyword is a claim that the defect is gone.** Use
+  `Fixes #N` / `Closes #N` only when the diff removes the cause. If your
+  change improves the situation without resolving it, write `Refs #N` and
+  say in the body what remains. A merged `Fixes #N` closes the issue
+  automatically, so an overstated trailer silently retires a live bug.
+- **Do not delete the fixture that represents the failing case.** Changing
+  a test input so the failing condition is no longer exercised makes CI
+  greener and the system no safer. If a fixture must change, say why in
+  the PR body.
+- **A claim about live behaviour needs a probe, not a passing test.** New
+  metric, endpoint, flag, timer or systemd unit — show it working on a
+  real host, or say plainly that you could not and what you did instead.
+  A green suite is evidence the code compiles and the assertions you chose
+  hold; it is not evidence the thing works where it runs.
+
+None of this asks for a perfect patch. It asks that the description and the
+patch be the same object, and that anything you are unsure of be stated
+rather than smoothed over. "I could not test this on a real edge" is a
+welcome sentence. A confident summary of work that is not in the diff is
+not.
+
+### Automated and AI-assisted pull requests
+
+Using an assistant to write a patch is fine, and we do it ourselves. The
+output is still yours, and the bar above applies to it unchanged — you are
+expected to have read the diff you are opening.
+
+What we close without review:
+
+- PRs whose description was generated from the issue text rather than from
+  the change, so that the summary describes an intended fix and the diff
+  contains something else.
+- Bulk, unsolicited PRs opened across many repositories, where this
+  repository was selected by a crawler rather than by interest in it.
+
+We would much rather have one patch from someone who understands what an
+edge node does than fifty that pattern-match our issue titles. If you are
+new here and want somewhere real to start, open an issue describing what
+you observed — a good bug report is worth more to us than a speculative
+fix, and it is the contribution we are actually short of.
+
 ## Contributor License Agreement (CLA)
 
 Every contribution must be covered by the OxPulse Contributor License
@@ -69,6 +124,8 @@ description rather than "fixing" them as a side effect of unrelated work.
 - Drive-by refactors unrelated to the stated PR scope.
 - Vendor lock-in to a specific cloud — partner edges run on arbitrary
   Debian/Ubuntu/Alma VPSes.
+- A description that outruns the diff — see
+  [Your patch must contain the change your message describes](#your-patch-must-contain-the-change-your-message-describes).
 
 ## License of contributions
 
