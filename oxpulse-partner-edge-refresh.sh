@@ -71,6 +71,18 @@ else
 fi
 unset _MSL_LOCAL _MSL_SBIN
 
+# Discard a pre-#328 partner_edge.prom before anything can scrape it. All five
+# production edges carry one (measured 2026-08-08), it is invalid exposition,
+# and nothing else repairs it — see the function's header. Runs here rather
+# than lazily inside emit_metric because the callers are failure counters: on a
+# healthy node emit_metric may not run for months, which is exactly how these
+# files survived since May.
+_msl_discarded="$(metric_sink_discard_pre328_prom || true)"
+if [[ -n "${_msl_discarded:-}" ]]; then
+    log "discarded pre-#328 textfile metric file (duplicate series, unrecoverable): ${_msl_discarded}"
+fi
+unset _msl_discarded
+
 # _docker_restart_if_sha_changed (sha-diff-gated docker compose restart/
 # recreate mechanism) — extracted to lib/surgical-restart-lib.sh (P2 of the
 # 2026-07-08 refresh-lib-extraction-strangler plan). PURE mechanism, zero
