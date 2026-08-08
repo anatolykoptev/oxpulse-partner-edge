@@ -71,7 +71,11 @@ fi
 # S3. No wildcard bind, in any spelling.
 # ---------------------------------------------------------------------------
 for bad in '0.0.0.0' '[::]' '*:9100'; do
-    if printf '%s\n' "$block" | grep -qF -- "--web.listen-address=$bad"; then
+    # here-string, not a pipe. `grep -q` exits on its first match and SIGPIPEs
+    # the upstream writer, so under `set -o pipefail` a SUCCESSFUL match returns
+    # non-zero. tests/test_pipefail_early_exit_guard.sh enforces this repo-wide,
+    # and caught exactly this in the first revision of this file.
+    if grep -qF -- "--web.listen-address=$bad" <<<"$block"; then
         _fail "S3: node-exporter binds the wildcard address '$bad'"
     fi
 done
@@ -83,7 +87,7 @@ done
 # series the host scripts write — which is the state measured fleet-wide on
 # 2026-08-08 and the whole reason #411 exists.
 # ---------------------------------------------------------------------------
-if printf '%s\n' "$block" | grep -q -- '--collector.textfile.directory='; then
+if grep -q -- '--collector.textfile.directory=' <<<"$block"; then
     _ok "S4: textfile collector enabled"
 else
     _fail "S4: no --collector.textfile.directory — partner_edge_* series would not be served"
