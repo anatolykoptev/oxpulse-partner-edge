@@ -119,6 +119,7 @@ else
     _run_gate() { # _run_gate <awg_host_ip_value> -> prints resulting profiles
         (
             set +u
+            # shellcheck disable=SC2034  # read by the gate below, via eval
             AWG_HOST_IP="$1"
             COMPOSE_PROFILES_EXTRA=""
             log()  { :; }
