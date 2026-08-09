@@ -164,9 +164,25 @@ _setup_caddy_render_env() {
         NAIVE_SOCKS_PORT="1080"
     fi
 
+    # CF_DNS_TLS_BLOCK: Cloudflare DNS-01 opt-in. If already set by caller
+    # (install.sh), use it. Otherwise derive from the token env file's
+    # existence — if /var/lib/oxpulse-partner-edge/caddy-env.env exists,
+    # the node opted in and the tls block should be emitted. Empty otherwise
+    # (fail-closed default: no token → no tls block → HTTP-01).
+    if [[ -z "${CF_DNS_TLS_BLOCK:-}" ]]; then
+        local _cf_env_file="${PREFIX_LIB:-/var/lib/oxpulse-partner-edge}/caddy-env.env"
+        if [[ -f "$_cf_env_file" ]]; then
+            CF_DNS_TLS_BLOCK='    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }'
+        else
+            CF_DNS_TLS_BLOCK=""
+        fi
+    fi
+
     export PARTNER_DOMAIN TURNS_SUBDOMAIN \
            AWG_MOTHERLY_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
-           NAIVE_SOCKS_PORT
+           NAIVE_SOCKS_PORT CF_DNS_TLS_BLOCK
 }
 
 # ---------------------------------------------------------------------------

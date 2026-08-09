@@ -449,6 +449,14 @@ resolve_external_ip() {
     [[ -n "${PRIVATE_IP:-}" ]] && EXTERNAL_IP_LINE="${PUBLIC_IP}/${PRIVATE_IP}"
     ALLOWED_PEER_IP_LINE=""
     [[ -n "${PRIVATE_IP:-}" ]] && ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
+    # CF_DNS_TLS_BLOCK: Cloudflare DNS-01 opt-in (same logic as install.sh /
+    # reconcile.sh _setup_caddy_render_env). Emit the tls block when the token
+    # env file exists; empty otherwise (fail-closed default).
+    CF_DNS_TLS_BLOCK=""
+    [[ -f "${PREFIX_LIB:-/var/lib/oxpulse-partner-edge}/caddy-env.env" ]] \
+        && CF_DNS_TLS_BLOCK='    tls {
+        dns cloudflare {env.CF_API_TOKEN}
+    }'
 }
 
 log "[3c/7] resolving authoritative external IP"
@@ -523,6 +531,7 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
        REALITY_ENCRYPTION TURNS_SUBDOMAIN \
        PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE ALLOWED_PEER_IP_LINE \
+       CF_DNS_TLS_BLOCK \
        IMAGE_VERSION \
        RELAY_JWT_SECRET \
        HYSTERIA2_SERVER HYSTERIA2_PORT HYSTERIA2_AUTH HYSTERIA2_OBFS \

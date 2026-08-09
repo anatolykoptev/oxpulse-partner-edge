@@ -140,6 +140,20 @@
 }
 
 {{PARTNER_DOMAIN}} {
+    # Cloudflare DNS-01 certificate issuance (opt-in per node).
+    # When CF_DNS_TLS_BLOCK is non-empty (install.sh sets it from
+    # OXPULSE_CF_API_TOKEN), this expands to:
+    #     tls {
+    #         dns cloudflare {env.CF_API_TOKEN}
+    #     }
+    # which switches the main vhost from HTTP-01 to DNS-01. When empty
+    # (no token configured), no tls block is emitted and Caddy uses its
+    # default automatic HTTPS (HTTP-01) — byte-identical to pre-DNS-01
+    # behaviour. The {env.CF_API_TOKEN} is Caddy's env var reference
+    # (single brace); the actual token value reaches the container via
+    # env_file in docker-compose.yml.tpl, never baked into this file.
+    {{CF_DNS_TLS_BLOCK}}
+
     encode gzip zstd
 
     header {

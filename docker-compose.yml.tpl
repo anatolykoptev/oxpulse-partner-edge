@@ -25,6 +25,18 @@ services:
     environment:
       PARTNER_DOMAIN: "{{PARTNER_DOMAIN}}"
       PARTNER_ID: "{{PARTNER_ID}}"
+    # Cloudflare DNS-01: CF_API_TOKEN reaches the container via env_file
+    # (NOT a {{CF_API_TOKEN}} placeholder in environment: — that would bake
+    # the token value into this rendered file, which is world-readable at
+    # /etc/oxpulse-partner-edge/docker-compose.yml). The file is written by
+    # install.sh when OXPULSE_CF_API_TOKEN is set, and is mode 0600 root-only.
+    # required: false so the stack boots on nodes without the token — the
+    # Caddyfile's {{CF_DNS_TLS_BLOCK}} is empty on those nodes, so Caddy's
+    # {env.CF_API_TOKEN} reference is never evaluated. Same pattern as the
+    # SFU's sfu-keys.env (env_file object form requires Docker Compose v2.24+).
+    env_file:
+      - path: /var/lib/oxpulse-partner-edge/caddy-env.env
+        required: false
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

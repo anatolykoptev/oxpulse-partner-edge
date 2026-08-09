@@ -3,7 +3,7 @@
 # SNI multiplex. Caddyfile is bind-mounted at runtime; nothing partner-specific
 # is baked here.
 #
-# Version pins (2026-04-18):
+# Version pins (2026-04-18, cloudflare added 2026-08-09):
 #   caddy:2.11.2 — caddy-l4 v0.1.0 requires caddy/v2 >= 2.11.1 (go.mod constraint);
 #                  pinned to exact patch for reproducibility
 #   caddy-l4@v0.1.0 — only stable release (SHA 6bee9cf), marked
@@ -15,6 +15,18 @@
 #                    elimination means none of it links: measured 154 MB vs
 #                    155 MB without it. Do not re-raise the size concern
 #                    without re-measuring.
+#   caddy-dns/cloudflare@v0.2.4 — Cloudflare DNS provider for ACME DNS-01
+#                    challenge issuance. Required for the multi-node-same-name
+#                    cert fix: two nodes serving one apex name cannot both
+#                    prove control with HTTP-01 (the CA reaches whichever
+#                    address it resolves), so DNS-01 is the only method that
+#                    needs no challenge traffic to the node. v0.2.4 is the
+#                    latest tag (Mar 2026, signed by mholt), uses libdns v1
+#                    API (libdns v1.1.0) — compatible with Caddy 2.8+ (ours
+#                    is 2.11.2). The module is opt-in per node: the Caddyfile
+#                    emits the `tls { dns cloudflare {env.CF_API_TOKEN} }`
+#                    block only when CF_DNS_TLS_BLOCK is non-empty at render
+#                    time (install.sh sets it from OXPULSE_CF_API_TOKEN).
 
 # ─── Stage 1: xcaddy build with caddy-l4 plugin ─────────────────────────────
 FROM caddy:2.11.2-builder AS builder
@@ -25,7 +37,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     xcaddy build \
     --with github.com/mholt/caddy-l4@v0.1.0 \
     --with github.com/porech/caddy-maxmind-geolocation@v1.0.3 \
-    --with github.com/caddyserver/cache-handler@v0.16.0
+    --with github.com/caddyserver/cache-handler@v0.16.0 \
+    --with github.com/caddy-dns/cloudflare@v0.2.4
 
 # ─── Stage 2: runtime image ─────────────────────────────────────────────────
 FROM caddy:2.11.2-alpine
@@ -37,7 +50,7 @@ LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.version="${VERSION}"
 LABEL oxpulse.component="partner-edge-caddy"
 LABEL oxpulse.version="${VERSION}"
-LABEL oxpulse.plugins="caddy-l4@v0.1.0,caddy-maxmind-geolocation@v1.0.3 (porech fork — aksdb deleted upstream),cache-handler@v0.16.0"
+LABEL oxpulse.plugins="caddy-l4@v0.1.0,caddy-maxmind-geolocation@v1.0.3 (porech fork — aksdb deleted upstream),cache-handler@v0.16.0,caddy-dns/cloudflare@v0.2.4"
 
 # Swap in the xcaddy-built binary (has the caddy-l4 module linked)
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
