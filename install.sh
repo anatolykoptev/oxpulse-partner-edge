@@ -1139,33 +1139,6 @@ else
 fi
 export ALLOWED_PEER_IP_LINE
 
-# CF_DNS_TLS_BLOCK for Caddyfile — Cloudflare DNS-01 certificate issuance.
-# When OXPULSE_CF_API_TOKEN is set, the main vhost's {{CF_DNS_TLS_BLOCK}}
-# expands to a `tls { dns cloudflare {env.CF_API_TOKEN} }` block, switching
-# it from HTTP-01 to DNS-01. When unset/empty, CF_DNS_TLS_BLOCK is empty →
-# no tls block emitted → Caddy uses default automatic HTTPS (HTTP-01).
-# This is the fail-closed default: nodes without the token are byte-identical
-# to today. The token value is NEVER in the rendered Caddyfile — it uses
-# Caddy's {env.CF_API_TOKEN} env reference. The token reaches the container
-# via env_file (docker-compose.yml.tpl caddy-env.env), not a {{CF_API_TOKEN}}
-# placeholder that would bake it into the world-readable compose file.
-CF_DNS_TLS_BLOCK=""
-if [[ -n "${OXPULSE_CF_API_TOKEN:-}" ]]; then
-	CF_DNS_TLS_BLOCK='    tls {
-        dns cloudflare {env.CF_API_TOKEN}
-    }'
-	# Write the token to a root-only env file for docker-compose env_file.
-	# install -d already created $PREFIX_LIB at 0700 above (or will for
-	# non-dry-run); the file itself is 0600 so only root can read it.
-	if [[ $DRY_RUN -eq 0 ]]; then
-		umask 077
-		printf 'CF_API_TOKEN=%s\n' "$OXPULSE_CF_API_TOKEN" > "$PREFIX_LIB/caddy-env.env"
-		chmod 600 "$PREFIX_LIB/caddy-env.env"
-		umask 022
-	fi
-fi
-export CF_DNS_TLS_BLOCK
-
 # ---------- Step 5: stage templates ----------
 log "[5/10] rendering templates"
 if [[ $DRY_RUN -eq 0 ]]; then
@@ -1240,7 +1213,6 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
        REALITY_ENCRYPTION TURNS_SUBDOMAIN \
        PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE ALLOWED_PEER_IP_LINE \
-       CF_DNS_TLS_BLOCK \
        IMAGE_VERSION \
        SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID \
        OTEL_EXPORTER_OTLP_ENDPOINT \
