@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.17](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.16...v0.16.17) (2026-08-10)
+
+
+### Features
+
+* **selfheal:** restart an UNHEALTHY-but-running container, bounded and escalating ([#581](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/581)) ([352955d](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/352955d679587b432d78e72228062af41d8ea73d))
+
 ## [0.16.16](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.15...v0.16.16) (2026-08-08)
 
 
