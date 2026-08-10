@@ -33,7 +33,7 @@ services:
       # Partners can override by mounting their own cover/ directory.
       - ./cover:/srv/cover:ro
       # M2b.2: DB-IP mmdb for maxmind_geolocation country lookup.
-      # Provisioned by install.sh; refreshed monthly by geoip-refresh.timer.
+      # Provisioned by install.sh; refreshed by geoip-refresh.timer (daily check).
       # Read-only — Caddy only needs to read the file.
       - /var/lib/geoip:/var/lib/geoip:ro
       # Phase 3: operator override slot — conf.d/*.caddy

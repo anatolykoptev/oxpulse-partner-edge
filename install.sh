@@ -1607,7 +1607,7 @@ fi
 # to inject X-Geo-Country into upstream requests (oxpulse-chat #748).
 # Non-fatal: if the download fails, Caddy starts without geolocation; the
 # Rust fallback chain (X-Client-Region → CF-IPCountry → in-process GeoDb)
-# covers the gap until the monthly timer succeeds.
+# covers the gap until the timer succeeds.
 if [[ $DRY_RUN -eq 0 ]]; then
 	log "[5b/10] provisioning DB-IP mmdb"
 	if [[ -n "$src_dir" && -f "$src_dir/scripts/oxpulse-geoip-refresh.sh" ]]; then
