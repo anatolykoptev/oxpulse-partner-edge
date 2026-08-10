@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.19](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.18...v0.16.19) (2026-08-10)
+
+
+### Features
+
+* **selfheal:** extend healing to units, enable-drift, stopped containers and disk ([#585](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/585)) ([e823fb8](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e823fb8df412aea4f135c67fba7a01a29b27fdd4))
+
 ## [0.16.18](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.17...v0.16.18) (2026-08-10)
 
 
