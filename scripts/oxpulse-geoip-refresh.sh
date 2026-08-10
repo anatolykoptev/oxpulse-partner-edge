@@ -5,8 +5,10 @@
 # CC-BY 4.0, no API key required), gunzips, and atomically replaces the
 # existing file. Atomic rename ensures Caddy never reads a half-written file.
 #
-# Invoked by geoip-refresh.timer (monthly, 1st of month + random jitter).
-# Also called directly by install.sh on first provisioning.
+# Invoked by geoip-refresh.timer (DAILY + random jitter — see the timer's own
+# comment for why a monthly schedule silently stopped running altogether), and
+# directly by install.sh on first provisioning. Daily is cheap because this
+# script exits before downloading anything once the current month is installed.
 #
 # DB-IP free tier URL pattern: https://download.db-ip.com/free/dbip-country-lite-{YM}.mmdb.gz
 # where YM = YYYY-MM (current month). New file is published on ~1st of each month.
@@ -23,11 +25,15 @@
 #
 # Hence the fallback below: if the current month is not published yet, take the
 # previous month. Month-old country data is a rounding error next to a database
-# that stops updating entirely, and the next monthly run picks up the new file.
+# that stops updating entirely, and tomorrow's run picks up the new file.
 set -euo pipefail
 
 GEOIP_DIR="${GEOIP_DIR:-/var/lib/geoip}"
 MMDB_PATH="${GEOIP_DIR}/dbip-country-lite.mmdb"
+# Which month the installed file actually came from. mtime cannot answer that:
+# a file installed on 20 May carries a May mtime whether it holds May data or a
+# fallback to April, and any touch destroys the answer entirely.
+STAMP="${GEOIP_DIR}/.installed-month"
 LOG="${LOG:-/var/log/oxpulse-geoip-refresh.log}"
 
 ts()  { date -Iseconds; }
@@ -38,6 +44,14 @@ YM=$(date -u +%Y-%m)
 YM_PREV=$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%Y-%m)
 
 mkdir -p "$GEOIP_DIR"
+
+# Already holding this month's file: nothing to do. This is what makes a DAILY
+# schedule free — ~29 of every 30 runs stop here without touching the network.
+# Deliberately not `--force`-able by accident: pass FORCE=1 to re-download.
+if [[ "${FORCE:-0}" != 1 && -s "$MMDB_PATH" && "$(cat "$STAMP" 2>/dev/null)" == "$YM" ]]; then
+    log "geoip-refresh: ${YM} already installed — nothing to do"
+    exit 0
+fi
 
 TMP=$(mktemp "${GEOIP_DIR}/dbip-country-lite.mmdb.XXXXXX.tmp")
 # Ensure temp file is cleaned up on any exit.
@@ -66,17 +80,25 @@ try_month() {
     return 0
 }
 
+INSTALLED_YM="$YM"
 if ! try_month "$YM"; then
     log "geoip-refresh: ${YM} not published yet — falling back to ${YM_PREV}"
     if ! try_month "$YM_PREV"; then
         log "geoip-refresh: ERROR neither ${YM} nor ${YM_PREV} could be fetched — aborting"
         exit 1
     fi
+    # Record the month actually installed, NOT the one asked for: the stamp must
+    # stay != $YM so tomorrow's run retries the current month instead of
+    # concluding it is already here.
+    INSTALLED_YM="$YM_PREV"
 fi
 
 chmod 644 "$TMP"
 # Atomic rename — Caddy's mmdb reader reopens on SIGHUP or next request,
 # so the swap is transparent; no Caddy restart required.
 mv "$TMP" "$MMDB_PATH"
+# Only after the file is in place — a stamp written earlier would claim a month
+# that a failed rename never delivered, and the daily run would skip forever.
+echo "$INSTALLED_YM" > "$STAMP"
 
-log "geoip-refresh: OK → ${MMDB_PATH} ($(stat -c %s "$MMDB_PATH") bytes)"
+log "geoip-refresh: OK → ${MMDB_PATH} (${INSTALLED_YM}, $(stat -c %s "$MMDB_PATH") bytes)"

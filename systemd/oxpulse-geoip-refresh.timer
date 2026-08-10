@@ -1,11 +1,27 @@
 [Unit]
-Description=Monthly DB-IP country mmdb refresh
+Description=DB-IP country mmdb refresh (daily check, monthly download)
 After=network-online.target
 
-# DB-IP free tier publishes a new file on the 1st of each month.
-# Jitter up to 4h spreads fleet-wide download load across partner nodes.
+# DB-IP free tier publishes a new file on the 1st of each month, so a MONTHLY
+# schedule looks right. It is not, for two measured reasons:
+#
+#  1. This timer is in upgrade.sh's _HOST_SCRIPT_RESTART_UNITS, and restarting a
+#     Persistent= timer REWRITES its stamp in /var/lib/systemd/timers. systemd
+#     then believes the job just ran, and every missed occurrence is silently
+#     cancelled. On rvpn — the node upgraded most often — the stamp read
+#     "Aug 7 20:05", the same second as oxpulse-xray-update.timer's, while the
+#     mmdb was still the one installed on 20 May. The job had not run in 82
+#     DAYS, the unit was not failed, and nothing anywhere reported it.
+#     Any period longer than the upgrade interval is a job that never runs.
+#  2. Publication happens DURING the 1st. A monthly timer that fires at 03:40
+#     and gets a 404 has no second chance until next month (see the script).
+#
+# Daily fixes both: a cancelled occurrence costs a day instead of a month, and
+# the missed-publication retry comes round tomorrow. It is not extra load — the
+# script exits before downloading anything when the current month's file is
+# already installed.
 [Timer]
-OnCalendar=monthly
+OnCalendar=daily
 RandomizedDelaySec=4h
 Persistent=true
 

@@ -404,6 +404,30 @@ grep -q '^partner_edge_container_unhealthy{container="oxpulse-partner-mmm"} 1$' 
 	&& pass "the unhealthy container reports 1" || fail "unhealthy container's sample is wrong"
 teardown
 
+# 24 — a CRASHLOOPING long-running service is bounded and escalates.
+#
+# The subtle one. `systemctl restart` on a long-running service returns as soon
+# as it STARTS, so `is-failed` immediately after is false even for a unit that
+# dies three seconds later. If success on that reading cleared the budget, a
+# crashlooper would get a fresh budget every tick: one restart per UNIT_GAP
+# forever, no given_up, no alert, and nothing in any metric to tell it apart
+# from a healthy node — the unbounded healer this whole file exists to prevent.
+# oxpulse-awg-params-agent.service is long-running on every node.
+setup
+export OXPULSE_SELFHEAL_UNIT_GAP=0        # the gap is not what is under test here
+echo oxpulse-crash.service > "$FX_UNITS/heals"   # "restart" always reports success
+for i in 1 2 3 4 5; do
+	echo oxpulse-crash.service > "$FX_UNITS/failed"   # ...and it is failed again next tick
+	run_it
+done
+n=$(grep -c '^restart oxpulse-crash.service$' "$UNIT_LOG")
+[[ "$n" == 3 ]] && pass "a crashlooping unit is bounded at 3 restarts ($n)" \
+               || fail "crashloop restarted $n times, expected 3 — the budget is being reset on a false 'recovered'"
+[[ "$(alerts)" == 1 ]] && pass "a crashlooping unit escalates exactly once" \
+                       || fail "crashloop alert count $(alerts), expected 1"
+unset OXPULSE_SELFHEAL_UNIT_GAP
+teardown
+
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

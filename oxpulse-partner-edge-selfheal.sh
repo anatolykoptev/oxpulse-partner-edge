@@ -65,8 +65,11 @@
 #                                no-op.
 #
 # WHAT IT DELIBERATELY DOES NOT DO
-#   • It never recreates or re-renders. A wedge is process state; config
-#     convergence belongs to oxpulse-partner-edge-refresh and upgrade.sh.
+#   • It never recreates or re-renders a CONTAINER. A wedge is process state;
+#     config convergence belongs to oxpulse-partner-edge-refresh and upgrade.sh.
+#     (Restarting a failed oxpulse-partner-edge-refresh.service does re-render,
+#     which is the correct heal — a failed refresh means convergence did not
+#     happen — but it is worth knowing that this healer can reach it.)
 #   • It never touches a container without a healthcheck (`naive` ships without
 #     one on purpose) — no healthcheck means no evidence, and acting without
 #     evidence is what this file exists to avoid.
@@ -513,10 +516,22 @@ heal_units() {   # now
 		# Bounded: a Type=oneshot restart BLOCKS until the unit finishes, and this
 		# script runs under a systemd TimeoutStartSec of its own.
 		timeout 60 systemctl restart "$u" >/dev/null 2>&1
-		# For a oneshot that is the real verdict; for a long-running service it
-		# only means "started", and a crash three seconds later shows up as a
-		# failed unit on the next tick, which spends another attempt and
-		# eventually gives up. Both are correct.
+		# For a Type=oneshot this is the real verdict — `restart` blocked until the
+		# unit finished. For a long-running service it only means "started": one
+		# that dies three seconds later reports not-failed right here and failed
+		# again on the next tick.
+		#
+		# So the budget is NEVER cleared on this path, however healthy the unit
+		# looks at this instant. Clearing it would hand a crashlooping service a
+		# fresh budget every tick — one restart per UNIT_GAP forever, no
+		# `given_up`, no alert, and no counter that distinguishes it from a
+		# healthy node. That is exactly the unbounded healer this file exists to
+		# prevent, and oxpulse-awg-params-agent.service is long-running on every
+		# node, so it is not hypothetical.
+		#
+		# Nothing is lost by leaving it: a unit that genuinely recovered stops
+		# appearing in _failed_units, so its budget is never consulted again and
+		# the window expires on its own.
 		if systemctl is-failed --quiet "$u" 2>/dev/null; then
 			log "$u: still failed after restart"
 			_count partner_edge_selfheal_attempts_total "$lbl,outcome=\"failed\"" 1
@@ -524,7 +539,6 @@ heal_units() {   # now
 			log "$u: recovered"
 			_count partner_edge_selfheal_attempts_total "$lbl,outcome=\"healed\"" 1
 			_gauge partner_edge_unit_failed "$lbl" 0
-			_budget_clear "$s"
 		fi
 	done <<< "$failed"
 }
@@ -562,11 +576,14 @@ heal_enable_drift() {   # now
 			continue
 		fi
 		timeout 60 systemctl enable --now "$u" >/dev/null 2>&1
+		# Same rule as heal_units: the budget is not cleared on success. A unit
+		# that stays enabled never reaches this code again, so nothing is lost —
+		# while something repeatedly disabling it now hits the bound and raises
+		# an alert instead of being fought silently forever.
 		if [[ "$(systemctl is-enabled "$u" 2>/dev/null)" == enabled ]]; then
 			log "$u: enabled"
 			_count partner_edge_selfheal_attempts_total "$lbl,outcome=\"enabled\"" 1
 			_gauge partner_edge_unit_enable_drift "$lbl" 0
-			_budget_clear "$s"
 		else
 			log "$u: enable did not take"
 			_count partner_edge_selfheal_attempts_total "$lbl,outcome=\"failed\"" 1
@@ -585,6 +602,11 @@ heal_disk() {   # now
 	[[ -n "$pct" ]] || return 0
 	local lbl="mount=\"$DOCKER_ROOT\""
 	_gauge partner_edge_disk_used_percent "$lbl" "$pct"
+	# Unlike the unit healers, clearing the budget here IS legitimate: "below the
+	# threshold" is an independent measurement of the world, not a verdict read
+	# a millisecond after our own action. A disk that refills hours later is a
+	# new incident and deserves a fresh budget; DISK_GAP still caps it at one
+	# prune per hour.
 	(( pct < DISK_PCT )) && { _budget_clear disk; return 0; }
 
 	_held disk && { log "disk at ${pct}%, but a hold file is present — not acting"; return 0; }
