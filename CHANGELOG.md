@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.20](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.19...v0.16.20) (2026-08-10)
+
+
+### Bug Fixes
+
+* **selfheal:** bound a crashlooping unit, and a monthly timer that never ran at all ([#587](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/587)) ([6d93935](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/6d93935dfb5bc5b5917e9a504e916d5551848166))
+
 ## [0.16.19](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.18...v0.16.19) (2026-08-10)
 
 
