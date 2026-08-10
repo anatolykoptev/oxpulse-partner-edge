@@ -71,12 +71,14 @@ now() { date +%s; }
 _SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 for _lib in metric-sink-lib.sh telegram-alert-lib.sh; do
 	for _cand in "$_SELF_DIR/$_lib" "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/$_lib"; do
+		# shellcheck source=/dev/null  # resolved at runtime on the node
 		[[ -r "$_cand" ]] && { . "$_cand"; break; }
 	done
 done
 # Byte-for-byte the resolution oxpulse-partner-edge-refresh.sh:39 uses. Guessing
 # here writes every metric into a directory node_exporter does not read, which
 # looks identical to a healer that never ran.
+# shellcheck disable=SC2034  # read as an ambient global by metric-sink-lib.sh
 TEXTFILE_DIR="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
 
 _gauge() {   # name labels value
