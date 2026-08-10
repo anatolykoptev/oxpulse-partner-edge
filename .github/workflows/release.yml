@@ -537,6 +537,11 @@ jobs:
           cp systemd/oxpulse-geoip-refresh.timer               oxpulse-geoip-refresh.timer
           cp systemd/oxpulse-channels-health-report.service    oxpulse-channels-health-report.service
           cp systemd/oxpulse-channels-health-report.timer      oxpulse-channels-health-report.timer
+          # Self-heal (bounded restart of an UNHEALTHY-but-running container).
+          # The sbin script itself lives at repo root = staging cwd, so it needs no
+          # cp; only these two units do, exactly like the health-report pair above.
+          cp systemd/oxpulse-partner-edge-selfheal.service     oxpulse-partner-edge-selfheal.service
+          cp systemd/oxpulse-partner-edge-selfheal.timer       oxpulse-partner-edge-selfheal.timer
           # Split-routing artifacts (PR #280): static unit + lib module + 3 sbin scripts.
           # The 3 sbin scripts (split-routing.sh, split-disable.sh, ru-subnets-update)
           # already live at repo root with the right name — no cp needed (same pattern as

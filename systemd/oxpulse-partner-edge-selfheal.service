@@ -1,0 +1,17 @@
+[Unit]
+Description=Restart an unhealthy partner-edge container (bounded, escalating)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/oxpulse-partner-edge-selfheal
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Short by construction: a restart's outcome is verified on the NEXT tick, not
+# waited for inline. A container needs start_period + interval*retries (~2 min
+# on this stack) to leave `starting`, so an inline wait would make a 60s oneshot
+# run for minutes and overlap its own timer. Worst case here is a handful of
+# docker inspects plus one `docker restart`.
+TimeoutStartSec=120

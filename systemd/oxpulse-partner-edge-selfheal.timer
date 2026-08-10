@@ -1,0 +1,12 @@
+[Unit]
+Description=Check partner-edge container health every 60s
+
+[Timer]
+# 90s after boot: containers must be past their start_period before an
+# unhealthy verdict means anything.
+OnBootSec=90s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

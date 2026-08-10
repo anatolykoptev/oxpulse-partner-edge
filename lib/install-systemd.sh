@@ -59,6 +59,17 @@ _systemd_install_helper_scripts() {
 		curl -fsSL "$REPO_RAW/oxpulse-channels-health-report.sh" -o "$PREFIX_SBIN/oxpulse-channels-health-report"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-channels-health-report"
 	fi
+
+	# Bounded self-heal for a container that is UNHEALTHY but still running
+	# (60s timer). restart: unless-stopped acts on container EXIT, not on a
+	# failing healthcheck, so before this nothing restarted a wedged container:
+	# cheburator sat dark 26h on 2026-08-10 reporting unhealthy the whole time.
+	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-partner-edge-selfheal.sh" ]]; then
+		install -m 0755 "$src_dir/oxpulse-partner-edge-selfheal.sh" "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
+	else
+		curl -fsSL "$REPO_RAW/oxpulse-partner-edge-selfheal.sh" -o "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
+		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
+	fi
 }
 
 # Install channel-render-lib.sh, ghcr-auth-lib.sh, oxpulse-token-lib.sh
@@ -417,6 +428,7 @@ _systemd_enable_units() {
 		systemctl enable --now oxpulse-xray-update.timer
 		systemctl enable --now oxpulse-geoip-refresh.timer
 		systemctl enable --now oxpulse-channels-health-report.timer
+		systemctl enable --now oxpulse-partner-edge-selfheal.timer
 	else
 		# Bake mode: enable hydrate so it fires on first boot after snapshot→clone.
 		# Do NOT start it now — secrets aren't present yet.
@@ -426,6 +438,7 @@ _systemd_enable_units() {
 		systemctl enable oxpulse-xray-update.timer
 		systemctl enable oxpulse-geoip-refresh.timer
 		systemctl enable oxpulse-channels-health-report.timer
+		systemctl enable oxpulse-partner-edge-selfheal.timer
 		log "  [bake] units installed, daemon-reloaded; hydrate + refresh enabled for first boot"
 	fi
 }
