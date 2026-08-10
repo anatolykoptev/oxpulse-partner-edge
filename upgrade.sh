@@ -1037,6 +1037,7 @@ _HOST_SCRIPT_SBIN_FILES=(
 	sni-select-lib.sh
 	oxpulse-partner-edge-sni-rotate
 	oxpulse-channels-health-report
+	oxpulse-partner-edge-selfheal
 	oxpulse-geoip-refresh
 	oxpulse-xray-update.sh
 	channel-render-lib.sh
@@ -1123,6 +1124,7 @@ _host_script_remote_name() {
 		oxpulse-partner-edge-refresh)    echo "oxpulse-partner-edge-refresh.sh" ;;
 		oxpulse-partner-edge-sni-rotate) echo "oxpulse-partner-edge-sni-rotate.sh" ;;
 		oxpulse-channels-health-report)  echo "oxpulse-channels-health-report.sh" ;;
+		oxpulse-partner-edge-selfheal)   echo "oxpulse-partner-edge-selfheal.sh" ;;
 		oxpulse-geoip-refresh)           echo "scripts/oxpulse-geoip-refresh.sh" ;;
 		oxpulse-xray-update.sh)          echo "scripts/oxpulse-xray-update.sh" ;;
 		channel-render-lib.sh)           echo "channel-render-lib.sh" ;;
@@ -1198,6 +1200,8 @@ _HOST_SCRIPT_SYSTEMD_FILES=(
 	oxpulse-geoip-refresh.timer
 	oxpulse-channels-health-report.service
 	oxpulse-channels-health-report.timer
+	oxpulse-partner-edge-selfheal.service
+	oxpulse-partner-edge-selfheal.timer
 	# Split-routing (PR #280).
 	oxpulse-partner-edge-split-routing.service
 	oxpulse-partner-edge-ru-subnets-update.service
@@ -1248,6 +1252,7 @@ _HOST_SCRIPT_ENABLE_UNITS=(
 	oxpulse-xray-update.timer
 	oxpulse-geoip-refresh.timer
 	oxpulse-channels-health-report.timer
+	oxpulse-partner-edge-selfheal.timer
 )
 
 # snapshot_host_scripts / restore_host_scripts / sync_host_scripts — thin
