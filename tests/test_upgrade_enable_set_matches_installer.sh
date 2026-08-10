@@ -170,6 +170,44 @@ else
       Enabling an undelivered unit is a permanent warn and an unconverged node."
 fi
 
+# ---------------------------------------------------------------------------
+# S6: the SELF-HEALER's enable-set is the same set, minus its own timer.
+#
+# oxpulse-partner-edge-selfheal.sh re-enables any declared unit it finds
+# disabled — the drift this whole file exists to prevent, but continuously
+# rather than only when an upgrade happens to run. That makes its ENABLE_UNITS
+# a FOURTH copy of the same list, free to drift exactly like the third one did.
+# So it is asserted here rather than trusted, and the healer parses nothing at
+# runtime.
+#
+# The one deliberate difference: the healer's OWN timer is excluded. Disabling
+# that timer is how an operator stops the healer, and a healer that re-enables
+# itself cannot be switched off by the person it is fighting.
+# ---------------------------------------------------------------------------
+SELFHEAL="$REPO_ROOT/oxpulse-partner-edge-selfheal.sh"
+if [[ ! -f "$SELFHEAL" ]]; then
+    fail "S6: $SELFHEAL not found — the healer's enable-set cannot be checked"
+else
+    healer_units=$(awk '/^ENABLE_UNITS=\(/{f=1;next} f&&/^\)/{exit} f' "$SELFHEAL" \
+                   | sed 's/#.*//' | tr -d '\t ' | grep . | sort)
+    expected=$(printf '%s\n' "$upgrade_units" \
+               | grep -vx 'oxpulse-partner-edge-selfheal.timer' | sort)
+    if [[ "$healer_units" == "$expected" ]]; then
+        pass "S6: the self-healer's enable-set matches (minus its own timer)"
+    else
+        fail "S6: the self-healer's ENABLE_UNITS DIVERGED from the enable-set"
+        echo "--- in the declared set but the healer would never repair it:"
+        comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$healer_units") | sed 's/^/    /'
+        echo "--- the healer would enable, but nothing declares it (a unit switched on by nobody's decision):"
+        comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$healer_units") | sed 's/^/    /'
+    fi
+    if grep -qx 'oxpulse-partner-edge-selfheal.timer' <<< "$healer_units"; then
+        fail "S6b: the healer's own timer is in its enable-set — switching the healer off would not stick"
+    else
+        pass "S6b: the healer never re-enables its own timer"
+    fi
+fi
+
 echo ""
 if [[ "$FAIL" -eq 0 ]]; then
     echo "PASS: all $PASS enable-set parity checks passed"

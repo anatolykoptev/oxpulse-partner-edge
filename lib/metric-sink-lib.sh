@@ -210,18 +210,52 @@ metric_sink_discard_pre328_prom() {
 # (non-fatal), matching emit_metric's own failure posture.
 _emit_prom_gauge_file() {
     local _basename="$1" _metric="$2" _value="$3" _labels="${4:-}"
+    # Optional _labels (e.g. kind="real") - backward-compatible: 3-arg callers emit
+    # the identical unlabeled line they always did.
+    printf '%s\t%s\n' "$_labels" "$_value" | _emit_prom_gauge_series "$_basename" "$_metric"
+}
+
+# _emit_prom_gauge_series BASENAME METRIC — the MULTI-SAMPLE form, and the sole
+# writer of the gauge textfile shape (_emit_prom_gauge_file above is its
+# one-sample delegate, which is what keeps tests/test_gauge_writer_fitness.sh's
+# single-implementation invariant true).
+#
+# Samples arrive on stdin, one per line, as "LABELS<TAB>VALUE"; an empty LABELS
+# field emits an unlabeled sample.
+#
+# WHY THIS EXISTS (measured on the live fleet, 2026-08-11): every gauge here
+# gets its OWN file, truncated on each write. A caller emitting one series PER
+# SUBJECT — `partner_edge_container_unhealthy{container="..."}` across five
+# containers — therefore wrote the same file five times and only the LAST
+# subject survived. ruoxp and rvpn both carried exactly one sample,
+# `container="oxpulse-partner-xray"` (alphabetically last), while the healer's
+# own `..._containers_seen` said 5. Four of five containers had no health
+# series at all, so a wedged coturn would have been invisible in a metric that
+# looked present and healthy — a detector reading as coverage.
+#
+# One file, one `# TYPE` line, every sample, still atomic (tmp+mv).
+_emit_prom_gauge_series() {
+    local _basename="$1" _metric="$2"
     local _dir="${PARTNER_EDGE_TEXTFILE_DIR:-/var/lib/prometheus-node-exporter/textfile}"
     [[ -d "$_dir" ]] || mkdir -p "$_dir" 2>/dev/null || return 0
     local _f="$_dir/$_basename"
     local _tmp="${_f}.tmp.$$"
-    # Optional _labels (e.g. kind="real") - backward-compatible: 3-arg callers emit
-    # the identical unlabeled line they always did.
     { printf '# TYPE %s gauge\n' "$_metric"
-      if [[ -n "$_labels" ]]; then
-          printf '%s{%s} %s\n' "$_metric" "$_labels" "$_value"
-      else
-          printf '%s %s\n' "$_metric" "$_value"
-      fi
+      local _line _l _v
+      # Split by hand rather than with `IFS=$'\t' read -r _l _v`: a TAB is IFS
+      # WHITESPACE, so read strips a leading one and an UNLABELED sample
+      # ("\tVALUE") arrives as _l=VALUE, _v='' — dropped. The file then carries
+      # a `# TYPE` line and no sample at all, which is how an unlabeled gauge
+      # silently disappears while every labelled one looks fine.
+      while IFS= read -r _line; do
+          _l="${_line%%$'\t'*}"; _v="${_line#*$'\t'}"
+          [[ -n "$_v" ]] || continue
+          if [[ -n "$_l" ]]; then
+              printf '%s{%s} %s\n' "$_metric" "$_l" "$_v"
+          else
+              printf '%s %s\n' "$_metric" "$_v"
+          fi
+      done
     } >"$_tmp" 2>/dev/null && mv -f "$_tmp" "$_f" 2>/dev/null || rm -f "$_tmp" 2>/dev/null
     return 0
 }
