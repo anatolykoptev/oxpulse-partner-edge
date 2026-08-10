@@ -638,6 +638,9 @@ jobs:
             oxpulse-geoip-refresh.timer \
             oxpulse-channels-health-report.service \
             oxpulse-channels-health-report.timer \
+            oxpulse-partner-edge-selfheal.sh \
+            oxpulse-partner-edge-selfheal.service \
+            oxpulse-partner-edge-selfheal.timer \
             oxpulse-partner-edge-split-routing.sh \
             oxpulse-partner-edge-split-disable.sh \
             oxpulse-partner-edge-ru-subnets-update \
@@ -711,6 +714,9 @@ jobs:
             oxpulse-geoip-refresh.timer \
             oxpulse-channels-health-report.service \
             oxpulse-channels-health-report.timer \
+            oxpulse-partner-edge-selfheal.sh \
+            oxpulse-partner-edge-selfheal.service \
+            oxpulse-partner-edge-selfheal.timer \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
