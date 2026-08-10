@@ -439,7 +439,12 @@ _evaluate_container() {   # container now
 # container an OOM storm exhausted. _evaluate_container never sees this case —
 # it only ever inspects health, and a stopped container has none.
 _evaluate_stopped() {   # container now
-	local c="$1" t="$2" s="stopped:$c"
+	local c="$1" t="$2"
+	# Two `local`s on purpose: a variable assigned in the SAME `local` is not yet
+	# in effect, so `s="stopped:$c"` up there would read the CALLER's `c` — which
+	# happens to hold the same value today, making it accidentally correct and
+	# silently wrong the day this is called from anywhere else.
+	local s="stopped:$c"
 	local lbl="container=\"$c\""
 	_gauge partner_edge_container_stopped "$lbl" 1
 
