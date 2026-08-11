@@ -104,6 +104,7 @@
 #   OXPULSE_SELFHEAL_DISK_MAX    default 2     prunes per disk window
 #   OXPULSE_SELFHEAL_DISK_WINDOW default 21600 disk rolling window, seconds
 #   OXPULSE_SELFHEAL_DISK_GAP    default 3600  min seconds between prunes
+#   OXPULSE_SELFHEAL_KEEP_RELEASES default 2   releases' images kept when pruning
 #   OXPULSE_SELFHEAL_ACTS_PER_TICK default 2   max unit actions in one tick
 #   OXPULSE_SELFHEAL_DRY_RUN     default 0     log the action, do not perform it
 #   OXPULSE_SELFHEAL_PROJECT     default oxpulse-partner-edge  compose project
@@ -122,6 +123,9 @@ DISK_PCT="${OXPULSE_SELFHEAL_DISK_PCT:-85}"
 DISK_MAX="${OXPULSE_SELFHEAL_DISK_MAX:-2}"
 DISK_WINDOW="${OXPULSE_SELFHEAL_DISK_WINDOW:-21600}"
 DISK_GAP="${OXPULSE_SELFHEAL_DISK_GAP:-3600}"
+# How many releases' images to keep. Two, because upgrade.sh rolls back to the
+# PREVIOUS image when a release fails its healthcheck.
+KEEP_RELEASES="${OXPULSE_SELFHEAL_KEEP_RELEASES:-2}"
 ACTS_PER_TICK="${OXPULSE_SELFHEAL_ACTS_PER_TICK:-2}"
 DRY_RUN="${OXPULSE_SELFHEAL_DRY_RUN:-0}"
 PROJECT="${OXPULSE_SELFHEAL_PROJECT:-oxpulse-partner-edge}"
@@ -597,6 +601,67 @@ heal_enable_drift() {   # now
 # actions below reclaim only things docker can recreate.
 _disk_pct() { df -P "$DOCKER_ROOT" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5+0}'; }
 
+# _prune_stale_edge_images — remove OUR OWN accumulated release tags. Prints the
+# number removed.
+#
+# WHY: an upgrade pulls the new images and never removes the ones it replaced.
+# Measured across the fleet 2026-08-11 — 90 stale tags on rvpn reaching back to
+# v0.8.0, 286 across five nodes — and nothing had ever removed one. rvpn was at
+# 80% with 12.2 GB of recoverable junk.
+#
+# Three rules, each load-bearing:
+#
+#   • The repository set is DERIVED from what is actually running, never a
+#     hand-written prefix. A service added in a later release is covered the day
+#     it ships; a hand-written list could not see it. It also cannot reach a
+#     neighbouring project's images — on rvpn a foreign container shares our
+#     compose label, and _managed_containers' name-prefix gate is what keeps this
+#     pointed at ours only.
+#   • Anything a CONTAINER references is kept, compared by image ID rather than
+#     by tag string: a container can reference an image by digest or under
+#     another tag, and a string comparison would delete the image out from under
+#     a running service.
+#   • The newest KEEP_RELEASES versions are kept. upgrade.sh rolls back to the
+#     PREVIOUS image when a release fails its healthcheck, so keeping fewer than
+#     two would turn a rollback into a re-pull at the worst possible moment.
+_prune_stale_edge_images() {
+	local repos removed=0
+	# Repos of the containers we manage — resolved through _managed_containers so
+	# the project label AND the name prefix both apply.
+	repos="$(while read -r c; do
+			[[ -n "$c" ]] || continue
+			local ref; ref="$(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null)"
+			[[ -n "$ref" ]] && echo "${ref%:*}"
+		done < <(_managed_containers -a) | sort -u)"
+	[[ -n "$repos" ]] || { echo 0; return 0; }
+
+	# Image IDs any container depends on, however it names them.
+	local used_ids
+	used_ids="$(docker ps -a --format '{{.Image}}' 2>/dev/null | sort -u \
+		| while read -r i; do docker inspect -f '{{.Id}}' "$i" 2>/dev/null; done | sort -u)"
+
+	local all keep
+	all="$(docker images --format '{{.ID}} {{.Repository}}:{{.Tag}}' 2>/dev/null \
+		| while read -r id ref; do
+			grep -qxF "${ref%:*}" <<< "$repos" && echo "$id $ref"
+		done)"
+	[[ -n "$all" ]] || { echo 0; return 0; }
+	# Newest versions present, by version sort — v0.16.20 correctly outranks
+	# v0.16.9, which a lexical sort would get backwards.
+	keep="$(awk '{print $2}' <<< "$all" | sed 's/.*://' | sort -Vru | head -n "$KEEP_RELEASES")"
+
+	local id ref ver full
+	while read -r id ref; do
+		[[ -n "$ref" ]] || continue
+		ver="${ref##*:}"
+		grep -qxF "$ver" <<< "$keep" && continue
+		full="$(docker inspect -f '{{.Id}}' "$id" 2>/dev/null)"
+		[[ -n "$full" ]] && grep -qxF "$full" <<< "$used_ids" && continue
+		docker rmi "$ref" >/dev/null 2>&1 && removed=$((removed + 1))
+	done <<< "$all"
+	echo "$removed"
+}
+
 heal_disk() {   # now
 	local t="$1" pct; pct="$(_disk_pct)"
 	[[ -n "$pct" ]] || return 0
@@ -617,19 +682,35 @@ heal_disk() {   # now
 	log "disk at ${pct}% (>= ${DISK_PCT}%) — reclaiming"
 	_budget_spend disk "$t"
 	if [[ "$DRY_RUN" == 1 ]]; then
-		log "[dry-run] docker image prune -f; docker builder prune -f --filter until=168h"
+		log "[dry-run] docker image prune -f; stale ${PROJECT} image tags; docker builder prune -f --filter until=168h"
 		return 0
 	fi
 
-	# Dangling images first: unreferenced by definition, so nothing that is
-	# running or tagged can be affected.
+	# The three reclaim steps are ordered by WHOSE data they touch: our own
+	# garbage first, anything shared with a neighbouring project last. rvpn shares
+	# this docker daemon with the rvpnm project, so that ordering is not cosmetic.
+
+	# 1. Dangling images: untagged and referenced by nothing, so garbage by
+	#    definition whoever built them.
 	timeout 120 docker image prune -f >/dev/null 2>&1
 	pct="$(_disk_pct)"
+
+	# 2. OUR OWN accumulated release tags. Measured 2026-08-11: an upgrade pulls
+	#    new images and never removes the ones it replaced, so every edge grows a
+	#    tag per release forever — 90 stale tags on rvpn going back to v0.8.0,
+	#    286 across the five nodes, 12.2 GB on rvpn alone. Nothing had ever
+	#    removed one.
 	if (( pct >= DISK_PCT )); then
-		# Then build cache older than a week. rvpn shares this daemon with a
-		# neighbouring project, so this is scoped by AGE rather than pruning
-		# everything — the cost of a miss is a slower rebuild, never a loss.
-		log "disk still at ${pct}% after image prune — pruning build cache older than 7d"
+		local n; n="$(_prune_stale_edge_images)"
+		log "disk still at ${pct}% — removed ${n} stale ${PROJECT} image tag(s)"
+		pct="$(_disk_pct)"
+	fi
+
+	# 3. Build cache older than a week — LAST, because on a shared daemon this is
+	#    the neighbour's too. Scoped by age rather than pruning everything; the
+	#    cost of a miss is a slower rebuild, never a loss.
+	if (( pct >= DISK_PCT )); then
+		log "disk still at ${pct}% — pruning build cache older than 7d"
 		timeout 120 docker builder prune -f --filter until=168h >/dev/null 2>&1
 		pct="$(_disk_pct)"
 	fi

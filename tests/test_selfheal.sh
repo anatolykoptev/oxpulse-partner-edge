@@ -81,14 +81,29 @@ read_fx() {   # container -> sets health started hashc state finished oneoff
 case "$1" in
   ps)
     shift
-    all=0; for a in "$@"; do [[ "$a" == "-a" ]] && all=1; done
+    all=0; want_image=0
+    for a in "$@"; do
+      [[ "$a" == "-a" ]] && all=1
+      [[ "$a" == *".Image"* ]] && want_image=1
+    done
     for f in "$FX"/*; do
       [[ -e "$f" ]] || continue
       n="$(basename "$f")"; read_fx "$n" || continue
-      [[ $all == 1 || "$state" == running ]] && echo "$n"
+      if [[ $all == 1 || "$state" == running ]]; then
+        if [[ $want_image == 1 ]]; then cat "$CONTAINER_IMAGE/$n" 2>/dev/null; else echo "$n"; fi
+      fi
     done ;;
   inspect)
-    fmt="$3"; c="$4"; read_fx "$c" || exit 1
+    fmt="$3"; c="$4"
+    case "$fmt" in
+      # Image lookups: {{.Id}} resolves a repo:tag OR a short id to its full id.
+      *.Id*)
+        line=$(awk -v k="$c" '$1==k || $2==k {print $1; exit}' "$IMAGE_LIST" 2>/dev/null)
+        [[ -n "$line" ]] && echo "sha256:$line" || exit 1 ;;
+      *Config.Image*)
+        cat "$CONTAINER_IMAGE/$c" 2>/dev/null || exit 1 ;;
+    esac
+    read_fx "$c" || exit 1
     case "$fmt" in
       *State.Health.Status*)  echo "$health" ;;
       *if\ .State.Health*)    [[ "$hashc" == y ]] && echo y ;;
@@ -96,6 +111,14 @@ case "$1" in
       *State.FinishedAt*)     date -d "@$finished" -Is ;;
       *compose.oneoff*)       echo "$oneoff" ;;
     esac ;;
+  images)
+    # --format '{{.ID}} {{.Repository}}:{{.Tag}}'
+    awk '{print $1" "$2}' "$IMAGE_LIST" 2>/dev/null ;;
+  rmi)
+    echo "$2" >> "$RMI_LOG"
+    grep -v " $2\$" "$IMAGE_LIST" > "$IMAGE_LIST.t" 2>/dev/null && mv -f "$IMAGE_LIST.t" "$IMAGE_LIST"
+    [[ -n "${FAKE_DISK_AFTER_RMI:-}" ]] && echo "$FAKE_DISK_AFTER_RMI" > "$TMPDIR_DISK"
+    ;;
   restart) echo "$2" >> "$RESTART_LOG"; exit "${DOCKER_RESTART_RC:-0}" ;;
   start)
     echo "$2" >> "$START_LOG"
@@ -164,6 +187,9 @@ TG
 	# The REAL metric sink, so the gauge assertions exercise the shipped writer.
 	cp "$REPO_ROOT/lib/metric-sink-lib.sh" "$TMP/metric-sink-lib.sh"
 
+	mkdir -p "$TMP/cimg"
+	export IMAGE_LIST="$TMP/images" CONTAINER_IMAGE="$TMP/cimg" RMI_LOG="$TMP/rmi"
+	: > "$IMAGE_LIST"; : > "$RMI_LOG"
 	export FIXTURES="$TMP/fixtures" FX_UNITS="$TMP/units"
 	export RESTART_LOG="$TMP/restarts" START_LOG="$TMP/starts"
 	export ALERT_LOG="$TMP/alerts" UNIT_LOG="$TMP/units.log" PRUNE_LOG="$TMP/prunes"
@@ -184,6 +210,11 @@ teardown() { rm -rf "$TMP"; }
 
 # name health started [hashc] [state] [finished] [oneoff]
 fixture() { echo "$2 $3 ${4:-y} ${5:-running} ${6:-0} ${7:-False}" > "$FIXTURES/$1"; }
+# container -> the image ref it runs
+cimage()  { echo "$2" > "$CONTAINER_IMAGE/$1"; }
+# id repo:tag  — the local image store
+image()   { echo "$1 $2" >> "$IMAGE_LIST"; }
+rmis()    { wc -l < "$RMI_LOG" | tr -d ' '; }
 run_it()   { bash "$SCRIPT" >"$TMP/out" 2>&1; }
 restarts() { wc -l < "$RESTART_LOG" | tr -d ' '; }
 starts()   { wc -l < "$START_LOG"   | tr -d ' '; }
@@ -426,6 +457,87 @@ n=$(grep -c '^restart oxpulse-crash.service$' "$UNIT_LOG")
 [[ "$(alerts)" == 1 ]] && pass "a crashlooping unit escalates exactly once" \
                        || fail "crashloop alert count $(alerts), expected 1"
 unset OXPULSE_SELFHEAL_UNIT_GAP
+teardown
+
+# --- image garbage collection -------------------------------------------------
+# An upgrade pulls the new images and never removes the ones it replaced, so every
+# edge grows one tag per release forever. Measured 2026-08-11 before this existed:
+# 90 stale tags on rvpn reaching back to v0.8.0, 286 across the five nodes, 12.2 GB
+# recoverable on rvpn alone — and nothing had ever removed one.
+img_setup() {   # a fleet-shaped image store: ours across 4 releases + a neighbour's
+	setup
+	echo 92 > "$TMPDIR_DISK"; export FAKE_DISK_AFTER_RMI=40
+	fixture oxpulse-partner-xray healthy "$OLD"
+	cimage  oxpulse-partner-xray ghcr.io/anatolykoptev/partner-edge-xray:v0.16.20
+	image aaa1 ghcr.io/anatolykoptev/partner-edge-xray:v0.16.20
+	image aaa2 ghcr.io/anatolykoptev/partner-edge-xray:v0.16.19
+	image aaa3 ghcr.io/anatolykoptev/partner-edge-xray:v0.16.9
+	image aaa4 ghcr.io/anatolykoptev/partner-edge-xray:v0.8.0
+	image bbb1 rocketvpn-monitor-api:latest          # the neighbouring project's
+	image bbb2 rust:1-bullseye                       # somebody's build base
+}
+
+# 25 — stale tags of OUR repos are removed
+img_setup; run_it
+[[ "$(rmis)" == 2 ]] && pass "image GC removes exactly the stale tags (2 of 4)" \
+                     || fail "removed $(rmis) tags, expected 2 — [$(tr '\n' ' ' <"$RMI_LOG")]"
+grep -q 'v0.8.0' "$RMI_LOG" && grep -q 'v0.16.9' "$RMI_LOG" \
+	&& pass "the oldest releases are the ones removed" || fail "wrong tags removed"
+teardown
+
+# 26 — the newest two are kept, because upgrade.sh rolls back to the PREVIOUS image
+img_setup; run_it
+grep -qE 'v0\.16\.(20|19)' "$RMI_LOG" \
+	&& fail "removed a release upgrade.sh would roll back to" \
+	|| pass "the current and previous releases are kept"
+teardown
+
+# 27 — a NEIGHBOUR's image is never touched. rvpn shares this docker daemon with
+# the rvpnm project; a prune that reached their images would be an outage we
+# caused on somebody else's service.
+img_setup; run_it
+grep -qE 'rocketvpn|rust' "$RMI_LOG" \
+	&& fail "removed an image belonging to another project" \
+	|| pass "images outside our repos are never touched"
+teardown
+
+# 28 — version ordering is NUMERIC. A lexical sort puts v0.16.9 above v0.16.20 and
+# would delete the running release.
+img_setup; run_it
+grep -q 'v0.16.9' "$RMI_LOG" && grep -qv 'v0.16.20' "$RMI_LOG" \
+	&& pass "v0.16.20 outranks v0.16.9 (version sort, not lexical)" \
+	|| fail "version ordering is lexical — the newest release would be deleted"
+teardown
+
+# 29 — below the threshold nothing is collected at all
+img_setup; echo 50 > "$TMPDIR_DISK"; run_it
+[[ "$(rmis)" == 0 ]] && pass "no image GC below the disk threshold" || fail "collected images on a healthy disk"
+teardown
+
+# 30 — ORDERING: our own garbage is taken BEFORE the shared build cache. On a box
+# whose docker daemon is shared with another project, pruning their build cache
+# when removing our own stale tags would have been enough is a cost we imposed
+# for nothing.
+img_setup; run_it
+if grep -q 'builder' "$PRUNE_LOG"; then
+	fail "pruned the SHARED build cache even though our own tags freed enough"
+else
+	pass "shared build cache is untouched when our own tags suffice"
+fi
+teardown
+
+# 31 — THE DANGEROUS ONE. A container running an OLD release must keep its image
+# even though that version is not among the newest kept. A node that skipped
+# upgrades, or one mid-rollback, is exactly this shape — and deleting the image a
+# running service was created from is an outage we caused ourselves.
+# The keep-set is compared by image ID, not by tag string, because a container can
+# reference an image by digest or under a different tag.
+img_setup
+cimage oxpulse-partner-xray ghcr.io/anatolykoptev/partner-edge-xray:v0.8.0
+run_it
+grep -q 'v0.8.0' "$RMI_LOG" \
+	&& fail "deleted the image a RUNNING container was created from" \
+	|| pass "an in-use image is kept however old its version"
 teardown
 
 echo ""
