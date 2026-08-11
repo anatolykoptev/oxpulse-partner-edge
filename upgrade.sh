@@ -1040,8 +1040,11 @@ if [[ "$MODE" == templates ]]; then
 		HY2_AUTH_PASS="${HY2_AUTH_PASS:-$OXPULSE_HY2_AUTH_PASS}"
 		HY2_OBFS_PASS="${HY2_OBFS_PASS:-$OXPULSE_HY2_OBFS_PASS}"
 		export HY2_AUTH_PASS HY2_OBFS_PASS
-		re_render_hysteria2
-		log "hy2 channel refreshed"
+		if re_render_hysteria2; then
+			log "hy2 channel refreshed"
+		else
+			log "WARNING: hy2 channel refresh failed — render returned non-zero (check HYSTERIA2_SERVER endpoint)"
+		fi
 	else
 		log "hy2 credentials not in env — skipping (set OXPULSE_HY2_AUTH_PASS + OXPULSE_HY2_OBFS_PASS)"
 	fi

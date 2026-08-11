@@ -1447,10 +1447,14 @@ if [[ -n "${HYSTERIA2_SERVER:-}" ]] && declare -f re_render_hysteria2 >/dev/null
 	HY2_OBFS_PASS="${HY2_OBFS_PASS:-${OXPULSE_HY2_OBFS_PASS:-}}"
 	if [[ -n "$HY2_AUTH_PASS" && -n "$HY2_OBFS_PASS" ]]; then
 		export HY2_AUTH_PASS HY2_OBFS_PASS OXPULSE_REPO_DIR="$stage"
-		re_render_hysteria2
-		COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
-		log "hy2 channel provisioned"
-		_hy2_status="active"
+		if re_render_hysteria2; then
+			COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
+			log "hy2 channel provisioned"
+			_hy2_status="active"
+		else
+			warn "hy2 render failed — channel not provisioned (check HYSTERIA2_SERVER endpoint)"
+			# _hy2_status stays "failed_at_start" — render failure is a provisioning failure
+		fi
 	else
 		warn "hy2 credentials unavailable — installing awg-only mode (hy2 will provision on next upgrade)"
 		# _hy2_status stays "failed_at_start" — credentials missing is a provisioning failure

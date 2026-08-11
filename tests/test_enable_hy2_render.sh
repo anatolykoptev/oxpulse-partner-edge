@@ -105,7 +105,7 @@ teardown() {
         PARTNER_EDGE_PREFIX_ETC="$TMP/etc" \
         OXPULSE_REPO_DIR="$REPO_ROOT" \
         PATH="$TMP:$MOCKS:$PATH" \
-        bash "$SCRIPT" --dry-run 2>&1 || true)
+        bash "$SCRIPT" --dry-run --server edge.example.net:51822 2>&1 || true)
     printf '%s\n' "$output" | grep -q 'api/partner/hy2-credentials'
 }
 
@@ -114,7 +114,7 @@ teardown() {
         PARTNER_EDGE_PREFIX_ETC="$TMP/etc" \
         OXPULSE_REPO_DIR="$REPO_ROOT" \
         PATH="$TMP:$MOCKS:$PATH" \
-        bash "$SCRIPT" --dry-run 2>&1 || true)
+        bash "$SCRIPT" --dry-run --server edge.example.net:51822 2>&1 || true)
     printf '%s\n' "$output" | grep -q 're_render_hysteria2'
 }
 
@@ -123,7 +123,7 @@ teardown() {
         PARTNER_EDGE_PREFIX_ETC="$TMP/etc" \
         OXPULSE_REPO_DIR="$REPO_ROOT" \
         PATH="$TMP:$MOCKS:$PATH" \
-        bash "$SCRIPT" --dry-run 2>&1 || true)
+        bash "$SCRIPT" --dry-run --server edge.example.net:51822 2>&1 || true)
     printf '%s\n' "$output" | grep -q 'ch3'
 }
 
@@ -133,7 +133,7 @@ teardown() {
         OXPULSE_REPO_DIR="$REPO_ROOT" \
         HY2_AUTH_PASS="" HY2_OBFS_PASS="" \
         PATH="$TMP:$MOCKS:$PATH" \
-        bash "$SCRIPT" --dry-run 2>&1 || true)
+        bash "$SCRIPT" --dry-run --server edge.example.net:51822 2>&1 || true)
     # No error about missing auth/obfs pass means creds were resolved.
     printf '%s\n' "$output" | grep -qv 'auth_pass missing'
 }
@@ -161,6 +161,6 @@ teardown() {
         PARTNER_EDGE_PREFIX_ETC="$TMP/etc" \
         OXPULSE_REPO_DIR="$REPO_ROOT" \
         PATH="$TMP:$MOCKS:$PATH" \
-        bash "$SCRIPT" --dry-run
+        bash "$SCRIPT" --dry-run --server edge.example.net:51822
     [ "$status" -eq 0 ]
 }

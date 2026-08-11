@@ -48,9 +48,12 @@ if [[ -n "\${HYSTERIA2_SERVER:-}" ]]; then
 fi
 if [[ -n "\${HYSTERIA2_SERVER:-}" ]] && declare -f re_render_hysteria2 >/dev/null 2>&1; then
     if [[ -n "\$HY2_AUTH_PASS" && -n "\$HY2_OBFS_PASS" ]]; then
-        re_render_hysteria2
-        COMPOSE_PROFILES_EXTRA="\${COMPOSE_PROFILES_EXTRA:+\${COMPOSE_PROFILES_EXTRA},}ch3"
-        _hy2_status="active"
+        if re_render_hysteria2; then
+            COMPOSE_PROFILES_EXTRA="\${COMPOSE_PROFILES_EXTRA:+\${COMPOSE_PROFILES_EXTRA},}ch3"
+            _hy2_status="active"
+        else
+            _hy2_status="failed_at_start"
+        fi
     fi
 fi
 if [[ "\${_hy2_status}" == "active" ]]; then
@@ -60,6 +63,44 @@ if [[ -n "\${NAIVE_SERVER:-}" ]]; then
     COMPOSE_PROFILES_EXTRA="\${COMPOSE_PROFILES_EXTRA:+\${COMPOSE_PROFILES_EXTRA},}ch5"
 fi
 printf '%s' "\${COMPOSE_PROFILES_EXTRA}"
+INNER
+}
+
+# Variant: re_render_hysteria2 stub returns 1 (render failure).
+_run_hy2_profiles_logic_failing() {
+    local hy2_server="${1:-}"
+    local hy2_auth="${2:-}"
+    local hy2_obfs="${3:-}"
+    local naive_server="${4:-}"
+
+    bash << INNER
+set -euo pipefail
+COMPOSE_PROFILES_EXTRA=""
+HYSTERIA2_SERVER="${hy2_server}"
+HY2_AUTH_PASS="${hy2_auth}"
+HY2_OBFS_PASS="${hy2_obfs}"
+NAIVE_SERVER="${naive_server}"
+
+re_render_hysteria2() { return 1; }  # stub — render FAILS
+
+_hy2_status="skipped"
+if [[ -n "\${HYSTERIA2_SERVER:-}" ]]; then
+    _hy2_status="failed_at_start"
+fi
+if [[ -n "\${HYSTERIA2_SERVER:-}" ]] && declare -f re_render_hysteria2 >/dev/null 2>&1; then
+    if [[ -n "\$HY2_AUTH_PASS" && -n "\$HY2_OBFS_PASS" ]]; then
+        if re_render_hysteria2; then
+            COMPOSE_PROFILES_EXTRA="\${COMPOSE_PROFILES_EXTRA:+\${COMPOSE_PROFILES_EXTRA},}ch3"
+            _hy2_status="active"
+        else
+            _hy2_status="failed_at_start"
+        fi
+    fi
+fi
+if [[ -n "\${NAIVE_SERVER:-}" ]]; then
+    COMPOSE_PROFILES_EXTRA="\${COMPOSE_PROFILES_EXTRA:+\${COMPOSE_PROFILES_EXTRA},}ch5"
+fi
+printf '%s|%s' "\${_hy2_status}" "\${COMPOSE_PROFILES_EXTRA}"
 INNER
 }
 
@@ -194,4 +235,16 @@ COMPOSE
     if grep -qE '\-\-profile "\$\{?COMPOSE_PROFILES_EXTRA' "$REPO_ROOT/install.sh"; then
         fail "install.sh still passes --profile \"\$COMPOSE_PROFILES_EXTRA\" — this is the bug pattern"
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 9: hy2 render fails → _hy2_status NOT active, ch3 NOT in profiles
+# Regression guard: a failed render must not be reported as active.
+# ---------------------------------------------------------------------------
+@test "hy2 render fails: _hy2_status not active, ch3 not in COMPOSE_PROFILES_EXTRA" {
+    result=$(_run_hy2_profiles_logic_failing "edge.example.net:51822" "authpass" "obfspass" "")
+    _status="${result%%|*}"
+    _profiles="${result#*|}"
+    [ "$_status" != "active" ]
+    [[ "$_profiles" != *ch3* ]]
 }

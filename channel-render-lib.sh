@@ -419,7 +419,12 @@ re_render_hysteria2() {
     local out="${HY2_OUTPUT_PATH:-/etc/oxpulse-partner-edge/hysteria2-client.yaml}"
     local backup
     backup="${out}.bak.$(date +%s)"
-    local server="${HY2_SERVER:-${OXPULSE_HY2_SERVER:-203.0.113.10:51822}}"
+    # Resolution chain: HY2_SERVER (direct override) → HYSTERIA2_SERVER (what
+    # the backend returns and install.sh/upgrade.sh/hydrate.sh carry) →
+    # OXPULSE_HY2_SERVER (fleet default from config/defaults.conf). No fabricated
+    # fallback — a missing endpoint is a configuration error, not a silent
+    # TEST-NET address that routes nowhere.
+    local server="${HY2_SERVER:-${HYSTERIA2_SERVER:-${OXPULSE_HY2_SERVER:-}}}"
     local listen="${HY2_LOCAL_LISTEN:-${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}}"
     local backend="${HY2_REMOTE_BACKEND:-${OXPULSE_HY2_REMOTE_BACKEND:-127.0.0.1:8907}}"
 
@@ -429,6 +434,10 @@ re_render_hysteria2() {
     fi
     if [[ -z "${HY2_AUTH_PASS:-}" || -z "${HY2_OBFS_PASS:-}" ]]; then
         echo "ERR re_render_hysteria2: HY2_AUTH_PASS or HY2_OBFS_PASS empty — call install.sh hy2-creds fetch first" >&2
+        return 1
+    fi
+    if [[ -z "$server" ]]; then
+        echo "ERR re_render_hysteria2: no hy2 server resolved — set HY2_SERVER, HYSTERIA2_SERVER, or OXPULSE_HY2_SERVER" >&2
         return 1
     fi
 

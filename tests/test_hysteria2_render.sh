@@ -18,7 +18,7 @@ source "$REPO_ROOT/channel-render-lib.sh"
 [[ -f "$REPO_ROOT/config/defaults.conf" ]] && source "$REPO_ROOT/config/defaults.conf"
 
 # Set fixture values — pin explicit literals for byte-identical golden comparison.
-HUB_SERVER="${OXPULSE_HY2_SERVER:-203.0.113.10:51822}"
+HUB_SERVER="${OXPULSE_HY2_SERVER:-hy2.example.net:51822}"
 HY2_AUTH_PASS="GOLDEN_AUTH_PASS_FIXTURE"
 HY2_OBFS_PASS="GOLDEN_OBFS_PASS_FIXTURE"
 HY2_LOCAL_LISTEN="${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
@@ -45,7 +45,7 @@ trap 'rm -rf "$out_dir"' EXIT
 
 HY2_OUTPUT_PATH="$out_dir/hysteria2-client.yaml"
 export OXPULSE_REPO_DIR="$REPO_ROOT"
-export HY2_SERVER="${OXPULSE_HY2_SERVER:-203.0.113.10:51822}"
+export HY2_SERVER="${OXPULSE_HY2_SERVER:-hy2.example.net:51822}"
 export HY2_AUTH_PASS="public-test-auth"
 export HY2_OBFS_PASS="public-test-obfs"
 export HY2_LOCAL_LISTEN="${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
