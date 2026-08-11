@@ -540,6 +540,75 @@ grep -q 'v0.8.0' "$RMI_LOG" \
 	|| pass "an in-use image is kept however old its version"
 teardown
 
+# A managed container can run a THIRD-PARTY image whose version scheme has nothing
+# to do with ours. Every edge runs hysteria2 as `tobyxdd/hysteria:v2.8.2`, and
+# v2.8.2 version-sorts above every v0.16.x we have ever released. The fixtures
+# above could not see this: they gave the neighbour's images repos we do NOT run,
+# so the repo filter dropped them before they could reach the version pool. Here
+# the third-party image IS one of our services, so it reaches it.
+hy_setup() {
+	img_setup
+	fixture oxpulse-partner-hysteria2 healthy "$OLD"
+	cimage  oxpulse-partner-hysteria2 tobyxdd/hysteria:v2.8.2
+	image ccc1 tobyxdd/hysteria:v2.8.2
+	image ccc2 tobyxdd/hysteria:v2
+}
+
+# 32 — THE ONE ONLY THE LIVE NODE SHOWED. Measured on zvonilka 2026-08-11 against
+# the real daemon, before this had ever run under real disk pressure: a keep-set
+# computed across all repos at once handed BOTH slots to v2.8.2 and v2, so every
+# release we had fell outside it and only the in-use-by-ID guard saved the four
+# that happened to be running.
+# The assertion is on the PREVIOUS release, not the current one. The current one
+# survives either way — the in-use guard catches it — so asserting on it passes
+# under the bug and proves nothing. The previous release is the image upgrade.sh
+# rolls back to, it is by definition not running, and it is what actually died.
+hy_setup; run_it
+grep -q 'v0.16.19' "$RMI_LOG" \
+	&& fail "a third-party version scheme took both keep slots — the rollback target was deleted" \
+	|| pass "keep-set is per repo: a neighbour's higher version cannot evict our releases"
+teardown
+
+# 33 — and the fix must not degrade into "keep everything": our own stale tags are
+# still collected while the third-party repo is present.
+hy_setup; run_it
+[[ "$(rmis)" == 2 ]] && grep -q 'v0.8.0' "$RMI_LOG" && grep -q 'v0.16.9' "$RMI_LOG" \
+	&& pass "our own stale tags are still collected alongside a third-party repo" \
+	|| fail "collected $(rmis) tag(s) — [$(tr '\n' ' ' <"$RMI_LOG")]"
+teardown
+
+# 34 — the third-party repo gets the same rule applied to ITSELF, not an exemption:
+# it keeps its newest KEEP_RELEASES and no more. With only two tags present both
+# survive; the assertion is that neither is treated as ours to delete.
+hy_setup; run_it
+grep -q 'tobyxdd' "$RMI_LOG" \
+	&& fail "deleted a tag of a service we run but do not build" \
+	|| pass "a third-party repo we run is collected by the same per-repo rule"
+teardown
+
+# 35 — the keep-set is matched by FULL REF, not by version number. Two of our own
+# services can sit on different releases: an upgrade that failed one service, or a
+# node that skipped one, leaves a repo lagging. Then a version that is current for
+# the laggard is stale for the others — and matching on the version alone lets the
+# stale one ride the laggard's keep entry and never be collected. The cost is a
+# leak rather than an outage, which is exactly why nothing else would report it.
+setup
+echo 92 > "$TMPDIR_DISK"; export FAKE_DISK_AFTER_RMI=40
+fixture oxpulse-partner-xray healthy "$OLD"
+fixture oxpulse-partner-sfu  healthy "$OLD"
+cimage  oxpulse-partner-xray ghcr.io/anatolykoptev/partner-edge-xray:v0.16.21
+cimage  oxpulse-partner-sfu  ghcr.io/anatolykoptev/partner-edge-sfu:v0.16.19
+image xxx1 ghcr.io/anatolykoptev/partner-edge-xray:v0.16.21
+image xxx2 ghcr.io/anatolykoptev/partner-edge-xray:v0.16.20
+image xxx3 ghcr.io/anatolykoptev/partner-edge-xray:v0.16.19
+image sss1 ghcr.io/anatolykoptev/partner-edge-sfu:v0.16.19
+image sss2 ghcr.io/anatolykoptev/partner-edge-sfu:v0.16.18
+run_it
+[[ "$(rmis)" == 1 ]] && grep -q 'xray:v0.16.19' "$RMI_LOG" \
+	&& pass "a stale tag is collected even while another repo still keeps that version" \
+	|| fail "collected $(rmis) — [$(tr '\n' ' ' <"$RMI_LOG")], expected only xray:v0.16.19"
+teardown
+
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

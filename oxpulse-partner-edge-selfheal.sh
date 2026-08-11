@@ -621,9 +621,19 @@ _disk_pct() { df -P "$DOCKER_ROOT" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); pri
 #     by tag string: a container can reference an image by digest or under
 #     another tag, and a string comparison would delete the image out from under
 #     a running service.
-#   • The newest KEEP_RELEASES versions are kept. upgrade.sh rolls back to the
-#     PREVIOUS image when a release fails its healthcheck, so keeping fewer than
-#     two would turn a rollback into a re-pull at the worst possible moment.
+#   • The newest KEEP_RELEASES versions of EACH REPOSITORY are kept — per repo,
+#     never across the whole set. upgrade.sh rolls back to the PREVIOUS image when
+#     a release fails its healthcheck, so keeping fewer than two would turn a
+#     rollback into a re-pull at the worst possible moment.
+#     Per repo because the services we run are not all versioned by us: every edge
+#     runs hysteria2 as `tobyxdd/hysteria:v2.8.2`, and v2.8.2 version-sorts above
+#     every v0.16.x we have ever released. One keep-set across all repos handed
+#     both slots to those two tags, so our own releases all fell outside it and
+#     only the in-use-by-ID rule above saved the four that happened to be running
+#     — the previous release, which is by definition not running, did not survive.
+#     Measured on zvonilka 2026-08-11 against the real daemon. The test fixtures
+#     could not show it: they gave the third-party images repos we do NOT run, so
+#     the repo filter dropped them before they reached the version pool.
 _prune_stale_edge_images() {
 	local repos removed=0
 	# Repos of the containers we manage — resolved through _managed_containers so
@@ -640,24 +650,33 @@ _prune_stale_edge_images() {
 	used_ids="$(docker ps -a --format '{{.Image}}' 2>/dev/null | sort -u \
 		| while read -r i; do docker inspect -f '{{.Id}}' "$i" 2>/dev/null; done | sort -u)"
 
-	local all keep
+	local all keep r v
 	all="$(docker images --format '{{.ID}} {{.Repository}}:{{.Tag}}' 2>/dev/null \
 		| while read -r id ref; do
 			grep -qxF "${ref%:*}" <<< "$repos" && echo "$id $ref"
 		done)"
 	[[ -n "$all" ]] || { echo 0; return 0; }
-	# Newest versions present, by version sort — v0.16.20 correctly outranks
-	# v0.16.9, which a lexical sort would get backwards.
-	keep="$(awk '{print $2}' <<< "$all" | sed 's/.*://' | sort -Vru | head -n "$KEEP_RELEASES")"
 
-	local id ref ver full
+	# The keep-set, as FULL refs so a version can never be read across repos.
+	# Within a repo the newest wins by version sort — v0.16.20 correctly outranks
+	# v0.16.9, which a lexical sort would get backwards.
+	keep=""
+	while read -r r; do
+		[[ -n "$r" ]] || continue
+		while read -r v; do
+			[[ -n "$v" ]] && keep+="${r}:${v}"$'\n'
+		done < <(while read -r _ ref; do
+				[[ "${ref%:*}" == "$r" ]] && echo "${ref##*:}"
+			done <<< "$all" | sort -Vru | head -n "$KEEP_RELEASES")
+	done <<< "$repos"
+
+	local id ref full
 	while read -r id ref; do
 		[[ -n "$ref" ]] || continue
-		ver="${ref##*:}"
-		grep -qxF "$ver" <<< "$keep" && continue
+		grep -qxF "$ref" <<< "$keep" && continue
 		full="$(docker inspect -f '{{.Id}}' "$id" 2>/dev/null)"
 		[[ -n "$full" ]] && grep -qxF "$full" <<< "$used_ids" && continue
-		docker rmi "$ref" >/dev/null 2>&1 && removed=$((removed + 1))
+		timeout 60 docker rmi "$ref" >/dev/null 2>&1 && removed=$((removed + 1))
 	done <<< "$all"
 	echo "$removed"
 }
