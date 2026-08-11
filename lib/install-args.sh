@@ -103,7 +103,11 @@ assembles a minimal BrandingConfig payload from whichever flags are set):
 
 Env overrides: OXPULSE_IMAGE_REGISTRY, OXPULSE_BACKEND_API, OXPULSE_REPO_RAW, REGION
 USAGE
-	exit 2
+	# --help/-h is the one command a stranger runs first; a non-zero exit
+	# breaks wrappers/Makefiles/CI that shell out to `install.sh --help`.
+	# The missing-required-arg path uses die() (exit 1), so exit 0 here is
+	# unambiguous and does not collide with any other exit code.
+	exit 0
 }
 
 args_parse() {

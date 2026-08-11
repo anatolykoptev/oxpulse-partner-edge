@@ -1465,13 +1465,16 @@ elif [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
 fi
 if [[ "${_hy2_status}" == "active" ]]; then
 	log "  hysteria2 CH3 profile enabled"
-	# MAJOR #1 fix: set restrictive perms on hysteria2-client.yaml.
-	# re_render_hysteria2() writes with umask 077 (mode 0600), which is correct for
-	# host-only access. The hysteria2 container (tobyxdd/hysteria:v2.8.2) runs as
-	# root inside the container (no USER directive in upstream Dockerfile) and
-	# mounts the file :ro, so 0640 root:root suffices — no chown to a gid needed.
-	# Threat model matches naive: only the distroless root process reads the secret.
-	chmod 0640 "${PREFIX_ETC}/hysteria2-client.yaml"
+	# Set restrictive perms on hysteria2-client.yaml (holds channel credentials).
+	# re_render_hysteria2() already writes with umask 077 (mode 0600); this chmod
+	# is an explicit belt-and-braces so a future renderer change can never loosen
+	# it. The hysteria2 container (tobyxdd/hysteria:v2.8.2) runs as root inside
+	# the container (no USER directive in upstream Dockerfile) and mounts the
+	# file :ro, so 0600 root:root suffices — root reads it, no gid needed.
+	# NOTE: 0640 was the previous mode; it was loosened to 0600 so every writer
+	# (install.sh, enable-hy2, hydrate.sh) agrees on the stricter mode and a
+	# re-render never relaxes perms on a secret-bearing file.
+	chmod 0600 "${PREFIX_ETC}/hysteria2-client.yaml"
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
 	# Phase 5.5: naive is a bypass channel -- render fail-soft.

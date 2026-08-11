@@ -541,8 +541,21 @@ render_template "$(tpl_file coturn.conf.tpl)"        "$PREFIX_ETC/coturn.conf"
 render_channel_soft xray "$(tpl_file xray-client.json.tpl)" "$PREFIX_ETC/xray-client.json" \
     || warn "  xray render failed — continuing without xray channel"
 if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
-    render_template "$(tpl_file hysteria2-client.yaml.tpl)" "$PREFIX_ETC/hysteria2-client.yaml"
-    log "  hysteria2-client.yaml rendered"
+    # Converge on re_render_hysteria2 — the dedicated hy2 renderer also used by
+    # install.sh and enable-hy2 — so every writer produces ONE rendering AND one
+    # mode (0600 via umask 077). The previous render_template call (generic
+    # python mustache) set no explicit mode and did not sed-escape YAML
+    # metacharacters in values, so a hy2 password containing " or \ would render
+    # differently between the two renderers — the live ruoxp/zvonilka/rvpn mode
+    # + shape divergence this block fixes. OXPULSE_REPO_DIR points re_render_hysteria2
+    # at the same template dir tpl_file() resolves. Fail-soft (warn, continue)
+    # mirrors the surrounding xray/naive channel renders.
+    OXPULSE_REPO_DIR="$TPL_DIR"
+    if re_render_hysteria2; then
+        log "  hysteria2-client.yaml rendered"
+    else
+        warn "  hysteria2-client.yaml render failed — continuing without hy2 channel"
+    fi
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
     render_channel_soft naive "$(tpl_file naive-client.json.tpl)" "$PREFIX_ETC/naive-client.json" \
