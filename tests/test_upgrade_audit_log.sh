@@ -43,6 +43,19 @@ STUB="$TMP/fake-upgrade.sh"
 {
 	echo '#!/bin/bash'
 	echo 'set -euo pipefail'
+	# BLAST-RADIUS BOUND, and it is not decoration. The wrapper re-execs itself and
+	# the env sentinel is the only thing that stops it — so a mutant that removes
+	# the sentinel turns this stub into a fork bomb. That is exactly what case 8
+	# exists to detect, and on 2026-08-11 running that mutant put the control plane
+	# at load 526 with 19,000 processes before it was killed by hand.
+	# This counter is independent of the wrapper's sentinel (own name, own export),
+	# so it still caps the recursion when the wrapper's is the thing under mutation.
+	# A mutation matrix must not be able to take down the box it runs on.
+	echo '_TEST_DEPTH=$(( ${_TEST_DEPTH:-0} + 1 )); export _TEST_DEPTH'
+	# `if`, not `[[ … ]] && { … }`: under `set -e` the && form exits the whole stub
+	# whenever the condition is FALSE, which silently turned every run into an
+	# immediate exit 1 and made the cap look like it was working.
+	echo 'if [[ "$_TEST_DEPTH" -gt 3 ]]; then echo "TEST-DEPTH-CAP-HIT"; exit 99; fi'
 	awk '/^# --- audit log ---/{f=1} /^PREFIX_ETC=/{exit} f{print}' "$UPGRADE"
 	echo 'echo "BODY-RAN args=[$*]"'
 	echo 'echo "BODY-STDERR" >&2'
@@ -50,12 +63,16 @@ STUB="$TMP/fake-upgrade.sh"
 } > "$STUB"
 chmod +x "$STUB"
 
+# Second belt: nothing here should take more than a moment, so a run that spins
+# is killed rather than left to compete with whatever else the box is doing.
+stub() { timeout 30 "$STUB" "$@"; }
+
 bash -n "$STUB" || { echo "FAIL: the extracted wrapper does not parse"; exit 1; }
 
 L="$TMP/up.log"
 
 # 1 — a run is recorded at all: header, body, exit line.
-OXPULSE_UPGRADE_LOG="$L" "$STUB" >/dev/null 2>&1
+OXPULSE_UPGRADE_LOG="$L" stub >/dev/null 2>&1 || true
 grep -q '^===== ' "$L"        && pass "a run writes a header"        || fail "no header in the log"
 grep -q 'BODY-RAN'  "$L"      && pass "stdout is captured"           || fail "stdout missing from the log"
 grep -q 'BODY-STDERR' "$L"    && pass "stderr is captured too"       || fail "stderr missing — a die would leave no trace"
@@ -63,7 +80,7 @@ grep -q '^===== exit 0' "$L"  && pass "the exit code is recorded"    || fail "no
 
 # 2 — THE ONE THIS EXISTS FOR. A FAILING run must be recorded, with its code.
 : > "$L"
-FAKE_RC=7 OXPULSE_UPGRADE_LOG="$L" "$STUB" >/dev/null 2>&1 || true
+FAKE_RC=7 OXPULSE_UPGRADE_LOG="$L" stub >/dev/null 2>&1 || true
 grep -q '^===== exit 7' "$L" \
 	&& pass "a FAILING run records its exit code" \
 	|| fail "the failure — the only run anyone reads the log for — was not recorded"
@@ -71,7 +88,7 @@ grep -q '^===== exit 7' "$L" \
 # 3 — the caller still sees the real exit code, not tee's.
 : > "$L"
 set +e
-FAKE_RC=7 OXPULSE_UPGRADE_LOG="$L" "$STUB" >/dev/null 2>&1
+FAKE_RC=7 OXPULSE_UPGRADE_LOG="$L" stub >/dev/null 2>&1
 _rc=$?
 set -e
 [[ "$_rc" == 7 ]] && pass "the caller's exit code survives the tee pipeline ($_rc)" \
@@ -80,7 +97,7 @@ set -e
 # 4 — SECRETS. --ghcr-token=… arrives as an ARGUMENT, so the header is the one
 # place in this script where a credential can reach a file on disk.
 : > "$L"
-OXPULSE_UPGRADE_LOG="$L" "$STUB" --ghcr-token=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 >/dev/null 2>&1 || true
+OXPULSE_UPGRADE_LOG="$L" stub --ghcr-token=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 >/dev/null 2>&1 || true
 if grep -q 'ghp_AbCdEfGhIjKlMnOpQrStUvWxYz' "$L"; then
 	fail "the GHCR token was written to the log in clear"
 else
@@ -92,14 +109,14 @@ grep -q 'redacted' "$L" && pass "the redaction is visible, not a silent drop" \
 # 5 — redaction by SHAPE as well as by flag name: a token that arrives some other
 # way is still masked. A flag-name-only rule is one rename away from leaking.
 : > "$L"
-OXPULSE_UPGRADE_LOG="$L" "$STUB" v0.16.22 gho_ZzZzZzZzZzZzZzZzZzZzZzZzZzZzZzZz >/dev/null 2>&1 || true
+OXPULSE_UPGRADE_LOG="$L" stub v0.16.22 gho_ZzZzZzZzZzZzZzZzZzZzZzZzZzZzZzZz >/dev/null 2>&1 || true
 grep -q 'gho_ZzZzZzZzZzZz' "$L" \
 	&& fail "a token-shaped argument leaked because only the flag name is matched" \
 	|| pass "a token-shaped argument is masked whatever flag carried it"
 
 # 6 — the log is never world-readable. It carries a full upgrade transcript.
 : > "$L"; chmod 0644 "$L"; rm -f "$L"
-OXPULSE_UPGRADE_LOG="$L" "$STUB" >/dev/null 2>&1
+OXPULSE_UPGRADE_LOG="$L" stub >/dev/null 2>&1 || true
 _mode=$(stat -c '%a' "$L" 2>/dev/null || stat -f '%Lp' "$L" 2>/dev/null)
 [[ "$_mode" == "600" ]] && pass "the log is created 0600 (got $_mode)" \
                         || fail "the log is $_mode — a full transcript should not be world-readable"
@@ -108,7 +125,7 @@ _mode=$(stat -c '%a' "$L" 2>/dev/null || stat -f '%Lp' "$L" 2>/dev/null)
 # disk-filler, and shipping a rotate drop-in would be another host artefact.
 : > "$L"
 head -c 3000 /dev/zero | tr '\0' 'x' > "$L"
-OXPULSE_UPGRADE_LOG="$L" OXPULSE_UPGRADE_LOG_MAX_BYTES=1000 "$STUB" >/dev/null 2>&1
+OXPULSE_UPGRADE_LOG="$L" OXPULSE_UPGRADE_LOG_MAX_BYTES=1000 stub >/dev/null 2>&1 || true
 _sz=$(wc -c < "$L")
 [[ "$_sz" -lt 3000 ]] && pass "an oversized log is trimmed before the run ($_sz bytes)" \
                       || fail "the log grew unbounded ($_sz bytes)"
@@ -118,7 +135,7 @@ grep -q 'BODY-RAN' "$L" && pass "the trim keeps the CURRENT run, not just old by
 # 8 — the sentinel. Without it the re-exec recurses until the process table gives
 # up, and it would do so on every edge at once.
 : > "$L"
-_out=$(OXPULSE_UPGRADE_LOG="$L" "$STUB" 2>&1)
+_out=$(OXPULSE_UPGRADE_LOG="$L" stub 2>&1 || true)
 _n=$(grep -c 'BODY-RAN' <<< "$_out")
 [[ "$_n" == 1 ]] && pass "the body runs exactly once (sentinel holds)" \
                  || fail "the body ran $_n times — the re-exec recurses"
@@ -126,11 +143,11 @@ _n=$(grep -c 'BODY-RAN' <<< "$_out")
 # 9 — an operator can turn it off, and an unwritable path must not abort the
 # upgrade. A log that can refuse to run the upgrade is worse than no log.
 : > "$L"
-_out=$(OXPULSE_UPGRADE_LOG=none "$STUB" 2>&1) && _rc=0 || _rc=$?
+_out=$(OXPULSE_UPGRADE_LOG=none stub 2>&1) && _rc=0 || _rc=$?
 grep -q 'BODY-RAN' <<< "$_out" && pass "OXPULSE_UPGRADE_LOG=none still runs the upgrade" \
                                || fail "disabling the log broke the upgrade"
 set +e
-_out=$(OXPULSE_UPGRADE_LOG=/proc/nonexistent/dir/up.log "$STUB" 2>&1)
+_out=$(OXPULSE_UPGRADE_LOG=/proc/nonexistent/dir/up.log stub 2>&1)
 _rc=$?
 set -e
 if [[ "$_rc" == 0 ]] && grep -q 'BODY-RAN' <<< "$_out"; then
