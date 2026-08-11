@@ -1077,6 +1077,10 @@ fi
 # some operators may still have in PATH before this installer auto-updates.
 # The operator must then run scripts/migrate-turns-subdomain.sh after
 # the opec binary is updated.
+# TURNS_SUBDOMAIN_VALID: state variable reused by the final banner so it can
+# name the per-node DNS record (or warn about its absence) without re-deriving
+# the check. 1 = valid api-<hex> form; 0 = empty/turns/malformed.
+TURNS_SUBDOMAIN_VALID=0
 if [[ "${TURNS_SUBDOMAIN:-}" == "turns" || -z "${TURNS_SUBDOMAIN:-}" ]]; then
 	warn "TURNS_SUBDOMAIN is '${TURNS_SUBDOMAIN:-<empty>}' — expected api-<hex> from backend."
 	warn "Possible causes:"
@@ -1088,6 +1092,8 @@ if [[ "${TURNS_SUBDOMAIN:-}" == "turns" || -z "${TURNS_SUBDOMAIN:-}" ]]; then
 elif [[ ! "${TURNS_SUBDOMAIN}" =~ ^api- ]]; then
 	warn "TURNS_SUBDOMAIN='$TURNS_SUBDOMAIN' does not match expected api-<hex> format."
 	warn "Verify the backend returned the correct value; check $BACKEND_API/api/partner/register response."
+else
+	TURNS_SUBDOMAIN_VALID=1
 fi
 
 # Phase 4.3d: Fetch Ed25519 SFU signing public key from /api/partner/keys at
@@ -1724,6 +1730,39 @@ cat <<BANNER
 ========================================================================
 BANNER
 else
+# Pre-compute the TURNS subdomain DNS line for the banner.  Reuses
+# TURNS_SUBDOMAIN_VALID from the warning block at Step 4 — never re-derives.
+if [[ "$TURNS_SUBDOMAIN_VALID" -eq 1 ]]; then
+	_turns_dns_line="  2. Point DNS A record for $TURNS_SUBDOMAIN.$DOMAIN → $PUBLIC_IP"
+else
+	_turns_dns_line="  2. WARNING: TURNS_SUBDOMAIN is not valid (expected api-<hex> from backend)."
+	_turns_dns_line="$_turns_dns_line TURNS on :443 will fail SNI match until fixed — see warnings above."
+fi
+
+# Pre-compute the health-status banner section.  HEALTHCHECK_CORE_FAILED and
+# HEALTHCHECK_TURNS_CERT_FAILED are set by healthcheck_run (Step 7); default
+# to 0 when dry-run skipped the healthcheck or when all checks passed.
+if [[ "${HEALTHCHECK_CORE_FAILED:-0}" -eq 1 ]]; then
+	_health_banner=""
+	_health_banner="${_health_banner}  --- INSTALL DEGRADED — core health checks RED ---"
+	_health_banner="${_health_banner}\n"
+	if [[ "${HEALTHCHECK_TURNS_CERT_FAILED:-0}" -eq 1 ]]; then
+		_health_banner="${_health_banner}    TURNS TLS cert not ready (coturn :5349 listener disabled)\n"
+	fi
+	_health_banner="${_health_banner}    Healthcheck poll timed out — run $PREFIX_SBIN/oxpulse-partner-edge-healthcheck\n"
+	_health_banner="${_health_banner}  The node is NOT fully operational. Inspect the output above and re-run\n"
+	_health_banner="${_health_banner}  the healthcheck binary before relying on this edge.\n"
+	if [[ "${ALLOW_DEGRADED:-0}" -eq 0 ]]; then
+		_health_banner="${_health_banner}  Exiting non-zero (core check failed). To proceed anyway, re-run with\n"
+		_health_banner="${_health_banner}  --allow-degraded (or OXPULSE_ALLOW_DEGRADED=1).\n"
+	else
+		_health_banner="${_health_banner}  --allow-degraded active: continuing with exit 0 despite degraded state.\n"
+	fi
+	_health_banner="${_health_banner}  ----------------------------------------------------------------"
+else
+	_health_banner="  All health checks green."
+fi
+
 cat <<BANNER
 
 ========================================================================
@@ -1745,8 +1784,23 @@ cat <<BANNER
 
   Next steps:
   1. Point DNS A record for $DOMAIN → $PUBLIC_IP
-  2. Wait for Caddy LE cert issuance (~60s after DNS propagates)
-  3. Open https://$DOMAIN and verify branding
+$_turns_dns_line
+  3. Wait for Caddy LE cert issuance (~60s after DNS propagates)
+  4. Open https://$DOMAIN and verify branding
+
+$(printf '%b' "$_health_banner")
 ========================================================================
 BANNER
+fi
+
+# F2: honest exit code.  A core healthcheck failure means the install did not
+# really work — exit non-zero so automation and operators cannot mistake a
+# degraded node for a successful one.  --allow-degraded (or
+# OXPULSE_ALLOW_DEGRADED=1) restores exit 0 for non-interactive callers that
+# intentionally proceed on a degraded-but-running node (upgrade.sh, fleet
+# rollout).  Optional channels (naive/CH5 absent, hy2 skipped) never reach
+# this path — healthcheck.sh returns GREEN for skipped optional channels, so
+# HEALTHCHECK_CORE_FAILED stays 0.
+if [[ "${HEALTHCHECK_CORE_FAILED:-0}" -eq 1 && "${ALLOW_DEGRADED:-0}" -eq 0 ]]; then
+	exit 1
 fi

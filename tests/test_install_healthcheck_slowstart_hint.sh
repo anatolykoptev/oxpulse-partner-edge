@@ -40,8 +40,11 @@ SCRIPT
 		_healthcheck_wait_turns_cert() { :; }
 
 		_healthcheck_poll
+		echo \"rc=\$?\"
 	"
+	# F2: _healthcheck_poll now returns non-zero on timeout (honest exit).
 	[ "$status" -eq 0 ]
+	[[ "$output" == *"rc=1"* ]]
 	# Must mention slow-start of SFU containers
 	[[ "$output" == *"30-60s"* ]] || [[ "$output" == *"slow"* ]]
 	# Must suggest re-checking with the healthcheck binary
