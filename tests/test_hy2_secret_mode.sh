@@ -17,12 +17,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL="$REPO_ROOT/install.sh"
 ENABLE_HY2="$REPO_ROOT/oxpulse-partner-edge-enable-hy2"
 HYDRATE="$REPO_ROOT/hydrate.sh"
+UPGRADE="$REPO_ROOT/upgrade.sh"
 
 FAIL=0
 pass() { echo "OK: $*"; }
 fail() { echo "FAIL: $*"; FAIL=1; }
 
-for f in "$INSTALL" "$ENABLE_HY2" "$HYDRATE"; do
+for f in "$INSTALL" "$ENABLE_HY2" "$HYDRATE" "$UPGRADE"; do
     [[ -f "$f" ]] || { echo "FAIL: $f not found"; exit 1; }
 done
 
@@ -47,7 +48,7 @@ fi
 # regression — it widens read access beyond root on a secret-bearing file.
 echo "==> 3: no writer uses chmod 0640 on hysteria2-client.yaml"
 violators=""
-for f in "$INSTALL" "$ENABLE_HY2" "$HYDRATE"; do
+for f in "$INSTALL" "$ENABLE_HY2" "$HYDRATE" "$UPGRADE"; do
     if grep -qE 'chmod 0640.*hysteria2-client\.yaml|chmod 0640.*\$_hy2_yaml' "$f"; then
         violators="$violators $(basename "$f")"
     fi
@@ -63,7 +64,12 @@ fi
 # sed-escaping of YAML metacharacters) while install.sh + enable-hy2 used the
 # dedicated re_render_hysteria2 (sed, umask 077 -> 0600). A hy2 password
 # containing " or \ renders differently between the two. Converge on one.
-echo "==> 4: hydrate.sh uses re_render_hysteria2 for hy2 (not render_template)"
+#
+# The hy2 render block now calls hydrate_render_hy2 (lib/hydrate-hy2.sh), which
+# internally calls re_render_hysteria2. So we check BOTH: hydrate.sh's block
+# calls hydrate_render_hy2 (not render_template), AND lib/hydrate-hy2.sh calls
+# re_render_hysteria2 (not render_template).
+echo "==> 4: hydrate.sh uses hydrate_render_hy2 → re_render_hysteria2 for hy2"
 # Extract the hy2 render block to scope the grep — render_template is used
 # legitimately elsewhere in hydrate.sh for chassis templates.
 hy2_block=$(awk '
@@ -79,15 +85,31 @@ hy2_code=$(echo "$hy2_block" | grep -v '^[[:space:]]*#')
 # `grep -q` exits early on first match and can propagate SIGPIPE (141) from
 # the producer as the pipeline's status, turning a passing assertion flaky.
 # `grep >/dev/null` drains stdin fully. Enforced by test_pipefail_early_exit_guard.sh.
-if echo "$hy2_code" | grep 're_render_hysteria2' >/dev/null; then
-    pass "hydrate.sh hy2 block calls re_render_hysteria2"
+if echo "$hy2_code" | grep 'hydrate_render_hy2' >/dev/null; then
+    pass "hydrate.sh hy2 block calls hydrate_render_hy2"
 else
-    fail "hydrate.sh hy2 block does not call re_render_hysteria2"
+    fail "hydrate.sh hy2 block does not call hydrate_render_hy2"
 fi
 if echo "$hy2_code" | grep 'render_template' >/dev/null; then
     fail "hydrate.sh hy2 block still calls render_template (renderer divergence)"
 else
     pass "hydrate.sh hy2 block does not call render_template"
+fi
+# Verify the extracted function converges on re_render_hysteria2.
+HY2_LIB="$REPO_ROOT/lib/hydrate-hy2.sh"
+if [[ -f "$HY2_LIB" ]]; then
+    if grep -q 're_render_hysteria2' "$HY2_LIB"; then
+        pass "lib/hydrate-hy2.sh calls re_render_hysteria2"
+    else
+        fail "lib/hydrate-hy2.sh does not call re_render_hysteria2"
+    fi
+    if grep -q 'render_template' "$HY2_LIB"; then
+        fail "lib/hydrate-hy2.sh still calls render_template (renderer divergence)"
+    else
+        pass "lib/hydrate-hy2.sh does not call render_template"
+    fi
+else
+    fail "lib/hydrate-hy2.sh not found"
 fi
 
 # ── Result ──────────────────────────────────────────────────────────────────

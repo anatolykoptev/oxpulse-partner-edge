@@ -45,6 +45,7 @@ setup() {
 		metric-sink-lib.sh
 		surgical-restart-lib.sh
 		xprb-refresh-lib.sh
+		hydrate-hy2.sh
 	)
 }
 

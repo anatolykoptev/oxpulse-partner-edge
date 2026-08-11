@@ -76,15 +76,20 @@ preflight_run() {
 #   --- installer exit=127 ---
 # with nothing naming the missing command.
 #
-# This check runs before the DRY_RUN-gated block: the binaries are needed even
-# in --dry-run (IP detection + template rendering run in dry-run too). On a
-# real VPS image iproute2 is always present, so this is a no-op there; the
-# value is naming the missing command at step 1 instead of a mystery 127 at
-# step 3. curl/jq/python3 are intentionally NOT checked here — deps_install
+# This check runs before the DRY_RUN-gated block: `ip` and `openssl` are
+# needed even in --dry-run (IP detection + RELAY_JWT_SECRET generation run in
+# dry-run too). `ss` is only needed for port checks, which are skipped under
+# --dry-run, so it is excluded from the dry-run required set. On a real VPS
+# image iproute2 and openssl are always present, so this is a no-op there;
+# the value is naming the missing command at step 1 instead of a mystery 127
+# at step 3. curl/jq/python3 are intentionally NOT checked here — deps_install
 # provisions them at step 2, so checking at step 1 would fail before they can
 # be installed.
 _preflight_required_binaries() {
-	local required=(ip ss)
+	local required=(ip openssl)
+	# ss is only used by _preflight_check_port_free, which is inside the
+	# DRY_RUN-gated block — skip it under --dry-run.
+	[[ "${DRY_RUN:-0}" -eq 0 ]] && required+=(ss)
 	local missing=() b
 	for b in "${required[@]}"; do
 		command -v "$b" >/dev/null 2>&1 || missing+=("$b")
@@ -92,9 +97,9 @@ _preflight_required_binaries() {
 	if [[ ${#missing[@]} -gt 0 ]]; then
 		local pkg_hint
 		case "${OS_FAMILY:-}" in
-			debian) pkg_hint="apt-get install -y iproute2" ;;
-			rhel)   pkg_hint="dnf install -y iproute" ;;
-			*)      pkg_hint="install the iproute2 package for your OS" ;;
+			debian) pkg_hint="apt-get install -y iproute2 openssl" ;;
+			rhel)   pkg_hint="dnf install -y iproute openssl" ;;
+			*)      pkg_hint="install the iproute2 and openssl packages for your OS" ;;
 		esac
 		die "required command(s) not found: ${missing[*]} — fix: $pkg_hint"
 	fi

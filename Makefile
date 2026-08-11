@@ -85,5 +85,6 @@ lib-checksums:
 	  metric-sink-lib.sh \
 	  surgical-restart-lib.sh \
 	  xprb-refresh-lib.sh \
+	  hydrate-hy2.sh \
 	) > lib/lib-checksums.txt
 	@echo "lib/lib-checksums.txt regenerated — commit the result"
