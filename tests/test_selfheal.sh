@@ -609,6 +609,54 @@ run_it
 	|| fail "collected $(rmis) — [$(tr '\n' ' ' <"$RMI_LOG")], expected only xray:v0.16.19"
 teardown
 
+# --- --collect-images: the collector alone, called by upgrade.sh ---------------
+# The disk healer opens at 85%, so between upgrades a node grows a tag per service
+# per release with nothing reporting it. upgrade.sh calls this the moment it
+# creates that garbage. The mode must do ONE thing — anything else would be a
+# healer running inside an upgrade, on a node whose services are mid-restart.
+run_collect() { bash "$SCRIPT" --collect-images >"$TMP/out" 2>&1; }
+
+# 36 — it collects, at any disk level. The threshold is the healer's rule, not
+# this one's: garbage is garbage whether or not the disk is under pressure.
+img_setup; echo 12 > "$TMPDIR_DISK"; run_collect
+[[ "$(rmis)" == 2 ]] && pass "--collect-images collects regardless of disk level" \
+                     || fail "collected $(rmis) at 12% disk, expected 2"
+teardown
+
+# 37 — and ONLY that. A container restart or a unit heal here would fire during an
+# upgrade, against services that are legitimately mid-restart.
+img_setup
+fixture oxpulse-partner-c1 unhealthy "$OLD"
+echo "oxpulse-geoip-refresh.service" > "$FX_UNITS/failed"
+run_collect
+[[ "$(restarts)" == 0 && "$(starts)" == 0 ]] \
+	&& pass "--collect-images restarts no container" \
+	|| fail "it restarted $(restarts) container(s) and started $(starts) — that is the healer's job, not the upgrade's"
+[[ "$(wc -l < "$UNIT_LOG" | tr -d ' ')" == 0 ]] \
+	&& pass "--collect-images touches no systemd unit" \
+	|| fail "it acted on a unit: [$(tr '\n' ' ' <"$UNIT_LOG")]"
+[[ "$(prunes)" == 0 ]] \
+	&& pass "--collect-images never prunes the shared build cache" \
+	|| fail "it pruned [$(tr '\n' ' ' <"$PRUNE_LOG")] — the neighbour's cache is not ours to reclaim here"
+teardown
+
+# 38 — the hold file stops it too. An operator holding a node expects NOTHING to
+# touch docker there, and an upgrade is not an exemption.
+img_setup; : > "$OXPULSE_SELFHEAL_HOLD"; run_collect
+[[ "$(rmis)" == 0 ]] && pass "--collect-images honours the hold file" \
+                     || fail "it removed $(rmis) tag(s) on a held node"
+teardown
+
+# 39 — it spends no disk budget. That budget exists to stop a node thrashing under
+# pressure and to give up loudly; charging an upgrade against it would exhaust the
+# allowance and fire the give-up alert on a node that is not in trouble.
+img_setup; run_collect
+_att="$(state disk attempts)"
+[[ -z "$_att" || "$_att" == 0 ]] \
+	&& pass "--collect-images spends no disk budget (attempts=${_att:-unset})" \
+	|| fail "it charged the disk budget: attempts=$_att — the give-up alert would fire on a healthy node"
+teardown
+
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]
