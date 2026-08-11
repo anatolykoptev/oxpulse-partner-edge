@@ -2249,6 +2249,33 @@ _render_gate() {
 	return 1
 }
 
+# _collect_stale_images — hand the images this upgrade just replaced to the
+# collector that already owns that rule, at the moment the garbage is created.
+#
+# WHY HERE, when the disk healer already collects: the healer opens at 85%, so
+# between upgrades a node grows one tag per service per release with nothing
+# reporting it — 286 across the five edges when anyone first looked, 12.2 GB
+# recoverable on rvpn alone. Worse than the space, that dead weight is SLACK:
+# when something else fills the disk, the healer reclaims OUR images, drops back
+# under the threshold and clears its budget, so the alert that should have said
+# "the growth is not ours" never fires at all.
+#
+# Delegated rather than reimplemented — the keep-set rules are subtle (per repo,
+# by image ID, version-sorted) and a second copy would drift from the first.
+#
+# Best-effort by construction: a collector that can fail an upgrade is a far
+# worse trade than a few stale tags, so every path here returns 0.
+_collect_stale_images() {
+	local _sh="${OXPULSE_SELFHEAL_BIN:-$PREFIX_SBIN/oxpulse-partner-edge-selfheal}"
+	if [[ ! -x "$_sh" ]]; then
+		warn "image collect: $_sh is not executable — skipping; the disk healer still has them"
+		return 0
+	fi
+	timeout 180 "$_sh" --collect-images </dev/null 2>&1 | sed 's/^/  /' \
+		|| warn "image collect: exited non-zero — stale tags remain for the disk healer"
+	return 0
+}
+
 # ---------------------------------------------------------------------------
 # Serve-ability adjudication (P3 — multi-homed false-rollback fix).
 #
@@ -3810,6 +3837,7 @@ if [[ "$MODE" == with_templates ]]; then
 	fi
 
 	log "--with-templates upgrade to $TARGET complete"
+	_collect_stale_images
 	exit 0
 fi
 
@@ -4022,6 +4050,7 @@ if ! _render_gate "plain-upgrade-render"; then
 fi
 
 log "upgraded to $TARGET successfully"
+_collect_stale_images
 
 if [[ "$V01_TO_V02" -eq 1 ]]; then
 	log "v0.1→v0.2: re-seeding templates via hydrate --reseed"

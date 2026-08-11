@@ -316,6 +316,30 @@ _oneoff()          { [[ "$(docker inspect -f '{{index .Config.Labels "com.docker
 main() {
 	mkdir -p "$STATE_DIR"
 
+	# --collect-images: the image collector ALONE, for upgrade.sh to call right
+	# after a successful upgrade — the moment the garbage is created.
+	#
+	# Exposed as a mode here rather than extracted into lib/ because a new lib file
+	# would have to be added to THREE hand-written lists (the Makefile's
+	# lib-checksums target and release.yml's sha256sum and upload lists), and
+	# missing any one of them ships it unverified with every gate still green.
+	# upgrade.sh already invokes its installed siblings this way — hydrate,
+	# healthcheck — so this reuses the delivery and integrity path they have.
+	#
+	# It takes the single-flight lock but NOT the upgrade lock: the caller IS the
+	# upgrade. It spends no budget and reads no threshold — the disk healer's
+	# budget exists to stop a node thrashing under pressure, and this is not that.
+	if [[ "${1:-}" == "--collect-images" ]]; then
+		exec 9>"$LOCK_FILE"
+		flock -n 9 || { log "another run holds the lock — not collecting"; exit 0; }
+		[[ -e "$HOLD_FILE" ]] && { log "hold file present — not collecting"; exit 0; }
+		local n; n="$(_prune_stale_edge_images)"
+		log "collected ${n} stale ${PROJECT} image tag(s) after upgrade"
+		_count partner_edge_images_collected_total "phase=\"upgrade\"" "$n"
+		_flush_gauges
+		exit 0
+	fi
+
 	# Single-flight. A previous tick still working is not an error.
 	exec 9>"$LOCK_FILE"
 	flock -n 9 || { log "another run holds the lock — skipping"; exit 0; }
