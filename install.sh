@@ -497,8 +497,30 @@ if [[ -f "$PREFIX_LIB/install.env" && -z "$MANUAL_CONFIG" ]]; then
 		# `cmd || warn` can't catch a `die` — its `exit 1` aborts the whole re-run,
 		# falsely signalling the already-working edge is broken. Degrade to a warn.
 		( awg_params_agent_run ) || warn "  awg-params-agent top-up failed (non-fatal); see journalctl"
-		log  "  running healthcheck and exiting 0"
-		"$PREFIX_SBIN/oxpulse-partner-edge-healthcheck" || true
+		log  "  running healthcheck"
+		# F1: honest exit on the top-up path.  A core healthcheck failure means
+		# the existing node is degraded — exit non-zero so the operator cannot
+		# mistake a broken node for a healthy one.  This mirrors the fresh-install
+		# gate at the bottom of this script (HEALTHCHECK_CORE_FAILED + ALLOW_DEGRADED).
+		# The installed healthcheck binary runs with no --local flag (full external
+		# probe) — appropriate here because DNS/certs should already be live on a
+		# top-up.  healthcheck.sh exits non-zero only when a non-skip check fails;
+		# skipped optional channels (hy2 not deployed, naive absent, legacy token)
+		# emit GREEN and never reach this path.  So a non-zero exit = a core check
+		# failed — the same classification as the fresh-install gate, derived from
+		# healthcheck.sh's FAIL counter rather than a hand-written list.
+		# `|| _topup_hc_rc=$?` captures the status without dying under set -e.
+		_topup_hc_rc=0
+		"$PREFIX_SBIN/oxpulse-partner-edge-healthcheck" || _topup_hc_rc=$?
+		if [[ $_topup_hc_rc -ne 0 ]]; then
+			warn "  healthcheck failed (exit $_topup_hc_rc) — core check(s) red"
+			if [[ "${ALLOW_DEGRADED:-0}" -eq 0 ]]; then
+				warn "  exiting non-zero (core check failed). To proceed anyway, re-run with"
+				warn "  --allow-degraded (or OXPULSE_ALLOW_DEGRADED=1)."
+				exit 1
+			fi
+			warn "  --allow-degraded active: continuing with exit 0 despite degraded state."
+		fi
 		exit 0
 	fi
 fi
