@@ -47,6 +47,7 @@ _run_args_parse() {
 		echo \"TUNNEL=\$TUNNEL\"
 		echo \"REGION=\$REGION\"
 		echo \"IMAGE_VERSION=\$IMAGE_VERSION\"
+		echo \"ALLOW_DEGRADED=\$ALLOW_DEGRADED\"
 	" -- "$@"
 }
 
@@ -138,4 +139,38 @@ _run_args_parse() {
 	"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"TOKEN=ptkn_file_token_xyz"* ]]
+}
+
+@test "args_parse --allow-degraded sets ALLOW_DEGRADED=1" {
+	run _run_args_parse --dry-run --partner-id=edge-b --domain=edge-b.example --token=abc --allow-degraded
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"ALLOW_DEGRADED=1"* ]]
+}
+
+@test "args_parse OXPULSE_ALLOW_DEGRADED=1 env sets ALLOW_DEGRADED=1" {
+	run bash -c "
+		set -euo pipefail
+		die()  { echo \"die: \$*\" >&2; exit 1; }
+		warn() { true; }
+		log()  { true; }
+		PREFIX_ETC=/etc/oxpulse-partner-edge
+		PREFIX_LIB=/var/lib/oxpulse-partner-edge
+		BACKEND_API=https://api.oxpulse.chat
+		OXPULSE_PARTNER_TOKEN='' OXPULSE_IMAGE_VERSION='' TURNS_SUBDOMAIN='' \
+		SFU_UDP_PORT='' SFU_METRICS_PORT='' SFU_EDGE_ID='' REGION='' \
+		HEALTHCHECK_TIMEOUT='' BRANDING_CONFIG='' OXPULSE_GHCR_TOKEN=''
+		OXPULSE_NONINTERACTIVE=1
+		OXPULSE_ALLOW_DEGRADED=1
+		source '${REPO_ROOT}/lib/install-args.sh'
+		args_parse --dry-run --partner-id=test --domain=test.net --token=abc
+		echo \"ALLOW_DEGRADED=\$ALLOW_DEGRADED\"
+	"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"ALLOW_DEGRADED=1"* ]]
+}
+
+@test "args_parse ALLOW_DEGRADED defaults to 0" {
+	run _run_args_parse --dry-run --partner-id=edge-b --domain=edge-b.example --token=abc
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"ALLOW_DEGRADED=0"* ]]
 }

@@ -24,7 +24,8 @@
 #   BRAND_CTA_URL_RU, BRAND_CTA_URL_EN, BRAND_CTA_URL_ZH, BRAND_CTA_URL_FA,
 #   BRAND_CTA_TEXT_RU, BRAND_CTA_TEXT_EN, BRAND_CTA_TEXT_ZH, BRAND_CTA_TEXT_FA,
 #   BRAND_LEGAL_ENTITY, BRAND_LEGAL_COUNTRY, BRAND_LEGAL_CONTACT,
-#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN, CLEAN_SBIN, SERVE_COUNTRIES, PROFILE
+#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN, CLEAN_SBIN, SERVE_COUNTRIES, PROFILE,
+#   ALLOW_DEGRADED, NO_INTEGRITY
 
 _args_usage() {
 	sed -n '2,18p' "$0" >&2
@@ -85,6 +86,11 @@ assembles a minimal BrandingConfig payload from whichever flags are set):
   --no-integrity             Skip tier-4 lib checksum validation when no local lib-checksums.txt is available.
                              Use when installing from a private fork or airgapped environment without a release tarball.
                              Implies you accept the risk that fetched libs cannot be verified.
+  --allow-degraded           Exit 0 even when a core healthcheck failed (degraded-but-running node).
+                             Exists for non-interactive callers (upgrade.sh, fleet rollout) that
+                             intentionally proceed on a degraded node; a human running install.sh
+                             by hand should NOT set this — a non-zero exit is the signal that the
+                             install did not really work. (env: OXPULSE_ALLOW_DEGRADED=1)
   --check                    Re-render templates to /tmp, diff vs installed files. Exit 0=clean, 1=Caddyfile drift, 2=compose drift.
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
@@ -210,6 +216,12 @@ args_parse() {
 	# without checksum validation (e.g. from a private fork or airgapped network).
 	# Default 0 = fail-closed. Set to 1 via --no-integrity.
 	NO_INTEGRITY=0
+	# F2 honest-exit: when 1, the installer exits 0 even if a core healthcheck
+	# failed (degraded-but-running node).  Exists so non-interactive callers
+	# (upgrade.sh, fleet rollout) that intentionally proceed on a degraded
+	# node are not broken by the new non-zero exit on core failure.  Set via
+	# --allow-degraded or OXPULSE_ALLOW_DEGRADED=1.
+	ALLOW_DEGRADED="${OXPULSE_ALLOW_DEGRADED:-0}"
 
 	# GHCR PAT supplied via --ghcr-token=ghp_xxx or OXPULSE_GHCR_TOKEN env.
 	# Flag wins over env. Empty disables (anonymous pull / assume prior docker login).
@@ -267,6 +279,7 @@ args_parse() {
 			--force-keygen|--rotate-identity) FORCE_KEYGEN=1 ;;
 			--clean-sbin)       CLEAN_SBIN=1 ;;
 			--no-integrity)     NO_INTEGRITY=1 ;;
+			--allow-degraded)   ALLOW_DEGRADED=1 ;;
 			-h|--help)          _args_usage ;;
 			*) die "unknown arg: $1 (try --help)" ;;
 		esac

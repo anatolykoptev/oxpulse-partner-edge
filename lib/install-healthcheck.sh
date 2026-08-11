@@ -44,7 +44,9 @@ _healthcheck_install_script() {
 _healthcheck_wait_turns_cert() {
 	local turns_cert_dir="/var/lib/docker/volumes/oxpulse-partner-edge_caddy-data/_data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${TURNS_SUBDOMAIN}.${DOMAIN}"
 	local turns_cert_deadline turns_cert_ready
-	turns_cert_deadline=$(( $(date +%s) + 180 ))
+	# TURNS_CERT_WAIT_TIMEOUT: configurable deadline (default 180s) so tests
+	# and operators with slow ACME can tune without editing the function.
+	turns_cert_deadline=$(( $(date +%s) + ${TURNS_CERT_WAIT_TIMEOUT:-180} ))
 	turns_cert_ready=0
 	while :; do
 		if [[ -s "$turns_cert_dir/${TURNS_SUBDOMAIN}.${DOMAIN}.crt" ]]; then
@@ -60,7 +62,8 @@ _healthcheck_wait_turns_cert() {
 		log "  TURNS cert ready → restarting coturn to enable :5349 TLS listener"
 		(cd "$PREFIX_ETC" && docker compose restart coturn >/dev/null 2>&1 || true)
 	else
-		warn "  TURNS cert not ready after 180s — coturn TLS listener may be disabled. Retry: 'docker compose -f $PREFIX_ETC/docker-compose.yml restart coturn' once Caddy obtains the cert"
+		warn "  TURNS cert not ready after ${TURNS_CERT_WAIT_TIMEOUT:-180}s — coturn TLS listener may be disabled. Retry: 'docker compose -f $PREFIX_ETC/docker-compose.yml restart coturn' once Caddy obtains the cert"
+		return 1
 	fi
 }
 
@@ -115,14 +118,30 @@ _healthcheck_poll() {
 	warn "  healthcheck still red after ${HEALTHCHECK_TIMEOUT}s — continuing, inspect with: $hc_script"
 	warn "  SFU containers commonly take 30-60s after first deploy; re-run '$hc_script' manually after 60s"
 	warn "  If your environment is consistently slow, re-install with --healthcheck-timeout=600"
+	return 1
 }
 
 healthcheck_run() {
 	log "[7/10] waiting for healthcheck (timeout ${HEALTHCHECK_TIMEOUT}s)"
+	# Initialise core-failure flags so the banner and exit gate can be honest.
+	# These are globals read by install.sh's Step 10 banner + exit logic.
+	HEALTHCHECK_CORE_FAILED=0
+	HEALTHCHECK_TURNS_CERT_FAILED=0
 	if [[ $DRY_RUN -eq 0 ]]; then
 		_healthcheck_install_script
-		_healthcheck_wait_turns_cert
-		_healthcheck_poll
+		# TURNS cert wait: core TLS/cert check.  Catch the return so set -e
+		# does not kill the script before the banner can report the failure.
+		if ! _healthcheck_wait_turns_cert; then
+			HEALTHCHECK_TURNS_CERT_FAILED=1
+			HEALTHCHECK_CORE_FAILED=1
+		fi
+		# Overall healthcheck poll: runs healthcheck.sh --local which covers
+		# containers, API, tunnel, TLS, ports.  healthcheck.sh already returns
+		# GREEN for skipped optional channels (hy2 not deployed, naive absent),
+		# so a non-zero poll means a CORE check failed.
+		if ! _healthcheck_poll; then
+			HEALTHCHECK_CORE_FAILED=1
+		fi
 	else
 		warn "  [dry-run] skipping healthcheck"
 	fi
