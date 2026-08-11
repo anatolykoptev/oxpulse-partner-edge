@@ -38,28 +38,34 @@ awk '/log "upgraded to \$TARGET successfully"/{s=NR} /^_collect_stale_images$/{i
 [[ "$_ok" == 1 ]] && pass "the plain path collects only after success is declared" \
                   || fail "the collector runs before the upgrade is declared successful"
 
+# The helper's body, captured ONCE. Piping awk into a quiet grep is forbidden
+# (tests/test_pipefail_early_exit_guard.sh): grep -q exits on the first match,
+# SIGPIPEs awk, and under `set -o pipefail` the pipeline reports failure — so the
+# assertion inverts on the very input it was meant to accept.
+_body=$(awk '/^_collect_stale_images\(\)/{f=1} f&&/^}/{exit} f' "$UPGRADE")
+
 # 3 — the collector must never be able to fail an upgrade. A few stale tags are a
 # far better outcome than a failed upgrade on an anti-censorship relay.
-awk '/^_collect_stale_images\(\)/{f=1} f&&/^}/{exit} f' "$UPGRADE" | grep -q 'return 0' \
+grep -q 'return 0' <<< "$_body" \
 	&& pass "the helper returns 0 on every path" \
 	|| fail "the helper can propagate a failure into the upgrade"
-awk '/^_collect_stale_images\(\)/{f=1} f&&/^}/{exit} f' "$UPGRADE" | grep -qE '\bdie\b' \
+grep -qE '\bdie\b' <<< "$_body" \
 	&& fail "the helper can die() — a collector must not abort an upgrade" \
 	|| pass "the helper never calls die()"
 
 # 4 — delegated, not reimplemented. A second copy of the keep-set rules (per repo,
 # by image ID, version-sorted) would drift from the first, and the drift would be
 # silent until it deleted a running release.
-awk '/^_collect_stale_images\(\)/{f=1} f&&/^}/{exit} f' "$UPGRADE" | grep -q 'oxpulse-partner-edge-selfheal' \
+grep -q 'oxpulse-partner-edge-selfheal' <<< "$_body" \
 	&& pass "it delegates to the installed collector" \
 	|| fail "the upgrade grew its own copy of the keep-set rules"
-awk '/^_collect_stale_images\(\)/{f=1} f&&/^}/{exit} f' "$UPGRADE" | grep -qE 'docker rmi|sort -Vru' \
+grep -qE 'docker rmi|sort -Vru' <<< "$_body" \
 	&& fail "the upgrade reimplements image removal instead of delegating" \
 	|| pass "no second implementation of the removal rules"
 
 # 5 — bounded. It runs inside an upgrade; a hung docker daemon must not park the
 # upgrade indefinitely.
-awk '/^_collect_stale_images\(\)/{f=1} f&&/^}/{exit} f' "$UPGRADE" | grep -q 'timeout ' \
+grep -q 'timeout ' <<< "$_body" \
 	&& pass "the call is bounded by a timeout" \
 	|| fail "an unbounded call — a hung docker parks the upgrade"
 
