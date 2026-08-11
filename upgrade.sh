@@ -50,6 +50,72 @@
 # See ghcr-auth-lib.sh for the full auth flow.
 set -euo pipefail
 
+# --- audit log ---------------------------------------------------------------
+# Every other periodic job on an edge writes its own log — refresh, sni-rotate,
+# xray-update, geoip all have one. This script had none, and it is the only one
+# that can gate a change and roll it back.
+#
+# 2026-08-11: the render gate fired on two edges. Which check regressed was
+# unrecoverable, because it existed only in the run's stdout and the caller had
+# piped that away. A gate whose verdict leaves no record cannot be diagnosed the
+# next morning, and this gate fires on the path that matters most.
+#
+# The WHOLE run is captured, not just the failure branch: without a green run to
+# compare against, the first red one has no baseline to diff against.
+#
+# Implemented as a re-exec rather than `exec > >(tee …)` because process
+# substitution does not make the shell wait for tee — the tail of a run, which is
+# exactly where the verdict is, can be lost as the script exits. The sentinel
+# makes it happen once, and the self-update re-exec further down has its own and
+# nests INSIDE this one, so the child's output is captured too.
+UPGRADE_LOG="${OXPULSE_UPGRADE_LOG:-/var/log/oxpulse-partner-edge-upgrade.log}"
+UPGRADE_LOG_MAX_BYTES="${OXPULSE_UPGRADE_LOG_MAX_BYTES:-4000000}"
+if [[ -z "${_OXPULSE_UPGRADE_LOGGING:-}" && "$UPGRADE_LOG" != "none" ]]; then
+	# install -m 0600 first: the file must never be created world-readable, and
+	# creating it by redirection would take the umask instead.
+	[[ -e "$UPGRADE_LOG" ]] || install -m 0600 /dev/null "$UPGRADE_LOG" 2>/dev/null || true
+	if : >> "$UPGRADE_LOG" 2>/dev/null; then
+		# Bounded here rather than by shipping a logrotate drop-in: rotation would
+		# be another host artefact needing its own delivery and its own gate, and
+		# the failure it prevents is a full disk, which is already watched.
+		if [[ "$(wc -c < "$UPGRADE_LOG" 2>/dev/null || echo 0)" -gt "$UPGRADE_LOG_MAX_BYTES" ]]; then
+			if tail -c "$(( UPGRADE_LOG_MAX_BYTES / 2 ))" "$UPGRADE_LOG" > "$UPGRADE_LOG.trim" 2>/dev/null; then
+				chmod 0600 "$UPGRADE_LOG.trim" 2>/dev/null || true
+				mv -f "$UPGRADE_LOG.trim" "$UPGRADE_LOG"
+			else
+				rm -f "$UPGRADE_LOG.trim"
+			fi
+		fi
+		# --ghcr-token=ghp_… arrives as an ARGUMENT, so a credential can reach this
+		# log two ways: the header below, and the script's OWN output — `die
+		# "unknown arg: $arg"` prints a mistyped token flag verbatim. Redacting only
+		# the header would have left that second path open, so the whole stream goes
+		# through the filter. By shape as well as by flag name: a flag-name-only
+		# rule is one rename away from leaking.
+		_ul_redact() { sed -E "${_UL_SED_U[@]}" \
+			-e 's/(--ghcr-token=)[^[:space:]]*/\1<redacted>/g' \
+			-e 's/gh[pousr]_[A-Za-z0-9]{16,}/<redacted>/g'; }
+		# Line-buffer the filter where sed supports it, so a run that takes minutes
+		# still prints to the operator's terminal as it goes rather than in 4K bursts.
+		if sed -u '' </dev/null >/dev/null 2>&1; then _UL_SED_U=(-u); else _UL_SED_U=(); fi
+		printf '\n===== %s  %s  args: %s\n' \
+			"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname 2>/dev/null || echo '?')" \
+			"$(printf '%s' "${*:-<none>}" | _ul_redact)" >> "$UPGRADE_LOG"
+		export _OXPULSE_UPGRADE_LOGGING=1
+		# errexit off around the pipeline, not `|| true`: without either, `set -e`
+		# kills this shell the moment the run fails and the exit line — the one
+		# thing anyone opens this log for — is never written. `|| true` would write
+		# it but RESET PIPESTATUS to true's, so the caller would read success from
+		# every failed upgrade. PIPESTATUS[0] is the script, not the filter or tee.
+		set +e
+		"$0" "$@" 2>&1 | _ul_redact | tee -a "$UPGRADE_LOG"
+		_ul_rc="${PIPESTATUS[0]}"
+		set -e
+		printf '===== exit %s  %s\n' "$_ul_rc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$UPGRADE_LOG"
+		exit "$_ul_rc"
+	fi
+fi
+
 PREFIX_ETC="${OXPULSE_PREFIX_ETC:-/etc/oxpulse-partner-edge}"
 PREFIX_LIB="${OXPULSE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
 PREFIX_SBIN="${OXPULSE_PREFIX_SBIN:-/usr/local/sbin}"
