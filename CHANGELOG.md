@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.21](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.20...v0.16.21) (2026-08-11)
+
+
+### Features
+
+* **selfheal:** collect our own stale release images, before touching anything shared ([#589](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/589)) ([5a7fc6f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/5a7fc6f9c6dabe55d121c5bfedec8f5af36a2277))
+
 ## [0.16.20](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.19...v0.16.20) (2026-08-10)
 
 
