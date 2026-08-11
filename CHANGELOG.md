@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.23](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.22...v0.16.23) (2026-08-11)
+
+
+### Features
+
+* **upgrade:** record every run, so a gate that rolls back leaves a reason ([#593](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/593)) ([3d3eff9](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3d3eff9fa8695274ee99331c32337d61b7feaf2b))
+
 ## [0.16.22](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.21...v0.16.22) (2026-08-11)
 
 
