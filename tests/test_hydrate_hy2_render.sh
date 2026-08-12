@@ -217,6 +217,65 @@ fi
 teardown_env
 
 # ── result ───────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# F3 — hydrate.sh must SURVIVE a failed hy2 render.
+#
+# hydrate_render_hy2 returns 1 on render failure BY CONTRACT: the caller is
+# meant to notice, leave "hysteria2-client" in CHANNELS_FAILED, and let
+# compose_strip_failed_channels drop the service block. But hydrate.sh runs
+# under `set -euo pipefail` (line 16), so a BARE call makes that return fatal —
+# the script dies before compose_strip runs, before the degraded-mode warning,
+# and before steps 5-7. The fail-soft design would be defeated by its own
+# caller, and the comment above the call would describe a strip that can never
+# happen.
+#
+# The sibling channel renders are already guarded (`render_channel_soft ... ||
+# warn`); this asserts the hy2 call is too. Extract the real block from
+# hydrate.sh rather than replicating it — a replica cannot observe hydrate.sh
+# changing.
+# ---------------------------------------------------------------------------
+_f3_block=$(mktemp)
+awk '
+    /^if \[\[ -n "\$\{HYSTERIA2_SERVER:-\}" \]\]; then$/ { cap=1 }
+    cap { print; if ($0 ~ /^fi$/) exit }
+' "$REPO_ROOT/hydrate.sh" > "$_f3_block"
+
+if [[ ! -s "$_f3_block" ]]; then
+    fail "F3: extraction produced an empty block — the awk pattern no longer matches hydrate.sh"
+else
+    grep -q 'hydrate_render_hy2' "$_f3_block" \
+        || fail "F3: extracted block does not contain the hy2 call — extraction is wrong"
+
+    _f3_out=$(
+        set +e
+        _F3_BLOCK="$_f3_block" bash 2>&1 <<'INNER'
+set -euo pipefail
+HYSTERIA2_SERVER="edge.example.net:51822"
+CHANNELS_FAILED=()
+warn() { echo "WARN $*"; }
+log()  { :; }
+# The render fails, exactly as it does when no endpoint or credentials resolve.
+hydrate_render_hy2() {
+    warn "  hysteria2-client.yaml render failed — continuing without hy2 channel"
+    CHANNELS_FAILED+=("hysteria2-client")
+    return 1
+}
+source "$_F3_BLOCK"
+# Reached only if the failed render did NOT kill the script.
+echo "SURVIVED failed=${#CHANNELS_FAILED[@]}"
+INNER
+    ) || true
+
+    if [[ "$_f3_out" != *"SURVIVED"* ]]; then
+        fail "F3: a failed hy2 render KILLED hydrate under set -e — compose_strip_failed_channels, the degraded warning and steps 5-7 never run. Got: $_f3_out"
+    elif [[ "$_f3_out" != *"failed=1"* ]]; then
+        fail "F3: survived but the channel was not recorded in CHANNELS_FAILED — compose strip would be a no-op. Got: $_f3_out"
+    else
+        pass "F3: a failed hy2 render is fail-soft — hydrate continues with the channel recorded"
+    fi
+fi
+rm -f "$_f3_block"
+
 if [[ $FAIL -ne 0 ]]; then
     echo "FAIL: hydrate hy2 render behavioural test — one or more checks failed"
     exit 1

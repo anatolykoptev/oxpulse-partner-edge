@@ -614,7 +614,15 @@ if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
     # re_render_hysteria2 without setting HY2_AUTH_PASS / HY2_OBFS_PASS, so the
     # render always failed and no file was written — operationally worse than
     # the old render_template path it replaced.
-    hydrate_render_hy2
+    #
+    # `|| true` is load-bearing, not sloppiness: hydrate.sh runs under
+    # `set -euo pipefail` (line 16) and hydrate_render_hy2 returns 1 on render
+    # failure BY CONTRACT, so a bare call makes the failure fatal — killing the
+    # script before compose_strip_failed_channels below, before the degraded-mode
+    # warning, and before steps 5-7.  The function already emits its own warn, so
+    # this does not swallow the diagnostic; the sibling channel renders above are
+    # guarded the same way with `|| warn`.
+    hydrate_render_hy2 || true
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
     render_channel_soft naive "$(tpl_file naive-client.json.tpl)" "$PREFIX_ETC/naive-client.json" \
