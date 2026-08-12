@@ -38,6 +38,15 @@ pass() {
 # Matches the sibling test_hydrate_hy2_render.sh:38-40 shape.  A counter rather
 # than a flag so `pass` can tell "a failure since my boundary" from "a failure
 # earlier in the run".
+#
+# Invariant: one `pass` per `fail` group.  A MISSING `pass` is benign — it can
+# only withhold a true OK, never print a false one.  The sharp edge runs the
+# OTHER way: a `pass` added WITHOUT a corresponding assertion absorbs the
+# previous group increment and re-syncs `_MARK`, so the NEXT real `pass` prints
+# a genuine false OK.  That shape is used deliberately at the two
+# extracted-block guards below, which is exactly what makes it easy to misuse —
+# reaching for a bare `pass` to "restore" a suppressed OK re-creates the very
+# bug this mechanism exists to prevent.
 fail() { echo "FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 # Setup/extraction guard: fatal.  Continuing past an empty extraction or a
 # missing prerequisite runs every later test against garbage and buries the
@@ -155,6 +164,10 @@ echo "--- F4: no TEST-NET default in carrier files ---"
 # from 1, so a permissions failure would read as "free of TEST-NET default".
 # Assert the carrier exists, then branch on the status explicitly rather than on
 # truthiness: absence is only established once we know we actually read the file.
+# Invoke as a PLAIN COMMAND.  Called inside `$( )` or on the left of a pipe,
+# `fail` increments a subshell copy of FAIL, the increment is lost, and the
+# `pass` below prints a false OK — the same defect this file just removed,
+# entering through a different door.
 _f4_no_testnet() {
     local f="$1" label="$2" rc
     if [[ ! -f "$f" ]]; then
@@ -449,6 +462,8 @@ case $_tmpl_awk_rc in
     4) fail_exit "F6: reached EOF without finding the branch or its terminator — the capture pattern no longer matches upgrade.sh" ;;
     *) fail_exit "F6: extraction awk failed with status $_tmpl_awk_rc" ;;
 esac
+# Also dominated by the `case` above (rc=0 implies the terminator was printed,
+# which implies a non-empty file) — a cheap backstop, not a load-bearing check.
 [ -s "$_tmpl_tail" ] || fail_exit "F6: extraction produced empty file — pattern did not match upgrade.sh"
 # Unreachable-by-design net: with the branch-boundary rule above, awk cannot
 # return 0 having captured anything but the block.  Kept so that a future change
