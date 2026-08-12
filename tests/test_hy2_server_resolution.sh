@@ -226,10 +226,12 @@ pass "F2 case A: render succeeds → _hy2_status=active, ch3 in profiles (real i
 # Capture the block's exit status too.  Without it this test is satisfied by an
 # EMPTY capture: with the guard removed, `set -e` inside the block kills the
 # inner shell before the status line, and "" is neither "active" nor contains
-# ch3 — so both checks below pass while the bug is present (issue #603).
-# The outer `set +e` is required: a non-zero substitution under the harness's
-# own `set -e` would kill this script before it could report.
-set +e
+# ch3 — BOTH checks below are absence checks, so both pass while the bug is
+# present (issue #603).
+# No errexit bracket here on purpose: this harness runs `set -uo pipefail`
+# (no -e), so a non-zero `var=$(...)` does not kill the shell and $? is
+# captured correctly.  Adding `set -e` after the capture would LEAK errexit
+# into the rest of the file.
 _f2b_result=$(
     set +e
     _HY2_BLOCK="$_hy2_block" bash <<'INNER'
@@ -256,7 +258,6 @@ printf '%s|%s' "$_hy2_status" "$COMPOSE_PROFILES_EXTRA"
 INNER
 )
 _f2b_rc=$?
-set -e
 _f2b_status="${_f2b_result%%|*}"
 _f2b_profiles="${_f2b_result#*|}"
 
@@ -325,10 +326,11 @@ fi
 pass "F5 case A: render succeeds → 'hy2 channel refreshed' logged (real upgrade.sh block)"
 
 # --- F5 case B: render fails → WARNING logged, NOT "hy2 channel refreshed" ---
-# Same reasoning as F2 case B (issue #603): an empty capture satisfies both
-# assertions below, so the block's exit status is what distinguishes a guarded
-# degrade from set -e killing the shell.
-set +e
+# NOT the same as F2 case B.  F5's first assertion below is a PRESENCE check
+# ("WARNING" must appear), which an empty capture already breaks — so this case
+# was never vacuous and caught the documented mutation on its own.  The rc check
+# is belt-and-braces: it names the abort explicitly instead of reporting a
+# missing WARNING line, which is a confusing way to describe a dead shell.
 _f5b_log=$(
     set +e
     _HY2_BLOCK="$_hy2_upgrade_block" bash <<'INNER'
@@ -344,7 +346,6 @@ source "$_HY2_BLOCK"
 INNER
 )
 _f5b_rc=$?
-set -e
 if [[ $_f5b_rc -ne 0 ]]; then
     fail "F5 case B: the extracted upgrade.sh block ABORTED (rc=$_f5b_rc) instead of degrading — the guard is missing and set -e killed the shell. The empty capture would satisfy every other assertion here."
 fi
@@ -378,7 +379,6 @@ grep -q 'exit 0' "$_tmpl_tail" \
     || fail "F6: extracted tail does not reach the exit — extraction is wrong"
 
 # --- F6 case A: render FAILS -> must exit non-zero ---
-set +e
 _TMPL_TAIL="$_tmpl_tail" bash >/dev/null 2>&1 <<'INNER'
 set -euo pipefail
 HY2_AUTH_PASS="auth-fixture"
@@ -388,14 +388,12 @@ re_render_hysteria2() { return 1; }
 source "$_TMPL_TAIL"
 INNER
 _f6a_rc=$?
-set -e
 if [[ $_f6a_rc -eq 0 ]]; then
     fail "F6 case A: hy2 render failed but --templates-only exited 0 — the exit code lies (rc=$_f6a_rc)"
 fi
 pass "F6 case A: render fails → --templates-only exits non-zero (rc=$_f6a_rc)"
 
 # --- F6 case B: render SUCCEEDS -> must still exit 0 ---
-set +e
 _TMPL_TAIL="$_tmpl_tail" bash >/dev/null 2>&1 <<'INNER'
 set -euo pipefail
 HY2_AUTH_PASS="auth-fixture"
@@ -405,7 +403,6 @@ re_render_hysteria2() { return 0; }
 source "$_TMPL_TAIL"
 INNER
 _f6b_rc=$?
-set -e
 if [[ $_f6b_rc -ne 0 ]]; then
     fail "F6 case B: render succeeded but --templates-only exited $_f6b_rc — a healthy refresh must exit 0"
 fi
