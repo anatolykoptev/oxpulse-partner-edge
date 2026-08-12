@@ -45,6 +45,7 @@ pub fn oxpulse_partner_edge_pacer_config() -> PacerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn partner_edge_config_has_expected_values() {
@@ -58,7 +59,86 @@ mod tests {
             oxpulse_sfu_kit::bwe::SUSPEND_VIDEO_BPS
         );
         assert_eq!(cfg.low_min_bps, oxpulse_sfu_kit::bwe::LOW_MIN_BPS);
-        assert_eq!(cfg.suspend_streak, oxpulse_sfu_kit::bwe::SUSPEND_STREAK);
         assert_eq!(cfg.upgrade_streak, oxpulse_sfu_kit::bwe::UPGRADE_STREAK);
+        // `suspend_streak` is flag-dependent (raised to
+        // SOFTENED_SUSPEND_STREAK when pacer_floor is on) and is asserted
+        // separately in `partner_edge_config_suspend_streak_tracks_pacer_floor_flag`,
+        // a `#[serial]` test that serializes with the
+        // `pacer_floor::tests` mutators which flip the flag at runtime.
+    }
+
+    /// `suspend_streak` is the only flag-dependent field of
+    /// [`oxpulse_partner_edge_pacer_config`]: it is `SUSPEND_STREAK` while
+    /// [`crate::pacer_floor::pacer_floor_enabled`] is off and
+    /// `SOFTENED_SUSPEND_STREAK` while it is on. The other five fields are
+    /// flag-independent and are asserted by
+    /// [`partner_edge_config_has_expected_values`].
+    ///
+    /// This test is `#[serial]` because it reads — and, under `test-utils`,
+    /// writes — the process-global `pacer_floor::ENABLED_OVERRIDE`. The write
+    /// direction is now the dominant hazard, and this test is the aggressor
+    /// rather than the victim: its `set(true)` landing between
+    /// `pacer_floor::tests::override_wins_over_env`'s `set(false)` and that
+    /// test's `assert!(!pacer_floor_enabled())` at `pacer_floor.rs:139` would
+    /// fail the MUTATOR, not this test.
+    ///
+    /// `serial_test`'s bare `#[serial]` is one unnamed group, so this test and
+    /// both `pacer_floor::tests` mutators are mutually exclusive today. Under
+    /// ci.yml's `cargo test` that is the whole of the protection: nothing
+    /// mechanically stops a future mutator from being added without
+    /// `#[serial]`, or under a NAMED group, which would silently reopen this
+    /// race across three files. Under `make test` the question does not arise —
+    /// that is `cargo nextest`, which runs each test in its own process.
+    ///
+    /// `crates/sfu/tests/pacer_floor_test.rs:3-11` reaches a different remedy —
+    /// a separate test binary — because `#[serial]` cannot protect the
+    /// non-serial neighbours it corrupts. That reasoning does not transfer to
+    /// `src/` inline tests, which all share one lib binary; here the reader
+    /// itself is made serial instead.
+    #[test]
+    #[serial]
+    fn partner_edge_config_suspend_streak_tracks_pacer_floor_flag() {
+        // Featureless build: the override machinery is `cfg`'d out, so no
+        // mutator exists in-process and only the default branch is reachable.
+        #[cfg(not(feature = "test-utils"))]
+        {
+            assert_eq!(
+                oxpulse_partner_edge_pacer_config().suspend_streak,
+                oxpulse_sfu_kit::bwe::SUSPEND_STREAK,
+                "with pacer_floor off, suspend_streak must be the kit default"
+            );
+        }
+
+        // With the override available, pin BOTH branches. Asserting only the
+        // off-branch would still pass with the `if pacer_floor_enabled()` arm
+        // of `oxpulse_partner_edge_pacer_config` deleted outright — while the
+        // flag is off that arm is unreachable by construction, so a one-sided
+        // assertion guards nothing.
+        #[cfg(feature = "test-utils")]
+        {
+            // Read BOTH values and restore the override BEFORE asserting.
+            // Asserting inline would leave a panic path that skips the reset and
+            // pins the process-global ON for every later test in this binary.
+            // That is harmless only because no current neighbour asserts a
+            // flag-dependent value — a property of today's neighbours, not of
+            // this test — and it would show up as a cascade of misattributed
+            // failures after the run was already red.
+            crate::pacer_floor::set_pacer_floor_for_tests(false);
+            let off = oxpulse_partner_edge_pacer_config().suspend_streak;
+            crate::pacer_floor::set_pacer_floor_for_tests(true);
+            let on = oxpulse_partner_edge_pacer_config().suspend_streak;
+            crate::pacer_floor::reset_pacer_floor_for_tests();
+
+            assert_eq!(
+                off,
+                oxpulse_sfu_kit::bwe::SUSPEND_STREAK,
+                "with pacer_floor off, suspend_streak must be the kit default"
+            );
+            assert_eq!(
+                on,
+                crate::pacer_floor::SOFTENED_SUSPEND_STREAK,
+                "with pacer_floor on, suspend_streak must be softened"
+            );
+        }
     }
 }
