@@ -43,10 +43,12 @@ pass() {
 # only withhold a true OK, never print a false one.  The sharp edge runs the
 # OTHER way: a `pass` added WITHOUT a corresponding assertion absorbs the
 # previous group increment and re-syncs `_MARK`, so the NEXT real `pass` prints
-# a genuine false OK.  That shape is used deliberately at the two
-# extracted-block guards below, which is exactly what makes it easy to misuse —
-# reaching for a bare `pass` to "restore" a suppressed OK re-creates the very
-# bug this mechanism exists to prevent.
+# a genuine false OK.  The two extracted-block guards below each carry their own
+# `pass` and LOOK like that shape — they are not.  Each has a real assertion on
+# the line above, so its `pass` closes a genuine group.  The discriminator is
+# the assertion, not the layout: reaching for a bare `pass` to "restore" a
+# suppressed OK, with nothing asserted behind it, re-creates the very bug this
+# mechanism exists to prevent.
 fail() { echo "FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 # Setup/extraction guard: fatal.  Continuing past an empty extraction or a
 # missing prerequisite runs every later test against garbage and buries the
