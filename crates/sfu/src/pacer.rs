@@ -75,16 +75,20 @@ mod tests {
     /// [`partner_edge_config_has_expected_values`].
     ///
     /// This test is `#[serial]` because it reads — and, under `test-utils`,
-    /// writes — the process-global `pacer_floor::ENABLED_OVERRIDE`. Without
-    /// `#[serial]` it could run concurrently with
-    /// `pacer_floor::tests::override_wins_over_env` (which flips the override
-    /// between `set(true)` and `set(false)`) and observe the wrong branch.
+    /// writes — the process-global `pacer_floor::ENABLED_OVERRIDE`. The write
+    /// direction is now the dominant hazard, and this test is the aggressor
+    /// rather than the victim: its `set(true)` landing between
+    /// `pacer_floor::tests::override_wins_over_env`'s `set(false)` and that
+    /// test's `assert!(!pacer_floor_enabled())` at `pacer_floor.rs:139` would
+    /// fail the MUTATOR, not this test.
     ///
     /// `serial_test`'s bare `#[serial]` is one unnamed group, so this test and
-    /// both `pacer_floor::tests` mutators are mutually exclusive today. That is
-    /// the whole of the protection: nothing mechanically stops a future mutator
-    /// from being added without `#[serial]`, or under a NAMED group, which
-    /// would silently reopen this race across three files.
+    /// both `pacer_floor::tests` mutators are mutually exclusive today. Under
+    /// ci.yml's `cargo test` that is the whole of the protection: nothing
+    /// mechanically stops a future mutator from being added without
+    /// `#[serial]`, or under a NAMED group, which would silently reopen this
+    /// race across three files. Under `make test` the question does not arise —
+    /// that is `cargo nextest`, which runs each test in its own process.
     ///
     /// `crates/sfu/tests/pacer_floor_test.rs:3-11` reaches a different remedy —
     /// a separate test binary — because `#[serial]` cannot protect the
@@ -112,21 +116,29 @@ mod tests {
         // assertion guards nothing.
         #[cfg(feature = "test-utils")]
         {
+            // Read BOTH values and restore the override BEFORE asserting.
+            // Asserting inline would leave a panic path that skips the reset and
+            // pins the process-global ON for every later test in this binary.
+            // That is harmless only because no current neighbour asserts a
+            // flag-dependent value — a property of today's neighbours, not of
+            // this test — and it would show up as a cascade of misattributed
+            // failures after the run was already red.
             crate::pacer_floor::set_pacer_floor_for_tests(false);
+            let off = oxpulse_partner_edge_pacer_config().suspend_streak;
+            crate::pacer_floor::set_pacer_floor_for_tests(true);
+            let on = oxpulse_partner_edge_pacer_config().suspend_streak;
+            crate::pacer_floor::reset_pacer_floor_for_tests();
+
             assert_eq!(
-                oxpulse_partner_edge_pacer_config().suspend_streak,
+                off,
                 oxpulse_sfu_kit::bwe::SUSPEND_STREAK,
                 "with pacer_floor off, suspend_streak must be the kit default"
             );
-
-            crate::pacer_floor::set_pacer_floor_for_tests(true);
             assert_eq!(
-                oxpulse_partner_edge_pacer_config().suspend_streak,
+                on,
                 crate::pacer_floor::SOFTENED_SUSPEND_STREAK,
                 "with pacer_floor on, suspend_streak must be softened"
             );
-
-            crate::pacer_floor::reset_pacer_floor_for_tests();
         }
     }
 }
