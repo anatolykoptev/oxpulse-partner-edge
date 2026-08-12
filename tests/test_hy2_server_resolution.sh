@@ -149,34 +149,38 @@ pass "F3: re_render_hysteria2 returns non-zero + ERR when no server resolvable"
 # ---------------------------------------------------------------------------
 echo "--- F4: no TEST-NET default in carrier files ---"
 
-# Each of these is an ABSENCE check, and `grep -qF` on a missing file returns
-# non-zero exactly like a clean file — so a renamed or deleted carrier reports
-# OK.  Assert the carrier exists first; the absence check is only meaningful
-# once we know we read something.
+# These are ABSENCE checks, and both of their non-match arms are traps.
+# `grep -qF` on a MISSING file exits non-zero exactly like a clean file, and on
+# an ERROR (unreadable, I/O) it exits 2 — which an `if`/`elif` cannot tell apart
+# from 1, so a permissions failure would read as "free of TEST-NET default".
+# Assert the carrier exists, then branch on the status explicitly rather than on
+# truthiness: absence is only established once we know we actually read the file.
+_f4_no_testnet() {
+    local f="$1" label="$2" rc
+    if [[ ! -f "$f" ]]; then
+        fail "F4: $label missing — an absence check cannot be satisfied by a missing file"
+        return
+    fi
+    grep -qF '203.0.113.10' "$f"
+    rc=$?
+    case $rc in
+        0) fail "F4: $label still contains TEST-NET address 203.0.113.10" ;;
+        1) ;;
+        *) fail "F4: grep errored (status $rc) reading $label — absence NOT established" ;;
+    esac
+}
 
 # channel-render-lib.sh must not contain the TEST-NET address as a fallback.
-if [[ ! -f "$REPO_ROOT/channel-render-lib.sh" ]]; then
-    fail "F4: channel-render-lib.sh missing — an absence check cannot be satisfied by a missing file"
-elif grep -qF '203.0.113.10' "$REPO_ROOT/channel-render-lib.sh"; then
-    fail "F4: channel-render-lib.sh still contains TEST-NET address 203.0.113.10"
-fi
-pass "F4: channel-render-lib.sh free of TEST-NET default"
+_f4_no_testnet "$REPO_ROOT/channel-render-lib.sh" "channel-render-lib.sh"
+pass "F4: channel-render-lib.sh present and free of TEST-NET default"
 
 # config/defaults.conf must not default OXPULSE_HY2_SERVER to TEST-NET.
-if [[ ! -f "$REPO_ROOT/config/defaults.conf" ]]; then
-    fail "F4: config/defaults.conf missing — an absence check cannot be satisfied by a missing file"
-elif grep -qF '203.0.113.10' "$REPO_ROOT/config/defaults.conf"; then
-    fail "F4: config/defaults.conf still contains TEST-NET address 203.0.113.10"
-fi
-pass "F4: config/defaults.conf free of TEST-NET default"
+_f4_no_testnet "$REPO_ROOT/config/defaults.conf" "config/defaults.conf"
+pass "F4: config/defaults.conf present and free of TEST-NET default"
 
 # oxpulse-partner-edge-enable-hy2 must not default HY2_SERVER to TEST-NET.
-if [[ ! -f "$REPO_ROOT/oxpulse-partner-edge-enable-hy2" ]]; then
-    fail "F4: oxpulse-partner-edge-enable-hy2 missing — an absence check cannot be satisfied by a missing file"
-elif grep -qF '203.0.113.10' "$REPO_ROOT/oxpulse-partner-edge-enable-hy2"; then
-    fail "F4: oxpulse-partner-edge-enable-hy2 still contains TEST-NET address 203.0.113.10"
-fi
-pass "F4: oxpulse-partner-edge-enable-hy2 free of TEST-NET default"
+_f4_no_testnet "$REPO_ROOT/oxpulse-partner-edge-enable-hy2" "oxpulse-partner-edge-enable-hy2"
+pass "F4: oxpulse-partner-edge-enable-hy2 present and free of TEST-NET default"
 
 # ---------------------------------------------------------------------------
 # F2 — install.sh guards the re_render_hysteria2 return value (call site)
@@ -215,6 +219,12 @@ awk '
 # Couple test to real code: the extracted block must contain the guard.
 grep -q 'if re_render_hysteria2' "$_hy2_block" \
     || fail "F2: extracted block missing the re_render_hysteria2 guard"
+# Its own boundary.  Without a `pass` here this `fail` leaks its increment into
+# case A's boundary below and silently withholds case A's OK — measured: in the
+# #605 acceptance run `OK: F2 case A` disappeared, even though case A genuinely
+# passed and its passing is real evidence that the failure is specific to the
+# guard rather than to the harness.
+pass "F2: extracted block contains the re_render_hysteria2 guard"
 
 # --- F2 case A: render succeeds → _hy2_status=active, ch3 in profiles ---
 _f2a_result=$(
@@ -333,6 +343,8 @@ awk '
 [ -s "$_hy2_upgrade_block" ] || fail_exit "F5: extraction produced empty file — pattern did not match upgrade.sh"
 grep -q 'if re_render_hysteria2' "$_hy2_upgrade_block" \
     || fail "F5: extracted block missing the re_render_hysteria2 guard"
+# Its own boundary — see the F2 equivalent above.
+pass "F5: extracted block contains the re_render_hysteria2 guard"
 
 # --- F5 case A: render succeeds → "hy2 channel refreshed" logged ---
 _f5a_log=$(
@@ -402,36 +414,49 @@ echo "--- F6: upgrade.sh --templates-only exit code reflects a hy2 render failur
 # not just the render block that F5 covers — the exit decision lives after
 # F5's closing `fi`.
 _tmpl_tail="$_out_dir/upgrade_templates_tail.sh"
+# The terminator must be found BEFORE the enclosing --templates-only branch
+# closes.  That structural rule is the guard; it replaces a line-count cap.
+#
+# No content check can work here.  Break the terminator and awk does NOT run to
+# EOF — it runs on to the next ANCHORED `exit 0` deeper in upgrade.sh and stops
+# there, capturing 1886 lines instead of ~25.  Measured on both trees: each tail
+# contains exactly ONE anchored `exit 0`, and each ENDS on one.  So "contains a
+# terminator", "ends on the terminator" and "contains exactly one" are all
+# satisfied by the broken extraction — every one of them was tried and passed.
+#
+# Indentation is the real discriminator (`\texit 0` vs `\t\t\texit 0`): the whole
+# branch is indented, so a column-0 statement means we have left it.  The first
+# one crossed in the broken case is the bare `fi` at upgrade.sh:1063 — the `fi`
+# closing --templates-only itself.  A size cap also detects the 1886-line case,
+# but only after producing the contaminated artifact, and it cannot see a stray
+# terminator that lands inside the cap.
+#
+# awk gotcha: `exit N` inside a rule STILL runs END, so an END exit overwrites
+# it.  Set flags in the rules and compute the status once, in END.
 awk '
     /if \[\[/ && /OXPULSE_HY2_AUTH_PASS/ { cap=1 }
-    cap { print; if ($0 ~ /^[[:space:]]*exit 0[[:space:]]*$/) exit }
+    cap {
+        if ($0 ~ /^fi[[:space:]]*$/) { closed=1; exit }
+        print
+        if ($0 ~ /^[[:space:]]*exit 0[[:space:]]*$/) { found=1; exit }
+    }
+    END { if (!found) exit (closed ? 3 : 4) }
 ' "$REPO_ROOT/upgrade.sh" > "$_tmpl_tail"
+_tmpl_awk_rc=$?
+case $_tmpl_awk_rc in
+    0) ;;
+    3) fail_exit "F6: the --templates-only branch closed before any 'exit 0' — the terminator is gone from upgrade.sh" ;;
+    4) fail_exit "F6: reached EOF without finding the branch or its terminator — the capture pattern no longer matches upgrade.sh" ;;
+    *) fail_exit "F6: extraction awk failed with status $_tmpl_awk_rc" ;;
+esac
 [ -s "$_tmpl_tail" ] || fail_exit "F6: extraction produced empty file — pattern did not match upgrade.sh"
-# SIZE is the only predicate that detects a mis-terminated extraction here, and
-# that is not obvious — I measured all three.  Break the terminator at :1062 and
-# awk does NOT run to EOF: it runs on to the next anchored `exit 0` deeper in
-# upgrade.sh and stops there, capturing 1886 lines instead of ~25.  So the
-# broken tail still CONTAINS an anchored `exit 0`, still ENDS on one, and
-# contains exactly ONE of them — every content-based predicate passes.  F6 case
-# A is an inverted assertion (satisfied by any breakage) and case B then also
-# reports OK, so the whole section goes green at rc=0 over a tail that is most
-# of the script.
-#
-# The cap is a sanity bound, not a tight fit: the block is ~25 lines, so 100
-# leaves 4x headroom while still being 19x smaller than the failure. If the
-# templates-only block ever legitimately outgrows it, this fails loudly and the
-# bound gets raised — which is the correct outcome for a fixture.
+# Unreachable-by-design net: with the branch-boundary rule above, awk cannot
+# return 0 having captured anything but the block.  Kept so that a future change
+# to the capture pattern cannot quietly produce a huge artifact — it costs one
+# line and it will never fire as things stand.
 _tmpl_tail_lines=$(wc -l < "$_tmpl_tail")
-[[ $_tmpl_tail_lines -le 100 ]] \
-    || fail_exit "F6: extracted tail is $_tmpl_tail_lines lines (expected ~25) — the terminator did not match and awk ran on to a later 'exit 0'"
-# Capture into a variable rather than `tail … | grep -q`: under `pipefail` a
-# matching `grep -q` exits immediately, SIGPIPEs the upstream `tail`, and the
-# pipeline's status goes non-zero on SUCCESS.  tests/test_pipefail_early_exit_guard.sh
-# enforces this repo-wide; it caught exactly this mistake here.
-_tmpl_tail_last=$(tail -n 1 "$_tmpl_tail")
-_tmpl_term_re='^[[:space:]]*exit 0[[:space:]]*$'
-[[ "$_tmpl_tail_last" =~ $_tmpl_term_re ]] \
-    || fail_exit "F6: extracted tail does not END on the terminator — extraction ran past it"
+[[ $_tmpl_tail_lines -le 500 ]] \
+    || fail_exit "F6: extracted tail is $_tmpl_tail_lines lines — the branch-boundary rule should have made this impossible"
 
 # --- F6 case A: render FAILS -> must exit non-zero ---
 _TMPL_TAIL="$_tmpl_tail" bash >/dev/null 2>&1 <<'INNER'
