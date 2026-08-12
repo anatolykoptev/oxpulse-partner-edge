@@ -223,6 +223,13 @@ fi
 pass "F2 case A: render succeeds → _hy2_status=active, ch3 in profiles (real install.sh block)"
 
 # --- F2 case B: render fails → _hy2_status NOT active, ch3 absent ---
+# Capture the block's exit status too.  Without it this test is satisfied by an
+# EMPTY capture: with the guard removed, `set -e` inside the block kills the
+# inner shell before the status line, and "" is neither "active" nor contains
+# ch3 — so both checks below pass while the bug is present (issue #603).
+# The outer `set +e` is required: a non-zero substitution under the harness's
+# own `set -e` would kill this script before it could report.
+set +e
 _f2b_result=$(
     set +e
     _HY2_BLOCK="$_hy2_block" bash <<'INNER'
@@ -248,9 +255,14 @@ source "$_HY2_BLOCK"
 printf '%s|%s' "$_hy2_status" "$COMPOSE_PROFILES_EXTRA"
 INNER
 )
+_f2b_rc=$?
+set -e
 _f2b_status="${_f2b_result%%|*}"
 _f2b_profiles="${_f2b_result#*|}"
 
+if [[ $_f2b_rc -ne 0 ]]; then
+    fail "F2 case B: the extracted install.sh block ABORTED (rc=$_f2b_rc) instead of degrading — the guard is missing and set -e killed the shell before it could report. The empty capture would satisfy every other assertion here."
+fi
 if [[ "$_f2b_status" == "active" ]]; then
     fail "F2 case B: render failed but _hy2_status=active — guard missing in real install.sh block"
 fi
@@ -313,6 +325,10 @@ fi
 pass "F5 case A: render succeeds → 'hy2 channel refreshed' logged (real upgrade.sh block)"
 
 # --- F5 case B: render fails → WARNING logged, NOT "hy2 channel refreshed" ---
+# Same reasoning as F2 case B (issue #603): an empty capture satisfies both
+# assertions below, so the block's exit status is what distinguishes a guarded
+# degrade from set -e killing the shell.
+set +e
 _f5b_log=$(
     set +e
     _HY2_BLOCK="$_hy2_upgrade_block" bash <<'INNER'
@@ -327,6 +343,11 @@ re_render_hysteria2() { return 1; }
 source "$_HY2_BLOCK"
 INNER
 )
+_f5b_rc=$?
+set -e
+if [[ $_f5b_rc -ne 0 ]]; then
+    fail "F5 case B: the extracted upgrade.sh block ABORTED (rc=$_f5b_rc) instead of degrading — the guard is missing and set -e killed the shell. The empty capture would satisfy every other assertion here."
+fi
 if [[ "$_f5b_log" != *"WARNING"* ]]; then
     fail "F5 case B: render failed but WARNING not logged — got: $_f5b_log"
 fi
