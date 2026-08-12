@@ -14,7 +14,7 @@
 # ch4 health-report change; old upgrade.sh deployed only the image.
 #
 # Usage:
-#   oxpulse-partner-edge-upgrade                       # pull :latest + sync host-scripts
+#   oxpulse-partner-edge-upgrade                       # reconcile to THIS script's baked tag
 #   oxpulse-partner-edge-upgrade v0.2.0                # pin to specific tag
 #   oxpulse-partner-edge-upgrade --check               # report pending upgrade, don't apply
 #   oxpulse-partner-edge-upgrade --rollback            # restore previous tag + host-scripts
@@ -903,6 +903,12 @@ check_signaling_sfu_secret
 CURRENT="${IMAGE_VERSION:-unknown}"
 MODE=apply
 TARGET=""
+# Was TARGET typed by the operator, or derived by resolve_default_target from
+# the baked OXPULSE_UPGRADE_TAG?  _assert_apply_not_downgrade needs to tell them
+# apart: a derived target carries no operator intent and may be older than the
+# running image, while an explicit tag IS the intent — and is the only way out
+# of an unversioned IMAGE_VERSION (the installer default is `stable`).
+TARGET_EXPLICIT=0
 DRY_RUN=0
 SKIPPED_CHECKS=""
 # ALLOW_UNVERIFIED gates the SHA256SUMS host-script guard (further down). Seed it from
@@ -930,7 +936,7 @@ for arg in "$@"; do
 			SKIPPED_CHECKS="${_sc//,/ }"
 			unset _sc ;;
 		--ghcr-token=*)   GHCR_TOKEN_ARG="${arg#--ghcr-token=}" ;;
-		v*|latest)        TARGET="$arg" ;;
+		v*|latest)        TARGET="$arg"; TARGET_EXPLICIT=1 ;;
 		-h|--help)
 			sed -n '2,29p' "$0"; exit 0 ;;
 		*) die "unknown arg: $arg" ;;
@@ -964,14 +970,33 @@ V01_TO_V02=0
 # corrupting the .prev backup chain. Both operators writing .prev simultaneously
 # would interleave state and leave rollback pointing at partially-applied config.
 
-# Helper: resolve_default_target sets TARGET if empty, preferring VERSION file
-# over 'latest' to keep upgrade target deterministic with the installer release.
-# Audit 2026-05-22 F2 — operator may invoke `oxpulse-partner-edge-upgrade`
-# without args; without this helper, that pulled :latest from GHCR even when
-# the installer pinned to a specific tag. Now we honor the same pin unless
-# the operator explicitly types `latest`.
+# Helper: resolve_default_target sets TARGET if empty, preferring the release
+# tag baked into this script (OXPULSE_UPGRADE_TAG, substituted by release.yml
+# at publish time) over a VERSION file over 'latest'.
+#
+# Resolution order:
+#   1. $TARGET already set (explicit CLI arg) — wins, unchanged.
+#   2. $OXPULSE_UPGRADE_TAG when it is a real vX.Y.Z tag and not the
+#      unsubstituted @RELEASE_TAG_PLACEHOLDER@ sentinel — the value baked into every
+#      released installer.  On every probed edge (ruoxp, rvpn, zvonilka) there
+#      is no VERSION file, so the previous fall-through to 'latest' made
+#      CURRENT and TARGET compare equal and the run exited "already on latest
+#      — nothing to do" having transferred nothing (issue #612).
+#   3. the VERSION file, as today.
+#   4. 'latest', keeping the existing warning.
+#
+# The regex check in branch 2 is the same idiom used at the REPO_RAW resolution
+# (upgrade.sh:186) and the SHA256SUMS gate (upgrade.sh:465): a real tag matches
+# ^v[0-9]+\. , the unsubstituted @RELEASE_TAG_PLACEHOLDER@ sentinel does not.
+# (Spelled the long way on purpose: release.yml seds the bare form globally at
+# publish, so a comment using it is rewritten in the shipped artifact.)
 resolve_default_target() {
 	if [[ -n "$TARGET" ]]; then return 0; fi
+	if [[ "${OXPULSE_UPGRADE_TAG}" =~ ^v[0-9]+\. ]]; then
+		TARGET="$OXPULSE_UPGRADE_TAG"
+		log "TARGET defaulted to $TARGET from OXPULSE_UPGRADE_TAG (release tag baked into this script)"
+		return 0
+	fi
 	local version_file
 	version_file="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/VERSION"
 	if [[ -r "$version_file" ]]; then
@@ -994,6 +1019,11 @@ resolve_default_target() {
 #
 # Resolution order:
 #   partner-edge-vX.Y.Z → strip prefix → vX.Y.Z (transition: old-form input)
+#   X.Y.Z (bare)        → add v prefix → vX.Y.Z (VERSION file in a source
+#                                               checkout yields a bare semver;
+#                                               real release tags are vX.Y.Z,
+#                                               so without the prefix the
+#                                               release URL 404s — issue #612)
 #   vX.Y.Z              → unchanged             (canonical new form)
 #   latest              → unchanged             (floating; SHA256SUMS guard skipped)
 #
@@ -1005,6 +1035,13 @@ normalize_target() {
 			# Transition: old-form input from pre-v0.12.60 installer. Strip prefix.
 			TARGET="${TARGET#partner-edge-}"
 			warn "old tag form detected — treating as $TARGET (releases ≥v0.12.60 use vX.Y.Z)"
+			;;
+		[0-9]*.[0-9]*.[0-9]*)
+			# Bare X.Y.Z (e.g. from a VERSION file in a source checkout) — real
+			# release tags are vX.Y.Z, so add the prefix or the release URL 404s
+			# (issue #612 branch 2).
+			warn "bare version $TARGET normalized to v-prefixed tag form"
+			TARGET="v$TARGET"
 			;;
 	esac
 	# One-form world: RELEASE_TAG = TARGET (git tag = image tag = release tag).
@@ -3225,6 +3262,51 @@ _assert_apply_not_downgrade() {
 	# branch and skip the gate. v-normalize it here.
 	local _tgt="$RELEASE_TAG"
 	[[ "$_tgt" =~ ^[0-9] ]] && _tgt="v$_tgt"
+
+	# An UNPARSEABLE current version cannot be compared, so _conflict_check_3
+	# records WARNING and nothing refuses — the guard is reached but structurally
+	# cannot fire.  That is the state of every edge whose IMAGE_VERSION is still
+	# 'latest' or 'unknown', which is exactly the population the no-arg path now
+	# reaches: before #612 those runs stopped at the `CURRENT == TARGET` gate and
+	# never got here, so the inert guard was unreachable.  Measured: CURRENT=latest
+	# with a proposed v0.15.0 PROCEEDS, while CURRENT=v0.16.24 with the same
+	# proposal is refused.
+	#
+	# Refuse rather than warn.  A run that cannot PROVE it is not a downgrade must
+	# not rewrite compose and recreate containers on its own say-so.  Self-healing:
+	# the first upgrade carrying a real tag writes a parseable IMAGE_VERSION, and
+	# every later no-arg run compares normally.  Explicit `latest` is unaffected —
+	# it fails the semver test on the proposed side and never enters this arm.
+	# A DERIVED target (no CLI arg — resolve_default_target took the tag baked
+	# into this script) cannot be ordered against an unversioned CURRENT, and the
+	# baked tag may well be older than the image the edge is actually running.
+	# _conflict_check_3 records only WARNING there, so nothing refuses: measured,
+	# CURRENT=latest with a proposed v0.15.0 PROCEEDS.
+	#
+	# Gate on PROVENANCE, not merely on comparability.  An EXPLICIT tag must pass:
+	# the installer default is IMAGE_VERSION=stable (lib/install-args.sh:130), and
+	# both writers that make CURRENT comparable (:3742, :3995) run DOWNSTREAM of
+	# this guard — so refusing an explicit tag would kill the very run that
+	# records a version, leaving no exit from the unversioned state.  That is the
+	# bootstrap oxpulse-partner-edge-refresh.sh:363-366 already prescribes.
+	# ${TARGET_EXPLICIT:-0}: the function must not require its caller to define
+	# the flag.  tests/test_fleet_self_upgrade.sh extracts this function into a
+	# stub that does not set it, and under `set -u` a bare reference kills the
+	# function before any case runs — all three of its downgrade assertions went
+	# red.  Defaulting to 0 also fails SAFE: unknown provenance is treated as
+	# derived, which is the stricter branch.
+	if [[ ${TARGET_EXPLICIT:-0} -eq 0 ]] \
+		&& [[ "$_tgt" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] \
+		&& [[ ! "$CURRENT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+		die "refusing a derived upgrade against an unversioned current state.
+  IMAGE_VERSION in the state file is '$CURRENT', which cannot be ordered against $_tgt,
+  and $_tgt was taken from this script's baked release tag rather than typed by you —
+  it may be OLDER than the image this edge is running.
+  Bootstrap once with an explicit tag:  oxpulse-partner-edge-upgrade $_tgt
+  (that records a comparable version and every later no-arg run compares normally),
+  or --skip-check=3 to force this one."
+	fi
+
 	_conflict_check_3 "$_tgt"
 	if [[ "${CHECK_STATUS[3]:-}" == "CATASTROPHIC" ]]; then
 		die "downgrade refused (check 3):
