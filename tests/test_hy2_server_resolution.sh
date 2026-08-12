@@ -21,11 +21,24 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TPL="$REPO_ROOT/hysteria2-client.yaml.tpl"
 
 FAIL=0
-pass() { echo "OK: $*"; }
+# `pass` prints only when no assertion has recorded a failure since the previous
+# `pass` line.  While `fail` exited, an "OK:" after a "FAIL:" was structurally
+# impossible; with recording assertions it is not, and an unconditional "OK:" is
+# an affirmative claim about the very property that just failed — greppable, and
+# the opposite of the truth.  The sibling test_hydrate_hy2_render.sh:152-154 gets
+# this from if/else at every site; a boundary marker gives the same guarantee
+# without restructuring 13 call sites.
+_MARK=0
+pass() {
+    if [[ $FAIL -ne $_MARK ]]; then _MARK=$FAIL; return 0; fi
+    echo "OK: $*"
+}
 # Assertion failure: record and continue so later sections still run.  The
 # summary at the end of the file exits non-zero if any assertion fired.
-# Matches the sibling test_hydrate_hy2_render.sh:38-40 shape.
-fail() { echo "FAIL: $*" >&2; FAIL=1; }
+# Matches the sibling test_hydrate_hy2_render.sh:38-40 shape.  A counter rather
+# than a flag so `pass` can tell "a failure since my boundary" from "a failure
+# earlier in the run".
+fail() { echo "FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 # Setup/extraction guard: fatal.  Continuing past an empty extraction or a
 # missing prerequisite runs every later test against garbage and buries the
 # real cause under cascading noise.
@@ -136,20 +149,31 @@ pass "F3: re_render_hysteria2 returns non-zero + ERR when no server resolvable"
 # ---------------------------------------------------------------------------
 echo "--- F4: no TEST-NET default in carrier files ---"
 
+# Each of these is an ABSENCE check, and `grep -qF` on a missing file returns
+# non-zero exactly like a clean file — so a renamed or deleted carrier reports
+# OK.  Assert the carrier exists first; the absence check is only meaningful
+# once we know we read something.
+
 # channel-render-lib.sh must not contain the TEST-NET address as a fallback.
-if grep -qF '203.0.113.10' "$REPO_ROOT/channel-render-lib.sh"; then
+if [[ ! -f "$REPO_ROOT/channel-render-lib.sh" ]]; then
+    fail "F4: channel-render-lib.sh missing — an absence check cannot be satisfied by a missing file"
+elif grep -qF '203.0.113.10' "$REPO_ROOT/channel-render-lib.sh"; then
     fail "F4: channel-render-lib.sh still contains TEST-NET address 203.0.113.10"
 fi
 pass "F4: channel-render-lib.sh free of TEST-NET default"
 
 # config/defaults.conf must not default OXPULSE_HY2_SERVER to TEST-NET.
-if grep -qF '203.0.113.10' "$REPO_ROOT/config/defaults.conf"; then
+if [[ ! -f "$REPO_ROOT/config/defaults.conf" ]]; then
+    fail "F4: config/defaults.conf missing — an absence check cannot be satisfied by a missing file"
+elif grep -qF '203.0.113.10' "$REPO_ROOT/config/defaults.conf"; then
     fail "F4: config/defaults.conf still contains TEST-NET address 203.0.113.10"
 fi
 pass "F4: config/defaults.conf free of TEST-NET default"
 
 # oxpulse-partner-edge-enable-hy2 must not default HY2_SERVER to TEST-NET.
-if grep -qF '203.0.113.10' "$REPO_ROOT/oxpulse-partner-edge-enable-hy2"; then
+if [[ ! -f "$REPO_ROOT/oxpulse-partner-edge-enable-hy2" ]]; then
+    fail "F4: oxpulse-partner-edge-enable-hy2 missing — an absence check cannot be satisfied by a missing file"
+elif grep -qF '203.0.113.10' "$REPO_ROOT/oxpulse-partner-edge-enable-hy2"; then
     fail "F4: oxpulse-partner-edge-enable-hy2 still contains TEST-NET address 203.0.113.10"
 fi
 pass "F4: oxpulse-partner-edge-enable-hy2 free of TEST-NET default"
@@ -383,7 +407,13 @@ awk '
     cap { print; if ($0 ~ /^[[:space:]]*exit 0[[:space:]]*$/) exit }
 ' "$REPO_ROOT/upgrade.sh" > "$_tmpl_tail"
 [ -s "$_tmpl_tail" ] || fail_exit "F6: extraction produced empty file — pattern did not match upgrade.sh"
-grep -q 'exit 0' "$_tmpl_tail" \
+# Anchored to the SAME pattern awk terminates on (:383).  An unanchored
+# `exit 0` also matches any of the seven other `exit 0` lines in upgrade.sh, so
+# when the terminator stops matching, awk runs to EOF and this guard passes over
+# a ~1900-line tail — with F6 case A satisfied by any breakage, both cases then
+# report OK at rc=0.  The guard's predicate must equal awk's, or it is blind to
+# the one failure it exists to catch.
+grep -qE '^[[:space:]]*exit 0[[:space:]]*$' "$_tmpl_tail" \
     || fail_exit "F6: extracted tail does not reach the exit — extraction is wrong"
 
 # --- F6 case A: render FAILS -> must exit non-zero ---
