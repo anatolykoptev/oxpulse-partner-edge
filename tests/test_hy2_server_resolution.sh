@@ -407,16 +407,23 @@ awk '
     cap { print; if ($0 ~ /^[[:space:]]*exit 0[[:space:]]*$/) exit }
 ' "$REPO_ROOT/upgrade.sh" > "$_tmpl_tail"
 [ -s "$_tmpl_tail" ] || fail_exit "F6: extraction produced empty file — pattern did not match upgrade.sh"
-# awk (:383) prints the terminator and exits immediately, so a CORRECT
-# extraction ENDS on that line.  Asking merely whether the tail *contains* an
-# `exit 0` cannot detect the failure this guard exists for, and anchoring the
-# pattern does not help: when the terminator stops matching, awk runs to EOF and
-# the tail then contains every other `exit 0` in upgrade.sh — several of which
-# are themselves anchored.  Measured: with the terminator broken, an anchored
-# `grep -q` over the whole tail still passed across 1886 captured lines while
-# F6 case A (an inverted assertion, satisfied by any breakage) and case B both
-# reported OK at rc=0.  The last LINE is the only predicate that separates
-# "terminated here" from "ran off the end".
+# SIZE is the only predicate that detects a mis-terminated extraction here, and
+# that is not obvious — I measured all three.  Break the terminator at :1062 and
+# awk does NOT run to EOF: it runs on to the next anchored `exit 0` deeper in
+# upgrade.sh and stops there, capturing 1886 lines instead of ~25.  So the
+# broken tail still CONTAINS an anchored `exit 0`, still ENDS on one, and
+# contains exactly ONE of them — every content-based predicate passes.  F6 case
+# A is an inverted assertion (satisfied by any breakage) and case B then also
+# reports OK, so the whole section goes green at rc=0 over a tail that is most
+# of the script.
+#
+# The cap is a sanity bound, not a tight fit: the block is ~25 lines, so 100
+# leaves 4x headroom while still being 19x smaller than the failure. If the
+# templates-only block ever legitimately outgrows it, this fails loudly and the
+# bound gets raised — which is the correct outcome for a fixture.
+_tmpl_tail_lines=$(wc -l < "$_tmpl_tail")
+[[ $_tmpl_tail_lines -le 100 ]] \
+    || fail_exit "F6: extracted tail is $_tmpl_tail_lines lines (expected ~25) — the terminator did not match and awk ran on to a later 'exit 0'"
 tail -n 1 "$_tmpl_tail" | grep -qE '^[[:space:]]*exit 0[[:space:]]*$' \
     || fail_exit "F6: extracted tail does not END on the terminator — extraction ran past it"
 
