@@ -5,6 +5,20 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.25](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.24...v0.16.25) (2026-08-12)
+
+
+### Bug Fixes
+
+* **hy2:** wire HYSTERIA2_SERVER into the renderer, fail loud on a missing endpoint ([e2e5bcb](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e2e5bcb852a236360d4d79b211d497f80a688a19))
+* **install:** first-contact defects and a fail-soft hy2 render on first boot ([471875f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/471875fca8770afb20ecd26ea969a53456b2a2af))
+* **install:** name the TURNS DNS record and exit honestly on a red core healthcheck ([a62857b](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/a62857b50b1eb593bafe9aea90908a779f3e8e1f))
+* **install:** the banner names the check that actually failed, and two comments stop claiming what the code does not do ([1c16cc9](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/1c16cc9deb532a338223a25f0633bfbd62d1ebf7))
+* **sfu:** serialise the bwe_temporal_cap and pacer_floor override tests ([b4b1a42](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/b4b1a420fed97ffbdca60fe24b92d9a4b1a10146))
+* **sfu:** split flag-dependent suspend_streak assertion into #[serial] test ([#611](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/611)) ([c3dba8c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c3dba8ce9cd741ff1fd62222f7129088b7e882cc))
+* **test:** assertion failures record and continue, setup guards stay fatal ([#610](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/610)) ([938b48c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/938b48cd519f9ca807b77df38c533b584260728f))
+* **upgrade:** no-arg target resolution consults the baked release tag ([#614](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/614)) ([c68a780](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c68a780fc013218e0e87e28cb0877725f9283077))
+
 ## [0.16.24](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.23...v0.16.24) (2026-08-11)
 
 
