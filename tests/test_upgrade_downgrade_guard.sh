@@ -61,12 +61,16 @@ bash -n "$_stub" || fail_exit "extracted stub is not valid bash"
 # run <explicit> <current> <tag> [skipped] -> prints PROCEEDS or REFUSED
 run() {
     TARGET_EXPLICIT="$1" CURRENT="$2" RELEASE_TAG="$3" SKIPPED_CHECKS="${4:-}" \
-        bash -c "set -uo pipefail; source '$_stub'; _assert_apply_not_downgrade && echo PROCEEDS" 2>&1 | head -1
+        bash -c "set -uo pipefail; source '$_stub'; _assert_apply_not_downgrade && echo PROCEEDS" 2>&1
 }
 
 expect() {
     local want="$1" explicit="$2" cur="$3" tag="$4" skip="${5:-}" label="$6" got
-    got=$(run "$explicit" "$cur" "$tag" "$skip")
+    local raw
+    raw=$(run "$explicit" "$cur" "$tag" "$skip")
+    # First line via parameter expansion, never a piped early-exit reader:
+    # under pipefail it SIGPIPEs the producer and the status flips on success.
+    got="${raw%%$'\n'*}"
     case "$got" in
         "$want"*) ;;
         *) fail "$label — expected $want, got: $got" ;;
@@ -113,8 +117,9 @@ echo "--- G7: the function does not require its caller to define TARGET_EXPLICIT
 # A sibling suite extracts this function into a stub that never sets the flag.
 # Under `set -u` a bare reference kills it before any case runs; the default
 # must hold, and must default to the STRICTER (derived) branch.
-_g7=$( CURRENT=stable RELEASE_TAG=v0.16.24 SKIPPED_CHECKS="" \
-    bash -c "set -uo pipefail; source '$_stub'; _assert_apply_not_downgrade && echo PROCEEDS" 2>&1 | head -1 )
+_g7_raw=$( CURRENT=stable RELEASE_TAG=v0.16.24 SKIPPED_CHECKS="" \
+    bash -c "set -uo pipefail; source '$_stub'; _assert_apply_not_downgrade && echo PROCEEDS" 2>&1 )
+_g7="${_g7_raw%%$'\n'*}"
 case "$_g7" in
     REFUSED*)  ;;
     *unbound*) fail "G7: TARGET_EXPLICIT unset kills the function under set -u — $_g7" ;;
