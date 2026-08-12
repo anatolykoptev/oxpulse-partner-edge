@@ -20,8 +20,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TPL="$REPO_ROOT/hysteria2-client.yaml.tpl"
 
+FAIL=0
 pass() { echo "OK: $*"; }
-fail() { echo "FAIL: $*" >&2; exit 1; }
+# Assertion failure: record and continue so later sections still run.  The
+# summary at the end of the file exits non-zero if any assertion fired.
+# Matches the sibling test_hydrate_hy2_render.sh:38-40 shape.
+fail() { echo "FAIL: $*" >&2; FAIL=1; }
+# Setup/extraction guard: fatal.  Continuing past an empty extraction or a
+# missing prerequisite runs every later test against garbage and buries the
+# real cause under cascading noise.
+fail_exit() { echo "FAIL: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # F1 — HYSTERIA2_SERVER honored by re_render_hysteria2
@@ -179,7 +187,7 @@ awk '
         if ($0 ~ /^[[:space:]]*fi[[:space:]]*$/) { depth--; if (depth==0) exit }
     }
 ' "$REPO_ROOT/install.sh" > "$_hy2_block"
-[ -s "$_hy2_block" ] || fail "F2: extraction produced empty file — pattern did not match install.sh"
+[ -s "$_hy2_block" ] || fail_exit "F2: extraction produced empty file — pattern did not match install.sh"
 # Couple test to real code: the extracted block must contain the guard.
 grep -q 'if re_render_hysteria2' "$_hy2_block" \
     || fail "F2: extracted block missing the re_render_hysteria2 guard"
@@ -298,7 +306,7 @@ awk '
         if ($0 ~ /^[[:space:]]*fi[[:space:]]*$/) { depth--; if (depth==0) exit }
     }
 ' "$REPO_ROOT/upgrade.sh" > "$_hy2_upgrade_block"
-[ -s "$_hy2_upgrade_block" ] || fail "F5: extraction produced empty file — pattern did not match upgrade.sh"
+[ -s "$_hy2_upgrade_block" ] || fail_exit "F5: extraction produced empty file — pattern did not match upgrade.sh"
 grep -q 'if re_render_hysteria2' "$_hy2_upgrade_block" \
     || fail "F5: extracted block missing the re_render_hysteria2 guard"
 
@@ -374,9 +382,9 @@ awk '
     /if \[\[/ && /OXPULSE_HY2_AUTH_PASS/ { cap=1 }
     cap { print; if ($0 ~ /^[[:space:]]*exit 0[[:space:]]*$/) exit }
 ' "$REPO_ROOT/upgrade.sh" > "$_tmpl_tail"
-[ -s "$_tmpl_tail" ] || fail "F6: extraction produced empty file — pattern did not match upgrade.sh"
+[ -s "$_tmpl_tail" ] || fail_exit "F6: extraction produced empty file — pattern did not match upgrade.sh"
 grep -q 'exit 0' "$_tmpl_tail" \
-    || fail "F6: extracted tail does not reach the exit — extraction is wrong"
+    || fail_exit "F6: extracted tail does not reach the exit — extraction is wrong"
 
 # --- F6 case A: render FAILS -> must exit non-zero ---
 _TMPL_TAIL="$_tmpl_tail" bash >/dev/null 2>&1 <<'INNER'
@@ -426,7 +434,7 @@ cat > "$_f7_dir/node-config.json" <<'JSON'
 {"node_id":"probe-node","hysteria2_server":"from-node-config.example:51822"}
 JSON
 cp "$REPO_ROOT/hysteria2-client.yaml.tpl" "$_f7_dir/" 2>/dev/null \
-    || fail "F7: template not found at $REPO_ROOT/hysteria2-client.yaml.tpl"
+    || fail_exit "F7: template not found at $REPO_ROOT/hysteria2-client.yaml.tpl"
 
 _f7_out=$(
     set +e
@@ -453,5 +461,14 @@ else
 fi
 rm -rf "$_f7_dir"
 
+# ---------------------------------------------------------------------------
+# Summary — record-and-continue harness: exit non-zero if any assertion
+# fired.  A harness that forgets this exit turns every failure into a green
+# suite, which is a worse version of the bug this file was fixed to catch.
+# ---------------------------------------------------------------------------
+if [[ $FAIL -ne 0 ]]; then
+    echo "FAIL: hy2 server resolution gate — one or more checks failed" >&2
+    exit 1
+fi
 echo
 echo "All hy2 server resolution tests passed."
