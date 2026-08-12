@@ -103,13 +103,13 @@ teardown() {
         PARTNER_EDGE_PREFIX_ETC="$TMP/etc" \
         OXPULSE_REPO_DIR="$REPO_ROOT" \
         PATH="$TMP:$MOCKS:$PATH" \
-        bash "$SCRIPT" --dry-run
+        bash "$SCRIPT" --dry-run --server edge.example.net:51822
     [ "$status" -eq 0 ]
     run env PREFIX_ETC="$TMP/etc" \
         PARTNER_EDGE_PREFIX_ETC="$TMP/etc" \
         OXPULSE_REPO_DIR="$REPO_ROOT" \
         PATH="$TMP:$MOCKS:$PATH" \
-        bash "$SCRIPT" --dry-run
+        bash "$SCRIPT" --dry-run --server edge.example.net:51822
     [ "$status" -eq 0 ]
     # re_render_hysteria2 must NOT have been called (dry-run returns before it).
     [ ! -f "$RENDER_CALLED_FILE" ]
@@ -126,7 +126,7 @@ teardown() {
     output=$(PREFIX_ETC="$TMP/etc" \
         PARTNER_EDGE_PREFIX_ETC="$TMP/etc" \
         OXPULSE_REPO_DIR="$TMP" \
-        HY2_SERVER="203.0.113.10:51822" \
+        HY2_SERVER="edge.example.net:51822" \
         HY2_LOCAL_LISTEN="0.0.0.0:18443" \
         HY2_REMOTE_BACKEND="127.0.0.1:8907" \
         PATH="$TMP:$MOCKS:$PATH" \
