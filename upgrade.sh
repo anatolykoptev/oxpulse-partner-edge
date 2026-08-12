@@ -1102,9 +1102,9 @@ _HOST_SCRIPT_SBIN_FILES=(
 	# consumer (the hydrate script) in this array: sync_host_scripts installs
 	# each file independently, so a partial sync that lands a NEW hydrate
 	# (which sources this lib) without the lib would leave first-boot hy2
-	# render silently skipped (hydrate.sh stubs hydrate_render_hy2 to a no-op
-	# when the lib is missing). Same fetch+sha256-verify path as
-	# channel-render-lib.sh below.
+	# render marked failed and stripped from compose (hydrate.sh marks the
+	# hy2 channel failed and strips it from compose when the lib is missing).
+	# Same fetch+sha256-verify path as channel-render-lib.sh below.
 	hydrate-hy2.sh
 	oxpulse-partner-edge-hydrate
 	oxpulse-partner-edge-refresh

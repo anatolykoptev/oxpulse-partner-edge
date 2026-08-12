@@ -1768,9 +1768,11 @@ else
 	_turns_dns_line="$_turns_dns_line TURNS on :443 will fail SNI match until fixed — see warnings above."
 fi
 
-# Pre-compute the health-status banner section.  HEALTHCHECK_CORE_FAILED and
-# HEALTHCHECK_TURNS_CERT_FAILED are set by healthcheck_run (Step 7); default
-# to 0 when dry-run skipped the healthcheck or when all checks passed.
+# Pre-compute the health-status banner section.  HEALTHCHECK_CORE_FAILED,
+# HEALTHCHECK_TURNS_CERT_FAILED, and HEALTHCHECK_POLL_FAILED are set by
+# healthcheck_run (Step 7); default to 0 when dry-run skipped the healthcheck
+# or when all checks passed.  Each line names the specific check that fired
+# so an operator investigates the right subsystem.
 if [[ "${HEALTHCHECK_CORE_FAILED:-0}" -eq 1 ]]; then
 	_health_banner=""
 	_health_banner="${_health_banner}  --- INSTALL DEGRADED — core health checks RED ---"
@@ -1778,7 +1780,9 @@ if [[ "${HEALTHCHECK_CORE_FAILED:-0}" -eq 1 ]]; then
 	if [[ "${HEALTHCHECK_TURNS_CERT_FAILED:-0}" -eq 1 ]]; then
 		_health_banner="${_health_banner}    TURNS TLS cert not ready (coturn :5349 listener disabled)\n"
 	fi
-	_health_banner="${_health_banner}    Healthcheck poll timed out — run $PREFIX_SBIN/oxpulse-partner-edge-healthcheck\n"
+	if [[ "${HEALTHCHECK_POLL_FAILED:-0}" -eq 1 ]]; then
+		_health_banner="${_health_banner}    Healthcheck poll timed out — run $PREFIX_SBIN/oxpulse-partner-edge-healthcheck\n"
+	fi
 	_health_banner="${_health_banner}  The node is NOT fully operational. Inspect the output above and re-run\n"
 	_health_banner="${_health_banner}  the healthcheck binary before relying on this edge.\n"
 	if [[ "${ALLOW_DEGRADED:-0}" -eq 0 ]]; then
@@ -1826,8 +1830,9 @@ fi
 # really work — exit non-zero so automation and operators cannot mistake a
 # degraded node for a successful one.  --allow-degraded (or
 # OXPULSE_ALLOW_DEGRADED=1) restores exit 0 for non-interactive callers that
-# intentionally proceed on a degraded-but-running node (upgrade.sh, fleet
-# rollout).  Optional channels (naive/CH5 absent, hy2 skipped) never reach
+# may intentionally proceed on a degraded-but-running node; no caller passes
+# it today (upgrade.sh has its own converge engine and does not invoke
+# install.sh).  Optional channels (naive/CH5 absent, hy2 skipped) never reach
 # this path — healthcheck.sh returns GREEN for skipped optional channels, so
 # HEALTHCHECK_CORE_FAILED stays 0.
 if [[ "${HEALTHCHECK_CORE_FAILED:-0}" -eq 1 && "${ALLOW_DEGRADED:-0}" -eq 0 ]]; then

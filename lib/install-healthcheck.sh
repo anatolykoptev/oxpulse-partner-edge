@@ -125,8 +125,12 @@ healthcheck_run() {
 	log "[7/10] waiting for healthcheck (timeout ${HEALTHCHECK_TIMEOUT}s)"
 	# Initialise core-failure flags so the banner and exit gate can be honest.
 	# These are globals read by install.sh's Step 10 banner + exit logic.
+	# Each flag tracks a specific check so the banner can name the one(s) that
+	# actually fired rather than printing a generic "poll timed out" line when
+	# only the TURNS cert failed (or vice versa).
 	HEALTHCHECK_CORE_FAILED=0
 	HEALTHCHECK_TURNS_CERT_FAILED=0
+	HEALTHCHECK_POLL_FAILED=0
 	if [[ $DRY_RUN -eq 0 ]]; then
 		_healthcheck_install_script
 		# TURNS cert wait: core TLS/cert check.  Catch the return so set -e
@@ -140,6 +144,7 @@ healthcheck_run() {
 		# GREEN for skipped optional channels (hy2 not deployed, naive absent),
 		# so a non-zero poll means a CORE check failed.
 		if ! _healthcheck_poll; then
+			HEALTHCHECK_POLL_FAILED=1
 			HEALTHCHECK_CORE_FAILED=1
 		fi
 	else
