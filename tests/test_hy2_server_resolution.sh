@@ -162,50 +162,102 @@ if ! grep -qE 'if[[:space:]]+re_render_hysteria2' "$REPO_ROOT/install.sh"; then
 fi
 pass "F2: install.sh uses conditional on re_render_hysteria2 return"
 
-# Behavioral: exercise the install.sh hy2 block with a failing render stub.
-# _hy2_status must NOT be "active" and ch3 must NOT be in COMPOSE_PROFILES_EXTRA.
-_f2_result=$(
+# Behavioral: extract the REAL hy2 block from install.sh and execute it.
+# Replaces the replica that silently drifted from install.sh (a replica cannot
+# see a change to install.sh). Uses the same awk-extraction pattern as
+# test_awg_params_agent_install.sh (WS4 guard tests) and
+# test_install_honest_exit_gate.sh (sibling branch fix/install-tells-the-truth):
+# track `; then`/`fi` depth to capture exactly the block. The `elif` at the
+# tail must NOT increment depth (it is part of the same if/fi construct), so
+# we exclude it from the `; then` counter.
+_hy2_block="$_out_dir/install_hy2_block.sh"
+awk '
+    /&& declare -f re_render_hysteria2/ { cap=1 }
+    cap {
+        print
+        if ($0 ~ /; then[[:space:]]*$/ && $0 !~ /^[[:space:]]*elif/) depth++
+        if ($0 ~ /^[[:space:]]*fi[[:space:]]*$/) { depth--; if (depth==0) exit }
+    }
+' "$REPO_ROOT/install.sh" > "$_hy2_block"
+[ -s "$_hy2_block" ] || fail "F2: extraction produced empty file — pattern did not match install.sh"
+# Couple test to real code: the extracted block must contain the guard.
+grep -q 'if re_render_hysteria2' "$_hy2_block" \
+    || fail "F2: extracted block missing the re_render_hysteria2 guard"
+
+# --- F2 case A: render succeeds → _hy2_status=active, ch3 in profiles ---
+_f2a_result=$(
     set +e
-    bash <<'INNER'
+    _HY2_BLOCK="$_hy2_block" bash <<'INNER'
 set -euo pipefail
 COMPOSE_PROFILES_EXTRA=""
-HYSTERIA2_SERVER="h.example.com"
-HY2_AUTH_PASS="auth"
-HY2_OBFS_PASS="obfs"
+HYSTERIA2_SERVER="edge.example.net:51822"
+BACKEND_API="https://api.oxpulse.chat"
+stage="/tmp"
 
-# Stub: re_render_hysteria2 FAILS (returns 1) — simulates unresolvable server.
-re_render_hysteria2() { return 1; }
+# Stubs: curl returns valid creds JSON; read_service_token returns a fake token.
+curl() { printf '%s' '{"auth_pass":"auth-fixture","obfs_pass":"obfs-fixture"}'; }
+read_service_token() { printf '%s' "fake-token"; }
 log()  { :; }
 warn() { :; }
+
+# Stub: re_render_hysteria2 SUCCEEDS.
+re_render_hysteria2() { return 0; }
 
 _hy2_status="skipped"
 if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
     _hy2_status="failed_at_start"
 fi
-if [[ -n "${HYSTERIA2_SERVER:-}" ]] && declare -f re_render_hysteria2 >/dev/null 2>&1; then
-    if [[ -n "$HY2_AUTH_PASS" && -n "$HY2_OBFS_PASS" ]]; then
-        export HY2_AUTH_PASS HY2_OBFS_PASS
-        if re_render_hysteria2; then
-            COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
-            _hy2_status="active"
-        else
-            warn "hy2 render failed"
-        fi
-    fi
-fi
+source "$_HY2_BLOCK"
 printf '%s|%s' "$_hy2_status" "$COMPOSE_PROFILES_EXTRA"
 INNER
 )
-_f2_status="${_f2_result%%|*}"
-_f2_profiles="${_f2_result#*|}"
+_f2a_status="${_f2a_result%%|*}"
+_f2a_profiles="${_f2a_result#*|}"
 
-if [[ "$_f2_status" == "active" ]]; then
-    fail "F2 behavioral: _hy2_status=active despite render failure — guard missing"
+if [[ "$_f2a_status" != "active" ]]; then
+    fail "F2 case A: render succeeded but _hy2_status='$_f2a_status' (expected active)"
 fi
-if [[ "$_f2_profiles" == *ch3* ]]; then
-    fail "F2 behavioral: ch3 profile enabled despite render failure"
+if [[ "$_f2a_profiles" != *ch3* ]]; then
+    fail "F2 case A: render succeeded but ch3 not in COMPOSE_PROFILES_EXTRA='$_f2a_profiles'"
 fi
-pass "F2 behavioral: failed render → _hy2_status != active, ch3 not enabled"
+pass "F2 case A: render succeeds → _hy2_status=active, ch3 in profiles (real install.sh block)"
+
+# --- F2 case B: render fails → _hy2_status NOT active, ch3 absent ---
+_f2b_result=$(
+    set +e
+    _HY2_BLOCK="$_hy2_block" bash <<'INNER'
+set -euo pipefail
+COMPOSE_PROFILES_EXTRA=""
+HYSTERIA2_SERVER="edge.example.net:51822"
+BACKEND_API="https://api.oxpulse.chat"
+stage="/tmp"
+
+curl() { printf '%s' '{"auth_pass":"auth-fixture","obfs_pass":"obfs-fixture"}'; }
+read_service_token() { printf '%s' "fake-token"; }
+log()  { :; }
+warn() { :; }
+
+# Stub: re_render_hysteria2 FAILS (returns 1) — simulates unresolvable server.
+re_render_hysteria2() { return 1; }
+
+_hy2_status="skipped"
+if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
+    _hy2_status="failed_at_start"
+fi
+source "$_HY2_BLOCK"
+printf '%s|%s' "$_hy2_status" "$COMPOSE_PROFILES_EXTRA"
+INNER
+)
+_f2b_status="${_f2b_result%%|*}"
+_f2b_profiles="${_f2b_result#*|}"
+
+if [[ "$_f2b_status" == "active" ]]; then
+    fail "F2 case B: render failed but _hy2_status=active — guard missing in real install.sh block"
+fi
+if [[ "$_f2b_profiles" == *ch3* ]]; then
+    fail "F2 case B: render failed but ch3 in COMPOSE_PROFILES_EXTRA='$_f2b_profiles' — guard missing"
+fi
+pass "F2 case B: render fails → _hy2_status != active, ch3 absent (real install.sh block)"
 
 # ---------------------------------------------------------------------------
 # F5 — upgrade.sh guards the re_render_hysteria2 return value (call site)
@@ -219,6 +271,69 @@ if ! grep -qE 'if[[:space:]]+re_render_hysteria2' "$REPO_ROOT/upgrade.sh"; then
     fail "F5: upgrade.sh does not guard re_render_hysteria2 with if (bare call — refreshed logged unconditionally)"
 fi
 pass "F5: upgrade.sh uses conditional on re_render_hysteria2 return"
+
+# Behavioral: extract the REAL hy2 block from upgrade.sh and execute it.
+# Same awk-extraction pattern; the block has no elif so the standard depth
+# tracker works. The block spans a backslash-continuation on the if condition
+# (`; then` is on the second line), which the tracker handles correctly.
+_hy2_upgrade_block="$_out_dir/upgrade_hy2_block.sh"
+awk '
+    /if \[\[/ && /OXPULSE_HY2_AUTH_PASS/ { cap=1 }
+    cap {
+        print
+        if ($0 ~ /; then[[:space:]]*$/) depth++
+        if ($0 ~ /^[[:space:]]*fi[[:space:]]*$/) { depth--; if (depth==0) exit }
+    }
+' "$REPO_ROOT/upgrade.sh" > "$_hy2_upgrade_block"
+[ -s "$_hy2_upgrade_block" ] || fail "F5: extraction produced empty file — pattern did not match upgrade.sh"
+grep -q 'if re_render_hysteria2' "$_hy2_upgrade_block" \
+    || fail "F5: extracted block missing the re_render_hysteria2 guard"
+
+# --- F5 case A: render succeeds → "hy2 channel refreshed" logged ---
+_f5a_log=$(
+    set +e
+    _HY2_BLOCK="$_hy2_upgrade_block" bash <<'INNER'
+set -euo pipefail
+HY2_AUTH_PASS="auth-fixture"
+HY2_OBFS_PASS="obfs-fixture"
+
+log() { printf '%s\n' "$*"; }
+
+re_render_hysteria2() { return 0; }
+
+source "$_HY2_BLOCK"
+INNER
+)
+if [[ "$_f5a_log" != *"hy2 channel refreshed"* ]]; then
+    fail "F5 case A: render succeeded but 'hy2 channel refreshed' not logged — got: $_f5a_log"
+fi
+if [[ "$_f5a_log" == *"WARNING"* ]]; then
+    fail "F5 case A: render succeeded but WARNING logged — got: $_f5a_log"
+fi
+pass "F5 case A: render succeeds → 'hy2 channel refreshed' logged (real upgrade.sh block)"
+
+# --- F5 case B: render fails → WARNING logged, NOT "hy2 channel refreshed" ---
+_f5b_log=$(
+    set +e
+    _HY2_BLOCK="$_hy2_upgrade_block" bash <<'INNER'
+set -euo pipefail
+HY2_AUTH_PASS="auth-fixture"
+HY2_OBFS_PASS="obfs-fixture"
+
+log() { printf '%s\n' "$*"; }
+
+re_render_hysteria2() { return 1; }
+
+source "$_HY2_BLOCK"
+INNER
+)
+if [[ "$_f5b_log" != *"WARNING"* ]]; then
+    fail "F5 case B: render failed but WARNING not logged — got: $_f5b_log"
+fi
+if [[ "$_f5b_log" == *"hy2 channel refreshed"* ]]; then
+    fail "F5 case B: render failed but 'hy2 channel refreshed' logged — guard missing in real upgrade.sh block"
+fi
+pass "F5 case B: render fails → WARNING logged, success NOT logged (real upgrade.sh block)"
 
 echo
 echo "All hy2 server resolution tests passed."
