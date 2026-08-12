@@ -407,14 +407,18 @@ awk '
     cap { print; if ($0 ~ /^[[:space:]]*exit 0[[:space:]]*$/) exit }
 ' "$REPO_ROOT/upgrade.sh" > "$_tmpl_tail"
 [ -s "$_tmpl_tail" ] || fail_exit "F6: extraction produced empty file — pattern did not match upgrade.sh"
-# Anchored to the SAME pattern awk terminates on (:383).  An unanchored
-# `exit 0` also matches any of the seven other `exit 0` lines in upgrade.sh, so
-# when the terminator stops matching, awk runs to EOF and this guard passes over
-# a ~1900-line tail — with F6 case A satisfied by any breakage, both cases then
-# report OK at rc=0.  The guard's predicate must equal awk's, or it is blind to
-# the one failure it exists to catch.
-grep -qE '^[[:space:]]*exit 0[[:space:]]*$' "$_tmpl_tail" \
-    || fail_exit "F6: extracted tail does not reach the exit — extraction is wrong"
+# awk (:383) prints the terminator and exits immediately, so a CORRECT
+# extraction ENDS on that line.  Asking merely whether the tail *contains* an
+# `exit 0` cannot detect the failure this guard exists for, and anchoring the
+# pattern does not help: when the terminator stops matching, awk runs to EOF and
+# the tail then contains every other `exit 0` in upgrade.sh — several of which
+# are themselves anchored.  Measured: with the terminator broken, an anchored
+# `grep -q` over the whole tail still passed across 1886 captured lines while
+# F6 case A (an inverted assertion, satisfied by any breakage) and case B both
+# reported OK at rc=0.  The last LINE is the only predicate that separates
+# "terminated here" from "ran off the end".
+tail -n 1 "$_tmpl_tail" | grep -qE '^[[:space:]]*exit 0[[:space:]]*$' \
+    || fail_exit "F6: extracted tail does not END on the terminator — extraction ran past it"
 
 # --- F6 case A: render FAILS -> must exit non-zero ---
 _TMPL_TAIL="$_tmpl_tail" bash >/dev/null 2>&1 <<'INNER'
