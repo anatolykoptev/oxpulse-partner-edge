@@ -336,4 +336,59 @@ fi
 pass "F5 case B: render fails → WARNING logged, success NOT logged (real upgrade.sh block)"
 
 echo
+echo "--- F6: upgrade.sh --templates-only exit code reflects a hy2 render failure ---"
+
+# The `if re_render_hysteria2` guard added for F5 stops set -e from killing the
+# refresh — deliberate, since xray is already re-rendered by then. But before
+# that guard existed, a bare failing render exited non-zero, so the guard must
+# not silently convert a failed refresh into exit 0: a cron or monitor checking
+# only the status would read it as a clean run.
+#
+# Extract the whole --templates-only tail (credentials-if through `exit 0`),
+# not just the render block that F5 covers — the exit decision lives after
+# F5's closing `fi`.
+_tmpl_tail="$_out_dir/upgrade_templates_tail.sh"
+awk '
+    /if \[\[/ && /OXPULSE_HY2_AUTH_PASS/ { cap=1 }
+    cap { print; if ($0 ~ /^[[:space:]]*exit 0[[:space:]]*$/) exit }
+' "$REPO_ROOT/upgrade.sh" > "$_tmpl_tail"
+[ -s "$_tmpl_tail" ] || fail "F6: extraction produced empty file — pattern did not match upgrade.sh"
+grep -q 'exit 0' "$_tmpl_tail" \
+    || fail "F6: extracted tail does not reach the exit — extraction is wrong"
+
+# --- F6 case A: render FAILS -> must exit non-zero ---
+set +e
+_TMPL_TAIL="$_tmpl_tail" bash >/dev/null 2>&1 <<'INNER'
+set -euo pipefail
+HY2_AUTH_PASS="auth-fixture"
+HY2_OBFS_PASS="obfs-fixture"
+log() { printf '%s\n' "$*"; }
+re_render_hysteria2() { return 1; }
+source "$_TMPL_TAIL"
+INNER
+_f6a_rc=$?
+set -e
+if [[ $_f6a_rc -eq 0 ]]; then
+    fail "F6 case A: hy2 render failed but --templates-only exited 0 — the exit code lies (rc=$_f6a_rc)"
+fi
+pass "F6 case A: render fails → --templates-only exits non-zero (rc=$_f6a_rc)"
+
+# --- F6 case B: render SUCCEEDS -> must still exit 0 ---
+set +e
+_TMPL_TAIL="$_tmpl_tail" bash >/dev/null 2>&1 <<'INNER'
+set -euo pipefail
+HY2_AUTH_PASS="auth-fixture"
+HY2_OBFS_PASS="obfs-fixture"
+log() { printf '%s\n' "$*"; }
+re_render_hysteria2() { return 0; }
+source "$_TMPL_TAIL"
+INNER
+_f6b_rc=$?
+set -e
+if [[ $_f6b_rc -ne 0 ]]; then
+    fail "F6 case B: render succeeded but --templates-only exited $_f6b_rc — a healthy refresh must exit 0"
+fi
+pass "F6 case B: render succeeds → --templates-only exits 0"
+
+echo
 echo "All hy2 server resolution tests passed."

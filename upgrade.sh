@@ -1044,9 +1044,19 @@ if [[ "$MODE" == templates ]]; then
 			log "hy2 channel refreshed"
 		else
 			log "WARNING: hy2 channel refresh failed — render returned non-zero (check HYSTERIA2_SERVER endpoint)"
+			_templates_hy2_failed=1
 		fi
 	else
 		log "hy2 credentials not in env — skipping (set OXPULSE_HY2_AUTH_PASS + OXPULSE_HY2_OBFS_PASS)"
+	fi
+	# The `if` guard above stops set -e from killing the refresh, which is the
+	# point — xray is already re-rendered and must not be rolled back by a hy2
+	# failure.  But the exit code must still tell the truth: before the guard
+	# existed a bare failing render exited non-zero, and a cron or monitor that
+	# checks only the status would otherwise read this run as a clean refresh.
+	if [[ "${_templates_hy2_failed:-0}" -eq 1 ]]; then
+		log "done (hy2 refresh FAILED — exiting non-zero)"
+		exit 1
 	fi
 	log "done"
 	exit 0
