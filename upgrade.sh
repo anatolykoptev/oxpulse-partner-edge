@@ -903,6 +903,12 @@ check_signaling_sfu_secret
 CURRENT="${IMAGE_VERSION:-unknown}"
 MODE=apply
 TARGET=""
+# Was TARGET typed by the operator, or derived by resolve_default_target from
+# the baked OXPULSE_UPGRADE_TAG?  _assert_apply_not_downgrade needs to tell them
+# apart: a derived target carries no operator intent and may be older than the
+# running image, while an explicit tag IS the intent — and is the only way out
+# of an unversioned IMAGE_VERSION (the installer default is `stable`).
+TARGET_EXPLICIT=0
 DRY_RUN=0
 SKIPPED_CHECKS=""
 # ALLOW_UNVERIFIED gates the SHA256SUMS host-script guard (further down). Seed it from
@@ -930,7 +936,7 @@ for arg in "$@"; do
 			SKIPPED_CHECKS="${_sc//,/ }"
 			unset _sc ;;
 		--ghcr-token=*)   GHCR_TOKEN_ARG="${arg#--ghcr-token=}" ;;
-		v*|latest)        TARGET="$arg" ;;
+		v*|latest)        TARGET="$arg"; TARGET_EXPLICIT=1 ;;
 		-h|--help)
 			sed -n '2,29p' "$0"; exit 0 ;;
 		*) die "unknown arg: $arg" ;;
@@ -3271,10 +3277,34 @@ _assert_apply_not_downgrade() {
 	# the first upgrade carrying a real tag writes a parseable IMAGE_VERSION, and
 	# every later no-arg run compares normally.  Explicit `latest` is unaffected —
 	# it fails the semver test on the proposed side and never enters this arm.
-	if [[ "$_tgt" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] && [[ ! "$CURRENT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-		die "cannot verify this is not a downgrade: current version is '$CURRENT', which is not a comparable tag.
-  The state file has never recorded a real release tag, so a proposed $_tgt cannot be ordered against it.
-  Re-run with an explicit tag to record a comparable version, or --skip-check=3 to force."
+	# A DERIVED target (no CLI arg — resolve_default_target took the tag baked
+	# into this script) cannot be ordered against an unversioned CURRENT, and the
+	# baked tag may well be older than the image the edge is actually running.
+	# _conflict_check_3 records only WARNING there, so nothing refuses: measured,
+	# CURRENT=latest with a proposed v0.15.0 PROCEEDS.
+	#
+	# Gate on PROVENANCE, not merely on comparability.  An EXPLICIT tag must pass:
+	# the installer default is IMAGE_VERSION=stable (lib/install-args.sh:130), and
+	# both writers that make CURRENT comparable (:3742, :3995) run DOWNSTREAM of
+	# this guard — so refusing an explicit tag would kill the very run that
+	# records a version, leaving no exit from the unversioned state.  That is the
+	# bootstrap oxpulse-partner-edge-refresh.sh:363-366 already prescribes.
+	# ${TARGET_EXPLICIT:-0}: the function must not require its caller to define
+	# the flag.  tests/test_fleet_self_upgrade.sh extracts this function into a
+	# stub that does not set it, and under `set -u` a bare reference kills the
+	# function before any case runs — all three of its downgrade assertions went
+	# red.  Defaulting to 0 also fails SAFE: unknown provenance is treated as
+	# derived, which is the stricter branch.
+	if [[ ${TARGET_EXPLICIT:-0} -eq 0 ]] \
+		&& [[ "$_tgt" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] \
+		&& [[ ! "$CURRENT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+		die "refusing a derived upgrade against an unversioned current state.
+  IMAGE_VERSION in the state file is '$CURRENT', which cannot be ordered against $_tgt,
+  and $_tgt was taken from this script's baked release tag rather than typed by you —
+  it may be OLDER than the image this edge is running.
+  Bootstrap once with an explicit tag:  oxpulse-partner-edge-upgrade $_tgt
+  (that records a comparable version and every later no-arg run compares normally),
+  or --skip-check=3 to force this one."
 	fi
 
 	_conflict_check_3 "$_tgt"
