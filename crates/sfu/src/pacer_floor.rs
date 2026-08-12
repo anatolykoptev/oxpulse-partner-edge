@@ -120,8 +120,18 @@ pub fn reset_pacer_floor_for_tests() {
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
+    // Both tests mutate the same process-global `ENABLED_OVERRIDE`. Without
+    // `#[serial]` the thread-pool runs them concurrently in one process, so a
+    // neighbour's `reset` can land between this test's `set(true)` and its
+    // assert — the override falls back to env (unset → off) and the assert
+    // fails (same race as `bwe_temporal_cap::tests`). `#[serial]` runs them
+    // one at a time. Poison is already handled: every lock site uses
+    // `unwrap_or_else(|p| p.into_inner())`, so a panicking test cannot poison
+    // the override mutex into failing subsequent runs.
     #[test]
+    #[serial]
     fn override_wins_over_env() {
         set_pacer_floor_for_tests(true);
         assert!(pacer_floor_enabled(), "override(true) must win");
@@ -131,6 +141,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn reset_falls_back_to_env_when_no_override() {
         set_pacer_floor_for_tests(true);
         reset_pacer_floor_for_tests();
