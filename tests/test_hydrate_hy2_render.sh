@@ -276,6 +276,60 @@ INNER
 fi
 rm -f "$_f3_block"
 
+# ---------------------------------------------------------------------------
+# F4 — the lib-not-found fallback must mark the channel failed, not succeed.
+#
+# hydrate.sh sources lib/hydrate-hy2.sh and, if the file is missing from both
+# the local and installed paths, defines a fallback stub. A stub that returns 0
+# without appending to CHANNELS_FAILED tells the caller the render succeeded:
+# compose_strip_failed_channels then leaves the hysteria2 service in
+# docker-compose.yml with a bind mount pointing at a file that was never
+# written — which is the exact gap this whole change exists to close.
+#
+# Delivery manifests make a missing lib unlikely, but "unlikely" and "reports
+# success" are different properties, and this is the failure mode with no error.
+# Exercise the REAL sourcing block from hydrate.sh with both paths absent.
+# ---------------------------------------------------------------------------
+_f4_block=$(mktemp)
+awk '
+    /^_hy2_lib_local=/ { cap=1 }
+    cap { print; if ($0 ~ /^fi$/) exit }
+' "$REPO_ROOT/hydrate.sh" > "$_f4_block"
+
+if [[ ! -s "$_f4_block" ]]; then
+    fail "F4: extraction produced an empty block — the awk pattern no longer matches hydrate.sh"
+else
+    grep -q 'hydrate_render_hy2' "$_f4_block" \
+        || fail "F4: extracted block does not define the fallback — extraction is wrong"
+
+    _f4_out=$(
+        set +e
+        _F4_BLOCK="$_f4_block" bash 2>&1 <<'INNER'
+set -uo pipefail
+CHANNELS_FAILED=()
+warn() { echo "WARN $*"; }
+log()  { :; }
+# Point both candidate lib paths at somewhere that cannot contain the lib, so
+# the fallback branch is the one that runs.
+SCRIPT_DIR="/nonexistent-$$"
+PREFIX_SBIN="/nonexistent-$$/sbin"
+source "$_F4_BLOCK"
+hydrate_render_hy2
+rc=$?
+echo "rc=$rc failed=${#CHANNELS_FAILED[@]} list=${CHANNELS_FAILED[*]:-none}"
+INNER
+    ) || true
+
+    if [[ "$_f4_out" != *"rc=1"* ]]; then
+        fail "F4: the lib-not-found stub reported SUCCESS — the caller will not strip the service, leaving a bind mount to a file that was never written. Got: $_f4_out"
+    elif [[ "$_f4_out" != *"hysteria2-client"* ]]; then
+        fail "F4: stub returned non-zero but did not record the channel — compose strip would be a no-op. Got: $_f4_out"
+    else
+        pass "F4: the lib-not-found fallback marks hy2 failed so the compose strip still runs"
+    fi
+fi
+rm -f "$_f4_block"
+
 if [[ $FAIL -ne 0 ]]; then
     echo "FAIL: hydrate hy2 render behavioural test — one or more checks failed"
     exit 1

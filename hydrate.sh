@@ -549,8 +549,17 @@ elif [[ -f "$_hy2_lib_installed" ]]; then
     # shellcheck source=/dev/null
     source "$_hy2_lib_installed"
 else
-    warn "lib/hydrate-hy2.sh not found — hy2 channel render will be skipped"
-    hydrate_render_hy2() { return 0; }
+    warn "lib/hydrate-hy2.sh not found — hy2 channel will be marked failed and stripped"
+    # The stub must honour the same contract as the real function: a channel we
+    # cannot render is a FAILED channel, not a skipped one.  Returning 0 here
+    # without recording the failure would leave compose_strip_failed_channels
+    # with nothing to strip, so the hysteria2 service would survive in
+    # docker-compose.yml bind-mounting a file that was never written — the exact
+    # gap lib/hydrate-hy2.sh exists to close.
+    hydrate_render_hy2() {
+        CHANNELS_FAILED+=("hysteria2-client")
+        return 1
+    }
 fi
 unset _hy2_lib_local _hy2_lib_installed
 
