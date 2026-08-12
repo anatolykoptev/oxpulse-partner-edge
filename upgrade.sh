@@ -14,7 +14,7 @@
 # ch4 health-report change; old upgrade.sh deployed only the image.
 #
 # Usage:
-#   oxpulse-partner-edge-upgrade                       # pull :latest + sync host-scripts
+#   oxpulse-partner-edge-upgrade                       # reconcile to THIS script's baked tag
 #   oxpulse-partner-edge-upgrade v0.2.0                # pin to specific tag
 #   oxpulse-partner-edge-upgrade --check               # report pending upgrade, don't apply
 #   oxpulse-partner-edge-upgrade --rollback            # restore previous tag + host-scripts
@@ -971,7 +971,7 @@ V01_TO_V02=0
 # Resolution order:
 #   1. $TARGET already set (explicit CLI arg) — wins, unchanged.
 #   2. $OXPULSE_UPGRADE_TAG when it is a real vX.Y.Z tag and not the
-#      unsubstituted @RELEASE_TAG@ sentinel — the value baked into every
+#      unsubstituted @RELEASE_TAG_PLACEHOLDER@ sentinel — the value baked into every
 #      released installer.  On every probed edge (ruoxp, rvpn, zvonilka) there
 #      is no VERSION file, so the previous fall-through to 'latest' made
 #      CURRENT and TARGET compare equal and the run exited "already on latest
@@ -981,7 +981,9 @@ V01_TO_V02=0
 #
 # The regex check in branch 2 is the same idiom used at the REPO_RAW resolution
 # (upgrade.sh:186) and the SHA256SUMS gate (upgrade.sh:465): a real tag matches
-# ^v[0-9]+\. , the unsubstituted @RELEASE_TAG@ sentinel does not.
+# ^v[0-9]+\. , the unsubstituted @RELEASE_TAG_PLACEHOLDER@ sentinel does not.
+# (Spelled the long way on purpose: release.yml seds the bare form globally at
+# publish, so a comment using it is rewritten in the shipped artifact.)
 resolve_default_target() {
 	if [[ -n "$TARGET" ]]; then return 0; fi
 	if [[ "${OXPULSE_UPGRADE_TAG}" =~ ^v[0-9]+\. ]]; then
@@ -1032,8 +1034,8 @@ normalize_target() {
 			# Bare X.Y.Z (e.g. from a VERSION file in a source checkout) — real
 			# release tags are vX.Y.Z, so add the prefix or the release URL 404s
 			# (issue #612 branch 2).
-			TARGET="v$TARGET"
 			warn "bare version $TARGET normalized to v-prefixed tag form"
+			TARGET="v$TARGET"
 			;;
 	esac
 	# One-form world: RELEASE_TAG = TARGET (git tag = image tag = release tag).
@@ -3254,6 +3256,27 @@ _assert_apply_not_downgrade() {
 	# branch and skip the gate. v-normalize it here.
 	local _tgt="$RELEASE_TAG"
 	[[ "$_tgt" =~ ^[0-9] ]] && _tgt="v$_tgt"
+
+	# An UNPARSEABLE current version cannot be compared, so _conflict_check_3
+	# records WARNING and nothing refuses — the guard is reached but structurally
+	# cannot fire.  That is the state of every edge whose IMAGE_VERSION is still
+	# 'latest' or 'unknown', which is exactly the population the no-arg path now
+	# reaches: before #612 those runs stopped at the `CURRENT == TARGET` gate and
+	# never got here, so the inert guard was unreachable.  Measured: CURRENT=latest
+	# with a proposed v0.15.0 PROCEEDS, while CURRENT=v0.16.24 with the same
+	# proposal is refused.
+	#
+	# Refuse rather than warn.  A run that cannot PROVE it is not a downgrade must
+	# not rewrite compose and recreate containers on its own say-so.  Self-healing:
+	# the first upgrade carrying a real tag writes a parseable IMAGE_VERSION, and
+	# every later no-arg run compares normally.  Explicit `latest` is unaffected —
+	# it fails the semver test on the proposed side and never enters this arm.
+	if [[ "$_tgt" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] && [[ ! "$CURRENT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+		die "cannot verify this is not a downgrade: current version is '$CURRENT', which is not a comparable tag.
+  The state file has never recorded a real release tag, so a proposed $_tgt cannot be ordered against it.
+  Re-run with an explicit tag to record a comparable version, or --skip-check=3 to force."
+	fi
+
 	_conflict_check_3 "$_tgt"
 	if [[ "${CHECK_STATUS[3]:-}" == "CATASTROPHIC" ]]; then
 		die "downgrade refused (check 3):

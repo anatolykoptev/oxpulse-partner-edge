@@ -117,6 +117,46 @@ fi
 pass "F1: no-arg + no VERSION → TARGET=$_f1_target (baked tag), CURRENT=latest → delivery happens"
 
 # ---------------------------------------------------------------------------
+# F1b — the UNSUBSTITUTED sentinel must not be accepted as a tag.
+# ---------------------------------------------------------------------------
+# This is the entire justification for testing OXPULSE_UPGRADE_TAG with
+# `=~ ^v[0-9]+\.` rather than a string compare, and without this case the
+# property is unasserted: broadening the regex to `=~ .` leaves every other
+# test in this file and in test_upgrade_tag_form.sh green.
+#
+# Mutation target: in upgrade.sh, broaden resolve_default_target's
+# OXPULSE_UPGRADE_TAG test to `=~ .` → this test goes RED because the raw
+# sentinel is adopted as TARGET and the release URL would 404.
+# ---------------------------------------------------------------------------
+echo "--- F1b: the unsubstituted sentinel is rejected, not adopted ---"
+
+_f1b_target=$(
+    _PREAMBLE="$PREAMBLE" bash <<'INNER'
+set -uo pipefail
+# A source checkout, or an artifact release.yml never sed'd: the placeholder is
+# still literal. Note the value is assembled at runtime so this test file cannot
+# itself be rewritten by release.yml's global sed.
+CURRENT=latest
+TARGET=""
+OXPULSE_UPGRADE_TAG="@RELEASE_$(printf 'TAG')@"
+source "$_PREAMBLE"
+resolve_default_target
+printf '%s' "$TARGET"
+INNER
+)
+
+case "$_f1b_target" in
+    *RELEASE_TAG*)
+        fail "F1b: the unsubstituted sentinel was adopted as TARGET ('$_f1b_target') — a real tag test is missing" ;;
+    latest)
+        pass "F1b: unsubstituted sentinel rejected → fell through to 'latest' as designed" ;;
+    *)
+        # A VERSION file next to the extracted preamble would also be legitimate;
+        # anything except the sentinel means the guard held.
+        pass "F1b: unsubstituted sentinel rejected → TARGET=$_f1b_target" ;;
+esac
+
+# ---------------------------------------------------------------------------
 # F2 — a bare X.Y.Z target acquires the v prefix.
 # ---------------------------------------------------------------------------
 # Mutation target: in upgrade.sh, remove the bare-version case from
