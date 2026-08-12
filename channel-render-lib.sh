@@ -420,11 +420,20 @@ re_render_hysteria2() {
     local backup
     backup="${out}.bak.$(date +%s)"
     # Resolution chain: HY2_SERVER (direct override) → HYSTERIA2_SERVER (what
-    # the backend returns and install.sh/upgrade.sh/hydrate.sh carry) →
-    # OXPULSE_HY2_SERVER (fleet default from config/defaults.conf). No fabricated
-    # fallback — a missing endpoint is a configuration error, not a silent
-    # TEST-NET address that routes nowhere.
+    # the backend returns and install.sh/hydrate.sh carry) → OXPULSE_HY2_SERVER
+    # (fleet default from config/defaults.conf) → hysteria2_server out of
+    # node-config.json. No fabricated fallback — a missing endpoint is a
+    # configuration error, not a silent TEST-NET address that routes nowhere.
+    #
+    # The node-config step is what makes upgrade.sh --templates-only work:
+    # HYSTERIA2_SERVER appears nowhere in that script, and refetch_node_config
+    # writes node-config.json to disk without exporting any of its fields, so
+    # without this the refresh path can only fail. Resolving it here rather than
+    # at each call site keeps one place that knows where the endpoint lives.
     local server="${HY2_SERVER:-${HYSTERIA2_SERVER:-${OXPULSE_HY2_SERVER:-}}}"
+    if [[ -z "$server" && -r "${NODE_CFG:-}" ]]; then
+        server=$(jq -r '.hysteria2_server // empty' "$NODE_CFG" 2>/dev/null || true)
+    fi
     local listen="${HY2_LOCAL_LISTEN:-${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}}"
     local backend="${HY2_REMOTE_BACKEND:-${OXPULSE_HY2_REMOTE_BACKEND:-127.0.0.1:8907}}"
 
@@ -437,7 +446,7 @@ re_render_hysteria2() {
         return 1
     fi
     if [[ -z "$server" ]]; then
-        echo "ERR re_render_hysteria2: no hy2 server resolved — set HY2_SERVER, HYSTERIA2_SERVER, or OXPULSE_HY2_SERVER" >&2
+        echo "ERR re_render_hysteria2: no hy2 server resolved — set HY2_SERVER, HYSTERIA2_SERVER or OXPULSE_HY2_SERVER, or provide hysteria2_server in $NODE_CFG" >&2
         return 1
     fi
 

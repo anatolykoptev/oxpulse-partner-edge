@@ -391,4 +391,49 @@ fi
 pass "F6 case B: render succeeds → --templates-only exits 0"
 
 echo
+echo "--- F7: endpoint resolves from node-config.json when no env var carries it ---"
+
+# upgrade.sh --templates-only never sets HY2_SERVER or HYSTERIA2_SERVER: the
+# name appears nowhere in that script except a warning message, and
+# refetch_node_config writes node-config.json to disk without exporting any of
+# its fields. install.sh only has the value because it reads
+# `json_get hysteria2_server` from the fetched config.
+#
+# With the fabricated TEST-NET default removed, that leaves the upgrade refresh
+# path unable to resolve an endpoint at all — honest, but non-functional. The
+# renderer must therefore fall back to the node-config the fleet already keeps
+# on disk, so every caller resolves the endpoint the same way.
+_f7_dir=$(mktemp -d)
+cat > "$_f7_dir/node-config.json" <<'JSON'
+{"node_id":"probe-node","hysteria2_server":"from-node-config.example:51822"}
+JSON
+cp "$REPO_ROOT/hysteria2-client.yaml.tpl" "$_f7_dir/" 2>/dev/null \
+    || fail "F7: template not found at $REPO_ROOT/hysteria2-client.yaml.tpl"
+
+_f7_out=$(
+    set +e
+    _F7_DIR="$_f7_dir" _F7_LIB="$REPO_ROOT/channel-render-lib.sh" bash <<'INNER' 2>&1
+set -uo pipefail
+log()  { :; }
+warn() { :; }
+# Every env source of the endpoint is absent — only node-config.json has it.
+unset HY2_SERVER HYSTERIA2_SERVER OXPULSE_HY2_SERVER
+export NODE_CFG="$_F7_DIR/node-config.json"
+export OXPULSE_REPO_DIR="$_F7_DIR"
+export HY2_OUTPUT_PATH="$_F7_DIR/hysteria2-client.yaml"
+export HY2_AUTH_PASS="auth-fixture" HY2_OBFS_PASS="obfs-fixture"
+source "$_F7_LIB" 2>/dev/null
+re_render_hysteria2 || echo "RENDER_FAILED"
+grep -E '^server' "$HY2_OUTPUT_PATH" 2>/dev/null || echo "NO_SERVER_LINE"
+INNER
+)
+
+if [[ "$_f7_out" == *"from-node-config.example:51822"* ]]; then
+    pass "F7: endpoint resolved from node-config.json when no env var carries it"
+else
+    fail "F7: endpoint did NOT resolve from node-config.json — upgrade --templates-only cannot refresh hy2. Got: $_f7_out"
+fi
+rm -rf "$_f7_dir"
+
+echo
 echo "All hy2 server resolution tests passed."
