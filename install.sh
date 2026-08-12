@@ -1830,8 +1830,9 @@ fi
 # really work — exit non-zero so automation and operators cannot mistake a
 # degraded node for a successful one.  --allow-degraded (or
 # OXPULSE_ALLOW_DEGRADED=1) restores exit 0 for non-interactive callers that
-# intentionally proceed on a degraded-but-running node (upgrade.sh, fleet
-# rollout).  Optional channels (naive/CH5 absent, hy2 skipped) never reach
+# may intentionally proceed on a degraded-but-running node; no caller passes
+# it today (upgrade.sh has its own converge engine and does not invoke
+# install.sh).  Optional channels (naive/CH5 absent, hy2 skipped) never reach
 # this path — healthcheck.sh returns GREEN for skipped optional channels, so
 # HEALTHCHECK_CORE_FAILED stays 0.
 if [[ "${HEALTHCHECK_CORE_FAILED:-0}" -eq 1 && "${ALLOW_DEGRADED:-0}" -eq 0 ]]; then

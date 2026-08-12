@@ -87,10 +87,11 @@ assembles a minimal BrandingConfig payload from whichever flags are set):
                              Use when installing from a private fork or airgapped environment without a release tarball.
                              Implies you accept the risk that fetched libs cannot be verified.
   --allow-degraded           Exit 0 even when a core healthcheck failed (degraded-but-running node).
-                             Exists for non-interactive callers (upgrade.sh, fleet rollout) that
-                             intentionally proceed on a degraded node; a human running install.sh
-                             by hand should NOT set this — a non-zero exit is the signal that the
-                             install did not really work. (env: OXPULSE_ALLOW_DEGRADED=1)
+                             Provided for non-interactive callers that may intentionally proceed
+                             on a degraded node; no caller passes it today (upgrade.sh has its own
+                             converge engine and does not invoke install.sh). A human running
+                             install.sh by hand should NOT set this — a non-zero exit is the signal
+                             that the install did not really work. (env: OXPULSE_ALLOW_DEGRADED=1)
   --check                    Re-render templates to /tmp, diff vs installed files. Exit 0=clean, 1=Caddyfile drift, 2=compose drift.
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
@@ -221,9 +222,10 @@ args_parse() {
 	# Default 0 = fail-closed. Set to 1 via --no-integrity.
 	NO_INTEGRITY=0
 	# F2 honest-exit: when 1, the installer exits 0 even if a core healthcheck
-	# failed (degraded-but-running node).  Exists so non-interactive callers
-	# (upgrade.sh, fleet rollout) that intentionally proceed on a degraded
-	# node are not broken by the new non-zero exit on core failure.  Set via
+	# failed (degraded-but-running node).  Provided so non-interactive callers
+	# that may intentionally proceed on a degraded node are not broken by the
+	# non-zero exit on core failure; no caller passes it today (upgrade.sh has
+	# its own converge engine and does not invoke install.sh).  Set via
 	# --allow-degraded or OXPULSE_ALLOW_DEGRADED=1.
 	ALLOW_DEGRADED="${OXPULSE_ALLOW_DEGRADED:-0}"
 
