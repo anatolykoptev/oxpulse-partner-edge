@@ -424,7 +424,13 @@ awk '
 _tmpl_tail_lines=$(wc -l < "$_tmpl_tail")
 [[ $_tmpl_tail_lines -le 100 ]] \
     || fail_exit "F6: extracted tail is $_tmpl_tail_lines lines (expected ~25) — the terminator did not match and awk ran on to a later 'exit 0'"
-tail -n 1 "$_tmpl_tail" | grep -qE '^[[:space:]]*exit 0[[:space:]]*$' \
+# Capture into a variable rather than `tail … | grep -q`: under `pipefail` a
+# matching `grep -q` exits immediately, SIGPIPEs the upstream `tail`, and the
+# pipeline's status goes non-zero on SUCCESS.  tests/test_pipefail_early_exit_guard.sh
+# enforces this repo-wide; it caught exactly this mistake here.
+_tmpl_tail_last=$(tail -n 1 "$_tmpl_tail")
+_tmpl_term_re='^[[:space:]]*exit 0[[:space:]]*$'
+[[ "$_tmpl_tail_last" =~ $_tmpl_term_re ]] \
     || fail_exit "F6: extracted tail does not END on the terminator — extraction ran past it"
 
 # --- F6 case A: render FAILS -> must exit non-zero ---
