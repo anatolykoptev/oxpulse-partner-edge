@@ -183,14 +183,44 @@ RELAY_JWT_SECRET=$(jq_get relay_jwt_secret)
 # env var and SFU_EDGES relay_api_url for cascade relay to work.
 [[ -z "$RELAY_JWT_SECRET" ]] && RELAY_JWT_SECRET=$(openssl rand -hex 32)
 # CH3/CH5 fallback channel vars — optional; empty if backend does not provision them.
+# NOTE: hysteria2_auth / hysteria2_obfs are NOT returned by the backend's
+# RegistrationOk (crates/server/src/partner_registry/types.rs has no such
+# fields). The hy2 channel credentials (auth_pass / obfs_pass) are fleet-shared
+# and come from GET /api/partner/hy2-credentials — fetched by
+# hydrate_render_hy2 (lib/hydrate-hy2.sh) the same way install.sh does.
+# HYSTERIA2_SERVER (the endpoint) IS returned and gates the hy2 render block.
 HYSTERIA2_SERVER=$(jq_get hysteria2_server)
 HYSTERIA2_PORT=$(jq_get hysteria2_port)
-HYSTERIA2_AUTH=$(jq_get hysteria2_auth)
-HYSTERIA2_OBFS=$(jq_get hysteria2_obfs)
 NAIVE_SERVER=$(jq_get naive_server)
 NAIVE_PORT=$(jq_get naive_port)
 NAIVE_USER=$(jq_get naive_user)
 NAIVE_PASS=$(jq_get naive_pass)
+
+# Service token — returned only on first registration (fresh hash). Persist
+# atomically to $PREFIX_ETC/token so hydrate_render_hy2 can call
+# GET /api/partner/hy2-credentials with it, and later scripts (refresh.sh,
+# upgrade.sh) can re-fetch node-config. Mirrors install.sh:966-980.
+# On reseed (idempotent re-register) the field is omitted — preserve the
+# existing token file (COALESCE-PRESERVE, same invariant as cross-probe-token).
+SERVICE_TOKEN=$(jq_get service_token)
+SVC_TOKEN_FILE="$PREFIX_ETC/token"
+if [[ -n "$SERVICE_TOKEN" ]]; then
+    if [[ ! -e "$SVC_TOKEN_FILE" ]]; then
+        _tok_tmp=$(mktemp "$SVC_TOKEN_FILE.XXXXXX")
+        printf '%s' "$SERVICE_TOKEN" > "$_tok_tmp"
+        chmod 0600 "$_tok_tmp"
+        mv -f "$_tok_tmp" "$SVC_TOKEN_FILE"
+        unset _tok_tmp
+        log "  service token persisted → $SVC_TOKEN_FILE (raw value redacted)"
+    else
+        warn "  service token returned by server but local file already exists; preserved local copy"
+    fi
+else
+    if [[ ! -e "$SVC_TOKEN_FILE" && -z "${OXPULSE_SERVICE_TOKEN:-}" ]]; then
+        warn "  no service_token in registration response and no local token file — hy2-credentials fetch will fail; set OXPULSE_SERVICE_TOKEN in hydrate.env as a fallback"
+    fi
+fi
+unset SERVICE_TOKEN
 
 [[ -n "$NODE_ID" ]]             || die "node_id missing from registration response"
 [[ -n "$BACKEND_ENDPOINT" ]]    || die "backend_endpoint missing from registration response"
@@ -495,6 +525,44 @@ else
 fi
 unset _rl_local _rl_sbin
 
+# Source oxpulse-token-lib.sh for read_service_token (used by hydrate_render_hy2
+# to call GET /api/partner/hy2-credentials with the persisted service token).
+_tok_lib_local="${SCRIPT_DIR}/oxpulse-token-lib.sh"
+_tok_lib_installed="${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-token-lib.sh"
+if [[ -f "$_tok_lib_local" ]]; then
+    # shellcheck source=oxpulse-token-lib.sh
+    source "$_tok_lib_local"
+elif [[ -f "$_tok_lib_installed" ]]; then
+    # shellcheck source=/dev/null
+    source "$_tok_lib_installed"
+fi
+unset _tok_lib_local _tok_lib_installed
+
+# Source lib/hydrate-hy2.sh (hydrate_render_hy2 — the hy2 channel render path
+# extracted from the inline block for behavioural testability).
+_hy2_lib_local="${SCRIPT_DIR}/lib/hydrate-hy2.sh"
+_hy2_lib_installed="${PREFIX_SBIN:-/usr/local/sbin}/hydrate-hy2.sh"
+if [[ -f "$_hy2_lib_local" ]]; then
+    # shellcheck source=lib/hydrate-hy2.sh
+    source "$_hy2_lib_local"
+elif [[ -f "$_hy2_lib_installed" ]]; then
+    # shellcheck source=/dev/null
+    source "$_hy2_lib_installed"
+else
+    warn "lib/hydrate-hy2.sh not found — hy2 channel will be marked failed and stripped"
+    # The stub must honour the same contract as the real function: a channel we
+    # cannot render is a FAILED channel, not a skipped one.  Returning 0 here
+    # without recording the failure would leave compose_strip_failed_channels
+    # with nothing to strip, so the hysteria2 service would survive in
+    # docker-compose.yml bind-mounting a file that was never written — the exact
+    # gap lib/hydrate-hy2.sh exists to close.
+    hydrate_render_hy2() {
+        CHANNELS_FAILED+=("hysteria2-client")
+        return 1
+    }
+fi
+unset _hy2_lib_local _hy2_lib_installed
+
 # ---------- Step 4: render templates ----------
 log "[4/7] rendering config templates"
 
@@ -525,7 +593,7 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE ALLOWED_PEER_IP_LINE \
        IMAGE_VERSION \
        RELAY_JWT_SECRET \
-       HYSTERIA2_SERVER HYSTERIA2_PORT HYSTERIA2_AUTH HYSTERIA2_OBFS \
+       HYSTERIA2_SERVER HYSTERIA2_PORT \
        NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT \
        SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID OTEL_EXPORTER_OTLP_ENDPOINT \
        SFU_SIGNING_PUBLIC_KEY SIGNALING_SFU_SECRET \
@@ -541,8 +609,29 @@ render_template "$(tpl_file coturn.conf.tpl)"        "$PREFIX_ETC/coturn.conf"
 render_channel_soft xray "$(tpl_file xray-client.json.tpl)" "$PREFIX_ETC/xray-client.json" \
     || warn "  xray render failed — continuing without xray channel"
 if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
-    render_template "$(tpl_file hysteria2-client.yaml.tpl)" "$PREFIX_ETC/hysteria2-client.yaml"
-    log "  hysteria2-client.yaml rendered"
+    # hydrate_render_hy2 (lib/hydrate-hy2.sh) fetches fleet-shared hy2 credentials
+    # from GET /api/partner/hy2-credentials — the same authenticated endpoint
+    # install.sh uses — then calls re_render_hysteria2 (the dedicated hy2 renderer
+    # shared with install.sh and enable-hy2). On failure it appends the compose
+    # service name to CHANNELS_FAILED so compose_strip_failed_channels removes
+    # the service block (closing the compose-strip gap where a failed render
+    # left a bind mount pointing at a non-existent file).
+    #
+    # The register response does NOT carry hy2 credentials (hysteria2_auth /
+    # hysteria2_obfs are never returned by the backend); only HYSTERIA2_SERVER
+    # (the endpoint) gates this block. The prior inline block called
+    # re_render_hysteria2 without setting HY2_AUTH_PASS / HY2_OBFS_PASS, so the
+    # render always failed and no file was written — operationally worse than
+    # the old render_template path it replaced.
+    #
+    # `|| true` is load-bearing, not sloppiness: hydrate.sh runs under
+    # `set -euo pipefail` (line 16) and hydrate_render_hy2 returns 1 on render
+    # failure BY CONTRACT, so a bare call makes the failure fatal — killing the
+    # script before compose_strip_failed_channels below, before the degraded-mode
+    # warning, and before steps 5-7.  The function already emits its own warn, so
+    # this does not swallow the diagnostic; the sibling channel renders above are
+    # guarded the same way with `|| warn`.
+    hydrate_render_hy2 || true
 fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
     render_channel_soft naive "$(tpl_file naive-client.json.tpl)" "$PREFIX_ETC/naive-client.json" \

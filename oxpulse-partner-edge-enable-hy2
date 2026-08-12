@@ -183,8 +183,12 @@ if [[ $_needs_render -eq 1 ]]; then
     else
         log "rendering hysteria2-client.yaml"
         re_render_hysteria2
-        # Match install.sh Phase 1.7 perms (L1252): mode 0640 post-render.
-        chmod 0640 "$_hy2_yaml"
+        # Mode 0600 — matches install.sh and hydrate.sh so every writer agrees
+        # on the stricter mode and a re-render never loosens perms on this
+        # secret-bearing file. re_render_hysteria2 already writes 0600 (umask
+        # 077); this chmod is explicit belt-and-braces. The hysteria2 container
+        # runs as root and mounts the file :ro, so 0600 root:root suffices.
+        chmod 0600 "$_hy2_yaml"
         log "hysteria2-client.yaml written ($HY2_SERVER → $HY2_LOCAL_LISTEN → $HY2_REMOTE_BACKEND)"
     fi
 fi

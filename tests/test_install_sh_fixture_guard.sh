@@ -19,7 +19,7 @@
 #   Case 5: new RFC patterns present in install.sh (RFC5737, loopback, link-local)
 #   Case 6: case-insensitive guard -- uppercase Example.COM matches via lowercase
 #   Case 7: MAJOR #3 authority comment present (Rust is authoritative)
-#   Case 8: hysteria2-client.yaml gets chmod 0640 when hy2 active
+#   Case 8: hysteria2-client.yaml gets chmod 0600 when hy2 active
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -118,12 +118,12 @@ else
     fail "Rust authoritative comment not found in install.sh"
 fi
 
-# ── Case 8: MAJOR #1 -- hysteria2-client.yaml gets 0640 perms ────────────────
-echo "==> Case 8: MAJOR #1 -- chmod 0640 present for hysteria2-client.yaml"
-if grep -qE 'chmod 0640.*hysteria2-client\.yaml' "$INSTALL"; then
-    pass "chmod 0640 for hysteria2-client.yaml found in install.sh"
+# ── Case 8: MAJOR #1 -- hysteria2-client.yaml gets 0600 perms ────────────────
+echo "==> Case 8: MAJOR #1 -- chmod 0600 present for hysteria2-client.yaml"
+if grep -qE 'chmod 0600.*hysteria2-client\.yaml' "$INSTALL"; then
+    pass "chmod 0600 for hysteria2-client.yaml found in install.sh"
 else
-    fail "chmod 0640 for hysteria2-client.yaml NOT found in install.sh"
+    fail "chmod 0600 for hysteria2-client.yaml NOT found in install.sh"
 fi
 
 # ── Result ────────────────────────────────────────────────────────────────────

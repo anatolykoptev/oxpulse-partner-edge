@@ -1097,6 +1097,15 @@ fi
 # fire up-to-date script bodies (not stale pre-upgrade copies).
 _HOST_SCRIPT_SBIN_FILES=(
 	oxpulse-partner-edge-upgrade
+	# Hy2 channel render lib — sourced as a SAME-DIR sibling by
+	# oxpulse-partner-edge-hydrate (first-boot hy2 render). MUST precede its
+	# consumer (the hydrate script) in this array: sync_host_scripts installs
+	# each file independently, so a partial sync that lands a NEW hydrate
+	# (which sources this lib) without the lib would leave first-boot hy2
+	# render silently skipped (hydrate.sh stubs hydrate_render_hy2 to a no-op
+	# when the lib is missing). Same fetch+sha256-verify path as
+	# channel-render-lib.sh below.
+	hydrate-hy2.sh
 	oxpulse-partner-edge-hydrate
 	oxpulse-partner-edge-refresh
 	# SNI selection helper — sourced as a SAME-DIR sibling by
@@ -1217,6 +1226,7 @@ _host_script_remote_name() {
 		metric-sink-lib.sh)              echo "lib/metric-sink-lib.sh" ;;
 		surgical-restart-lib.sh)         echo "lib/surgical-restart-lib.sh" ;;
 		xprb-refresh-lib.sh)             echo "lib/xprb-refresh-lib.sh" ;;
+		hydrate-hy2.sh)                  echo "lib/hydrate-hy2.sh" ;;
 		oxpulse-partner-edge-split-routing)    echo "oxpulse-partner-edge-split-routing.sh" ;;
 		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
 		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;

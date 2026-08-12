@@ -174,3 +174,69 @@ _run_args_parse() {
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"ALLOW_DEGRADED=0"* ]]
 }
+
+@test "args_parse --help exits 0 (F1: was exit 2)" {
+	# --help is the one command a stranger runs first; a non-zero exit breaks
+	# wrappers/Makefiles/CI. _args_usage used to end with `exit 2`.
+	# $0 is passed as the bash -c arg0 so _args_usage's `sed -n '2,18p' "$0"`
+	# resolves to a real file (install.sh) — matching real invocation where
+	# $0 is the installer path. Without this, sed fails under set -e before
+	# the exit is reached, masking the real exit code under test.
+	run bash -c "
+		set -euo pipefail
+		die()  { echo \"die: \$*\" >&2; exit 1; }
+		warn() { true; }
+		log()  { true; }
+		PREFIX_ETC=/etc/oxpulse-partner-edge
+		PREFIX_LIB=/var/lib/oxpulse-partner-edge
+		BACKEND_API=https://api.oxpulse.chat
+		OXPULSE_PARTNER_TOKEN='' OXPULSE_IMAGE_VERSION='' TURNS_SUBDOMAIN='' \
+		SFU_UDP_PORT='' SFU_METRICS_PORT='' SFU_EDGE_ID='' REGION='' \
+		HEALTHCHECK_TIMEOUT='' BRANDING_CONFIG='' OXPULSE_GHCR_TOKEN=''
+		OXPULSE_NONINTERACTIVE=1
+		source '${REPO_ROOT}/lib/install-args.sh'
+		args_parse --help
+	" "${REPO_ROOT}/install.sh"
+	[ "$status" -eq 0 ]
+}
+
+@test "args_parse -h exits 0 (F1: short form)" {
+	run bash -c "
+		set -euo pipefail
+		die()  { echo \"die: \$*\" >&2; exit 1; }
+		warn() { true; }
+		log()  { true; }
+		PREFIX_ETC=/etc/oxpulse-partner-edge
+		PREFIX_LIB=/var/lib/oxpulse-partner-edge
+		BACKEND_API=https://api.oxpulse.chat
+		OXPULSE_PARTNER_TOKEN='' OXPULSE_IMAGE_VERSION='' TURNS_SUBDOMAIN='' \
+		SFU_UDP_PORT='' SFU_METRICS_PORT='' SFU_EDGE_ID='' REGION='' \
+		HEALTHCHECK_TIMEOUT='' BRANDING_CONFIG='' OXPULSE_GHCR_TOKEN=''
+		OXPULSE_NONINTERACTIVE=1
+		source '${REPO_ROOT}/lib/install-args.sh'
+		args_parse -h
+	" "${REPO_ROOT}/install.sh"
+	[ "$status" -eq 0 ]
+}
+
+@test "args_parse with no required args exits 1 with --domain message (F1 gate)" {
+	# A genuinely missing required argument must still exit non-zero with the
+	# ERR diagnostic — the --help fix must not collapse this path.
+	run bash -c "
+		set -euo pipefail
+		die()  { echo \"ERR \$*\" >&2; exit 1; }
+		warn() { true; }
+		log()  { true; }
+		PREFIX_ETC=/etc/oxpulse-partner-edge
+		PREFIX_LIB=/var/lib/oxpulse-partner-edge
+		BACKEND_API=https://api.oxpulse.chat
+		OXPULSE_PARTNER_TOKEN='' OXPULSE_IMAGE_VERSION='' TURNS_SUBDOMAIN='' \
+		SFU_UDP_PORT='' SFU_METRICS_PORT='' SFU_EDGE_ID='' REGION='' \
+		HEALTHCHECK_TIMEOUT='' BRANDING_CONFIG='' OXPULSE_GHCR_TOKEN=''
+		OXPULSE_NONINTERACTIVE=1
+		source '${REPO_ROOT}/lib/install-args.sh'
+		args_parse
+	"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"--domain is required"* ]]
+}
