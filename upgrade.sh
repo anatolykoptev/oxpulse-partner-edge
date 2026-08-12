@@ -964,14 +964,31 @@ V01_TO_V02=0
 # corrupting the .prev backup chain. Both operators writing .prev simultaneously
 # would interleave state and leave rollback pointing at partially-applied config.
 
-# Helper: resolve_default_target sets TARGET if empty, preferring VERSION file
-# over 'latest' to keep upgrade target deterministic with the installer release.
-# Audit 2026-05-22 F2 — operator may invoke `oxpulse-partner-edge-upgrade`
-# without args; without this helper, that pulled :latest from GHCR even when
-# the installer pinned to a specific tag. Now we honor the same pin unless
-# the operator explicitly types `latest`.
+# Helper: resolve_default_target sets TARGET if empty, preferring the release
+# tag baked into this script (OXPULSE_UPGRADE_TAG, substituted by release.yml
+# at publish time) over a VERSION file over 'latest'.
+#
+# Resolution order:
+#   1. $TARGET already set (explicit CLI arg) — wins, unchanged.
+#   2. $OXPULSE_UPGRADE_TAG when it is a real vX.Y.Z tag and not the
+#      unsubstituted @RELEASE_TAG@ sentinel — the value baked into every
+#      released installer.  On every probed edge (ruoxp, rvpn, zvonilka) there
+#      is no VERSION file, so the previous fall-through to 'latest' made
+#      CURRENT and TARGET compare equal and the run exited "already on latest
+#      — nothing to do" having transferred nothing (issue #612).
+#   3. the VERSION file, as today.
+#   4. 'latest', keeping the existing warning.
+#
+# The regex check in branch 2 is the same idiom used at the REPO_RAW resolution
+# (upgrade.sh:186) and the SHA256SUMS gate (upgrade.sh:465): a real tag matches
+# ^v[0-9]+\. , the unsubstituted @RELEASE_TAG@ sentinel does not.
 resolve_default_target() {
 	if [[ -n "$TARGET" ]]; then return 0; fi
+	if [[ "${OXPULSE_UPGRADE_TAG}" =~ ^v[0-9]+\. ]]; then
+		TARGET="$OXPULSE_UPGRADE_TAG"
+		log "TARGET defaulted to $TARGET from OXPULSE_UPGRADE_TAG (release tag baked into this script)"
+		return 0
+	fi
 	local version_file
 	version_file="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/VERSION"
 	if [[ -r "$version_file" ]]; then
@@ -994,6 +1011,11 @@ resolve_default_target() {
 #
 # Resolution order:
 #   partner-edge-vX.Y.Z → strip prefix → vX.Y.Z (transition: old-form input)
+#   X.Y.Z (bare)        → add v prefix → vX.Y.Z (VERSION file in a source
+#                                               checkout yields a bare semver;
+#                                               real release tags are vX.Y.Z,
+#                                               so without the prefix the
+#                                               release URL 404s — issue #612)
 #   vX.Y.Z              → unchanged             (canonical new form)
 #   latest              → unchanged             (floating; SHA256SUMS guard skipped)
 #
@@ -1005,6 +1027,13 @@ normalize_target() {
 			# Transition: old-form input from pre-v0.12.60 installer. Strip prefix.
 			TARGET="${TARGET#partner-edge-}"
 			warn "old tag form detected — treating as $TARGET (releases ≥v0.12.60 use vX.Y.Z)"
+			;;
+		[0-9]*.[0-9]*.[0-9]*)
+			# Bare X.Y.Z (e.g. from a VERSION file in a source checkout) — real
+			# release tags are vX.Y.Z, so add the prefix or the release URL 404s
+			# (issue #612 branch 2).
+			TARGET="v$TARGET"
+			warn "bare version $TARGET normalized to v-prefixed tag form"
 			;;
 	esac
 	# One-form world: RELEASE_TAG = TARGET (git tag = image tag = release tag).
