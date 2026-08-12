@@ -347,7 +347,7 @@ INNER
 )
 _f5b_rc=$?
 if [[ $_f5b_rc -ne 0 ]]; then
-    fail "F5 case B: the extracted upgrade.sh block ABORTED (rc=$_f5b_rc) instead of degrading — the guard is missing and set -e killed the shell. The empty capture would satisfy every other assertion here."
+    fail "F5 case B: the extracted upgrade.sh block ABORTED (rc=$_f5b_rc) instead of degrading — the guard is missing and set -e killed the shell. (The WARNING check below would also catch this; this line just names the cause.)"
 fi
 if [[ "$_f5b_log" != *"WARNING"* ]]; then
     fail "F5 case B: render failed but WARNING not logged — got: $_f5b_log"
