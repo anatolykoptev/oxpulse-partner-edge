@@ -10,6 +10,16 @@ setup() {
 	cat > "$TMPDIR_LOCAL/bin/install" <<'STUB'
 #!/usr/bin/env bash
 echo "install $*" >> "$FAKE_LOG"
+# `install -d [-m MODE] DIR...` creates DIRECTORIES. Without this branch the
+# code below treated the mode and the directory as src/dst and touched a FILE
+# where a directory belonged, so every later write under it failed with
+# "Not a directory". That was invisible while the curl stub ended in `|| true`.
+if [[ "$1" == "-d" ]]; then
+	shift
+	[[ "$1" == "-m" ]] && shift 2
+	mkdir -p "$@"
+	exit 0
+fi
 # copy src→dest so downstream code can open the file if needed
 if [[ "$1" == "-m" ]]; then
 	shift 2  # skip mode and mode-value
@@ -23,6 +33,7 @@ exit 0
 STUB
 	chmod +x "$TMPDIR_LOCAL/bin/install"
 
+	mkdir -p "$TMPDIR_LOCAL/sbin" "$TMPDIR_LOCAL/libdir" "$TMPDIR_LOCAL/share"
 	cat > "$TMPDIR_LOCAL/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 echo "curl $*" >> "$FAKE_LOG"
@@ -34,6 +45,7 @@ while [[ $# -gt 0 ]]; do
 	if [[ "$1" == "-o" ]]; then dst="$2"; shift 2; else shift; fi
 done
 if [[ -n "$dst" ]]; then
+	mkdir -p "$(dirname "$dst")"
 	printf '#!/bin/bash\nstub_func() { :; }\n' > "$dst"
 fi
 exit 0
@@ -73,6 +85,20 @@ DRY_RUN=0
 src_dir=''
 REPO_RAW='http://127.0.0.1:1/does-not-exist'
 PREFIX_SBIN='$TMPDIR_LOCAL/sbin'
+# PREFIX_LIBDIR was never set here. _systemd_install_lib_scripts writes to
+# PREFIX_LIBDIR, so with it unset the destination was the literal
+# /render-channel-lib.sh -- the filesystem ROOT. The old stub curl ended in a
+# touch guarded by || true, which swallowed the Permission denied, so this
+# suite was green over a file that was never written. Found by the #530 fetch
+# guard, which refuses an empty result.
+#
+# NOTE: this heredoc delimiter is UNQUOTED, so backticks here are command
+# substitution and RUN. Keep this comment backtick-free.
+PREFIX_LIBDIR='$TMPDIR_LOCAL/libdir'
+# Manifest destination, so the delivery record lands in the temp tree rather
+# than under /usr/local/share on the box running the tests.
+OXPULSE_SHARE_DIR='$TMPDIR_LOCAL/share'
+PREFIX_BIN='$TMPDIR_LOCAL/bindir'
 SYSTEMD_DIR='$TMPDIR_LOCAL/systemd'
 BAKE_MODE=0
 TURNS_SUBDOMAIN=api-test01

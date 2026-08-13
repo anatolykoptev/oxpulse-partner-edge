@@ -52,8 +52,22 @@ fi
 echo "==> Case 3: lib/install-systemd.sh creates parent dir for VERSION"
 # The /usr/local/share/oxpulse-partner-edge dir must be created before the file write.
 # Either a dedicated install -d line or reuse of an existing install -d suffices.
-if grep -q 'install -d.*oxpulse-partner-edge' "$INSTALL_SYSTEMD" 2>/dev/null; then
-	pass "install-systemd.sh creates /usr/local/share/oxpulse-partner-edge dir"
+# The path is built from a variable now (#530: it was hardcoded six times, which
+# is how the installer suite ran green while writing to a real system path).  So
+# accept either spelling — but ALSO require that the variable defaults to the
+# canonical path, otherwise this check would pass over a variable pointing
+# anywhere at all.
+_mkdir_ok=0
+if grep -qE 'install -d.*(oxpulse-partner-edge|\$_share_dir)' "$INSTALL_SYSTEMD" 2>/dev/null; then
+	if grep -q 'oxpulse-partner-edge' "$INSTALL_SYSTEMD" 2>/dev/null \
+		&& grep -qE '_share_dir="\$\{OXPULSE_SHARE_DIR:-/usr/local/share/oxpulse-partner-edge\}"' "$INSTALL_SYSTEMD" 2>/dev/null; then
+		_mkdir_ok=1
+	elif grep -q 'install -d.*oxpulse-partner-edge' "$INSTALL_SYSTEMD" 2>/dev/null; then
+		_mkdir_ok=1   # literal form, pre-#530
+	fi
+fi
+if [ "$_mkdir_ok" -eq 1 ]; then
+	pass "install-systemd.sh creates the oxpulse-partner-edge share dir"
 else
 	fail "install-systemd.sh does not mkdir /usr/local/share/oxpulse-partner-edge before installing VERSION"
 fi

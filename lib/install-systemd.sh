@@ -377,28 +377,37 @@ _systemd_install_lib_scripts() {
 	fi
 	_DELIVERED_SBIN_LIBS+=("xprb-refresh-lib.sh")
 
+	# Canonical share path, overridable so the installer can be exercised without
+	# writing outside a test's temp tree. The default is unchanged, so production
+	# behaviour is identical.
+	#
+	# It was hardcoded below. That is how this installer's test suite came to run
+	# green while writing to a real system path: the old stub curl ended in a touch
+	# guarded by || true, which swallowed the Permission denied. The #530 fetch
+	# guard refuses an empty result and surfaced it immediately.
+	local _share_dir="${OXPULSE_SHARE_DIR:-/usr/local/share/oxpulse-partner-edge}"
 	# Fleet-wide infrastructure defaults (Bug 8 fix — install to canonical share path).
 	# channel-render-lib.sh and oxpulse-channels-health-report.sh both source this file
 	# from /usr/local/share/oxpulse-partner-edge/config/defaults.conf at runtime.
-	install -d -m 0755 "/usr/local/share/oxpulse-partner-edge/config"
+	install -d -m 0755 "$_share_dir/config"
 	if [[ -n "$src_dir" && -f "$src_dir/config/defaults.conf" ]]; then
 		install -m 0644 "$src_dir/config/defaults.conf" \
-			"/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+			"$_share_dir/config/defaults.conf"
 	else
 		_curl_fetch_or_die "$REPO_RAW/config/defaults.conf" \
-			"/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+			"$_share_dir/config/defaults.conf"
 	fi
 
 	# VERSION file: oxpulse-channels-health-report.sh reads installer_version from
 	# /usr/local/share/oxpulse-partner-edge/VERSION (canonical path, line 96).
 	# Without this install the field is always absent from health-report payloads.
-	install -d -m 0755 "/usr/local/share/oxpulse-partner-edge"
+	install -d -m 0755 "$_share_dir"
 	if [[ -n "$src_dir" && -f "$src_dir/VERSION" ]]; then
 		install -m 0644 "$src_dir/VERSION" \
-			"/usr/local/share/oxpulse-partner-edge/VERSION"
+			"$_share_dir/VERSION"
 	else
 		_curl_fetch_or_die "$REPO_RAW/VERSION" \
-			"/usr/local/share/oxpulse-partner-edge/VERSION"
+			"$_share_dir/VERSION"
 	fi
 
 	# #530: write the delivery manifest so healthcheck.sh can verify the
@@ -522,13 +531,16 @@ _systemd_install_cert_watch_units() {
 
 # Install xray auto-update script into /usr/local/bin/ (mirrors SFU pattern).
 _systemd_install_xray_update_script() {
+	# Overridable so the installer can be exercised without writing to the real
+	# /usr/local/bin. Spelling matches tests/test_upgrade_syncs_host_scripts.sh:122.
+	local _bin_dir="${PREFIX_BIN:-${OXPULSE_PREFIX_BIN:-/usr/local/bin}}"
 	if [[ -n "$src_dir" && -f "$src_dir/scripts/oxpulse-xray-update.sh" ]]; then
 		install -m 0755 "$src_dir/scripts/oxpulse-xray-update.sh" \
-			"/usr/local/bin/oxpulse-xray-update.sh"
+			"$_bin_dir/oxpulse-xray-update.sh"
 	else
 		_curl_fetch_or_die "$REPO_RAW/scripts/oxpulse-xray-update.sh" \
-			"/usr/local/bin/oxpulse-xray-update.sh"
-		chmod 0755 "/usr/local/bin/oxpulse-xray-update.sh"
+			"$_bin_dir/oxpulse-xray-update.sh"
+		chmod 0755 "$_bin_dir/oxpulse-xray-update.sh"
 	fi
 }
 
