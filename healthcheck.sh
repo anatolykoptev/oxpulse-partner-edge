@@ -438,6 +438,55 @@ else
 fi
 unset _chs_file
 
+# --- 22. sbin helper libs delivered: present, non-empty, define ≥1 function ---
+# #530: a failed curl leaves a zero-byte file that passes [[ -f ]] but defines
+# nothing — the consumer then degrades silently.  This check reads the manifest
+# the installer wrote (/usr/local/share/oxpulse-partner-edge/sbin-libs.manifest,
+# derived from the installer's own delivery code — NOT a hand-maintained array)
+# and verifies each entry: exists, non-empty, and defines at least one function.
+# Skip-on-legacy: pre-#530 nodes have no manifest — emit INFO and treat as pass.
+_OXPULSE_SHARE_DIR="${OXPULSE_SHARE_DIR:-/usr/local/share/oxpulse-partner-edge}"
+_SBIN_LIB_MANIFEST="$_OXPULSE_SHARE_DIR/sbin-libs.manifest"
+_SBIN_PREFIX="${PREFIX_SBIN:-/usr/local/sbin}"
+if [[ "$SNAPSHOT_MODE" -eq 0 ]]; then echo -n "  22. sbin helper libs delivered:                      "; fi
+if [[ ! -r "$_SBIN_LIB_MANIFEST" ]]; then
+	snap_emit "check_22_sbin_libs" 0 "SKIP (sbin-libs.manifest absent — pre-#530 install; re-run install.sh to enable)\n"
+else
+	_sbl_fail=0
+	_sbl_count=0
+	_sbl_errors=""
+	while IFS= read -r _sbl_name || [[ -n "$_sbl_name" ]]; do
+		[[ -z "$_sbl_name" ]] && continue
+		_sbl_count=$((_sbl_count + 1))
+		_sbl_path="$_SBIN_PREFIX/$_sbl_name"
+		if [[ ! -f "$_sbl_path" ]]; then
+			_sbl_errors="${_sbl_errors}$_sbl_name:missing "
+			_sbl_fail=1
+		elif [[ ! -s "$_sbl_path" ]]; then
+			_sbl_errors="${_sbl_errors}$_sbl_name:empty "
+			_sbl_fail=1
+		else
+			_sbl_funcs=$(grep -cE '^[[:space:]]*(function[[:space:]]+)?[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\(\)' "$_sbl_path" 2>/dev/null || true)
+			if [[ "$_sbl_funcs" -eq 0 ]]; then
+				_sbl_errors="${_sbl_errors}$_sbl_name:no-functions "
+				_sbl_fail=1
+			fi
+		fi
+	done < "$_SBIN_LIB_MANIFEST"
+
+	if [[ $_sbl_fail -eq 0 ]]; then
+		snap_emit "check_22_sbin_libs" 0 "$(printf '\033[32mOK\033[0m (%d libs verified present, non-empty, defining ≥1 function)\n' "$_sbl_count")"
+	else
+		snap_emit "check_22_sbin_libs" 1 "$(printf '\033[31mFAIL\033[0m (%s)\n' "$_sbl_errors")"
+		if [[ "$SNAPSHOT_MODE" -eq 0 ]]; then
+			echo "    Recovery: re-run install.sh to re-deliver the failing lib(s)"
+		fi
+		FAIL=$((FAIL + 1))
+	fi
+	unset _sbl_fail _sbl_count _sbl_errors _sbl_name _sbl_path _sbl_funcs
+fi
+unset _SBIN_LIB_MANIFEST _SBIN_PREFIX _OXPULSE_SHARE_DIR
+
 # In snapshot mode: always exit 0 (output is for diffing, not pass/fail signal).
 if [[ "$SNAPSHOT_MODE" -eq 1 ]]; then
 	exit 0

@@ -250,11 +250,14 @@ else
             # a plain fixed-string search also hits comments, `[[ -f ... ]]`
             # probes and `rm -f`. Proved by mutation — commenting out all three
             # install lines left this assertion green.
+            # #530: _curl_fetch_or_die replaced bare curl calls — it takes
+            # (url, dest) args, so the "$PREFIX_SBIN/<name>" target is still
+            # visible on the same line.
             _e1_needle='"$PREFIX_SBIN/'"${sib}"'"'
             # Collected first, then matched from a here-string: piping into
             # `grep -q` trips this repo's pipefail early-exit guard, because the
             # -q exits on the first hit and the upstream stage dies on SIGPIPE.
-            _e1_writes=$(sed 's/#.*//' "$INSTALL_SYSTEMD" | grep -E '(install -m|curl .*-o |cp )' || true)
+            _e1_writes=$(sed 's/#.*//' "$INSTALL_SYSTEMD" | grep -E '(install -m|curl .*-o |cp |_curl_fetch_or_die)' || true)
             if grep -qF "$_e1_needle" <<<"$_e1_writes"; then
                 pass "E1: '$sib' is installed into PREFIX_SBIN by the fresh-install path"
             else

@@ -26,12 +26,16 @@ STUB
 	cat > "$TMPDIR_LOCAL/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 echo "curl $*" >> "$FAKE_LOG"
-# extract -o dest and touch it so install.sh doesn't die on missing file
+# extract -o dest and write a non-empty stub so _curl_fetch_or_die's
+# [[ -s ]] check passes.  Include a function definition so _verify_sbin_libs
+# (which greps for function defs) also passes for sbin lib files.
 dst=""
 while [[ $# -gt 0 ]]; do
 	if [[ "$1" == "-o" ]]; then dst="$2"; shift 2; else shift; fi
 done
-[[ -n "$dst" ]] && touch "$dst" || true
+if [[ -n "$dst" ]]; then
+	printf '#!/bin/bash\nstub_func() { :; }\n' > "$dst"
+fi
 exit 0
 STUB
 	chmod +x "$TMPDIR_LOCAL/bin/curl"

@@ -15,6 +15,63 @@
 #   _chan_lib_tmp    string (optional), temp path to pre-fetched channel-render-lib.sh
 #   log warn die     functions (install.sh provides)
 
+# Fetch a URL to a destination, aborting the install on any failure.
+# curl -f catches HTTP errors (4xx/5xx) but NOT a truncated body on a
+# connection dropped mid-transfer — the [[ -s ]] (non-empty) check catches
+# that.  A zero-byte file from a dropped transfer would otherwise chmod and
+# source cleanly, defining nothing — the silent-degradation bug #530 this
+# prevents.
+_curl_fetch_or_die() {
+	local _url="$1" _dest="$2"
+	curl -fsSL "$_url" -o "$_dest" \
+		|| die "fetch failed: $_url (curl exited non-zero)"
+	[[ -s "$_dest" ]] \
+		|| die "fetch produced empty file: $_url → $_dest (truncated or dropped mid-transfer)"
+}
+
+# Verify every sbin helper lib the installer shipped is present, non-empty,
+# and defines at least one function.  Existence alone is not the check: a
+# failed curl leaves a zero-byte file that chmods fine and sources cleanly,
+# defining nothing — the consumer then degrades silently (#530).
+#
+# The expected set is DERIVED from the installer's own delivery code, not a
+# hand-maintained array.  _systemd_install_lib_scripts populates
+# _DELIVERED_SBIN_LIBS as it installs each lib; this function reads that
+# array.  For healthcheck.sh (which runs without the installer), the set is
+# read from the manifest file the installer wrote to
+# /usr/local/share/oxpulse-partner-edge/sbin-libs.manifest.
+#
+# Returns 0 if all pass, 1 if any fail (with the failing lib name on stderr).
+_verify_sbin_libs() {
+	local -a _libs=()
+	if [[ -n "${_DELIVERED_SBIN_LIBS+x}" && ${#_DELIVERED_SBIN_LIBS[@]} -gt 0 ]]; then
+		_libs=("${_DELIVERED_SBIN_LIBS[@]}")
+	else
+		local _manifest="${OXPULSE_SHARE_DIR:-/usr/local/share/oxpulse-partner-edge}/sbin-libs.manifest"
+		[[ -r "$_manifest" ]] || return 0  # pre-#530 node — nothing to check
+		mapfile -t _libs < "$_manifest"
+	fi
+	local _lib _path _func_count _err=0
+	for _lib in "${_libs[@]}"; do
+		[[ -n "$_lib" ]] || continue
+		_path="${PREFIX_SBIN:-/usr/local/sbin}/$_lib"
+		if [[ ! -f "$_path" ]]; then
+			echo "sbin lib delivery FAILED: $_lib missing from ${PREFIX_SBIN:-/usr/local/sbin}" >&2
+			_err=1
+		elif [[ ! -s "$_path" ]]; then
+			echo "sbin lib delivery FAILED: $_lib is zero bytes" >&2
+			_err=1
+		else
+			_func_count=$(grep -cE '^[[:space:]]*(function[[:space:]]+)?[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\(\)' "$_path" 2>/dev/null || true)
+			if [[ "$_func_count" -eq 0 ]]; then
+				echo "sbin lib delivery FAILED: $_lib defines no functions" >&2
+				_err=1
+			fi
+		fi
+	done
+	return "$_err"
+}
+
 # Install upgrade.sh, hydrate.sh, refresh.sh, sni-rotate.sh, channels-health-report.sh
 # into $PREFIX_SBIN.
 _systemd_install_helper_scripts() {
@@ -22,7 +79,7 @@ _systemd_install_helper_scripts() {
 	if [[ -n "$src_dir" && -f "$src_dir/upgrade.sh" ]]; then
 		install -m 0755 "$src_dir/upgrade.sh" "$PREFIX_SBIN/oxpulse-partner-edge-upgrade"
 	else
-		curl -fsSL "$REPO_RAW/upgrade.sh" -o "$PREFIX_SBIN/oxpulse-partner-edge-upgrade"
+		_curl_fetch_or_die "$REPO_RAW/upgrade.sh" "$PREFIX_SBIN/oxpulse-partner-edge-upgrade"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-upgrade"
 	fi
 
@@ -30,7 +87,7 @@ _systemd_install_helper_scripts() {
 	if [[ -n "$src_dir" && -f "$src_dir/hydrate.sh" ]]; then
 		install -m 0755 "$src_dir/hydrate.sh" "$PREFIX_SBIN/oxpulse-partner-edge-hydrate"
 	else
-		curl -fsSL "$REPO_RAW/hydrate.sh" -o "$PREFIX_SBIN/oxpulse-partner-edge-hydrate"
+		_curl_fetch_or_die "$REPO_RAW/hydrate.sh" "$PREFIX_SBIN/oxpulse-partner-edge-hydrate"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-hydrate"
 	fi
 
@@ -38,7 +95,7 @@ _systemd_install_helper_scripts() {
 	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-partner-edge-refresh.sh" ]]; then
 		install -m 0755 "$src_dir/oxpulse-partner-edge-refresh.sh" "$PREFIX_SBIN/oxpulse-partner-edge-refresh"
 	else
-		curl -fsSL "$REPO_RAW/oxpulse-partner-edge-refresh.sh" -o "$PREFIX_SBIN/oxpulse-partner-edge-refresh"
+		_curl_fetch_or_die "$REPO_RAW/oxpulse-partner-edge-refresh.sh" "$PREFIX_SBIN/oxpulse-partner-edge-refresh"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-refresh"
 	fi
 
@@ -47,8 +104,8 @@ _systemd_install_helper_scripts() {
 		install -m 0755 "$src_dir/oxpulse-partner-edge-sni-rotate.sh" \
 			"$PREFIX_SBIN/oxpulse-partner-edge-sni-rotate"
 	else
-		curl -fsSL "$REPO_RAW/oxpulse-partner-edge-sni-rotate.sh" \
-			-o "$PREFIX_SBIN/oxpulse-partner-edge-sni-rotate"
+		_curl_fetch_or_die "$REPO_RAW/oxpulse-partner-edge-sni-rotate.sh" \
+			"$PREFIX_SBIN/oxpulse-partner-edge-sni-rotate"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-sni-rotate"
 	fi
 
@@ -56,7 +113,7 @@ _systemd_install_helper_scripts() {
 	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-channels-health-report.sh" ]]; then
 		install -m 0755 "$src_dir/oxpulse-channels-health-report.sh" "$PREFIX_SBIN/oxpulse-channels-health-report"
 	else
-		curl -fsSL "$REPO_RAW/oxpulse-channels-health-report.sh" -o "$PREFIX_SBIN/oxpulse-channels-health-report"
+		_curl_fetch_or_die "$REPO_RAW/oxpulse-channels-health-report.sh" "$PREFIX_SBIN/oxpulse-channels-health-report"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-channels-health-report"
 	fi
 
@@ -67,7 +124,7 @@ _systemd_install_helper_scripts() {
 	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-partner-edge-selfheal.sh" ]]; then
 		install -m 0755 "$src_dir/oxpulse-partner-edge-selfheal.sh" "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
 	else
-		curl -fsSL "$REPO_RAW/oxpulse-partner-edge-selfheal.sh" -o "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
+		_curl_fetch_or_die "$REPO_RAW/oxpulse-partner-edge-selfheal.sh" "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
 	fi
 }
@@ -75,6 +132,13 @@ _systemd_install_helper_scripts() {
 # Install channel-render-lib.sh, ghcr-auth-lib.sh, oxpulse-token-lib.sh
 # into $PREFIX_SBIN.
 _systemd_install_lib_scripts() {
+	# #530: the expected set of sbin helper libs is DERIVED from this
+	# function's own delivery code — each block appends the basename it just
+	# installed to _DELIVERED_SBIN_LIBS.  No hand-maintained array; a new lib
+	# added here is automatically covered by the post-install assertion
+	# (_verify_sbin_libs) and the healthcheck check.
+	_DELIVERED_SBIN_LIBS=()
+
 	# Shared channel render library (sourced by upgrade.sh + refresh.sh).
 	if [[ -n "$src_dir" && -f "$src_dir/channel-render-lib.sh" ]]; then
 		install -m 0644 "$src_dir/channel-render-lib.sh" "$PREFIX_SBIN/channel-render-lib.sh"
@@ -82,20 +146,31 @@ _systemd_install_lib_scripts() {
 		install -m 0644 "$_chan_lib_tmp" "$PREFIX_SBIN/channel-render-lib.sh"
 		rm -f "$_chan_lib_tmp"
 	else
-		curl -fsSL "$REPO_RAW/channel-render-lib.sh" -o "$PREFIX_SBIN/channel-render-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/channel-render-lib.sh" "$PREFIX_SBIN/channel-render-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/channel-render-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("channel-render-lib.sh")
 
 	# Shared SNI selection helper — sourced by channel-render-lib.sh (every
 	# render) AND oxpulse-partner-edge-sni-rotate.sh (daily timer). Single
 	# source of the sha256(node_id:date) mod pool_size arithmetic; co-installed
 	# to PREFIX_SBIN so both callers resolve it as a sibling.
-	if [[ -n "$src_dir" && -f "$src_dir/sni-select-lib.sh" ]]; then
+	# #530: same 4-tier delivery chain as its neighbours (src_dir/lib →
+	# src_dir/flat → INSTALL_LIB_DIR → curl).  Previously only 2 tiers
+	# (src_dir/flat → curl), so an air-gapped or offline fresh install had
+	# nothing but the network path.
+	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/sni-select-lib.sh" ]]; then
+		install -m 0644 "$src_dir/lib/sni-select-lib.sh" "$PREFIX_SBIN/sni-select-lib.sh"
+	elif [[ -n "${src_dir:-}" && -f "$src_dir/sni-select-lib.sh" ]]; then
 		install -m 0644 "$src_dir/sni-select-lib.sh" "$PREFIX_SBIN/sni-select-lib.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/sni-select-lib.sh" ]]; then
+		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/sni-select-lib.sh" \
+			"$PREFIX_SBIN/sni-select-lib.sh"
 	else
-		curl -fsSL "$REPO_RAW/sni-select-lib.sh" -o "$PREFIX_SBIN/sni-select-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/sni-select-lib.sh" "$PREFIX_SBIN/sni-select-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/sni-select-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("sni-select-lib.sh")
 
 	# Phase 5.5 MAJOR 1: fail-soft render helpers (render_channel_soft, CHANNELS_FAILED,
 	# compose_strip_failed_channels) — sourced by install.sh, hydrate.sh, update.sh, refresh.sh.
@@ -125,19 +200,21 @@ _systemd_install_lib_scripts() {
 			install -m 0644 "$_rcl_src" "$PREFIX_LIBDIR/render-channel-lib.sh"
 		fi
 	else
-		curl -fsSL "$REPO_RAW/lib/render-channel-lib.sh" -o "$PREFIX_SBIN/render-channel-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/lib/render-channel-lib.sh" "$PREFIX_SBIN/render-channel-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/render-channel-lib.sh"
-		curl -fsSL "$REPO_RAW/lib/render-channel-lib.sh" -o "$PREFIX_LIBDIR/render-channel-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/lib/render-channel-lib.sh" "$PREFIX_LIBDIR/render-channel-lib.sh"
 		chmod 0644 "$PREFIX_LIBDIR/render-channel-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("render-channel-lib.sh")
 
 	# GHCR auth lib (sourced by upgrade.sh)
 	if [[ -n "$src_dir" && -f "$src_dir/ghcr-auth-lib.sh" ]]; then
 		install -m 0644 "$src_dir/ghcr-auth-lib.sh" "$PREFIX_SBIN/ghcr-auth-lib.sh"
 	else
-		curl -fsSL "$REPO_RAW/ghcr-auth-lib.sh" -o "$PREFIX_SBIN/ghcr-auth-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/ghcr-auth-lib.sh" "$PREFIX_SBIN/ghcr-auth-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/ghcr-auth-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("ghcr-auth-lib.sh")
 
 	# Peer-IP-guard lib (SSRF / internal-IP classification) — sourced fail-
 	# closed by oxpulse-channels-health-report.sh from PREFIX_SBIN at every
@@ -156,18 +233,20 @@ _systemd_install_lib_scripts() {
 		install -m 0755 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/peer-ip-guard-lib.sh" \
 			"$PREFIX_SBIN/peer-ip-guard-lib.sh"
 	else
-		curl -fsSL "$REPO_RAW/lib/peer-ip-guard-lib.sh" -o "$PREFIX_SBIN/peer-ip-guard-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/lib/peer-ip-guard-lib.sh" "$PREFIX_SBIN/peer-ip-guard-lib.sh"
 		chmod 0755 "$PREFIX_SBIN/peer-ip-guard-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("peer-ip-guard-lib.sh")
 
 	# Service token lib (sourced by refresh.sh + any script calling authenticated
 	# /api/partner/* endpoints)
 	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-token-lib.sh" ]]; then
 		install -m 0644 "$src_dir/oxpulse-token-lib.sh" "$PREFIX_SBIN/oxpulse-token-lib.sh"
 	else
-		curl -fsSL "$REPO_RAW/oxpulse-token-lib.sh" -o "$PREFIX_SBIN/oxpulse-token-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/oxpulse-token-lib.sh" "$PREFIX_SBIN/oxpulse-token-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/oxpulse-token-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("oxpulse-token-lib.sh")
 
 	# Hy2 channel render lib (sourced by oxpulse-partner-edge-hydrate on
 	# first-boot). 0644 (sourced, not executed). Same 4-way delivery tiers
@@ -181,9 +260,10 @@ _systemd_install_lib_scripts() {
 		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/hydrate-hy2.sh" \
 			"$PREFIX_SBIN/hydrate-hy2.sh"
 	else
-		curl -fsSL "$REPO_RAW/lib/hydrate-hy2.sh" -o "$PREFIX_SBIN/hydrate-hy2.sh"
+		_curl_fetch_or_die "$REPO_RAW/lib/hydrate-hy2.sh" "$PREFIX_SBIN/hydrate-hy2.sh"
 		chmod 0644 "$PREFIX_SBIN/hydrate-hy2.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("hydrate-hy2.sh")
 
 	# Phase 5.8 Task 6: telegram-alert-lib.sh — shared rate-limited Telegram
 	# alert primitive (used by oxpulse-channels-health-report.sh transition
@@ -196,9 +276,10 @@ _systemd_install_lib_scripts() {
 		install -m 0755 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/telegram-alert-lib.sh" \
 			"$PREFIX_SBIN/telegram-alert-lib.sh"
 	else
-		curl -fsSL "$REPO_RAW/lib/telegram-alert-lib.sh" -o "$PREFIX_SBIN/telegram-alert-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/lib/telegram-alert-lib.sh" "$PREFIX_SBIN/telegram-alert-lib.sh"
 		chmod 0755 "$PREFIX_SBIN/telegram-alert-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("telegram-alert-lib.sh")
 
 	# P2 strangler extraction (2026-07-08 plan): channel-health-lib.sh — E2E
 	# channel probes + report/verdict logic sourced fail-closed by
@@ -213,9 +294,10 @@ _systemd_install_lib_scripts() {
 		install -m 0755 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/channel-health-lib.sh" \
 			"$PREFIX_SBIN/channel-health-lib.sh"
 	else
-		curl -fsSL "$REPO_RAW/lib/channel-health-lib.sh" -o "$PREFIX_SBIN/channel-health-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/lib/channel-health-lib.sh" "$PREFIX_SBIN/channel-health-lib.sh"
 		chmod 0755 "$PREFIX_SBIN/channel-health-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("channel-health-lib.sh")
 
 	# P3b cross-probe lib — mesh peer-probe functions sourced by
 	# oxpulse-channels-health-report.sh at runtime (strangler-fig extraction).
@@ -229,9 +311,10 @@ _systemd_install_lib_scripts() {
 		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/cross-probe-lib.sh" \
 			"$PREFIX_SBIN/cross-probe-lib.sh"
 	else
-		curl -fsSL "$REPO_RAW/lib/cross-probe-lib.sh" -o "$PREFIX_SBIN/cross-probe-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/lib/cross-probe-lib.sh" "$PREFIX_SBIN/cross-probe-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/cross-probe-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("cross-probe-lib.sh")
 
 	# Metric-sink lib (P1 of the 2026-07-08 refresh-lib-extraction-strangler
 	# plan) — emit_metric/emit_gauge Prometheus textfile sink sourced
@@ -248,9 +331,10 @@ _systemd_install_lib_scripts() {
 		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/metric-sink-lib.sh" \
 			"$PREFIX_SBIN/metric-sink-lib.sh"
 	else
-		curl -fsSL "$REPO_RAW/lib/metric-sink-lib.sh" -o "$PREFIX_SBIN/metric-sink-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/lib/metric-sink-lib.sh" "$PREFIX_SBIN/metric-sink-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/metric-sink-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("metric-sink-lib.sh")
 
 	# Surgical-restart lib (P2 of the 2026-07-08 refresh-lib-extraction-
 	# strangler plan) — the sha-diff-gated docker restart/recreate mechanism,
@@ -267,9 +351,10 @@ _systemd_install_lib_scripts() {
 		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/surgical-restart-lib.sh" \
 			"$PREFIX_SBIN/surgical-restart-lib.sh"
 	else
-		curl -fsSL "$REPO_RAW/lib/surgical-restart-lib.sh" -o "$PREFIX_SBIN/surgical-restart-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/lib/surgical-restart-lib.sh" "$PREFIX_SBIN/surgical-restart-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/surgical-restart-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("surgical-restart-lib.sh")
 
 	# Xprb-refresh lib (P3 of the 2026-07-08 refresh-lib-extraction-strangler
 	# plan) — the cross-probe (xprb_) bearer-token daily re-mint leg, sourced
@@ -287,9 +372,10 @@ _systemd_install_lib_scripts() {
 		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/xprb-refresh-lib.sh" \
 			"$PREFIX_SBIN/xprb-refresh-lib.sh"
 	else
-		curl -fsSL "$REPO_RAW/lib/xprb-refresh-lib.sh" -o "$PREFIX_SBIN/xprb-refresh-lib.sh"
+		_curl_fetch_or_die "$REPO_RAW/lib/xprb-refresh-lib.sh" "$PREFIX_SBIN/xprb-refresh-lib.sh"
 		chmod 0644 "$PREFIX_SBIN/xprb-refresh-lib.sh"
 	fi
+	_DELIVERED_SBIN_LIBS+=("xprb-refresh-lib.sh")
 
 	# Fleet-wide infrastructure defaults (Bug 8 fix — install to canonical share path).
 	# channel-render-lib.sh and oxpulse-channels-health-report.sh both source this file
@@ -299,8 +385,8 @@ _systemd_install_lib_scripts() {
 		install -m 0644 "$src_dir/config/defaults.conf" \
 			"/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
 	else
-		curl -fsSL "$REPO_RAW/config/defaults.conf" \
-			-o "/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
+		_curl_fetch_or_die "$REPO_RAW/config/defaults.conf" \
+			"/usr/local/share/oxpulse-partner-edge/config/defaults.conf"
 	fi
 
 	# VERSION file: oxpulse-channels-health-report.sh reads installer_version from
@@ -311,9 +397,23 @@ _systemd_install_lib_scripts() {
 		install -m 0644 "$src_dir/VERSION" \
 			"/usr/local/share/oxpulse-partner-edge/VERSION"
 	else
-		curl -fsSL "$REPO_RAW/VERSION" \
-			-o "/usr/local/share/oxpulse-partner-edge/VERSION"
+		_curl_fetch_or_die "$REPO_RAW/VERSION" \
+			"/usr/local/share/oxpulse-partner-edge/VERSION"
 	fi
+
+	# #530: write the delivery manifest so healthcheck.sh can verify the
+	# shipped lib set without running the installer.  Derived from
+	# _DELIVERED_SBIN_LIBS (populated above by each install block), NOT a
+	# hand-maintained array — a new lib added to this function is
+	# automatically covered.
+	# Fail-soft: if the share dir is not writable (e.g., test harness), warn
+	# but do not abort — the post-install assertion uses the in-memory
+	# _DELIVERED_SBIN_LIBS array, not the manifest.  OXPULSE_SHARE_DIR
+	# override lets tests redirect the manifest to a temp path.
+	local _manifest_dir="${OXPULSE_SHARE_DIR:-/usr/local/share/oxpulse-partner-edge}"
+	printf '%s\n' "${_DELIVERED_SBIN_LIBS[@]}" \
+		> "$_manifest_dir/sbin-libs.manifest" 2>/dev/null \
+		|| warn "  could not write sbin-libs.manifest to $_manifest_dir — healthcheck lib check will be unavailable"
 }
 
 # Install pre-made systemd unit files (no placeholder substitution).
@@ -340,8 +440,8 @@ _systemd_install_units() {
 		install -m 0644 "$src_dir/systemd/oxpulse-partner-edge.service" \
 			"$SYSTEMD_DIR/oxpulse-partner-edge.service"
 	else
-		curl -fsSL "$REPO_RAW/systemd/oxpulse-partner-edge.service" \
-			-o "$SYSTEMD_DIR/oxpulse-partner-edge.service"
+		_curl_fetch_or_die "$REPO_RAW/systemd/oxpulse-partner-edge.service" \
+			"$SYSTEMD_DIR/oxpulse-partner-edge.service"
 	fi
 
 	# Hydrate oneshot unit
@@ -349,8 +449,8 @@ _systemd_install_units() {
 		install -m 0644 "$src_dir/systemd/oxpulse-partner-edge-hydrate.service" \
 			"$SYSTEMD_DIR/oxpulse-partner-edge-hydrate.service"
 	else
-		curl -fsSL "$REPO_RAW/systemd/oxpulse-partner-edge-hydrate.service" \
-			-o "$SYSTEMD_DIR/oxpulse-partner-edge-hydrate.service"
+		_curl_fetch_or_die "$REPO_RAW/systemd/oxpulse-partner-edge-hydrate.service" \
+			"$SYSTEMD_DIR/oxpulse-partner-edge-hydrate.service"
 	fi
 
 	# Refresh service + timer
@@ -358,7 +458,7 @@ _systemd_install_units() {
 		if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
 			install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
 		else
-			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+			_curl_fetch_or_die "$REPO_RAW/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
 		fi
 	done
 
@@ -367,7 +467,7 @@ _systemd_install_units() {
 		if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
 			install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
 		else
-			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+			_curl_fetch_or_die "$REPO_RAW/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
 		fi
 	done
 
@@ -376,7 +476,7 @@ _systemd_install_units() {
 		if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
 			install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
 		else
-			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+			_curl_fetch_or_die "$REPO_RAW/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
 		fi
 	done
 
@@ -385,7 +485,7 @@ _systemd_install_units() {
 		if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
 			install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
 		else
-			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+			_curl_fetch_or_die "$REPO_RAW/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
 		fi
 	done
 
@@ -394,7 +494,7 @@ _systemd_install_units() {
 		if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
 			install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
 		else
-			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+			_curl_fetch_or_die "$REPO_RAW/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
 		fi
 	done
 
@@ -409,7 +509,7 @@ _systemd_install_cert_watch_units() {
 		if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
 			local_src="$src_dir/systemd/${unit}"
 		else
-			curl -fsSL "$REPO_RAW/systemd/${unit}" -o "/tmp/${unit}.fetched"
+			_curl_fetch_or_die "$REPO_RAW/systemd/${unit}" "/tmp/${unit}.fetched"
 			local_src="/tmp/${unit}.fetched"
 		fi
 		sed -e "s|{{TURNS_SUBDOMAIN}}|${TURNS_SUBDOMAIN}|g" \
@@ -426,8 +526,8 @@ _systemd_install_xray_update_script() {
 		install -m 0755 "$src_dir/scripts/oxpulse-xray-update.sh" \
 			"/usr/local/bin/oxpulse-xray-update.sh"
 	else
-		curl -fsSL "$REPO_RAW/scripts/oxpulse-xray-update.sh" \
-			-o "/usr/local/bin/oxpulse-xray-update.sh"
+		_curl_fetch_or_die "$REPO_RAW/scripts/oxpulse-xray-update.sh" \
+			"/usr/local/bin/oxpulse-xray-update.sh"
 		chmod 0755 "/usr/local/bin/oxpulse-xray-update.sh"
 	fi
 }
@@ -543,6 +643,13 @@ systemd_run() {
 		_systemd_install_cert_watch_units
 		_systemd_install_xray_update_script
 		_systemd_enable_units
+		# #530: assert every sbin helper lib landed: present, non-empty, and
+		# defines at least one function.  A failed curl leaves a zero-byte
+		# file that passes [[ -f ]] — this check reaches inside the file.
+		# The expected set is derived from _DELIVERED_SBIN_LIBS (populated by
+		# _systemd_install_lib_scripts), not a hand-maintained array.
+		_verify_sbin_libs || die "sbin helper lib delivery check failed — see errors above"
+		log "  sbin lib delivery verified: ${#_DELIVERED_SBIN_LIBS[@]} libs present, non-empty, defining ≥1 function"
 		# Phase 5.7 Item 5: scan for zombie sbin scripts from prior versions.
 		# Requires CLEAN_SBIN (set by --clean-sbin) to actually remove.
 		sbin_cleanup_zombies
