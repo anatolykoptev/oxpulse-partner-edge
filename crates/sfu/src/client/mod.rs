@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 use oxpulse_sfu_kit::ClientOrigin;
 
 use crate::metrics::SfuMetrics;
-use crate::propagate::ClientId;
+use crate::propagate::{ClientId, Propagated};
 
 /// Reason a per-connection session is being closed. Carried over the
 /// `Client::close_signal` channel so the WS task can translate the
@@ -339,6 +339,24 @@ pub struct Client {
     /// `oxpulse_sfu_kit::client::Client::last_pacer_drive`, which this fork's
     /// separate `Client` type does not inherit (fork-collapse verdict).
     pub(crate) last_pacer_tick: Option<std::time::Instant>,
+    /// Issue #618: per-publisher keyframe-wait state for the
+    /// subscribe-triggered PLI loop. One entry per (origin, mid_in) —
+    /// the publisher track this subscriber is waiting on a keyframe
+    /// from. Created when a video track transitions to Open after
+    /// renegotiation; drained when a keyframe is observed (terminating
+    /// condition) or the attempt budget is spent. Pumped by
+    /// [`Registry::pump_ws_ctrl`][crate::registry::Registry::pump_ws_ctrl]
+    /// every loop iteration.
+    pub(crate) keyframe_waits: Vec<keyframe::KeyframeWait>,
+    /// Issue #618: pending `Propagated` events emitted by methods that
+    /// run inside `drain_ws_ctrl` (specifically
+    /// `accept_renegotiation_answer` → `start_keyframe_waits_for_open_video_tracks`)
+    /// but don't have direct access to the registry's `to_propagate`
+    /// queue. Drained by `Registry::pump_ws_ctrl` after the client loop
+    /// and appended to `to_propagate` so `fanout_pending` routes them.
+    /// Bounded by the number of video tracks transitioned per loop
+    /// iteration (typically 1).
+    pub(crate) pending_propagated: VecDeque<Propagated>,
 }
 
 impl Client {

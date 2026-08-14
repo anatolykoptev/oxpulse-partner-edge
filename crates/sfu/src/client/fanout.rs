@@ -399,6 +399,11 @@ impl Client {
                 .sfu_wire_written_total
                 .with_label_values(&[kind_label])
                 .inc();
+            // Issue #618: observe keyframes for the subscribe-triggered PLI
+            // loop. Terminates any matching keyframe-wait for this (origin,
+            // mid) pair. Called after writer.write succeeds so we only
+            // observe packets that actually reached the subscriber's wire.
+            self.observe_keyframe(origin, data);
         }
     }
 
