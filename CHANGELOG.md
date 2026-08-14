@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.26](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.25...v0.16.26) (2026-08-14)
+
+
+### Bug Fixes
+
+* **sfu:** request a keyframe when a subscriber attaches, and repeat until observed ([#619](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/619)) ([c473d01](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c473d01991ec214463bdf45254e7f34bb682e7db))
+
 ## [0.16.25](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.24...v0.16.25) (2026-08-12)
 
 
