@@ -584,12 +584,18 @@ pub struct SfuMetrics {
     /// upstream issue, or the keyframe observation path is broken).
     pub sfu_keyframe_on_subscribe_requests_total: IntCounterVec,
     /// Final outcome of the subscribe-triggered keyframe loop (issue
-    /// #618). Labels: `outcome` ∈ `{"observed", "budget_exhausted"}`.
+    /// #618). Labels: `outcome` ∈ `{"observed", "budget_exhausted",
+    /// "codec_unobservable", "publisher_gone"}`.
     /// `observed` = a keyframe was observed within the attempt budget;
     /// `budget_exhausted` = the loop gave up after
     /// `KEYFRAME_SUBSCRIBE_MAX_ATTEMPTS` or the deadline. A rising
     /// `budget_exhausted` rate is the black-screen signature — the
-    /// subscriber never got a decodable frame.
+    /// subscriber never got a decodable frame. `codec_unobservable` =
+    /// the track's codec is AV1 or VP9, whose keyframe bit str0m cannot
+    /// detect under SFrame (ciphertext payload); the wait
+    /// short-circuited after the initial PLI — this is an expected
+    /// interim state, NOT a black-screen signature. `publisher_gone` =
+    /// the publisher departed mid-wait; the PLI could not be delivered.
     pub sfu_keyframe_on_subscribe_outcome_total: IntCounterVec,
     /// Wall-clock duration from the first PLI emission to the observed
     /// keyframe, for subscribe-triggered loops that converged (issue
@@ -1532,8 +1538,11 @@ impl SfuMetrics {
                 "sfu_keyframe_on_subscribe_outcome_total",
                 "Final outcome of the subscribe-triggered keyframe loop (issue \
                  #618). outcome=observed = keyframe seen within budget; \
-                 outcome=budget_exhausted = loop gave up. Rising \
-                 budget_exhausted rate = black-screen signature."
+                 outcome=budget_exhausted = loop gave up (rising rate = \
+                 black-screen signature); outcome=codec_unobservable = AV1/VP9 \
+                 under SFrame, keyframe bit not detectable (expected interim \
+                 state, NOT black-screen); outcome=publisher_gone = publisher \
+                 departed mid-wait."
             ),
             &["outcome"],
         )
@@ -1543,6 +1552,12 @@ impl SfuMetrics {
             .get();
         let _ = sfu_keyframe_on_subscribe_outcome_total
             .with_label_values(&["budget_exhausted"])
+            .get();
+        let _ = sfu_keyframe_on_subscribe_outcome_total
+            .with_label_values(&["codec_unobservable"])
+            .get();
+        let _ = sfu_keyframe_on_subscribe_outcome_total
+            .with_label_values(&["publisher_gone"])
             .get();
 
         let sfu_keyframe_on_subscribe_time_to_first_seconds = reg!(Histogram::with_opts(

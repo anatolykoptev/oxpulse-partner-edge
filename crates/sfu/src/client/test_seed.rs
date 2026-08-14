@@ -5,7 +5,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use str0m::format::{Codec, CodecExtra, CodecSpec, FormatParams, PayloadParams, Vp8CodecExtra};
+use str0m::format::{
+    Codec, CodecExtra, CodecSpec, FormatParams, PayloadParams, Vp8CodecExtra, Vp9CodecExtra,
+};
 use str0m::media::{Frequency, MediaData, MediaKind, MediaTime, Mid, Pt, Rid};
 use str0m::rtp::{ExtensionValues, SeqNo};
 use str0m::Rtc;
@@ -173,4 +175,42 @@ pub fn make_media_data_keyframe(mid_tag: u8, rid: Option<Rid>) -> MediaData {
         is_keyframe: true,
     });
     data
+}
+
+/// Build a synthetic `MediaData` with a VP9 codec where `is_keyframe()`
+/// returns `false` — simulates an SFrame-encrypted VP9 stream where
+/// str0m cannot detect keyframes from the ciphertext payload. The
+/// `params.spec().codec` is `Codec::Vp9` so the keyframe-wait loop can
+/// identify the codec and short-circuit with `codec_unobservable`.
+pub fn make_media_data_vp9(mid_tag: u8, rid: Option<Rid>) -> MediaData {
+    let mid: Mid = Mid::from(&*format!("m{mid_tag}"));
+    let pt = Pt::from(96u8);
+    let seq: SeqNo = 0u64.into();
+    let params = PayloadParams::new(
+        pt,
+        None,
+        CodecSpec {
+            codec: Codec::Vp9,
+            clock_rate: Frequency::NINETY_KHZ,
+            channels: None,
+            format: FormatParams::default(),
+        },
+    );
+    MediaData {
+        mid,
+        pt,
+        rid,
+        params,
+        time: MediaTime::from_90khz(0),
+        network_time: Instant::now(),
+        seq_range: seq..=seq,
+        data: vec![0xde, 0xad, 0xbe, 0xef].into(),
+        ext_vals: ExtensionValues::default(),
+        // Vp9CodecExtra::default() has is_keyframe: false — str0m cannot
+        // detect the keyframe bit under SFrame (ciphertext payload).
+        codec_extra: CodecExtra::Vp9(Vp9CodecExtra::default()),
+        contiguous: true,
+        last_sender_info: None,
+        audio_start_of_talk_spurt: false,
+    }
 }

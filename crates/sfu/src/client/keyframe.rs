@@ -189,20 +189,46 @@ impl Client {
     /// Terminal handler for a propagated keyframe request: if this
     /// client actually owns an incoming track matching `mid_in`, pass
     /// the request through to str0m's writer.
+    ///
+    /// Per-track throttle: a publisher never sends more than one PLI per
+    /// [`KEYFRAME_REQUEST_MIN_GAP`] per track, regardless of how many
+    /// subscribers ask (reactive + subscribe + layer-switch). This mirrors
+    /// [`request_keyframe_throttled`]'s check on the same
+    /// `TrackInEntry::last_keyframe_request` field — the subscribe PLI
+    /// routes `Propagated::KeyframeRequest` → fanout → this handler,
+    /// bypassing `request_keyframe_throttled`, so the throttle must be
+    /// applied here too. Without it, N subscribers on one publisher
+    /// produce up to N PLI emissions per second (str0m's
+    /// `pending_request_keyframe` dedupes only within one RTCP cycle).
     pub fn handle_keyframe_request(&mut self, req: KeyframeRequest, mid_in: Mid) {
-        if !self.tracks_in.iter().any(|i| i.id.mid == mid_in) {
+        let Some(entry_idx) = self.tracks_in.iter().position(|i| i.id.mid == mid_in) else {
+            return;
+        };
+        // Per-track throttle — mirrors request_keyframe_throttled's
+        // elapsed < MIN_GAP check on the same field.
+        if self.tracks_in[entry_idx]
+            .last_keyframe_request
+            .map(|t| t.elapsed() < KEYFRAME_REQUEST_MIN_GAP)
+            .unwrap_or(false)
+        {
             return;
         }
         // Test-only: record the request's target RID before the writer
         // lookup (which no-ops on unnegotiated Rtc in tests). This is the
         // only observable signal that a Propagated::KeyframeRequest reached
-        // the publisher in the unit/integration test path.
+        // the publisher (and was NOT throttled) in the unit/integration
+        // test path.
         #[cfg(any(test, feature = "test-utils"))]
         {
             if let Ok(mut g) = self.keyframe_requests_received.lock() {
                 g.push(req.rid);
             }
         }
+        // Mark the throttle timestamp before the writer lookup so the
+        // per-track gap is enforced even when the writer is unavailable
+        // (unnegotiated Rtc in tests). In production the writer is always
+        // available for a negotiated track.
+        self.tracks_in[entry_idx].last_keyframe_request = Some(Instant::now());
         let Some(mut writer) = self.rtc.writer(mid_in) else {
             return;
         };
@@ -222,12 +248,7 @@ impl Client {
     /// `origin` / `mid_in` identify the publisher's incoming track to
     /// request on. `now` is the loop's clock (passed in so tests can
     /// control time without `Instant::now()`).
-    fn start_keyframe_wait(
-        &mut self,
-        origin: ClientId,
-        mid_in: Mid,
-        now: Instant,
-    ) {
+    fn start_keyframe_wait(&mut self, origin: ClientId, mid_in: Mid, now: Instant) {
         // De-dup: if a wait for this (origin, mid_in) already exists, don't
         // start a second one. This handles the case where multiple
         // renegotiation rounds transition the same track to Open.
@@ -295,32 +316,50 @@ impl Client {
     /// attempt budget is not yet spent, emit a retry PLI (into
     /// `self.pending_propagated`). If the budget IS spent (attempts ≥
     /// [`KEYFRAME_SUBSCRIBE_MAX_ATTEMPTS`] or the deadline elapsed),
-    /// record `budget_exhausted` and drop the wait.
+    /// record `budget_exhausted` and drop the wait. If the publisher
+    /// departed mid-wait (its `TrackIn` weak ref no longer upgrades),
+    /// record `publisher_gone` and drop the wait.
     ///
     /// Called once per UDP loop iteration from
     /// [`Registry::pump_ws_ctrl`][crate::registry::Registry::pump_ws_ctrl].
     /// `now` is the loop's clock.
     pub(crate) fn pump_keyframe_waits(&mut self, now: Instant) {
-        // Drain-and-rebuild: remove exhausted waits, emit retries for the
-        // rest. Iterate by index and track which to remove.
-        let mut to_remove: Vec<usize> = Vec::new();
+        // Drain-and-rebuild: remove exhausted/gone waits, emit retries for
+        // the rest. Iterate by index and track which to remove + outcome.
+        let mut to_remove: Vec<(usize, &'static str)> = Vec::new();
         for i in 0..self.keyframe_waits.len() {
             let wait = &mut self.keyframe_waits[i];
 
             // Deadline check (secondary bound).
             if now.duration_since(wait.started_at) >= KEYFRAME_SUBSCRIBE_DEADLINE {
-                to_remove.push(i);
+                to_remove.push((i, "budget_exhausted"));
                 continue;
             }
 
             // Attempt budget check (primary bound).
             if wait.attempts >= KEYFRAME_SUBSCRIBE_MAX_ATTEMPTS {
-                to_remove.push(i);
+                to_remove.push((i, "budget_exhausted"));
                 continue;
             }
 
             // Retry interval throttle — only emit if MIN_GAP has elapsed.
             if now.duration_since(wait.last_request_at) < KEYFRAME_REQUEST_MIN_GAP {
+                continue;
+            }
+
+            // Publisher-gone check: before emitting a retry, verify the
+            // publisher's TrackIn is still alive. If the publisher departed
+            // mid-wait, fanout finds no matching client and drops the PLI
+            // silently; without this check the wait would run the full
+            // budget → budget_exhausted, indistinguishable from "publisher
+            // ignoring PLIs". End with a distinct outcome instead.
+            let publisher_alive = self.tracks_out.iter().any(|o| {
+                o.track_in
+                    .upgrade()
+                    .is_some_and(|t| t.origin == wait.origin && t.mid == wait.mid_in)
+            });
+            if !publisher_alive {
+                to_remove.push((i, "publisher_gone"));
                 continue;
             }
 
@@ -330,12 +369,13 @@ impl Client {
                 rid: self.chosen_rid,
                 kind: KeyframeRequestKind::Pli,
             };
-            self.pending_propagated.push_back(Propagated::KeyframeRequest(
-                self.id,
-                req,
-                wait.origin,
-                wait.mid_in,
-            ));
+            self.pending_propagated
+                .push_back(Propagated::KeyframeRequest(
+                    self.id,
+                    req,
+                    wait.origin,
+                    wait.mid_in,
+                ));
             wait.last_request_at = now;
             wait.attempts += 1;
 
@@ -345,22 +385,33 @@ impl Client {
                 .inc();
         }
 
-        // Remove exhausted waits in reverse order to preserve indices.
-        // Record `budget_exhausted` for each removed wait.
-        for &i in to_remove.iter().rev() {
+        // Remove exhausted/gone waits in reverse order to preserve indices.
+        // Record the outcome metric for each.
+        for &(i, outcome) in to_remove.iter().rev() {
             let wait = self.keyframe_waits.remove(i);
             self.metrics
                 .sfu_keyframe_on_subscribe_outcome_total
-                .with_label_values(&["budget_exhausted"])
+                .with_label_values(&[outcome])
                 .inc();
-            tracing::warn!(
-                client = *self.id,
-                origin = *wait.origin,
-                mid_in = %wait.mid_in,
-                attempts = wait.attempts,
-                elapsed_ms = now.duration_since(wait.started_at).as_millis(),
-                "issue #618: keyframe-wait budget exhausted — subscriber may see black video"
-            );
+            match outcome {
+                "budget_exhausted" => tracing::warn!(
+                    client = *self.id,
+                    origin = *wait.origin,
+                    mid_in = %wait.mid_in,
+                    attempts = wait.attempts,
+                    elapsed_ms = now.duration_since(wait.started_at).as_millis(),
+                    "issue #618: keyframe-wait budget exhausted — subscriber may see black video"
+                ),
+                "publisher_gone" => tracing::info!(
+                    client = *self.id,
+                    origin = *wait.origin,
+                    mid_in = %wait.mid_in,
+                    attempts = wait.attempts,
+                    elapsed_ms = now.duration_since(wait.started_at).as_millis(),
+                    "issue #618: keyframe-wait ended — publisher departed mid-wait"
+                ),
+                _ => {}
+            }
         }
     }
 
@@ -374,10 +425,43 @@ impl Client {
     /// `data` is the forwarded packet. Uses
     /// [`MediaData::is_keyframe`][str0m::media::MediaData::is_keyframe]
     /// (codec-agnostic — H264/H265/H266/VP8/VP9/AV1) to detect keyframes.
+    ///
+    /// SFrame collapse: for AV1 and VP9, str0m's keyframe detection
+    /// requires cleartext bitstream parsing, which SFrame encrypts.
+    /// `is_keyframe()` is therefore always false for these codecs under
+    /// SFrame, and the wait would run the full budget → `budget_exhausted`
+    /// on every subscribe. When we observe the first media packet for a
+    /// wait whose codec is AV1 or VP9, short-circuit the wait with
+    /// `codec_unobservable` instead. The keyframe is forwarded via
+    /// `handle_media_data_out` regardless of the wait, so video renders.
+    /// This collapses back to normal observation once `sframe-ratchet`
+    /// exposes the AV1/VP9 keyframe byte — remove this branch and the
+    /// `is_keyframe()` path handles it.
     pub(crate) fn observe_keyframe(&mut self, origin: ClientId, data: &str0m::media::MediaData) {
-        if !data.is_keyframe() {
+        if data.is_keyframe() {
+            self.terminate_waits(origin, data.mid, "observed", true);
             return;
         }
+
+        // SFrame-collapsed observation for AV1/VP9 — see doc comment.
+        let codec = data.params.spec().codec;
+        if matches!(codec, str0m::format::Codec::Av1 | str0m::format::Codec::Vp9) {
+            self.terminate_waits(origin, data.mid, "codec_unobservable", false);
+        }
+
+        // Non-keyframe packet for an observable codec — wait continues.
+    }
+
+    /// Remove all keyframe-waits matching `(origin, mid)` and record the
+    /// given outcome. When `record_time_to_first` is true, also observe
+    /// the wall-clock duration in the time-to-first-keyframe histogram.
+    fn terminate_waits(
+        &mut self,
+        origin: ClientId,
+        mid: Mid,
+        outcome: &'static str,
+        record_time_to_first: bool,
+    ) {
         let now = Instant::now();
         // Collect the indices of waits matching (origin, mid). There should
         // be at most one per (origin, mid_in) due to start_keyframe_wait's
@@ -386,7 +470,7 @@ impl Client {
             .keyframe_waits
             .iter()
             .enumerate()
-            .filter(|(_, w)| w.origin == origin && w.mid_in == data.mid)
+            .filter(|(_, w)| w.origin == origin && w.mid_in == mid)
             .map(|(i, _)| i)
             .collect();
         if matching.is_empty() {
@@ -397,19 +481,22 @@ impl Client {
             let wait = self.keyframe_waits.remove(i);
             self.metrics
                 .sfu_keyframe_on_subscribe_outcome_total
-                .with_label_values(&["observed"])
+                .with_label_values(&[outcome])
                 .inc();
             let elapsed = now.duration_since(wait.started_at).as_secs_f64();
-            self.metrics
-                .sfu_keyframe_on_subscribe_time_to_first_seconds
-                .observe(elapsed);
+            if record_time_to_first {
+                self.metrics
+                    .sfu_keyframe_on_subscribe_time_to_first_seconds
+                    .observe(elapsed);
+            }
             tracing::debug!(
                 client = *self.id,
                 origin = *wait.origin,
                 mid_in = %wait.mid_in,
                 attempts = wait.attempts,
+                outcome = outcome,
                 time_to_first_ms = elapsed * 1000.0,
-                "issue #618: keyframe observed — wait terminated"
+                "issue #618: keyframe-wait terminated"
             );
         }
     }
@@ -581,11 +668,14 @@ mod issue_618_tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use str0m::media::{MediaKind, Mid, Rid};
+    use str0m::media::{MediaKind, Mid};
 
-    use super::super::test_seed::{make_media_data_keyframe, new_client, seed_track_in};
+    use super::super::test_seed::{
+        make_media_data_keyframe, make_media_data_vp9, new_client, seed_track_in,
+    };
     use super::super::tracks::{TrackOut, TrackOutState};
     use super::Client;
+    use crate::fanout::fanout_for_tests;
     use crate::propagate::{ClientId, Propagated};
 
     /// Wire `subscriber`'s `tracks_out` to `publisher`'s seeded video
@@ -604,9 +694,7 @@ mod issue_618_tests {
 
     /// Drain `Propagated::KeyframeRequest` events from a client's
     /// `pending_propagated`, returning `(count, origins, mids)`.
-    fn drain_pending_keyframe_reqs(
-        client: &mut Client,
-    ) -> (usize, Vec<ClientId>, Vec<Mid>) {
+    fn drain_pending_keyframe_reqs(client: &mut Client) -> (usize, Vec<ClientId>, Vec<Mid>) {
         let mut origins = Vec::new();
         let mut mids = Vec::new();
         let mut count = 0usize;
@@ -644,7 +732,11 @@ mod issue_618_tests {
 
         let (count, origins, mids) = drain_pending_keyframe_reqs(&mut subscriber);
         assert_eq!(count, 1, "exactly one initial PLI for one Open video track");
-        assert_eq!(origins, vec![pub_origin], "PLI routed to publisher's ClientId");
+        assert_eq!(
+            origins,
+            vec![pub_origin],
+            "PLI routed to publisher's ClientId"
+        );
         assert_eq!(mids, vec![pub_mid], "PLI targets publisher's incoming mid");
 
         // De-dup: calling again must NOT emit a second PLI for the same
@@ -726,8 +818,7 @@ mod issue_618_tests {
         }
         // 3 retries in the loop + 1 before = 4 total retries.
         assert_eq!(
-            loop_retries,
-            3,
+            loop_retries, 3,
             "3 retries in the loop (attempts 3,4,5); 1st retry was before the loop"
         );
 
@@ -918,10 +1009,173 @@ mod issue_618_tests {
         assert_eq!(count, 0, "no retries for a terminated wait");
     }
 
-    /// Verify that `Rid` is unused in these tests (suppresses unused import
-    /// warning if the compiler doesn't see a use).
+    // ── Review fix tests: per-track throttle, codec_unobservable, publisher_gone ──
+
+    /// F1 (review): the publisher emits at most one PLI per
+    /// `KEYFRAME_REQUEST_MIN_GAP` regardless of subscriber count. N ≥ 2
+    /// subscribers each emit an initial PLI; the per-track throttle in
+    /// `handle_keyframe_request` must suppress all but the first.
+    ///
+    /// Falsification: remove the per-track throttle check in
+    /// `handle_keyframe_request` → all 3 PLIs are recorded →
+    /// `received.len() == 3` → assertion fails.
     #[test]
-    fn _rid_import_used() {
-        let _ = Rid::from("q");
+    fn f1_per_track_throttle_caps_pli_across_subscribers() {
+        let mut publisher = new_client(ClientId(900));
+        let track = seed_track_in(&mut publisher, 1, MediaKind::Video);
+
+        // N ≥ 2 subscribers on one publisher.
+        let mut all_clients: Vec<Client> = vec![publisher];
+        for i in 0..3u64 {
+            let mut s = new_client(ClientId(901 + i));
+            wire_open_video_track(&mut s, &track);
+            all_clients.push(s);
+        }
+        // all_clients[0] = publisher, [1..=3] = subscribers
+
+        // Start keyframe waits on all subscribers — each emits one
+        // initial PLI into pending_propagated.
+        let now = Instant::now();
+        for s in all_clients.iter_mut().skip(1) {
+            s.start_keyframe_waits_for_open_video_tracks(now);
+        }
+
+        // Collect all initial PLIs from subscribers' pending_propagated.
+        let mut plis: Vec<Propagated> = Vec::new();
+        for s in all_clients.iter_mut().skip(1) {
+            while let Some(p) = s.pending_propagated.pop_front() {
+                plis.push(p);
+            }
+        }
+        assert_eq!(plis.len(), 3, "3 subscribers → 3 initial PLIs");
+
+        // Fanout each PLI — each routes to the publisher (source == publisher.id).
+        for p in &plis {
+            fanout_for_tests(p, &mut all_clients);
+        }
+
+        // The per-track throttle in handle_keyframe_request must cap the
+        // publisher's PLI emissions to 1 per KEYFRAME_REQUEST_MIN_GAP,
+        // regardless of how many subscribers asked.
+        let received = all_clients[0].keyframe_requests_received_for_tests();
+        assert_eq!(
+            received.len(),
+            1,
+            "per-track throttle: only 1 PLI reaches publisher regardless of subscriber count"
+        );
+    }
+
+    /// F2 (review): an unobservable codec (VP9 under SFrame) ends as
+    /// `codec_unobservable`, not `budget_exhausted`, and emits only the
+    /// initial PLI (no retries).
+    ///
+    /// Falsification: restore the old `observe_keyframe` path (remove the
+    /// AV1/VP9 short-circuit) → the wait never terminates by observation
+    /// → pump runs the full budget → `budget_exhausted` increments and
+    /// `codec_unobservable` stays 0 → assertion fails.
+    #[test]
+    fn f2_unobservable_codec_terminates_with_codec_unobservable() {
+        let mut publisher = new_client(ClientId(810));
+        let track = seed_track_in(&mut publisher, 1, MediaKind::Video);
+        let pub_origin = publisher.id;
+
+        let mut subscriber = new_client(ClientId(811));
+        wire_open_video_track(&mut subscriber, &track);
+
+        let t0 = Instant::now();
+        subscriber.start_keyframe_waits_for_open_video_tracks(t0);
+
+        // Drain the initial PLI.
+        let (initial_count, _, _) = drain_pending_keyframe_reqs(&mut subscriber);
+        assert_eq!(initial_count, 1, "initial PLI emitted");
+
+        // Observe a VP9 non-keyframe packet — is_keyframe() returns false,
+        // but the codec is VP9 (unobservable under SFrame). The wait must
+        // short-circuit with codec_unobservable.
+        let vp9_data = make_media_data_vp9(1, None);
+        subscriber.observe_keyframe(pub_origin, &vp9_data);
+
+        // The wait should be terminated with codec_unobservable.
+        assert!(
+            subscriber.keyframe_waits.is_empty(),
+            "wait terminated for unobservable codec"
+        );
+
+        // Metric: codec_unobservable incremented.
+        let metrics = subscriber.metrics_for_tests().clone();
+        let unobservable = metrics
+            .sfu_keyframe_on_subscribe_outcome_total
+            .with_label_values(&["codec_unobservable"])
+            .get();
+        assert_eq!(unobservable, 1, "codec_unobservable metric incremented");
+
+        // Metric: budget_exhausted NOT incremented.
+        let exhausted = metrics
+            .sfu_keyframe_on_subscribe_outcome_total
+            .with_label_values(&["budget_exhausted"])
+            .get();
+        assert_eq!(
+            exhausted, 0,
+            "budget_exhausted NOT incremented for unobservable codec"
+        );
+
+        // Only the initial PLI was emitted — no retries.
+        let retry = metrics
+            .sfu_keyframe_on_subscribe_requests_total
+            .with_label_values(&["retry"])
+            .get();
+        assert_eq!(retry, 0, "no retries for unobservable codec");
+    }
+
+    /// F3 (review): a departed publisher ends as `publisher_gone`, not
+    /// `budget_exhausted`.
+    ///
+    /// Falsification: remove the publisher-gone check in
+    /// `pump_keyframe_waits` → the wait runs the full budget →
+    /// `budget_exhausted` increments and `publisher_gone` stays 0 →
+    /// assertion fails.
+    #[test]
+    fn f3_publisher_gone_ends_wait_with_distinct_outcome() {
+        let mut publisher = new_client(ClientId(820));
+        let track = seed_track_in(&mut publisher, 1, MediaKind::Video);
+
+        let mut subscriber = new_client(ClientId(821));
+        wire_open_video_track(&mut subscriber, &track);
+
+        let t0 = Instant::now();
+        subscriber.start_keyframe_waits_for_open_video_tracks(t0);
+        let _ = drain_pending_keyframe_reqs(&mut subscriber);
+
+        // Simulate publisher departure: drop all strong refs to the
+        // TrackIn so the subscriber's Weak<TrackIn> no longer upgrades.
+        drop(track);
+        publisher.tracks_in.clear();
+        drop(publisher);
+
+        // Pump past the MIN_GAP — the publisher-gone check should fire
+        // before any retry is emitted.
+        subscriber.pump_keyframe_waits(t0 + Duration::from_secs(1));
+
+        // The wait should be removed with publisher_gone.
+        assert!(
+            subscriber.keyframe_waits.is_empty(),
+            "wait ended after publisher gone"
+        );
+
+        let metrics = subscriber.metrics_for_tests().clone();
+        let publisher_gone = metrics
+            .sfu_keyframe_on_subscribe_outcome_total
+            .with_label_values(&["publisher_gone"])
+            .get();
+        assert_eq!(publisher_gone, 1, "publisher_gone metric incremented");
+
+        let exhausted = metrics
+            .sfu_keyframe_on_subscribe_outcome_total
+            .with_label_values(&["budget_exhausted"])
+            .get();
+        assert_eq!(
+            exhausted, 0,
+            "budget_exhausted NOT incremented when publisher is gone"
+        );
     }
 }
