@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use str0m::format::{Codec, CodecExtra, CodecSpec, FormatParams, PayloadParams};
+use str0m::format::{Codec, CodecExtra, CodecSpec, FormatParams, PayloadParams, Vp8CodecExtra};
 use str0m::media::{Frequency, MediaData, MediaKind, MediaTime, Mid, Pt, Rid};
 use str0m::rtp::{ExtensionValues, SeqNo};
 use str0m::Rtc;
@@ -155,4 +155,22 @@ pub fn make_media_data(mid_tag: u8, rid: Option<Rid>) -> MediaData {
         last_sender_info: None,
         audio_start_of_talk_spurt: false,
     }
+}
+
+/// Build a synthetic `MediaData` whose `is_keyframe()` returns `true`.
+/// Uses `CodecExtra::Vp8` with `is_keyframe: true` — the codec-agnostic
+/// `MediaData::is_keyframe()` checks this field. Used by the issue #618
+/// keyframe-wait tests to simulate a publisher sending a keyframe after
+/// a PLI request.
+pub fn make_media_data_keyframe(mid_tag: u8, rid: Option<Rid>) -> MediaData {
+    let mut data = make_media_data(mid_tag, rid);
+    data.codec_extra = CodecExtra::Vp8(Vp8CodecExtra {
+        discardable: false,
+        sync: false,
+        layer_index: 0,
+        picture_id: Some(0),
+        tl0_picture_id: Some(0),
+        is_keyframe: true,
+    });
+    data
 }

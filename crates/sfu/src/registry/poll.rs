@@ -19,10 +19,27 @@ impl Registry {
     /// Phase J M2: drain WS control messages (answer-renegotiate) from every client.
     /// Called at the top of the UDP loop before `poll_all` so accepted answers are
     /// visible to str0m in the same iteration.
+    ///
+    /// Issue #618: also pumps the subscribe-triggered keyframe-wait loop for each
+    /// client (emits retry PLIs until a keyframe is observed or the attempt budget
+    /// is spent) and drains `pending_propagated` (initial PLIs from
+    /// `accept_renegotiation_answer` → `start_keyframe_waits_for_open_video_tracks`)
+    /// into `self.to_propagate` so `fanout_pending` routes them.
     pub fn pump_ws_ctrl(&mut self) {
+        let now = Instant::now();
         for client in self.clients.iter_mut() {
             client.drain_ws_ctrl();
+            // Issue #618: pump keyframe-wait retries. Events go into the
+            // client's pending_propagated, drained below.
+            client.pump_keyframe_waits(now);
         }
+        // Drain each client's pending_propagated into the registry's
+        // to_propagate so fanout_pending routes the PLI requests.
+        let mut pending = std::collections::VecDeque::new();
+        for client in self.clients.iter_mut() {
+            pending.append(&mut client.pending_propagated);
+        }
+        self.to_propagate.append(&mut pending);
     }
 
     /// Poll every client until each returns a `Timeout`, queuing

@@ -114,6 +114,12 @@ impl Client {
             sfu_events_cid: None,
             last_emitted_tier: None,
             pending_tier_emit: None,
+            // Issue #618: empty at construction; populated when a video
+            // track transitions to Open after renegotiation.
+            keyframe_waits: Vec::new(),
+            // Issue #618: empty at construction; drained every loop iteration
+            // by Registry::pump_ws_ctrl.
+            pending_propagated: std::collections::VecDeque::new(),
         }
     }
 

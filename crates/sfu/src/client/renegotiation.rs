@@ -323,6 +323,14 @@ impl Client {
             .with_label_values(&["ok"])
             .inc();
 
+        // Issue #618: now that tracks have transitioned to Open, start
+        // keyframe-waits for every Open video track. This emits the initial
+        // PLI request(s) into `pending_propagated`, which the registry drains
+        // after pump_ws_ctrl and routes via fanout_pending. The pump loop
+        // (pump_keyframe_waits) retries until a keyframe is observed or the
+        // attempt budget is spent.
+        self.start_keyframe_waits_for_open_video_tracks(Instant::now());
+
         // Drain the next queued track open (sequential pipeline).
         if let Some(next) = self.renegotiation_queue.pop_front() {
             self.start_renegotiation(next);

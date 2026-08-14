@@ -571,6 +571,32 @@ pub struct SfuMetrics {
     /// the call site; the metric itself is always registered so the baseline
     /// is 0 at startup (mirrors `sfu_dd_temporal_drops_total`).
     pub bwe_temporal_cap_total: IntCounterVec,
+
+    // ── Issue #618: subscribe-triggered keyframe loop ───────────────────────
+    /// Count of PLI requests emitted by the subscribe-triggered keyframe
+    /// loop (issue #618). Labels: `attempt` ∈ `{"initial", "retry"}`.
+    /// `initial` = the first PLI sent when a video track transitions to
+    /// Open; `retry` = subsequent PLIs sent by `pump_keyframe_waits` until
+    /// a keyframe is observed or the attempt budget is spent. The ratio
+    /// `retry / initial` is the "PLI amplification factor" — a healthy
+    /// loop converges on the initial request; a high retry rate indicates
+    /// the publisher is not responding to PLIs (encoder stall, relay
+    /// upstream issue, or the keyframe observation path is broken).
+    pub sfu_keyframe_on_subscribe_requests_total: IntCounterVec,
+    /// Final outcome of the subscribe-triggered keyframe loop (issue
+    /// #618). Labels: `outcome` ∈ `{"observed", "budget_exhausted"}`.
+    /// `observed` = a keyframe was observed within the attempt budget;
+    /// `budget_exhausted` = the loop gave up after
+    /// `KEYFRAME_SUBSCRIBE_MAX_ATTEMPTS` or the deadline. A rising
+    /// `budget_exhausted` rate is the black-screen signature — the
+    /// subscriber never got a decodable frame.
+    pub sfu_keyframe_on_subscribe_outcome_total: IntCounterVec,
+    /// Wall-clock duration from the first PLI emission to the observed
+    /// keyframe, for subscribe-triggered loops that converged (issue
+    /// #618). Only observed for `outcome="observed"` outcomes; exhausted
+    /// loops are not recorded (no keyframe to time). Suggested alert:
+    /// p99 > 5s indicates a slow publisher response.
+    pub sfu_keyframe_on_subscribe_time_to_first_seconds: Histogram,
 }
 
 impl SfuMetrics {
@@ -1482,6 +1508,54 @@ impl SfuMetrics {
             .with_label_values(&["uncapped"])
             .get();
 
+        // ── Issue #618: subscribe-triggered keyframe loop metrics ──────────
+        let sfu_keyframe_on_subscribe_requests_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_keyframe_on_subscribe_requests_total",
+                "PLI requests emitted by the subscribe-triggered keyframe loop \
+                 (issue #618). attempt=initial = first PLI on track Open; \
+                 attempt=retry = subsequent PLIs until keyframe observed or \
+                 budget spent. retry/initial ratio = PLI amplification factor."
+            ),
+            &["attempt"],
+        )
+        .context("sfu_keyframe_on_subscribe_requests_total")?);
+        let _ = sfu_keyframe_on_subscribe_requests_total
+            .with_label_values(&["initial"])
+            .get();
+        let _ = sfu_keyframe_on_subscribe_requests_total
+            .with_label_values(&["retry"])
+            .get();
+
+        let sfu_keyframe_on_subscribe_outcome_total = reg!(IntCounterVec::new(
+            Opts::new(
+                "sfu_keyframe_on_subscribe_outcome_total",
+                "Final outcome of the subscribe-triggered keyframe loop (issue \
+                 #618). outcome=observed = keyframe seen within budget; \
+                 outcome=budget_exhausted = loop gave up. Rising \
+                 budget_exhausted rate = black-screen signature."
+            ),
+            &["outcome"],
+        )
+        .context("sfu_keyframe_on_subscribe_outcome_total")?);
+        let _ = sfu_keyframe_on_subscribe_outcome_total
+            .with_label_values(&["observed"])
+            .get();
+        let _ = sfu_keyframe_on_subscribe_outcome_total
+            .with_label_values(&["budget_exhausted"])
+            .get();
+
+        let sfu_keyframe_on_subscribe_time_to_first_seconds = reg!(Histogram::with_opts(
+            HistogramOpts::new(
+                "sfu_keyframe_on_subscribe_time_to_first_seconds",
+                "Wall-clock duration from first PLI to observed keyframe for \
+                 subscribe-triggered loops that converged (issue #618). Only \
+                 recorded for outcome=observed. p99 > 5s = slow publisher.",
+            )
+            .buckets(vec![0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0]),
+        )
+        .context("sfu_keyframe_on_subscribe_time_to_first_seconds")?);
+
         Ok(Self {
             registry: Arc::new(registry),
             active_rooms,
@@ -1562,6 +1636,9 @@ impl SfuMetrics {
             sfu_dd_frames_total,
             sfu_dd_temporal_drops_total,
             bwe_temporal_cap_total,
+            sfu_keyframe_on_subscribe_requests_total,
+            sfu_keyframe_on_subscribe_outcome_total,
+            sfu_keyframe_on_subscribe_time_to_first_seconds,
         })
     }
 
