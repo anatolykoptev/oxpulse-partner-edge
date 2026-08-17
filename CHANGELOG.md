@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.27](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.26...v0.16.27) (2026-08-17)
+
+
+### Bug Fixes
+
+* **probes:** bound turnutils probes INSIDE the coturn container ([#624](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/624)) ([bff79fc](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/bff79fcf392c77c817b2f4fcaee783db5f5129bc))
+
 ## [0.16.26](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.25...v0.16.26) (2026-08-14)
 
 
