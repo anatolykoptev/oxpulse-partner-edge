@@ -348,7 +348,10 @@ _probe_peer_udp_stun() {
     # layers, and `timeout 0` means "no limit" — which would silently
     # resurrect the leak this fix closes.
     local stun_timeout="${OXPULSE_PEER_UDP_STUN_TIMEOUT:-5}"
-    [[ "$stun_timeout" =~ ^[1-9][0-9]*$ ]] || stun_timeout=5
+    if ! [[ "$stun_timeout" =~ ^[1-9][0-9]*$ ]]; then
+        warn "peer-probe udp: OXPULSE_PEER_UDP_STUN_TIMEOUT='$stun_timeout' is not a positive integer — using 5s"
+        stun_timeout=5
+    fi
     stun_out=$(timeout "$stun_timeout" \
         docker exec oxpulse-partner-coturn \
         timeout "$stun_timeout" \
