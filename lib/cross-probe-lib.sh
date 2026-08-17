@@ -328,8 +328,33 @@ _probe_peer_udp_stun() {
     # (5s probe + 8s POST) on top of the existing TLS leg, giving a worst-case
     # per-peer total of 32s (was 19s) and a full cycle cap=2 worst case of:
     #   32×2 + 3×2 + 10 = 80s ≤ TimeoutStartSec=90.
-    stun_out=$(timeout "${OXPULSE_PEER_UDP_STUN_TIMEOUT:-5}" \
+    # The bounding timeout runs INSIDE the container: an outer
+    # `timeout N docker exec …` kills only the docker CLIENT, and the exec'd
+    # process keeps running in the container forever. turnutils_stunclient
+    # waits indefinitely when the Binding gets no answer, so every timed-out
+    # probe leaked one process — 120 leaked stunclients (oldest 2.8 days,
+    # each squatting a UDP port in coturn's 49152-65535 relay range) found on
+    # an edge on 2026-08-17. Verified on the live image (coturn:4.6-alpine,
+    # BusyBox 1.37 timeout): SIGTERM reaps a hanging stunclient, rc=143, no
+    # survivors — and 124|143 both classify as timeout below.
+    #
+    # The outer timeout keeps the SAME value: the in-container timeout is not
+    # a child of the docker client, so whichever layer fires first, the
+    # in-container process is still reaped by its own bound. An equal outer
+    # keeps the service-budget model at :512-552 true (5s per UDP probe).
+    #
+    # The env override is validated to a positive integer because it now
+    # feeds arithmetic-free but busybox-`timeout`-parsed positions in BOTH
+    # layers, and `timeout 0` means "no limit" — which would silently
+    # resurrect the leak this fix closes.
+    local stun_timeout="${OXPULSE_PEER_UDP_STUN_TIMEOUT:-5}"
+    if ! [[ "$stun_timeout" =~ ^[1-9][0-9]*$ ]]; then
+        warn "peer-probe udp: OXPULSE_PEER_UDP_STUN_TIMEOUT='$stun_timeout' is not a positive integer — using 5s"
+        stun_timeout=5
+    fi
+    stun_out=$(timeout "$stun_timeout" \
         docker exec oxpulse-partner-coturn \
+        timeout "$stun_timeout" \
         turnutils_stunclient "$dial_ip" -p "$stun_port" \
         2>&1)
     exit_code=$?

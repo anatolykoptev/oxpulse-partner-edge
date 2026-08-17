@@ -1067,6 +1067,61 @@ else
 fi
 trap - EXIT; rm -rf "$T17"
 
+# ── Test 18: in-container timeout precedes turnutils_stunclient ───────────────
+# 2026-08-17 leak class: `timeout N docker exec …` kills only the docker CLIENT;
+# the exec'd process keeps running in the container. turnutils_stunclient waits
+# forever when the Binding gets no answer, so every timed-out probe leaked one
+# process (120 found on one edge, oldest 2.8 days, squatting UDP ports inside
+# coturn's 49152-65535 relay range). The fix bounds the probe INSIDE the
+# container: the docker-exec argv must be `… exec oxpulse-partner-coturn
+# timeout <n> turnutils_stunclient …`. This test records the docker stub's argv
+# and asserts that shape — it goes RED on the pre-fix argv (no inner timeout).
+T18=$(mktemp -d)
+trap 'rm -rf "$T18"' EXIT
+make_bin "$T18"; mkdir -p "$T18/etc" "$T18/var"
+write_node_config "$T18/etc"
+printf '[{"node_id":"peer-t18","turns_host":"api-t18.example.com","turns_port":443}]\n' \
+    > "$T18/var/peer-roster.json"
+cat > "$T18/getent" <<'STUB'
+#!/bin/sh
+[ "$2" = "api-t18.example.com" ] && { echo "203.0.113.18 STREAM api-t18.example.com"; exit 0; }
+exit 2
+STUB
+chmod +x "$T18/getent"
+# docker stub: record full argv per invocation, then behave like T13's stub.
+# Unquoted heredoc delimiter: $T18 expands at stub-write time; the stub's own
+# runtime expansions ($*) are escaped.
+cat > "$T18/docker" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$T18/docker-argv.log"
+if [[ "\$*" == *"static-auth-secret"* ]]; then echo "t18-secret"; exit 0; fi
+if [[ "\$*" == *"turnutils_stunclient"* ]]; then echo "STUN response received"; exit 0; fi
+exit 1
+STUB
+chmod +x "$T18/docker"
+
+set +e
+PATH="$T18:/usr/bin:/bin" \
+    _NODE_CONFIG="$T18/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+    STATE_DIR="$T18/var" _PEER_ROSTER_FILE="$T18/var/peer-roster.json" \
+    OXPULSE_CROSS_PROBE_TOKEN="xprb_t18" OXPULSE_SERVICE_TOKEN="stkn_t18" \
+    OXPULSE_TURN_SECRET="t18-secret" OXPULSE_GETENT_BIN="$T18/getent" \
+    bash "$SCRIPT" --dry-run >/dev/null 2>&1
+set -e
+
+# grep -m1 (not `| head -1`) and a native [[ =~ ]] (not piped `grep -q`):
+# both piped forms are what test_pipefail_early_exit_guard.sh exists to ban.
+# [1-9][0-9]* — `timeout 0` means "no limit" and would resurrect the leak.
+STUN_ARGV18=$(grep -a -m1 'turnutils_stunclient' "$T18/docker-argv.log" 2>/dev/null || true)
+if [[ -z "$STUN_ARGV18" ]]; then
+    fail "test18: docker stub never saw turnutils_stunclient; argv log: $(cat "$T18/docker-argv.log" 2>/dev/null)"
+elif [[ "$STUN_ARGV18" =~ exec\ oxpulse-partner-coturn\ timeout\ [1-9][0-9]*\ turnutils_stunclient ]]; then
+    ok "test18: stunclient probe is bounded INSIDE the container (timeout precedes turnutils_stunclient)"
+else
+    fail "test18: no in-container timeout before turnutils_stunclient — the timed-out probe leaks in the container; argv: $STUN_ARGV18"
+fi
+trap - EXIT; rm -rf "$T18"
+
 echo
 echo "Cross-probe loop: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

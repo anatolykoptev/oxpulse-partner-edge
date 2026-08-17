@@ -1239,6 +1239,49 @@ rm -rf "$T21"
 bash -n "$SCRIPT" && ok "syntax check: oxpulse-channels-health-report.sh"
 
 echo
+# ── Test 22: ch4 uclient probe is bounded INSIDE the container ────────────────
+# Companion to cross-probe test18 (2026-08-17 leak class): an outer
+# `timeout N docker exec …` kills only the docker client; the exec'd
+# turnutils_uclient keeps running in the container when the Allocate gets no
+# answer. The normal-path probe must carry its bound in-container:
+# `… exec oxpulse-partner-coturn timeout <n> turnutils_uclient …`.
+# grep -m1 + native [[ =~ ]] keep this pipefail-guard-clean.
+T22=$(mktemp -d)
+trap 'rm -rf "$T22"' EXIT
+make_bin "$T22"
+mkdir -p "$T22/etc"
+write_node_config "$T22/etc" '{"id":"ch4"}'
+cat > "$T22/docker" <<STUB
+#!/bin/bash
+printf '%s\n' "\$*" >> "$T22/docker-argv.log"
+if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then
+    echo "probe-test-secret"
+    exit 0
+fi
+if [[ "\$*" == *"turnutils_uclient"* ]]; then exit 0; fi
+exit 1
+STUB
+chmod +x "$T22/docker"
+
+set +e
+PATH="$T22:/usr/bin:/bin" \
+    _NODE_CONFIG="$T22/etc/node-config.json" \
+    _TOKEN_LIB=/nonexistent \
+    OXPULSE_SERVICE_TOKEN="stkn_test" \
+    bash "$SCRIPT" --dry-run >/dev/null 2>&1
+set -e
+
+UCLIENT_ARGV22=$(grep -a -m1 'turnutils_uclient' "$T22/docker-argv.log" 2>/dev/null || true)
+if [[ -z "$UCLIENT_ARGV22" ]]; then
+    fail "test22: docker stub never saw turnutils_uclient; argv log: $(cat "$T22/docker-argv.log" 2>/dev/null)"
+elif [[ "$UCLIENT_ARGV22" =~ exec\ oxpulse-partner-coturn\ timeout\ [1-9][0-9]*\ turnutils_uclient ]]; then
+    ok "test22: uclient probe is bounded INSIDE the container (timeout precedes turnutils_uclient)"
+else
+    fail "test22: no in-container timeout before turnutils_uclient — a timed-out Allocate probe leaks in the container; argv: $UCLIENT_ARGV22"
+fi
+trap - EXIT
+rm -rf "$T22"
+
 if [[ "$FAIL" -eq 0 ]]; then
     echo "PASS: all $PASS checks passed"
     exit 0

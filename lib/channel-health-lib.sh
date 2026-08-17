@@ -442,8 +442,15 @@ probe_ch4() {
         # Capture combined output so the failure tail can be logged/classified
         # locally — the dispatch command-substitution swallows stderr, so the
         # next investigation would otherwise be blind to WHY the probe failed.
+        # Inner timeout: turnutils_uclient hangs indefinitely when the Allocate
+        # gets no answer, and an outer-only timeout kills just the docker
+        # client — the uclient keeps running in the container (the stunclient
+        # sibling leaked 120 processes this way; same class + live reap proof:
+        # cross-probe-lib.sh _probe_peer_udp_stun). Outer keeps the SAME 10s:
+        # the in-container process is reaped by its own bound regardless of
+        # which layer fires first, and the service-budget model stays true.
         uclient_out=$(timeout 10 docker exec oxpulse-partner-coturn \
-            turnutils_uclient \
+            timeout 10 turnutils_uclient \
                 -u "$turn_username" \
                 -w "$turn_password" \
                 -y -n 1 \
@@ -487,8 +494,10 @@ probe_ch4() {
         probe_mode="stun-degraded"
         warn "ch4: TURN secret unavailable — falling back to STUN Binding probe (degraded: no auth/quota coverage)"
         t0="${EPOCHREALTIME}"
+        # Inner timeout — stunclient waits forever with no Binding answer;
+        # same in-container-leak guard as the Allocate probe above.
         uclient_out=$(timeout 10 docker exec oxpulse-partner-coturn \
-            turnutils_stunclient "$probe_target" -p "$turn_port" \
+            timeout 10 turnutils_stunclient "$probe_target" -p "$turn_port" \
             2>&1)
         exit_code=$?
         t1="${EPOCHREALTIME}"
