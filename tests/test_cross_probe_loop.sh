@@ -1109,10 +1109,13 @@ PATH="$T18:/usr/bin:/bin" \
     bash "$SCRIPT" --dry-run >/dev/null 2>&1
 set -e
 
-STUN_ARGV18=$(grep -a 'turnutils_stunclient' "$T18/docker-argv.log" 2>/dev/null | head -1)
+# grep -m1 (not `| head -1`) and a native [[ =~ ]] (not piped `grep -q`):
+# both piped forms are what test_pipefail_early_exit_guard.sh exists to ban.
+# [1-9][0-9]* — `timeout 0` means "no limit" and would resurrect the leak.
+STUN_ARGV18=$(grep -a -m1 'turnutils_stunclient' "$T18/docker-argv.log" 2>/dev/null || true)
 if [[ -z "$STUN_ARGV18" ]]; then
     fail "test18: docker stub never saw turnutils_stunclient; argv log: $(cat "$T18/docker-argv.log" 2>/dev/null)"
-elif printf '%s' "$STUN_ARGV18" | grep -qE 'exec oxpulse-partner-coturn timeout [0-9]+ turnutils_stunclient'; then
+elif [[ "$STUN_ARGV18" =~ exec\ oxpulse-partner-coturn\ timeout\ [1-9][0-9]*\ turnutils_stunclient ]]; then
     ok "test18: stunclient probe is bounded INSIDE the container (timeout precedes turnutils_stunclient)"
 else
     fail "test18: no in-container timeout before turnutils_stunclient — the timed-out probe leaks in the container; argv: $STUN_ARGV18"

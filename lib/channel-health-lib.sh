@@ -324,12 +324,8 @@ _resolve_coturn_probe_target() {
     # the value; the public part is everything before the first '/' (NAT form
     # "public/private"); no '/' → the whole value is public.
     local ext_line
-    # Inner timeout: an outer `timeout N docker exec …` kills only the docker
-    # client — the exec'd process keeps running in the container (the leak
-    # class fixed fleet-wide on 2026-08-17; see cross-probe-lib.sh
-    # _probe_peer_udp_stun for the full story).
-    ext_line=$(timeout 12 docker exec oxpulse-partner-coturn \
-        timeout 10 sed -n 's/^external-ip=//p' \
+    ext_line=$(timeout 10 docker exec oxpulse-partner-coturn \
+        sed -n 's/^external-ip=//p' \
         /etc/coturn/turnserver.conf 2>/dev/null | head -n1 || true)
     if [[ -n "$ext_line" ]]; then
         target="${ext_line%%/*}"
@@ -392,9 +388,8 @@ probe_ch4() {
     if [[ -n "${OXPULSE_TURN_SECRET:-}" ]]; then
         turn_secret="$OXPULSE_TURN_SECRET"
     else
-        # Inner timeout — same in-container-leak guard as the ext_line read above.
-        turn_secret=$(timeout 12 docker exec oxpulse-partner-coturn \
-            timeout 10 sed -n 's/^static-auth-secret=//p' \
+        turn_secret=$(timeout 10 docker exec oxpulse-partner-coturn \
+            sed -n 's/^static-auth-secret=//p' \
             /etc/coturn/turnserver.conf 2>/dev/null || true)
     fi
 
@@ -450,9 +445,11 @@ probe_ch4() {
         # Inner timeout: turnutils_uclient hangs indefinitely when the Allocate
         # gets no answer, and an outer-only timeout kills just the docker
         # client — the uclient keeps running in the container (the stunclient
-        # sibling leaked 120 processes this way; same class, see
-        # cross-probe-lib.sh _probe_peer_udp_stun).
-        uclient_out=$(timeout 12 docker exec oxpulse-partner-coturn \
+        # sibling leaked 120 processes this way; same class + live reap proof:
+        # cross-probe-lib.sh _probe_peer_udp_stun). Outer keeps the SAME 10s:
+        # the in-container process is reaped by its own bound regardless of
+        # which layer fires first, and the service-budget model stays true.
+        uclient_out=$(timeout 10 docker exec oxpulse-partner-coturn \
             timeout 10 turnutils_uclient \
                 -u "$turn_username" \
                 -w "$turn_password" \
@@ -499,7 +496,7 @@ probe_ch4() {
         t0="${EPOCHREALTIME}"
         # Inner timeout — stunclient waits forever with no Binding answer;
         # same in-container-leak guard as the Allocate probe above.
-        uclient_out=$(timeout 12 docker exec oxpulse-partner-coturn \
+        uclient_out=$(timeout 10 docker exec oxpulse-partner-coturn \
             timeout 10 turnutils_stunclient "$probe_target" -p "$turn_port" \
             2>&1)
         exit_code=$?
