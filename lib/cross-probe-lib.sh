@@ -328,8 +328,17 @@ _probe_peer_udp_stun() {
     # (5s probe + 8s POST) on top of the existing TLS leg, giving a worst-case
     # per-peer total of 32s (was 19s) and a full cycle cap=2 worst case of:
     #   32×2 + 3×2 + 10 = 80s ≤ TimeoutStartSec=90.
-    stun_out=$(timeout "${OXPULSE_PEER_UDP_STUN_TIMEOUT:-5}" \
+    # The bounding timeout runs INSIDE the container: an outer
+    # `timeout N docker exec …` kills only the docker CLIENT, and the exec'd
+    # process keeps running in the container forever. turnutils_stunclient
+    # waits indefinitely when the Binding gets no answer, so every timed-out
+    # probe leaked one process — 120 leaked stunclients (oldest 2.8 days,
+    # each squatting a UDP port in coturn's 49152-65535 relay range) found on
+    # an edge on 2026-08-17. The outer timeout stays as a +2s belt for a hung
+    # docker daemon; exit 124 still classifies as timeout either way.
+    stun_out=$(timeout "$(( ${OXPULSE_PEER_UDP_STUN_TIMEOUT:-5} + 2 ))" \
         docker exec oxpulse-partner-coturn \
+        timeout "${OXPULSE_PEER_UDP_STUN_TIMEOUT:-5}" \
         turnutils_stunclient "$dial_ip" -p "$stun_port" \
         2>&1)
     exit_code=$?
@@ -488,8 +497,10 @@ _run_peer_probe_loop() {
     if [[ -n "${OXPULSE_TURN_SECRET:-}" ]]; then
         turn_secret="$OXPULSE_TURN_SECRET"
     else
-        turn_secret=$(timeout 10 docker exec oxpulse-partner-coturn \
-            sed -n 's/^static-auth-secret=//p' \
+        # Inner timeout so a wedged in-container sed cannot outlive its
+        # docker-exec client (see _probe_peer_udp_stun for the leak class).
+        turn_secret=$(timeout 12 docker exec oxpulse-partner-coturn \
+            timeout 10 sed -n 's/^static-auth-secret=//p' \
             /etc/coturn/turnserver.conf 2>/dev/null || true)
     fi
     if [[ -z "$turn_secret" ]]; then
