@@ -60,7 +60,7 @@ fips = ["dep:aws-lc-rs"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "signal", "macros", "test-util"] }
-ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem", "rand_core"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 rand = "0.8"
 serial_test = "3"
