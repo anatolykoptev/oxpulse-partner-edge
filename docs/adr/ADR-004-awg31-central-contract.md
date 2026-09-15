@@ -86,7 +86,7 @@ Motherly's generator and the edge validators both enforce these; upstream `merge
 
 1. `HeaderProtectionKey` set (non-zero) ⇒ **all of S1–S4 ≥ 12** on the resolved conf (absent S3 counts as 0 and fails).
 2. `S1 + 56 ≠ S2`.
-3. `H1`–`H4` bands pairwise non-overlapping; every value/bound ≤ **2147483647** (2³¹−1 — the upstream field is u32 but the amneziawg-windows client caps at 2³¹−1; stay under it).
+3. `H1`–`H4` bands pairwise non-overlapping. Two bounds apply: central MUST emit values/bounds ≤ **2147483647** (2³¹−1 — the amneziawg-windows client caps there; an emitted value above it wedges that client); the edge validator accepts up to the wire bound **u32::MAX** that upstream `UintRange` permits — acceptor stricter than the grammar would break peer interop, emitter looser than 2³¹−1 would break the windows peer.
 4. Absent param = 0/off — a v3.1 peer running the v1 param set is wire-identical to 2.x, so interop with a pre-flip motherly is safe by construction.
 
 ### Generation bands (ADVISORY — explicitly non-normative)

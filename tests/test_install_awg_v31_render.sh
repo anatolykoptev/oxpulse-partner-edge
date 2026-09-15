@@ -51,7 +51,7 @@ _load_awg_globals() {
 	export AWG_H1="1234567890"
 	export AWG_H2="2345678901"
 	export AWG_H3="3456789012"
-	export AWG_H4="4567890123"
+	export AWG_H4="4234567890"
 	export AWG_CONF_DIR="$TMP/awg-conf"
 	export AWG_LISTEN_PORT="43842"
 	echo "mocked-private-key-base64==" > "$TMP/awg-private.key"
@@ -202,16 +202,19 @@ AWG_DISABLE_COOKIES|DisableCookies|off
 	[ -f "$(_marker)" ]
 }
 
-@test "v3.1: HPK omitted when an S value is non-numeric (cannot prove >= 12)" {
+@test "v3.1: non-numeric required must-match S1 skips the write entirely" {
 	export AWG_S3="15" AWG_S1="abc"
 	export AWG_HPK="QUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUI="
 	_configure
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"DEGRADED=1"* ]]
-	run grep -q "HeaderProtectionKey" "$TMP/awg-conf/awg0.conf"
-	[ "$status" -ne 0 ]
-	# the bad S1 itself is must-match -> renders verbatim (IpcSet names it)
-	grep -q "^S1 = abc$" "$TMP/awg-conf/awg0.conf"
+	# S1 is a required field — an out-of-grammar value renders a conf
+	# `awg syncconf` refuses outright (dead-but-green), so the whole write
+	# is skipped and the marker names the field. Same fail-closed contract
+	# as the agent's merge (params.rs validate_s_value).
+	[ ! -f "$TMP/awg-conf/awg0.conf" ]
+	[ -f "$(_marker)" ]
+	grep -q "AWG_S1" "$(_marker)"
 }
 
 # ---------------------------------------------------------------------------
@@ -292,12 +295,15 @@ AWG_DISABLE_COOKIES|DisableCookies|off
 	grep -q "PrivateKey = mocked-private-key-base64==" "$TMP/awg-conf/awg0.conf"
 }
 
-@test "v3.1: must-match renders VERBATIM post-charset — no bash grammar rewrite" {
-	# A charset-clean but odd-shaped must-match value is central's problem:
-	# install must not silently edit it (IpcSet names the field upstream).
+@test "v3.1: grammar-invalid must-match drops the line + marker + degraded (s3)" {
+	# A charset-clean but grammar-invalid must-match value must NOT render:
+	# upstream S fields are u16 — `awg syncconf` would reject the whole conf
+	# (dead-but-green). Drop the line, keep the rest, mark degraded.
 	export AWG_S3="15x"   # charset-clean, grammar-odd
 	_configure
 	[ "$status" -eq 0 ]
-	grep -q "^S3 = 15x$" "$TMP/awg-conf/awg0.conf"
-	[[ "$output" != *"DEGRADED=1"* ]]
+	! grep -q "^S3" "$TMP/awg-conf/awg0.conf"
+	grep -q "^Jc = " "$TMP/awg-conf/awg0.conf"   # rest of the conf still rendered
+	grep -q "s3(grammar)" "$(_marker)"
+	[[ "$output" == *"DEGRADED=1"* ]]
 }

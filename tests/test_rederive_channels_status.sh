@@ -83,6 +83,10 @@ esac
 JQSHIM
     chmod +x "$TMP/shims/jq"
 
+    # AWG conf dir for the degraded-heal arm (marker + conf live here)
+    export AWG_CONF_DIR="$TMP/awg-conf"
+    mkdir -p "$AWG_CONF_DIR"
+
     # log stub
     log() { :; }
     LOG_FILE="$TMP/refresh.log"
@@ -318,6 +322,138 @@ t_no_file_noop() {
     teardown_env
 }
 
+# ---------------------------------------------------------------------------
+# 7-10. awg=degraded heal arm — the .param-dropped ledger governs.
+# ---------------------------------------------------------------------------
+
+_awg_conf_with() {
+    # Write an awg0.conf carrying the given conf keys (one per line, "K = v").
+    local conf="$AWG_CONF_DIR/awg0.conf"
+    {   echo "[Interface]"; echo "PrivateKey = K"; echo "Address = 10.9.0.4/32"
+        echo "ListenPort = 43842"; echo "Jc = 5"; echo "Jmin = 20"; echo "Jmax = 70"
+        echo "S1 = 17"; echo "S2 = 13"; echo "S4 = 6"
+        echo "H1 = 5"; echo "H2 = 6"; echo "H3 = 7"; echo "H4 = 8"
+        echo "Table = off"; echo "MTU = 1300"; echo ""
+        echo "[Peer]"; echo "PublicKey = P"; echo "Endpoint = 10.0.0.1:51820"
+        echo "AllowedIPs = 10.9.0.1/32"; echo "PersistentKeepalive = 25"
+        for kv in "$@"; do echo "$kv"; done
+    } > "$conf"
+}
+
+# 7. degraded + drop-marker, all must-match fields restored → active + marker gone
+t_degraded_heals_when_fields_restored() {
+    setup_env
+    cat > "$PREFIX_LIB/channels-status.env" <<EOF
+xray=active
+hysteria2=skipped
+naive=skipped
+awg=degraded
+EOF
+    _awg_conf_with "S3 = 15" "HeaderProtectionKey = AAAA"
+    cat > "$AWG_CONF_DIR/awg0.conf.param-dropped" <<'EOF'
+awg0.conf param-drop 2026-09-15T00:00:00Z:
+  must-match dropped: s3(grammar) header_protection_key(grammar)— the AWG link will NOT come up while motherly expects these params (caller status: awg=degraded)
+EOF
+
+    local funcs; funcs=$(extract_functions)
+    # shellcheck source=/dev/null
+    source "$funcs"
+    PATH="$TMP/shims:$PATH" _rederive_channels_status
+
+    local st; st=$(grep '^awg=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
+    if [[ "$st" == "active" && ! -f "$AWG_CONF_DIR/awg0.conf.param-dropped" ]]; then
+        pass "t_degraded_heals_when_fields_restored: degraded → active, marker retired"
+    else
+        fail "t_degraded_heals_when_fields_restored: awg='$st', marker exists=$(test -f "$AWG_CONF_DIR/awg0.conf.param-dropped" && echo yes || echo no)"
+    fi
+    teardown_env
+}
+
+# 8. degraded + drop-marker, a must-match field still absent → stays degraded
+t_degraded_stays_when_field_missing() {
+    setup_env
+    cat > "$PREFIX_LIB/channels-status.env" <<EOF
+xray=active
+hysteria2=skipped
+naive=skipped
+awg=degraded
+EOF
+    _awg_conf_with   # conf has NO S3 line
+    cat > "$AWG_CONF_DIR/awg0.conf.param-dropped" <<'EOF'
+awg0.conf param-drop 2026-09-15T00:00:00Z:
+  must-match dropped: s3(grammar)— the AWG link will NOT come up while motherly expects these params (caller status: awg=degraded)
+EOF
+
+    local funcs; funcs=$(extract_functions)
+    # shellcheck source=/dev/null
+    source "$funcs"
+    PATH="$TMP/shims:$PATH" _rederive_channels_status
+
+    local st; st=$(grep '^awg=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
+    if [[ "$st" == "degraded" && -f "$AWG_CONF_DIR/awg0.conf.param-dropped" ]]; then
+        pass "t_degraded_stays_when_field_missing: degraded + missing S3 stays degraded, marker kept"
+    else
+        fail "t_degraded_stays_when_field_missing: awg='$st' (expected degraded), marker exists=$(test -f "$AWG_CONF_DIR/awg0.conf.param-dropped" && echo yes || echo no)"
+    fi
+    teardown_env
+}
+
+# 9. degraded + render-SKIPPED marker → stays degraded even with a healthy
+#    conf (a refused render means the running conf predates the payload —
+#    presence can't prove it matches central's current expectation; the next
+#    conf writer retires the marker)
+t_degraded_stays_on_skip_marker() {
+    setup_env
+    cat > "$PREFIX_LIB/channels-status.env" <<EOF
+xray=active
+hysteria2=skipped
+naive=skipped
+awg=degraded
+EOF
+    _awg_conf_with "S3 = 15" "HeaderProtectionKey = AAAA"
+    cat > "$AWG_CONF_DIR/awg0.conf.param-dropped" <<'EOF'
+awg0.conf render SKIPPED 2026-09-15T00:00:00Z: required/identity field(s) failed the conf-injection charset/grammar guard: AWG_H4 — the offending bytes were NEVER written; any previous awg0.conf left untouched; fix the register payload and re-run.
+EOF
+
+    local funcs; funcs=$(extract_functions)
+    # shellcheck source=/dev/null
+    source "$funcs"
+    PATH="$TMP/shims:$PATH" _rederive_channels_status
+
+    local st; st=$(grep '^awg=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
+    if [[ "$st" == "degraded" ]]; then
+        pass "t_degraded_stays_on_skip_marker: render-SKIPPED marker keeps degraded"
+    else
+        fail "t_degraded_stays_on_skip_marker: awg='$st' (expected degraded)"
+    fi
+    teardown_env
+}
+
+# 10. degraded + NO marker → active (nothing outstanding)
+t_degraded_heals_no_marker() {
+    setup_env
+    cat > "$PREFIX_LIB/channels-status.env" <<EOF
+xray=active
+hysteria2=skipped
+naive=skipped
+awg=degraded
+EOF
+    _awg_conf_with
+
+    local funcs; funcs=$(extract_functions)
+    # shellcheck source=/dev/null
+    source "$funcs"
+    PATH="$TMP/shims:$PATH" _rederive_channels_status
+
+    local st; st=$(grep '^awg=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
+    if [[ "$st" == "active" ]]; then
+        pass "t_degraded_heals_no_marker: degraded without marker → active"
+    else
+        fail "t_degraded_heals_no_marker: awg='$st' (expected active)"
+    fi
+    teardown_env
+}
+
 # Run all tests
 t_before_skip
 t_rederive_promotes
@@ -325,6 +461,10 @@ t_after_acts
 t_failed_sticky
 t_skipped_stays_when_absent
 t_no_file_noop
+t_degraded_heals_when_fields_restored
+t_degraded_stays_when_field_missing
+t_degraded_stays_on_skip_marker
+t_degraded_heals_no_marker
 
 echo ""
 echo "=== rederive channels-status: PASS=$PASS FAIL=$FAIL ==="

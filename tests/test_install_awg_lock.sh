@@ -43,7 +43,7 @@ _load_awg_globals() {
 	export AWG_H1="1234567890"
 	export AWG_H2="2345678901"
 	export AWG_H3="3456789012"
-	export AWG_H4="4567890123"
+	export AWG_H4="4234567890"
 	export AWG_CONF_DIR="$TMP/awg-conf"
 	export AWG_LISTEN_PORT="43842"
 	echo "FRESH-private-key-base64==" > "$TMP/awg-private.key"

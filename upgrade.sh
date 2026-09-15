@@ -592,8 +592,10 @@ _ensure_awg_lib() {
     local _sd _adjacent _installed
     _sd="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
     # Repo checkout keeps it under lib/; the release bundle flattens it next to
-    # upgrade.sh. Installed edges have neither (INSTALL_LIB_DIR only holds
-    # render-channel-lib.sh) and resolve through the tier-3 fetch.
+    # upgrade.sh, and installed edges get the same same-dir sibling via the
+    # sbin delivery (lib/install-systemd.sh + _HOST_SCRIPT_SBIN_FILES place
+    # install-awg.sh next to the upgrade binary in $PREFIX_SBIN). An edge
+    # that somehow lacks every local tier resolves through the tier-3 fetch.
     if [[ -f "$_sd/lib/install-awg.sh" ]]; then
         _adjacent="$_sd/lib/install-awg.sh"
     else

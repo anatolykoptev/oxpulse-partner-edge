@@ -201,7 +201,7 @@ ensure_amneziawg() {
 # ---------------------------------------------------------------------------
 # _awg_conf_safe VALUE — charset guard for every central-sourced string
 # interpolated into awg0.conf. The forbidden set (\n \r [ ]) is byte-identical
-# to I1_FORBIDDEN_CHARS at crates/awg-params-agent/src/params.rs:57 — the
+# to FORBIDDEN_CONF_CHARS in crates/awg-params-agent/src/params.rs — the
 # single grammar authority (opec/src/secrets/sfu_key.rs is the other
 # sanctioned mirror). A value carrying these primitives can splice an
 # injected [Peer] section into the conf: '\n'/'\r' start a new directive,
@@ -217,16 +217,112 @@ _awg_conf_safe() {
 	return 0
 }
 
+# ---------------------------------------------------------------------------
+# Grammar layer — mirrors the params-agent FIELD_SPECS validators
+# (crates/awg-params-agent/src/params.rs) so both writers hold one contract.
+# Upstream uapi (device/uapi.go @ v3.1): jc/jmin/jmax are ParseUint(10,32),
+# s1-s4 ParseUint(10,16), h1-h4 are `N`/`N-M` u32 ranges with lo >= 5 and
+# pairwise non-overlap in mergeWithDevice; header_protection_key must
+# base64-decode to exactly 32 bytes; random_trailers/disable_cookies are
+# on|off post-extraction normalization. A value outside that grammar renders
+# a conf `awg syncconf` refuses outright — dead-but-green — so grammar
+# failures take the same paths as charset failures (skip-write for required
+# fields, drop-line+degraded for optional must-match).
+# ---------------------------------------------------------------------------
+# Digit-length caps in the numeric guards are LOAD-BEARING, not pedantry:
+# `10#$v` wraps modulo 2^64 on input longer than ~19 digits, so a
+# 20-digit "number" can wrap under the bound and falsely pass.
+_awg_u16()   { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 <= 65535 )); }
+_awg_u32()   { [[ "$1" =~ ^[0-9]{1,10}$ ]] && (( 10#$1 <= 4294967295 )); }
+_awg_onoff() { [[ "$1" == "on" || "$1" == "off" ]]; }
+
+# _awg_h_parse VALUE → "lo hi" on stdout; fails on shape, order, or bound.
+# `N` collapses to `N N`. lo >= 5: 1-4 are the vanilla WG message types an H
+# value must not shadow.
+_awg_h_parse() {
+	local lo hi
+	if [[ "$1" =~ ^([0-9]{1,10})-([0-9]{1,10})$ ]]; then
+		lo="${BASH_REMATCH[1]}"; hi="${BASH_REMATCH[2]}"
+	elif [[ "$1" =~ ^[0-9]{1,10}$ ]]; then
+		lo="$1"; hi="$1"
+	else
+		return 1
+	fi
+	(( 10#$lo >= 5 && 10#$lo <= 10#$hi && 10#$hi <= 4294967295 )) || return 1
+	printf '%s %s\n' "$lo" "$hi"
+}
+
+# _awg_range VALUE — `N` or `N-M` with lo <= hi (mirrors the agent's
+# validate_range_string; upstream UintRange shape). Members capped at 18
+# digits so the 10# compare can't wrap.
+_awg_range() {
+	local lo hi
+	if [[ "$1" =~ ^([0-9]{1,18})-([0-9]{1,18})$ ]]; then
+		lo="${BASH_REMATCH[1]}"; hi="${BASH_REMATCH[2]}"
+	elif [[ "$1" =~ ^[0-9]{1,18}$ ]]; then
+		lo="$1"; hi="$1"
+	else
+		return 1
+	fi
+	(( 10#$lo <= 10#$hi ))
+}
+
+# _awg_itag VALUE — mirrors upstream newObfChain: VALUE is a sequence of
+# `<key>` / `<key arg>` tokens, keys in {b,t,r,rc,rd,d,ds,dz}; text between
+# tokens is ignored (upstream scans for '<' … '>'). b needs a non-empty
+# even-length hex arg (0x prefix ok); r/rc/rd/dz need a numeric length
+# 0..=65535 (upstream Atoi accepts negatives that PANIC the daemon at send —
+# we are stricter); t/d/ds ignore their arg. Empty <> tag, unterminated <,
+# unknown key, or no tag at all → fail.
+_awg_itag() {
+	local rest="$1" tok key arg hex
+	[[ "$rest" == *"<"* ]] || return 1
+	while [[ "$rest" == *"<"* ]]; do
+		rest="${rest#*<}"
+		tok="${rest%%>*}"
+		[[ "$tok" != "$rest" ]] || return 1   # unterminated <
+		rest="${rest#*>}"
+		# IFS-split without glob risk (read -a never pathname-expands, unlike
+		# `set -- $tok`); leading ws is skipped = upstream split_whitespace.
+		local -a _w=(); read -ra _w <<< "$tok"
+		key="${_w[0]:-}"; arg="${_w[1]:-}"
+		[[ -n "$key" ]] || return 1
+		case "$key" in
+		b)
+			hex="${arg#0x}"
+			[[ -n "$hex" && $(( ${#hex} % 2 )) -eq 0 && "$hex" =~ ^[0-9a-fA-F]+$ ]] || return 1
+			;;
+		t|d|ds) ;;
+		r|rc|rd|dz)
+			{ [[ "$arg" =~ ^[0-9]{1,5}$ ]] && (( 10#$arg <= 65535 )); } || return 1
+			;;
+		*) return 1 ;;
+		esac
+	done
+	return 0
+}
+
+# _awg_hpk32 VALUE — true iff VALUE base64-decodes to exactly 32 bytes (the
+# wire width upstream XORs into the type field). Same check as the agent's
+# decode_hpk (strict base64 — validate=True rejects whitespace and
+# non-alphabet bytes).
+_awg_hpk32() {
+	python3 -c "import base64,sys
+try: sys.exit(0 if len(base64.b64decode(sys.argv[1], validate=True)) == 32 else 1)
+except Exception: sys.exit(1)" "$1" 2>/dev/null
+}
+
 # Optional-line builders — used ONLY inside configure_amneziawg. Both append
 # to the caller-visible accumulators _opt_lines / _drop_mm / _drop_cl (bash
 # dynamic scope — declared `local` in configure_amneziawg before the calls).
 #
-#   _awg_opt_mm <field-label> <ConfKey> <value>
+#   _awg_opt_mm <field-label> <ConfKey> <value> [validator-fn]
 #       MUST-MATCH param (s3, header_protection_key, random_trailers): charset
-#       guard, then render VERBATIM — no bash grammar layer (upstream IpcSet
-#       names the field on a grammar failure; the edge must not silently edit
-#       a must-match value). Charset failure → record the drop; the bytes
-#       NEVER render.
+#       guard, then optional upstream-grammar validator fn, then render
+#       VERBATIM — the edge must not silently EDIT a must-match value, but a
+#       value that fails the grammar must not render at all (an invalid
+#       must-match is a dead link, not a degraded feature). Either failure →
+#       record the drop; the bytes NEVER render.
 #
 #   _awg_opt_cl <field-label> <ConfKey> <value> <grammar-ERE>
 #       CLIENT-SIDE param (i1-i5, content_padding_addition, the 5 timings,
@@ -235,10 +331,12 @@ _awg_conf_safe() {
 #       (the params agent may re-add the field from a later epoch).
 _awg_opt_mm() {
 	[[ -z "$3" ]] && return 0
-	if _awg_conf_safe "$3"; then
-		_opt_lines+="$2 = $3"$'\n'
-	else
+	if ! _awg_conf_safe "$3"; then
 		_drop_mm+="$1(charset) "
+	elif [[ -n "${4:-}" ]] && ! "$4" "$3"; then
+		_drop_mm+="$1(grammar) "
+	else
+		_opt_lines+="$2 = $3"$'\n'
 	fi
 }
 
@@ -247,6 +345,20 @@ _awg_opt_cl() {
 	if ! _awg_conf_safe "$3"; then
 		_drop_cl+="$1(charset) "
 	elif [[ ! "$3" =~ $4 ]]; then
+		_drop_cl+="$1(grammar) "
+	else
+		_opt_lines+="$2 = $3"$'\n'
+	fi
+}
+
+# _awg_opt_clf — same client-side drop-line contract as _awg_opt_cl but $4
+# is a validator FUNCTION (for grammars a bare ERE can't express: I-tag
+# tokens, range ordering).
+_awg_opt_clf() {
+	[[ -z "$3" ]] && return 0
+	if ! _awg_conf_safe "$3"; then
+		_drop_cl+="$1(charset) "
+	elif ! "$4" "$3"; then
 		_drop_cl+="$1(grammar) "
 	else
 		_opt_lines+="$2 = $3"$'\n'
@@ -330,23 +442,70 @@ configure_amneziawg() {
 	local _drop_ident="" _drop_mm="" _drop_cl="" _opt_lines=""
 	local _marker="${conf_path}.param-dropped"
 	local _f
+	# Identity fields: non-empty + charset-safe. The numeric must-match
+	# fields additionally carry upstream grammar (u32 junk trio, u16 S
+	# values, `N`/`N-M` H ranges) — an out-of-grammar value renders a conf
+	# `awg syncconf` refuses outright, i.e. dead-but-green, so it takes the
+	# same skip-write path as a charset failure.
 	for _f in AWG_ALLOCATED_IP AWG_MOTHERLY_PUBKEY AWG_MOTHERLY_ENDPOINT \
-	          AWG_MOTHERLY_AWG_IP AWG_JC AWG_JMIN AWG_JMAX \
-	          AWG_S1 AWG_S2 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4; do
-		_awg_conf_safe "${!_f:-}" || _drop_ident+="$_f "
+	          AWG_MOTHERLY_AWG_IP; do
+		{ [[ -n "${!_f:-}" ]] && _awg_conf_safe "${!_f}"; } || _drop_ident+="$_f "
 	done
+	for _f in AWG_JC AWG_JMIN AWG_JMAX; do
+		{ [[ -n "${!_f:-}" ]] && _awg_conf_safe "${!_f}" && _awg_u32 "${!_f}"; } \
+			|| _drop_ident+="$_f "
+	done
+	for _f in AWG_S1 AWG_S2 AWG_S4; do
+		{ [[ -n "${!_f:-}" ]] && _awg_conf_safe "${!_f}" && _awg_u16 "${!_f}"; } \
+			|| _drop_ident+="$_f "
+	done
+	# H1-H4: range grammar + pairwise non-overlap (upstream mergeWithDevice
+	# refuses an overlapping header set — the whole IpcSet op fails).
+	local _h_name=() _h_lo=() _h_hi=() _hp i j
+	for _f in AWG_H1 AWG_H2 AWG_H3 AWG_H4; do
+		if [[ -n "${!_f:-}" ]] && _awg_conf_safe "${!_f}" \
+			&& _hp=$(_awg_h_parse "${!_f}"); then
+			_h_name+=("$_f"); _h_lo+=("${_hp%% *}"); _h_hi+=("${_hp##* }")
+		else
+			_drop_ident+="$_f "
+		fi
+	done
+	for ((i = 0; i < ${#_h_lo[@]}; i++)); do
+		for ((j = i + 1; j < ${#_h_lo[@]}; j++)); do
+			if (( 10#${_h_lo[i]} <= 10#${_h_hi[j]} && 10#${_h_lo[j]} <= 10#${_h_hi[i]} )); then
+				_drop_ident+="${_h_name[i]}x${_h_name[j]} "
+			fi
+		done
+	done
+	# Resolved-set pair invariants (same checks the agent runs post-merge):
+	# S1+56==S2 makes init/response handshake packets the same padded size —
+	# upstream refuses it; jmin>jmax underflows `max-min` to a ~4GiB
+	# allocation inside Device.JunkPackets. Run only when both sides parsed
+	# (an unparsed side is already flagged above).
+	if [[ "${AWG_S1:-}" =~ ^[0-9]+$ && "${AWG_S2:-}" =~ ^[0-9]+$ ]] && \
+		(( 10#$AWG_S1 + 56 == 10#$AWG_S2 )); then
+		_drop_ident+="AWG_S1+56==AWG_S2 "
+	fi
+	if [[ "${AWG_JMIN:-}" =~ ^[0-9]+$ && "${AWG_JMAX:-}" =~ ^[0-9]+$ ]] && \
+		(( 10#$AWG_JMIN > 10#$AWG_JMAX )); then
+		_drop_ident+="AWG_JMIN-gt-AWG_JMAX "
+	fi
 	# The private key is locally generated (not central) but interpolates the
 	# same way — a corrupt key file is the same silent-dead-render class.
-	# Read it once here; the template below uses ${_privkey}.
+	# `|| true` keeps a missing/unreadable file from aborting the whole
+	# install under `set -e` (the AWG channel is fail-soft); the empty result
+	# then lands in _drop_ident as a configuration failure — a conf rendered
+	# with `PrivateKey = ` would report awg=active on a link that can never
+	# handshake (dead-but-green).
 	local _privkey
-	_privkey=$(cat "$AWG_PRIV_PATH" 2>/dev/null)
-	_awg_conf_safe "$_privkey" || _drop_ident+="AWG_PRIV_PATH "
+	_privkey=$(cat "$AWG_PRIV_PATH" 2>/dev/null || true)
+	[[ -n "$_privkey" ]] && _awg_conf_safe "$_privkey" || _drop_ident+="AWG_PRIV_PATH "
 	_awg_conf_safe "$listen_port" || _drop_ident+="AWG_LISTEN_PORT "
 	if [[ -n "$_drop_ident" ]]; then
-		printf '%s\n' "awg0.conf render SKIPPED $(date -u +%Y-%m-%dT%H:%M:%SZ): required/identity field(s) failed the conf-injection charset guard: ${_drop_ident}— the offending bytes were NEVER written; any previous awg0.conf left untouched; fix the register payload and re-run." \
+		printf '%s\n' "awg0.conf render SKIPPED $(date -u +%Y-%m-%dT%H:%M:%SZ): required/identity field(s) failed the conf-injection charset/grammar guard: ${_drop_ident}— the offending bytes were NEVER written; any previous awg0.conf left untouched; fix the register payload and re-run." \
 			> "$_marker" 2>/dev/null || true
 		AWG_CONF_DEGRADED=1
-		warn "configure_amneziawg: required AWG field(s) failed the conf-injection charset guard: ${_drop_ident}— awg0.conf NOT written this pass (existing conf, if any, untouched). The AWG link will NOT come up from this render. See ${_marker}."
+		warn "configure_amneziawg: required AWG field(s) failed the charset/grammar guard: ${_drop_ident}— awg0.conf NOT written this pass (existing conf, if any, untouched). The AWG link will NOT come up from this render. See ${_marker}."
 		exec 9>&-
 		return 0
 	fi
@@ -354,17 +513,15 @@ configure_amneziawg() {
 	# awg_extract_all (bools already on|off). Install NEVER generates values —
 	# the single client-param generator is agent-side (D2). Emission order is
 	# fixed: S3, I1-I5, HPK, CPA, the 5 timings, RandomTrailers, DisableCookies.
-	_awg_opt_mm s3 S3 "${AWG_S3:-}"
-	# I-tag grammar: the whole value must be a sequence of <tag> / <tag arg>
-	# tokens (upstream I1-I5 shape `<r 32><b 0x01><rd 4><rc 8><t>`); arg content
-	# is anything but brackets — the charset guard already removed [ ].
-	local _itag_re='^(<[a-z]+( [^<>]+)?>)+$'
-	local _range_re='^[0-9]+(-[0-9]+)?$'
-	_awg_opt_cl i1 I1 "${AWG_I1:-}" "$_itag_re"
-	_awg_opt_cl i2 I2 "${AWG_I2:-}" "$_itag_re"
-	_awg_opt_cl i3 I3 "${AWG_I3:-}" "$_itag_re"
-	_awg_opt_cl i4 I4 "${AWG_I4:-}" "$_itag_re"
-	_awg_opt_cl i5 I5 "${AWG_I5:-}" "$_itag_re"
+	_awg_opt_mm s3 S3 "${AWG_S3:-}" _awg_u16
+	# I-tags get the full upstream tag grammar (_awg_itag — known keys, per-key
+	# arg shape); timings/CPA get N|N-M with lo<=hi (_awg_range). Both are
+	# function validators — an ERE can't express them.
+	_awg_opt_clf i1 I1 "${AWG_I1:-}" _awg_itag
+	_awg_opt_clf i2 I2 "${AWG_I2:-}" _awg_itag
+	_awg_opt_clf i3 I3 "${AWG_I3:-}" _awg_itag
+	_awg_opt_clf i4 I4 "${AWG_I4:-}" _awg_itag
+	_awg_opt_clf i5 I5 "${AWG_I5:-}" _awg_itag
 	# HPK precondition — mirrors upstream mergeWithDevice, evaluated on the
 	# EFFECTIVE (post-extraction) set: a non-empty HeaderProtectionKey renders
 	# only when ALL of S1/S2/S3/S4 are integers >= 12 (absent S3 = 0 — so HPK
@@ -373,6 +530,8 @@ configure_amneziawg() {
 	if [[ -n "${AWG_HPK:-}" ]]; then
 		if ! _awg_conf_safe "$AWG_HPK"; then
 			_drop_mm+="header_protection_key(charset) "
+		elif ! _awg_hpk32 "$AWG_HPK"; then
+			_drop_mm+="header_protection_key(grammar) "
 		else
 			local _hpk_ok=1 _sv
 			for _sv in "${AWG_S1:-0}" "${AWG_S2:-0}" "${AWG_S3:-0}" "${AWG_S4:-0}"; do
@@ -386,13 +545,13 @@ configure_amneziawg() {
 			fi
 		fi
 	fi
-	_awg_opt_cl content_padding_addition ContentPaddingAddition "${AWG_CONTENT_PADDING_ADDITION:-}" "$_range_re"
-	_awg_opt_cl rekey_after_time RekeyAfterTime "${AWG_REKEY_AFTER_TIME:-}" "$_range_re"
-	_awg_opt_cl rekey_timeout RekeyTimeout "${AWG_REKEY_TIMEOUT:-}" "$_range_re"
-	_awg_opt_cl reject_after_time RejectAfterTime "${AWG_REJECT_AFTER_TIME:-}" "$_range_re"
-	_awg_opt_cl keepalive_timeout KeepaliveTimeout "${AWG_KEEPALIVE_TIMEOUT:-}" "$_range_re"
-	_awg_opt_cl max_handshake_attempts MaxHandshakeAttempts "${AWG_MAX_HANDSHAKE_ATTEMPTS:-}" "$_range_re"
-	_awg_opt_mm random_trailers RandomTrailers "${AWG_RANDOM_TRAILERS:-}"
+	_awg_opt_clf content_padding_addition ContentPaddingAddition "${AWG_CONTENT_PADDING_ADDITION:-}" _awg_range
+	_awg_opt_clf rekey_after_time RekeyAfterTime "${AWG_REKEY_AFTER_TIME:-}" _awg_range
+	_awg_opt_clf rekey_timeout RekeyTimeout "${AWG_REKEY_TIMEOUT:-}" _awg_range
+	_awg_opt_clf reject_after_time RejectAfterTime "${AWG_REJECT_AFTER_TIME:-}" _awg_range
+	_awg_opt_clf keepalive_timeout KeepaliveTimeout "${AWG_KEEPALIVE_TIMEOUT:-}" _awg_range
+	_awg_opt_clf max_handshake_attempts MaxHandshakeAttempts "${AWG_MAX_HANDSHAKE_ATTEMPTS:-}" _awg_range
+	_awg_opt_mm random_trailers RandomTrailers "${AWG_RANDOM_TRAILERS:-}" _awg_onoff
 	_awg_opt_cl disable_cookies DisableCookies "${AWG_DISABLE_COOKIES:-}" '^(on|off)$'
 	# Atomic write: stream into a temp file in the SAME dir, chmod, then rename(2)
 	# over awg0.conf. The agent's apply_to_kernel() reads the conf via awg-quick

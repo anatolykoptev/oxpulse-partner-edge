@@ -15,6 +15,52 @@
 #   _chan_lib_tmp    string (optional), temp path to pre-fetched channel-render-lib.sh
 #   log warn die     functions (install.sh provides)
 
+# _install_sbin_fetch_lib NAME DST MODE — the curl fallback for lib/* files,
+# verified against lib-checksums.txt whenever a manifest resolves (adjacent
+# checkout → installed INSTALL_LIB_DIR → remote fetch alongside, same
+# candidate order as install.sh's _install_lib_source). Field-exact awk match
+# on column 2 (tolerating "./" prefix) — the same manifest-entry matching the
+# other resolvers use.
+#
+# Posture: a resolved manifest with no entry or a mismatching hash REFUSES
+# the install (a truncated/captive-portal/stale manifest must not smuggle a
+# root-sourced lib — the omit-one-line bypass). No manifest at all → the
+# historical unverified install (install|bash invocations can lack one; the
+# file must still ship). Callers treat non-zero as the curl failure it
+# replaces.
+_install_sbin_fetch_lib() {
+	local name="$1" dst="$2" mode="$3"
+	local tmp ck="" cktmp="" cand actual expected
+	tmp=$(mktemp) || return 1
+	curl -fsSL "$REPO_RAW/lib/$name" -o "$tmp" || { rm -f "$tmp"; return 1; }
+	for cand in \
+		"${src_dir:-}/lib/lib-checksums.txt" \
+		"${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/lib-checksums.txt"; do
+		if [[ -r "$cand" ]]; then ck="$cand"; break; fi
+	done
+	if [[ -z "$ck" ]]; then
+		cktmp=$(mktemp) || cktmp=""
+		if [[ -n "$cktmp" ]] && curl -fsSL --max-time 15 \
+			"$REPO_RAW/lib/lib-checksums.txt" -o "$cktmp" 2>/dev/null; then
+			ck="$cktmp"
+		fi
+	fi
+	if [[ -n "$ck" ]]; then
+		actual=$(sha256sum "$tmp" | awk '{print $1}')
+		expected=$(awk -v n="$name" '$2 == n || $2 == "./" n { print $1; exit }' "$ck")
+		if [[ -z "$expected" ]]; then
+			warn "install-systemd: lib-checksums.txt has no entry for $name — refusing unverified install of a root-sourced lib"
+			rm -f "$tmp" "$cktmp"; return 1
+		fi
+		if [[ "$actual" != "$expected" ]]; then
+			warn "install-systemd: checksum mismatch for lib/$name (expected ${expected:0:16}…, got ${actual:0:16}…) — refusing to install"
+			rm -f "$tmp" "$cktmp"; return 1
+		fi
+	fi
+	install -m "$mode" "$tmp" "$dst"
+	rm -f "$tmp" "$cktmp"
+}
+
 # Install upgrade.sh, hydrate.sh, refresh.sh, sni-rotate.sh, channels-health-report.sh
 # into $PREFIX_SBIN.
 _systemd_install_helper_scripts() {
@@ -163,8 +209,11 @@ _systemd_install_lib_scripts() {
 	# AWG installer lib — _ensure_awg_lib in upgrade.sh sources it as a
 	# same-dir sibling CANDIDATE ($_sd/install-awg.sh → tier-1 of _source_lib)
 	# for the AWG 3.1 version-converge step. Same 4-way src_dir/lib → flat →
-	# operator-staged → curl shape as peer-ip-guard-lib.sh above; without it
-	# installed edges converge only via the online tier-3 fetch.
+	# operator-staged → manifest-verified curl shape as peer-ip-guard-lib.sh
+	# above; without it installed edges converge only via the online tier-3
+	# fetch. The remote tier goes through _install_sbin_fetch_lib: this file
+	# is sourced as root by upgrade, so an unverified fetch was a code-
+	# execution channel (review fix).
 	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/install-awg.sh" ]]; then
 		install -m 0644 "$src_dir/lib/install-awg.sh" "$PREFIX_SBIN/install-awg.sh"
 	elif [[ -n "${src_dir:-}" && -f "$src_dir/install-awg.sh" ]]; then
@@ -173,8 +222,7 @@ _systemd_install_lib_scripts() {
 		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/install-awg.sh" \
 			"$PREFIX_SBIN/install-awg.sh"
 	else
-		curl -fsSL "$REPO_RAW/lib/install-awg.sh" -o "$PREFIX_SBIN/install-awg.sh"
-		chmod 0644 "$PREFIX_SBIN/install-awg.sh"
+		_install_sbin_fetch_lib install-awg.sh "$PREFIX_SBIN/install-awg.sh" 0644
 	fi
 
 	# Service token lib (sourced by refresh.sh + any script calling authenticated

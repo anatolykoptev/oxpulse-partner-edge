@@ -703,8 +703,15 @@ DRYJSON
 		# (register.rs post_with_retry) — parity with hydrate.sh:151, which already
 		# sends it. Env not flag: old opec ignores env but dies on unknown flags;
 		# absent header = treated-as-old = fail-safe (ADR-004).
-		OXPULSE_IMAGE_VERSION="$IMAGE_VERSION"
-		export OXPULSE_IMAGE_VERSION
+		# The contract wants the installer BUNDLE tag, not the image channel —
+		# IMAGE_VERSION is `stable`/`latest` (an alias, not a version), so send
+		# OXPULSE_RELEASE_TAG when release.yml substituted it (vX.Y.Z form) and
+		# leave the env unset otherwise: no header beats a placeholder or an
+		# alias that every node shares (motherly keys schema gating on it).
+		if [[ "${OXPULSE_RELEASE_TAG}" =~ ^v[0-9]+\. ]]; then
+			OXPULSE_IMAGE_VERSION="$OXPULSE_RELEASE_TAG"
+			export OXPULSE_IMAGE_VERSION
+		fi
 		if ! opec "${_opec_register_args[@]}"; then
 			die "opec secrets register failed"
 		fi

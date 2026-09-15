@@ -549,13 +549,58 @@ _rederive_channels_status() {
     fi
 
     # awg: skipped → active when awg_ip in node-config + awg-quick@awg0 active.
-    if [[ "${_cur[awg]:-}" == "skipped" ]]; then
+    #      degraded → active under the same liveness gate PLUS proof the
+    #      .param-dropped marker is stale:
+    #        * `must-match dropped:` ledger — every recorded field must be
+    #          back as a `Key = v` line in awg0.conf (the params agent re-adds
+    #          them on a later epoch; a degraded flag surviving a repaired
+    #          link is a false-failed node — healthcheck gates on this file).
+    #        * `render SKIPPED` marker — NOT healed here: the whole render was
+    #          refused, so the running conf predates that payload and field
+    #          presence can't prove it matches what central NOW expects. The
+    #          marker is owned by the last conf writer — the params agent
+    #          regenerates/clears it on its next merge pass, which flips this
+    #          arm on the following refresh tick.
+    #      Marker absent = nothing outstanding → heal. Fields still absent →
+    #      stays degraded: with a must-match param missing the link is
+    #      wire-dead in one direction and a green "active" is the
+    #      dead-but-green lie the marker exists to prevent.
+    if [[ "${_cur[awg]:-}" == "skipped" || "${_cur[awg]:-}" == "degraded" ]]; then
         local _awg_ip
         _awg_ip=$(jq -r '.awg_ip // empty' "$NODE_CFG" 2>/dev/null || true)
         if [[ -n "$_awg_ip" ]] && _rdcs_unit_active awg-quick@awg0; then
-            log "  [rederive] awg: skipped → active (awg_ip=$_awg_ip, awg0 up)"
-            _cur[awg]=active
-            _changed=1
+            local _heal=1 _conf="${AWG_CONF_DIR:-/etc/amnezia/amneziawg}/awg0.conf"
+            local _marker="${_conf}.param-dropped"
+            if [[ "${_cur[awg]:-}" == "degraded" && -f "$_marker" ]]; then
+                if grep -q 'render SKIPPED' "$_marker" 2>/dev/null; then
+                    _heal=0
+                else
+                    local _mm _f _key
+                    # `${_drop_mm% }` in the writer strips the space before
+                    # the em-dash, so tolerate `X—` and `X —` spellings.
+                    _mm=$(sed -n 's/^  must-match dropped: \(.*[^ ]\) *— .*/\1/p' "$_marker" 2>/dev/null || true)
+                    for _f in $_mm; do
+                        case "${_f%%(*}" in
+                            s3) _key="S3" ;;
+                            header_protection_key) _key="HeaderProtectionKey" ;;
+                            random_trailers) _key="RandomTrailers" ;;
+                            *) _key=""; _heal=0 ;;  # unknown name → stay degraded (conservative)
+                        esac
+                        [[ $_heal -eq 0 ]] && break
+                        if [[ -n "$_key" ]]; then
+                            grep -q "^${_key} *= *[^ ]" "$_conf" 2>/dev/null || { _heal=0; break; }
+                        fi
+                    done
+                fi
+            fi
+            if [[ $_heal -eq 1 ]]; then
+                log "  [rederive] awg: ${_cur[awg]} → active (awg_ip=$_awg_ip, awg0 up)"
+                # Marker is now stale history — retire it so the next pass
+                # doesn't re-derive degradation from a repaired conf.
+                [[ "${_cur[awg]:-}" == "degraded" ]] && rm -f "$_marker" 2>/dev/null
+                _cur[awg]=active
+                _changed=1
+            fi
         fi
     fi
 

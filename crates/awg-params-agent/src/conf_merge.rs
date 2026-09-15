@@ -205,16 +205,17 @@ impl FieldSpec {
             (SpecKind::RangeString, FieldValue::Str(s)) => {
                 params::validate_range_string(self.field, s)
             }
-            (SpecKind::TagLiteral, FieldValue::Str(s)) => {
-                params::validate_conf_string(self.field, s)
-            }
+            (SpecKind::TagLiteral, FieldValue::Str(s)) => params::validate_i_tag(self.field, s),
             (SpecKind::HeaderProtectionKey, FieldValue::Str(s)) => {
                 params::decode_hpk(self.field, s).map(|_| ())
             }
             // `Option<bool>` is total — no grammar to violate.
             (SpecKind::OnOff, FieldValue::Bool(_)) => Ok(()),
-            // No grammar layer in the contract for the jc trio (v1 parity).
-            (SpecKind::JunkCount, FieldValue::Int(_)) => Ok(()),
+            // u32 bound mirrors upstream `ParseUint(value, 10, 32)`; the
+            // jmin<=jmax pair invariant is a post-merge precondition below.
+            (SpecKind::JunkCount, FieldValue::Int(n)) => {
+                params::validate_junk_value(self.field, *n)
+            }
             _ => Err(anyhow!(
                 "awg param rejected: field={} internal type mismatch — \
                  validator {:?} can't hold {:?} (table bug)",
@@ -254,9 +255,12 @@ fn epoch_str(p: &AwgParams, get: fn(&AwgParams) -> &Option<String>) -> Option<Fi
 }
 
 /// The D1 sourcing table — every mergeable key, its class (reject-mode),
-/// its grammar validator, and its default source. Order matters: entries
-/// insert under `[Interface]` in this order, mirroring the installer
-/// template's key order (lib/install-awg.sh heredoc).
+/// its grammar validator, and its default source. Order matters: absent
+/// keys insert under `[Interface]` in table order. That order mirrors the
+/// installer template (lib/install-awg.sh) EXCEPT `s3`, which the table
+/// groups with its S-family (s1 s2 s3 s4) while the installer emits it at
+/// the head of the optional block — same key, different line position;
+/// conf semantics don't care, byte-diffs do, so call it out.
 ///
 /// MUST-MATCH (central-sourced, never edge-generated): S1-S4, H1-H4,
 /// HeaderProtectionKey, RandomTrailers.
@@ -531,8 +535,12 @@ static AWG_INTERFACE_RE: Lazy<Regex> =
 /// GenerateObfuscation31 reference, trimmed to the edge-generated set;
 /// ADR-004 mirrors them informatively).
 pub struct ClientDefaults {
-    /// I1 junk-tag literal — always `<r 32-256>`; I2-I5 stay absent = empty
-    /// per Amnezia convention (their themed content is central-only, D1).
+    /// I1 junk-tag literal — `<r N>` with N drawn in [32,256] per node
+    /// (3x-ui's GenerateObfuscation31 emits `randInt(32,256)` inside the
+    /// tag — the band is the draw range, NOT the literal; a literal
+    /// `32-256` fails upstream `Atoi` and wedges syncconf). I2-I5 stay
+    /// absent = empty per Amnezia convention (themed content is
+    /// central-only, D1).
     pub i1: String,
     /// ContentPaddingAddition rendered `lo-hi`: lo ∈ [8,24], hi = lo +
     /// [8,40] — max 24+40 = 64, so the ≤64 total ceiling holds by
@@ -545,7 +553,8 @@ pub struct ClientDefaults {
 }
 
 // D2 band consts — the spec's authoritative edge-generation ranges.
-const DEFAULT_I1: &str = "<r 32-256>";
+const I1_RAND_LO: i64 = 32;
+const I1_RAND_HI: i64 = 256;
 const JC_LO: i64 = 3;
 const JC_HI: i64 = 6;
 const JMIN_LO: i64 = 40;
@@ -571,7 +580,7 @@ impl ClientDefaults {
         let cpa_hi = cpa_lo + rand_inclusive(CPA_DELTA_LO, CPA_DELTA_HI)?;
         debug_assert!(cpa_hi <= 64, "CPA band invariant: hi <= 64 by construction");
         Ok(Self {
-            i1: DEFAULT_I1.to_owned(),
+            i1: format!("<r {}>", rand_inclusive(I1_RAND_LO, I1_RAND_HI)?),
             content_padding_addition: format!("{cpa_lo}-{cpa_hi}"),
             jc,
             jmin,
@@ -633,11 +642,31 @@ fn fill_random(buf: &mut [u8]) -> Result<()> {
 /// `Err` is also returned if `conf` has no `[Interface]` section to insert
 /// into. All other content ([Peer] sections, PrivateKey, Address,
 /// comments, whitespace) is preserved byte-for-byte.
+///
+/// Test-only compat wrapper: the production caller uses the
+/// `_reporting` variant for its dropped-field list; the suite's ~40 call
+/// sites predate it and don't need the list.
+#[cfg(test)]
 pub fn merge_obfuscation_params(
     conf: &str,
     params: Option<&AwgParams>,
     defaults: &ClientDefaults,
 ) -> Result<String> {
+    merge_obfuscation_params_reporting(conf, params, defaults).map(|(conf, _)| conf)
+}
+
+/// Reporting variant of [`merge_obfuscation_params`]: same merge, but also
+/// returns the names of every client-class field whose epoch value failed
+/// validation and was omitted. The agent feeds the list to
+/// `param_rejected_total{field=...}` — without it a hostile/MITM central can
+/// fuzz the freeform-string surface (I1–I5, CPA, timings) forever with zero
+/// alert-visible signal: those omissions return `Ok`, so the `field=` marker
+/// contract on `Err` never sees them.
+pub fn merge_obfuscation_params_reporting(
+    conf: &str,
+    params: Option<&AwgParams>,
+    defaults: &ClientDefaults,
+) -> Result<(String, Vec<&'static str>)> {
     // ── PASS 1: resolve-effective + per-field validate ───────────────────
     //
     // For each spec: epoch Some > existing conf line > default. The write
@@ -647,6 +676,7 @@ pub fn merge_obfuscation_params(
     let mut effective: HashMap<&'static str, FieldValue> = HashMap::new();
     let mut replaces: Vec<(&'static FieldSpec, String)> = Vec::new();
     let mut inserts: Vec<(&'static FieldSpec, String)> = Vec::new();
+    let mut dropped: Vec<&'static str> = Vec::new();
 
     for spec in FIELD_SPECS {
         // First match anywhere in the text — deliberately unscoped by
@@ -684,11 +714,15 @@ pub fn merge_obfuscation_params(
                         // generated default — "absent from epoch AND conf"
                         // is the default's only trigger, and an invalid
                         // epoch was still PRESENT.
+                        // The field name rides `dropped` out to the caller so
+                        // the param_rejected_total counter sees client-side
+                        // rejections, not only the must-match Err path.
                         warn!(
                             field = spec.field,
                             error = %e,
                             "omitting invalid client-side field — keeping existing conf line"
                         );
+                        dropped.push(spec.field);
                         if let Some(v) = conf_val {
                             effective.insert(spec.field, v);
                         }
@@ -787,6 +821,71 @@ pub fn merge_obfuscation_params(
             ));
         }
     }
+    // jmin <= jmax on the resolved set. Upstream stores both as bare
+    // ParseUint(10,32) values and never cross-checks them at uapi time; the
+    // violation detonates inside Device.JunkPackets() — `min +
+    // fastrandn(max-min)` underflows uint32 to a ~4GiB allocation per junk
+    // packet. These are client-class fields, so soften first: drop the
+    // epoch-sourced member(s), re-resolve from the existing conf line, and
+    // only fail closed if the pair is still inverted — i.e. the
+    // pre-existing conf itself is the bad side (daemon already broken;
+    // applying fresh values can't fix it, but refusing keeps the bad epoch
+    // unrecorded and alert-visible).
+    {
+        let junk_pair = |eff: &HashMap<&'static str, FieldValue>| -> Option<(i64, i64)> {
+            match (eff.get("jmin"), eff.get("jmax")) {
+                (Some(FieldValue::Int(lo)), Some(FieldValue::Int(hi))) => Some((*lo, *hi)),
+                _ => None,
+            }
+        };
+        if let Some((lo, hi)) = junk_pair(&effective) {
+            if lo > hi {
+                for f in ["jmin", "jmax"] {
+                    let spec = FIELD_SPECS
+                        .iter()
+                        .find(|s| s.field == f)
+                        .expect("jmin/jmax are FIELD_SPECS members");
+                    let epoch_sourced = params.and_then(|p| (spec.epoch)(p)).is_some();
+                    if !epoch_sourced {
+                        continue;
+                    }
+                    replaces.retain(|(s, _)| s.field != f);
+                    inserts.retain(|(s, _)| s.field != f);
+                    dropped.push(f);
+                    let conf_raw = spec
+                        .line_re()
+                        .captures(conf)
+                        .map(|c| c.get(1).expect("capture group exists").as_str());
+                    match conf_raw.and_then(|raw| spec.parse_conf_value(raw)) {
+                        Some(v) => {
+                            effective.insert(f, v);
+                        }
+                        None => {
+                            effective.remove(f);
+                        }
+                    }
+                }
+                if let Some((lo, hi)) = junk_pair(&effective) {
+                    if lo > hi {
+                        return Err(anyhow!(
+                            "awg param rejected: field=jmax post-merge jmin={} > \
+                             jmax={} with no epoch-sourced member left to drop \
+                             (pre-existing conf is inverted) — JunkPackets would \
+                             underflow max-min to a ~4GiB allocation; rejecting \
+                             whole merge",
+                            lo,
+                            hi
+                        ));
+                    }
+                }
+                warn!(
+                    field = "jmin/jmax",
+                    "epoch jmin>jmax violated pair invariant — dropped \
+                     epoch-sourced member(s), kept existing conf lines"
+                );
+            }
+        }
+    }
 
     // ── PASS 2: splice ───────────────────────────────────────────────────
     // Replace-in-place first (order irrelevant — per-key regex), then one
@@ -837,7 +936,7 @@ pub fn merge_obfuscation_params(
         }
     }
 
-    Ok(result)
+    Ok((result, dropped))
 }
 
 #[cfg(test)]
@@ -876,7 +975,7 @@ mod tests {
     /// Deterministic defaults for tests — the merge never sees RNG.
     fn test_defaults() -> ClientDefaults {
         ClientDefaults {
-            i1: "<r 32-256>".to_owned(),
+            i1: "<r 128>".to_owned(),
             content_padding_addition: "10-30".to_owned(),
             jc: 4,
             jmin: 55,
@@ -1510,6 +1609,98 @@ mod tests {
         );
     }
 
+    /// jmin > jmax on the resolved set — upstream never checks the pair at
+    /// uapi time; JunkPackets underflows `max-min` to a ~4GiB allocation.
+    /// Client-class degrade: drop the epoch-sourced member(s), keep the
+    /// existing conf lines.
+    #[test]
+    fn merge_jmin_gt_jmax_drops_epoch_members_keeps_conf() {
+        let conf = fixture_conf(); // has Jmin/Jmax lines — see fixture
+        let params = AwgParams {
+            jmin: Some(9000),
+            jmax: Some(10), // inverted pair, both epoch-sourced
+            ..sample_params(11)
+        };
+        let (out, dropped) =
+            merge_obfuscation_params_reporting(conf, Some(&params), &test_defaults()).unwrap();
+        assert!(
+            !out.contains("Jmin = 9000\n") && !out.contains("Jmax = 10\n"),
+            "inverted epoch pair must not reach the conf:\n{out}"
+        );
+        assert!(
+            dropped.contains(&"jmin") && dropped.contains(&"jmax"),
+            "both dropped members must be reported for the metric: {dropped:?}"
+        );
+        // The conf's own pair survives untouched.
+        assert!(out.contains("Jmin = ") && out.contains("Jmax = "));
+    }
+
+    /// Only one epoch member inverts the pair — drop just it.
+    #[test]
+    fn merge_jmin_gt_jmax_drops_only_epoch_sourced_member() {
+        let conf = fixture_conf();
+        let params = AwgParams {
+            jmin: Some(9_999_999), // epoch raises jmin over conf's jmax
+            jmax: None,
+            ..sample_params(11)
+        };
+        let (out, dropped) =
+            merge_obfuscation_params_reporting(conf, Some(&params), &test_defaults()).unwrap();
+        assert!(!out.contains("9999999"), "epoch jmin must drop:\n{out}");
+        assert_eq!(dropped, vec!["jmin"]);
+    }
+
+    /// Conf itself is already inverted and the epoch doesn't touch the pair
+    /// — nothing epoch-sourced to drop → fail closed.
+    #[test]
+    fn merge_jmin_gt_jmax_preexisting_inverted_conf_fails_closed() {
+        let conf = fixture_conf().replace("Jmin = 50", "Jmin = 5000");
+        // Fixture's Jmax stays < 5000 → resolved pair inverted, epoch clean.
+        let params = AwgParams {
+            jmin: None,
+            jmax: None,
+            ..sample_params(11)
+        };
+        let err = merge_obfuscation_params_reporting(&conf, Some(&params), &test_defaults())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("field=jmax"),
+            "must name field=jmax, got: {err}"
+        );
+    }
+
+    /// Per-field junk bound: negative and >u32 epoch values are client-class
+    /// drops, not merge failures — and they land on `dropped` for the metric.
+    #[test]
+    fn merge_drops_out_of_grammar_junk_values() {
+        let params = AwgParams {
+            jc: Some(-1),
+            jmax: Some(u32::MAX as i64 + 1),
+            ..sample_params(11)
+        };
+        let (out, dropped) =
+            merge_obfuscation_params_reporting(fixture_conf(), Some(&params), &test_defaults())
+                .unwrap();
+        assert!(!out.contains("-1"), "negative Jc must not render:\n{out}");
+        assert!(dropped.contains(&"jc") && dropped.contains(&"jmax"));
+    }
+
+    /// An invalid I-tag literal is a client-class drop — never reaches conf.
+    #[test]
+    fn merge_drops_invalid_i_tag() {
+        let params = AwgParams {
+            i1: Some("<r -5>".to_owned()), // parses upstream, panics at send
+            i2: Some("<bogus>".to_owned()),
+            ..sample_params(11)
+        };
+        let (out, dropped) =
+            merge_obfuscation_params_reporting(fixture_conf(), Some(&params), &test_defaults())
+                .unwrap();
+        assert!(!out.contains("bogus") && !out.contains("-5"));
+        assert!(dropped.contains(&"i1") && dropped.contains(&"i2"));
+    }
+
     /// The hpk-without-s3 buggy epoch: even with all conf S ≥ 12, an absent
     /// S3 resolves to 0 → reject (the exact regression the spec calls out).
     #[test]
@@ -1615,7 +1806,7 @@ mod tests {
         assert!(out.contains("Jc = 4\n"), "default jc must insert:\n{out}");
         assert!(out.contains("Jmin = 55\n"));
         assert!(out.contains("Jmax = 120\n"));
-        assert!(out.contains("I1 = <r 32-256>\n"), "default I1:\n{out}");
+        assert!(out.contains("I1 = <r 128>\n"), "default I1:\n{out}");
         assert!(
             out.contains("ContentPaddingAddition = 10-30\n"),
             "default CPA:\n{out}"
@@ -1672,7 +1863,7 @@ mod tests {
         let out = merge_obfuscation_params(conf_bare, None, &test_defaults()).unwrap();
         // Client-class inserts land (conf lacked I1/CPA; jc trio already
         // present → preserved at their conf values, NOT re-defaulted).
-        assert!(out.contains("I1 = <r 32-256>\n"), "top-up I1:\n{out}");
+        assert!(out.contains("I1 = <r 128>\n"), "top-up I1:\n{out}");
         assert!(
             out.contains("ContentPaddingAddition = 10-30\n"),
             "top-up CPA:\n{out}"
@@ -1738,7 +1929,14 @@ mod tests {
             assert!((8..=24).contains(&lo), "cpa lo band: {lo}");
             assert!((8..=40).contains(&(hi - lo)), "cpa delta band: {}", hi - lo);
             assert!(hi <= 64, "cpa total <= 64: {hi}");
-            assert_eq!(d.i1, "<r 32-256>");
+            // I1 is `<r N>` with N in [32,256] — the band is the draw range
+            // (3x-ui emits randInt(32,256) inside the tag), never a literal.
+            let n: i64 =
+                d.i1.strip_prefix("<r ")
+                    .and_then(|s| s.strip_suffix('>'))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| panic!("i1 must be `<r N>`: {:?}", d.i1));
+            assert!((32..=256).contains(&n), "i1 rand band: {n}");
         }
     }
 

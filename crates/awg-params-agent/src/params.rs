@@ -49,8 +49,8 @@ pub struct AwgParams {
     pub h3: IntOrRange,
     #[serde(rename = "H4")]
     pub h4: IntOrRange,
-    /// Junk-packet tag literals — opaque to the edge: the charset guard is
-    /// the ONLY edge-side validation; the tag grammar is upstream's.
+    /// Junk-packet tag literals — edge-side validation is charset guard +
+    /// the upstream `newObfChain` tag grammar (see [`validate_i_tag`]).
     #[serde(rename = "I1", default)]
     pub i1: Option<String>,
     #[serde(rename = "I2", default)]
@@ -202,6 +202,113 @@ pub fn validate_conf_string(field: &'static str, value: &str) -> Result<()> {
             field,
             bad
         ));
+    }
+    Ok(())
+}
+
+/// Junk-trio grammar: `jc`/`jmin`/`jmax` are `ParseUint(value, 10, 32)`
+/// upstream (device/uapi.go handleDeviceLine @ v3.1) — `0..=4294967295`.
+/// A negative or >u32 value fails `awg syncconf` with IpcErrorInvalid,
+/// leaving the device half-configured. The `jmin <= jmax` pair invariant is
+/// checked cross-field in conf_merge — upstream never checks it at uapi
+/// time; it detonates later inside `Device.JunkPackets()`
+/// (`min + fastrandn(max-min)` underflows uint32 to a ~4GiB allocation).
+pub fn validate_junk_value(field: &'static str, n: i64) -> Result<()> {
+    if !(0..=u32::MAX as i64).contains(&n) {
+        return Err(anyhow!(
+            "awg param rejected: field={} value {} outside junk grammar 0..={} \
+             (upstream ParseUint(10,32)) — refusing to splice into awg0.conf",
+            field,
+            n,
+            u32::MAX
+        ));
+    }
+    Ok(())
+}
+
+/// I-tag grammar — a mirror of upstream `newObfChain` (device/obf.go @
+/// v3.1). The spec is a sequence of `<key [arg]>` tags; text between tags is
+/// ignored upstream. Known keys: `b` `t` `r` `rc` `rd` `d` `ds` `dz`.
+/// Per-tag arg grammar (upstream builders, device/obf_*.go):
+///
+/// - `b` — hex string, `0x` prefix optional, non-empty, even digit count
+/// - `r`/`rc`/`rd`/`dz` — non-negative integer length (upstream accepts any
+///   `Atoi` value, but a negative then PANICS the daemon at send —
+///   `dst[:n]` on n<0 — so the edge bound is deliberately stricter than
+///   upstream's parser)
+/// - `t`/`d`/`ds` — arg ignored upstream
+///
+/// An unknown key, an empty `<>`, an unterminated `<`, or a malformed arg
+/// errors out the WHOLE `awg syncconf` set op (IpcErrorInvalid) — the conf
+/// the agent just wrote is then un-appliable. A value with no `<` at all
+/// parses to an inert nil chain upstream — meaningless config, rejected.
+pub fn validate_i_tag(field: &'static str, value: &str) -> Result<()> {
+    validate_conf_string(field, value)?;
+    if value.is_empty() {
+        // Absent-equivalent — upstream parses "" to a nil chain; nothing to
+        // validate. Callers treat Some("") as absent anyway.
+        return Ok(());
+    }
+    let reject = |reason: String| -> Result<()> {
+        Err(anyhow!(
+            "awg param rejected: field={} value {:?} {} — refusing to splice into awg0.conf",
+            field,
+            value,
+            reason
+        ))
+    };
+    let mut rest = value;
+    let mut saw_tag = false;
+    while let Some(start) = rest.find('<') {
+        let Some(end) = rest[start..].find('>') else {
+            return reject("has an unterminated `<` (upstream: missing enclosing >)".to_string());
+        };
+        let end = start + end;
+        let tag = &rest[start + 1..end];
+        let mut parts = tag.split_whitespace();
+        let Some(key) = parts.next() else {
+            return reject("has an empty `<>` tag".to_string());
+        };
+        let arg = parts.next();
+        saw_tag = true;
+        match key {
+            "b" => {
+                let Some(arg) = arg else {
+                    return reject("tag <b> requires a hex argument".to_string());
+                };
+                let digits = arg.strip_prefix("0x").unwrap_or(arg);
+                if digits.is_empty()
+                    || digits.len() % 2 != 0
+                    || !digits.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    return reject(
+                        "tag <b> argument must be non-empty even-length hex".to_string(),
+                    );
+                }
+            }
+            "r" | "rc" | "rd" | "dz" => {
+                let Some(arg) = arg else {
+                    return reject(format!("tag <{key}> requires a length argument"));
+                };
+                match arg.parse::<u64>() {
+                    Ok(n) if n <= 65535 => {}
+                    _ => {
+                        return reject(format!(
+                            "tag <{key}> argument must be a length in 0..=65535 \
+                             (upstream Atoi accepts negatives that panic the daemon at send)"
+                        ))
+                    }
+                }
+            }
+            "t" | "d" | "ds" => {}
+            other => return reject(format!("has unknown tag <{other}>")),
+        }
+        rest = &rest[end + 1..];
+    }
+    if !saw_tag {
+        return reject(
+            "contains no <tag> elements (upstream parses it to an inert nil chain)".to_string(),
+        );
     }
     Ok(())
 }
@@ -651,5 +758,75 @@ mod tests {
     fn base_params_is_constructible() {
         let p = base_params();
         assert_eq!(p.s2, 18);
+    }
+
+    // ── Junk-trio grammar (u32 — upstream ParseUint(10,32)) ─────────────
+
+    #[test]
+    fn junk_value_grammar_matrix() {
+        for ok in [0, 1, 3, 1024, u32::MAX as i64] {
+            assert!(validate_junk_value("jc", ok).is_ok(), "{ok} must pass");
+        }
+        for (bad, field) in [
+            (-1, "jc"),
+            (-1000, "jmin"),
+            (u32::MAX as i64 + 1, "jmax"),
+            (i64::MAX, "jc"),
+        ] {
+            let err = validate_junk_value(field, bad).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("field={field}")),
+                "{bad} must reject with field={field}, got: {err}"
+            );
+        }
+    }
+
+    // ── I-tag grammar (mirror of upstream newObfChain @ v3.1) ────────────
+
+    #[test]
+    fn i_tag_grammar_accepts_legit_chains() {
+        for ok in [
+            // The documented WG-initiation-mimic signature.
+            "<r 2><b 0x0100><b 0x0001><b 0x0000><b 0x0000><b 0x0000>",
+            "<r 128>",               // generated ClientDefaults shape
+            "<t>",                   // timestamp tag, arg ignored
+            "<d><ds>",               // data passthrough / base64 string
+            "<rc 16><rd 4><dz 8>",   // char/digit/datasize tags
+            "<b 0100>",              // hex without 0x prefix is legal upstream
+            "junk between <r 5> ok", // inter-tag text is ignored upstream
+            "",                      // empty = absent-equivalent
+        ] {
+            assert!(
+                validate_i_tag("i1", ok).is_ok(),
+                "{ok:?} must pass the tag grammar"
+            );
+        }
+    }
+
+    /// Every wedge shape upstream `newObfChain` errors on — plus the
+    /// negative-length form upstream parses but then panics on at send.
+    #[test]
+    fn i_tag_grammar_rejects_wedge_shapes() {
+        for bad in [
+            "arbitrary string", // no <tag> at all → inert nil chain
+            "<bogus>",          // unknown tag key
+            "<r",               // unterminated tag
+            "<>",               // empty tag
+            "<r>",              // missing arg
+            "<r abc>",          // non-numeric arg
+            "<r -5>",           // negative — upstream Atoi accepts, daemon PANICS
+            "<r 99999>",        // over the 65535 edge bound
+            "<b>",              // b requires hex arg
+            "<b 0x123>",        // odd hex length
+            "<b 0xzz>",         // non-hex
+            "<b 0x>",           // empty hex
+            "<r 5>bad<q 1>",    // unknown tag mid-chain
+        ] {
+            let err = validate_i_tag("i2", bad).unwrap_err().to_string();
+            assert!(
+                err.contains("field=i2"),
+                "{bad:?} must reject with field=i2, got: {err}"
+            );
+        }
     }
 }
