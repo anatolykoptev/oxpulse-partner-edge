@@ -58,14 +58,39 @@ exit 22
 STUB
 	chmod +x "$TMP/bin/curl"
 
-	# --- systemctl: log everything; is-active gated on FAKE_SYSTEMCTL_ACTIVE
+	# --- systemctl: log everything; state persists across calls so the
+	# enable-arm tests can assert "disabled → enable --now → enabled+active"
+	# against the post-enable READ, not just the call. Precedence: state file
+	# (written by a successful `enable`) > FAKE_SYSTEMCTL_* override > default
+	# enabled/inactive. FAKE_ENABLE_RC=1 simulates a failed `enable --now`
+	# (state left untouched).
 	cat > "$TMP/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 echo "systemctl $*" >> "$FAKE_LOG"
+sf="$FAKE_STATE/sys"
+en="$(sed -n 1p "$sf" 2>/dev/null)"; act="$(sed -n 2p "$sf" 2>/dev/null)"
+en="${en:-${FAKE_SYSTEMCTL_ENABLED:-enabled}}"
+act="${act:-${FAKE_SYSTEMCTL_ACTIVE:-0}}"
 case "$1" in
-	is-active)  [[ "${FAKE_SYSTEMCTL_ACTIVE:-0}" == "1" ]] && exit 0 || exit 3 ;;
-	is-enabled) echo "${FAKE_SYSTEMCTL_ENABLED:-enabled}"; exit 0 ;;
-	*)          exit 0 ;;
+	is-active)
+		[[ "$act" == "1" || "$act" == "active" ]] && exit 0 || exit 3 ;;
+	is-enabled)
+		# --quiet → exit code only; plain → print the state word. Real
+		# systemctl exits 0 for BOTH "enabled" and "enabled-runtime" —
+		# only the printed word distinguishes persistence.
+		if [[ "$2" == "--quiet" ]]; then
+			[[ "$en" == enabled* ]] && exit 0 || exit 1
+		fi
+		echo "$en"; [[ "$en" == enabled* ]] && exit 0 || exit 1 ;;
+	enable)
+		if [[ "${FAKE_ENABLE_RC:-0}" == "0" ]]; then
+			en="enabled"; [[ "$*" == *--now* ]] && act="active"
+			mkdir -p "$FAKE_STATE"; printf '%s\n%s\n' "$en" "$act" > "$sf"
+		fi
+		exit "${FAKE_ENABLE_RC:-0}" ;;
+	disable)
+		mkdir -p "$FAKE_STATE"; printf 'disabled\ninactive\n' > "$sf" ;;
+	*)  exit 0 ;;
 esac
 STUB
 	chmod +x "$TMP/bin/systemctl"
@@ -188,6 +213,8 @@ export SYSTEMCTL_BIN='$TMP/bin/systemctl'
 export REPO_RAW='fixture://raw'
 export RELEASES_BASE='fixture://rel'
 export DRY_RUN=0
+export FAKE_STATE='$TMP/state'
+export OXPULSE_AWG_CONF_PATH='$TMP/node/awg0.conf'
 ENVEOF
 }
 
@@ -207,6 +234,8 @@ export PREFIX_ETC='$FETC'
 export PREFIX_LIB='$FLIB'
 export BACKEND_API='https://api.oxpulse.chat'
 export NODE_ID='test-node-01'
+export FAKE_STATE='$TMP/state-agent'
+export OXPULSE_AWG_CONF_PATH='$TMP/node/awg0.conf'
 ENVEOF
 }
 
@@ -265,13 +294,13 @@ _make_release() {
 	! grep -q 'systemctl restart oxpulse-awg-params-agent.service' "$FAKE_LOG"
 }
 
-@test "sync: missing unit + missing binary → AWG-less skip (no fetch)" {
+@test "sync: missing env + missing binary → nothing-ours skip (no fetch)" {
 	_make_release v9.9.9 oxpulse-awg-params-agent-amd64 'NEW-BINARY'
 
 	run env PATH="$TMP/bin:$PATH" \
 		bash -c "$(_sync_env); bash '$TMP/run_sync.sh' v9.9.9"
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"AWG-less node"* ]]
+	[[ "$output" == *"nothing ours to refresh"* ]]
 	# The asset itself was never fetched (SHA256SUMS at Step 1 still is).
 	! grep -q 'oxpulse-awg-params-agent-amd64' "$FAKE_LOG"
 	[ ! -e "$FBIN/oxpulse-awg-params-agent" ]
@@ -353,6 +382,104 @@ _make_release() {
 		bash -c "$(_sync_env); bash '$TMP/run_sync.sh' v9.9.9"
 	[ "$status" -eq 0 ]
 	[ "$(cat "$FBIN/oxpulse-awg-params-agent")" = 'NEW-BINARY-v9.9.9' ]
+}
+
+# ---------------------------------------------------------------------------
+# A2. the enable arm (Step 5d) — dormant-node healing + the conf witness.
+# The env file renders on EVERY install, so it cannot prove the node took
+# the AWG channel — awg0.conf does. Enable requires env+unit+binary+conf,
+# then runs `enable --now` UNCONDITIONALLY (is-enabled exit 0 also covers
+# the non-persistent enabled-runtime state) and verifies BOTH the printed
+# persistent state and is-active — a failed start must warn, not log success.
+# ---------------------------------------------------------------------------
+
+@test "sync: dormant node (env+unit+binary+conf, unit disabled) → enable --now heals" {
+	# The HIGH-finding arm: binary delivered earlier (same sha → up-to-date
+	# path) but the unit was never enabled at install. Everything the enable
+	# needs is on disk → heal HERE, no operator re-run.
+	printf '[Service]\nExecStart=/usr/local/bin/oxpulse-awg-params-agent\n' \
+		> "$FSYSTEMD/oxpulse-awg-params-agent.service"
+	printf 'SAME-BYTES' > "$FBIN/oxpulse-awg-params-agent"
+	: > "$FETC/awg-params-agent.env"
+	: > "$TMP/node/awg0.conf"   # the channel witness
+	_make_release v9.9.9 oxpulse-awg-params-agent-amd64 'SAME-BYTES'
+
+	run env FAKE_SYSTEMCTL_ENABLED=disabled PATH="$TMP/bin:$PATH" \
+		bash -c "$(_sync_env); bash '$TMP/run_sync.sh' v9.9.9"
+	[ "$status" -eq 0 ]
+	grep -q 'systemctl enable --now oxpulse-awg-params-agent.service' "$FAKE_LOG"
+	[[ "$output" == *"host-asset: oxpulse-awg-params-agent — enabled + active"* ]]
+}
+
+@test "sync: enabled-runtime unit still gets persistent enable --now" {
+	# is-enabled exits 0 for enabled-runtime — a FALSE converge that dies on
+	# reboot. A short-circuit on `is-enabled --quiet` regresses to that; the
+	# unconditional enable --now persists the unit.
+	printf '[Service]\nExecStart=/usr/local/bin/oxpulse-awg-params-agent\n' \
+		> "$FSYSTEMD/oxpulse-awg-params-agent.service"
+	printf 'SAME-BYTES' > "$FBIN/oxpulse-awg-params-agent"
+	: > "$FETC/awg-params-agent.env"
+	: > "$TMP/node/awg0.conf"
+	_make_release v9.9.9 oxpulse-awg-params-agent-amd64 'SAME-BYTES'
+
+	run env FAKE_SYSTEMCTL_ENABLED=enabled-runtime FAKE_SYSTEMCTL_ACTIVE=1 \
+		PATH="$TMP/bin:$PATH" \
+		bash -c "$(_sync_env); bash '$TMP/run_sync.sh' v9.9.9"
+	[ "$status" -eq 0 ]
+	grep -q 'systemctl enable --now oxpulse-awg-params-agent.service' "$FAKE_LOG"
+	[[ "$output" == *"enabled + active"* ]]
+}
+
+@test "sync: enable --now failure warns and does NOT claim success" {
+	printf '[Service]\nExecStart=/usr/local/bin/oxpulse-awg-params-agent\n' \
+		> "$FSYSTEMD/oxpulse-awg-params-agent.service"
+	printf 'SAME-BYTES' > "$FBIN/oxpulse-awg-params-agent"
+	: > "$FETC/awg-params-agent.env"
+	: > "$TMP/node/awg0.conf"
+	_make_release v9.9.9 oxpulse-awg-params-agent-amd64 'SAME-BYTES'
+
+	run env FAKE_SYSTEMCTL_ENABLED=disabled FAKE_ENABLE_RC=1 \
+		PATH="$TMP/bin:$PATH" \
+		bash -c "$(_sync_env); bash '$TMP/run_sync.sh' v9.9.9"
+	[ "$status" -eq 0 ]   # fail-soft — the upgrade still converges
+	[[ "$output" == *"warn:"*"host-asset"* ]]
+	[[ "$output" != *"host-asset: oxpulse-awg-params-agent — enabled + active"* ]]
+}
+
+@test "sync: env+unit+binary but NO awg0.conf → never enabled (AWG-less node)" {
+	# env renders unconditionally at install — it cannot witness the channel.
+	# A node with no awg0.conf has no AWG; enabling the daemon would run a
+	# root process erroring on the missing conf every tick.
+	printf '[Service]\nExecStart=/usr/local/bin/oxpulse-awg-params-agent\n' \
+		> "$FSYSTEMD/oxpulse-awg-params-agent.service"
+	printf 'SAME-BYTES' > "$FBIN/oxpulse-awg-params-agent"
+	: > "$FETC/awg-params-agent.env"
+	# NOTE: no $TMP/node/awg0.conf.
+	_make_release v9.9.9 oxpulse-awg-params-agent-amd64 'SAME-BYTES'
+
+	run env PATH="$TMP/bin:$PATH" \
+		bash -c "$(_sync_env); bash '$TMP/run_sync.sh' v9.9.9"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"up-to-date"* ]]
+	! grep -q 'systemctl enable' "$FAKE_LOG"
+}
+
+@test "sync: env+unit+conf but binary absent → fetch, install, then activate" {
+	# The dormant-delivery arm: install ran (env present) but the binary
+	# never landed. The gate fetches via env-ownership, installs, and the
+	# post-install enable fires because conf+env+unit are all on disk.
+	printf '[Service]\nExecStart=/usr/local/bin/oxpulse-awg-params-agent\n' \
+		> "$FSYSTEMD/oxpulse-awg-params-agent.service"
+	: > "$FETC/awg-params-agent.env"
+	: > "$TMP/node/awg0.conf"
+	_make_release v9.9.9 oxpulse-awg-params-agent-amd64 'NEW-BINARY'
+
+	run env FAKE_SYSTEMCTL_ENABLED=disabled PATH="$TMP/bin:$PATH" \
+		bash -c "$(_sync_env); bash '$TMP/run_sync.sh' v9.9.9"
+	[ "$status" -eq 0 ]
+	[ "$(cat "$FBIN/oxpulse-awg-params-agent")" = 'NEW-BINARY' ]
+	grep -q 'systemctl enable --now oxpulse-awg-params-agent.service' "$FAKE_LOG"
+	[[ "$output" == *"host-asset: oxpulse-awg-params-agent — enabled + active"* ]]
 }
 
 @test "arch map: host-scripts-lib mirrors the install-awg-params-agent authority" {
@@ -447,10 +574,25 @@ _make_release() {
 	# Re-run on a node that already has the binary must not regress to
 	# disabled just because this installer cannot fetch a verified update.
 	printf 'EXISTING-BINARY' > "$FBIN/oxpulse-awg-params-agent"
+	: > "$TMP/node/awg0.conf"   # channel witness — enable requires conf
 
 	run env PATH="$TMP/bin:$PATH" \
 		bash -c "$(_agent_env); unset OXPULSE_RELEASE_TAG; bash '$TMP/run_agent.sh' awg_params_agent_run"
 	[ "$status" -eq 0 ]
 	grep -q 'systemctl enable --now oxpulse-awg-params-agent.service' "$FAKE_LOG"
 	[ "$(cat "$FBIN/oxpulse-awg-params-agent")" = 'EXISTING-BINARY' ]
+}
+
+@test "bootstrap: binary present but no awg0.conf → unit NOT enabled (AWG-less)" {
+	# Same witness contract as Step 5d: the env renders unconditionally, so
+	# only awg0.conf proves the node took the channel. Enabling the daemon
+	# without it = a root process erroring on the missing conf every tick.
+	printf 'EXISTING-BINARY' > "$FBIN/oxpulse-awg-params-agent"
+	# NOTE: no $TMP/node/awg0.conf.
+
+	run env PATH="$TMP/bin:$PATH" \
+		bash -c "$(_agent_env); unset OXPULSE_RELEASE_TAG; bash '$TMP/run_agent.sh' awg_params_agent_run"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"no awg0.conf"* ]]
+	! grep -q 'systemctl enable' "$FAKE_LOG"
 }

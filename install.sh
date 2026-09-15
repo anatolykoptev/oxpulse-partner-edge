@@ -1777,7 +1777,7 @@ healthcheck_run
 
 # ---------- Step 8b: awg-params-agent ----------
 # Must be inside BAKE_MODE=0 block: _awg_params_agent_render_env expands
-#  which is only assigned during the hydrate path above.
+# NODE_ID/BACKEND_API, only assigned during the hydrate path above.
 awg_params_agent_run
 
 fi  # end BAKE_MODE=0 (hydrate path)

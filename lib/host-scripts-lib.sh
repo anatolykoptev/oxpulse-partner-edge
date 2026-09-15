@@ -144,11 +144,12 @@ _host_script_asset_install_dir() {
 }
 
 # _host_script_asset_env_file NAME — the env file the asset's unit requires
-# (EnvironmentFile= contract), or "" when the asset has none. This is the
-# AWG-presence signal the step gates + enables on: the env file is rendered
-# ONLY by the install path's awg_params_agent_run, so its presence means
-# "this node took the AWG channel" — unlike the unit file, which Step 5
-# installs unconditionally fleet-wide and therefore cannot witness.
+# (EnvironmentFile= contract), or "" when the asset has none. Used by the
+# fetch gate below: rendered by the install path's awg_params_agent_run, it
+# distinguishes "install ran" from a bare unit file — which Step 5 installs
+# unconditionally fleet-wide. NOTE: it is NOT an AWG-channel witness (the
+# env renders on every install, AWG block or not) — the fetch gate only
+# decides "is this ours to refresh"; the enable gate uses the conf file.
 _host_script_asset_env_file() {
 	case "$1" in
 		# install-awg-params-agent.sh:_awg_params_agent_render_env target;
@@ -158,27 +159,53 @@ _host_script_asset_env_file() {
 	esac
 }
 
-# _host_script_asset_enable NAME DST UNIT ENV — activate the unit when the
-# full install-time prerequisite set is on disk (env + unit + binary) and
-# the unit is not enabled. Closes the dormant-node gap: a node whose install
-# took awg_params_agent_run's fail-soft arm (binary absent → unit rendered
-# but never enabled) has no other convergent path — Step 7 restarts only
+# _host_script_asset_conf_file NAME — the config file proving this node
+# actually took the asset's channel, or "" when the asset needs none. For
+# the params agent this is awg0.conf — the file the daemon merges into;
+# a node without it has no AWG channel and enabling the unit would just
+# run a root daemon erroring on a missing conf every tick.
+_host_script_asset_conf_file() {
+	case "$1" in
+		oxpulse-awg-params-agent) printf '%s\n' "${OXPULSE_AWG_CONF_PATH:-/etc/amnezia/amneziawg/awg0.conf}" ;;
+		*)                        printf '%s\n' "" ;;
+	esac
+}
+
+# _host_script_asset_enable NAME DST UNIT ENV CONF — activate the unit when
+# the full prerequisite set is on disk (env + unit + binary + the channel
+# conf). Closes the dormant-node gap: a node whose install took
+# awg_params_agent_run's fail-soft arm (binary absent → unit rendered but
+# never enabled) has no other convergent path — Step 7 restarts only
 # is-active units, _HOST_SCRIPT_ENABLE_UNITS deliberately excludes the agent
 # (pinned by tests/test_upgrade_enable_set_matches_installer.sh), and
-# awg_params_agent_run is never called by upgrade.sh. Idempotent —
-# is-enabled short-circuits on converged nodes. Fail-soft: a failed
-# enable warns, never dies (same contract as the rest of Step 5d).
+# awg_params_agent_run is never called by upgrade.sh. The conf requirement
+# is the AWG-channel witness the env file can't be (it renders
+# unconditionally at install). `enable` runs unconditionally — idempotent,
+# and it must not trust `is-enabled`'s exit 0, which also reports the
+# non-persistent `enabled-runtime` state (dead after reboot). The verify
+# checks BOTH persistent enable and live state — a failed --now start must
+# warn, not log "enabled + started". Fail-soft throughout: a failed enable
+# warns, never dies (same contract as the rest of Step 5d).
 _host_script_asset_enable() {
-	local _a="$1" _a_dst="$2" _a_unit="$3" _a_env="$4"
+	local _a="$1" _a_dst="$2" _a_unit="$3" _a_env="$4" _a_conf="$5"
 	[[ -n "$_a_env" && -f "$_a_env" && -f "$_a_unit" && -f "$_a_dst" ]] || return 0
-	"$SYSTEMCTL_BIN" is-enabled --quiet "${_a}.service" 2>/dev/null && return 0
+	# A declared-but-absent conf means no channel was ever taken — skip.
+	[[ -z "$_a_conf" || -f "$_a_conf" ]] || return 0
 	"$SYSTEMCTL_BIN" daemon-reload 2>/dev/null || true
 	if "$SYSTEMCTL_BIN" enable --now "${_a}.service" 2>/dev/null \
-		&& "$SYSTEMCTL_BIN" is-enabled --quiet "${_a}.service" 2>/dev/null; then
-		log "  host-asset: $_a — enabled + started (node was dormant: binary delivered, unit never enabled)"
+		&& [[ "$("$SYSTEMCTL_BIN" is-enabled "${_a}.service" 2>/dev/null)" == "enabled" ]] \
+		&& "$SYSTEMCTL_BIN" is-active --quiet "${_a}.service" 2>/dev/null; then
+		:
 	else
-		warn "  host-asset: $_a installed but 'enable --now' failed — check: $SYSTEMCTL_BIN status ${_a}.service"
+		# Idempotent no-op on converged nodes — quiet unless something that
+		# should have worked didn't.
+		[[ "$("$SYSTEMCTL_BIN" is-enabled "${_a}.service" 2>/dev/null)" == "enabled" ]] \
+			&& "$SYSTEMCTL_BIN" is-active --quiet "${_a}.service" 2>/dev/null \
+			&& return 0
+		warn "  host-asset: $_a installed but not persistently enabled + active after 'enable --now' — check: $SYSTEMCTL_BIN status ${_a}.service"
+		return 0
 	fi
+	log "  host-asset: $_a — enabled + active (node was dormant: binary delivered, unit never enabled)"
 }
 
 # snapshot_host_scripts TAG — copy every managed sbin file + relevant systemd
@@ -765,11 +792,13 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	# agent-binary hashes across five edges, because every upgrade restarted
 	# the unit and none ever refreshed the binary.
 	#
-	# GATE — env file present OR binary already installed: nodes that never
-	# took the AWG channel no-op entirely (no fetch attempted). The env file
-	# (rendered solely by the install path's awg_params_agent_run) is the
-	# AWG-presence witness — NOT the unit file, which Step 5 installs
-	# unconditionally fleet-wide and so cannot distinguish.
+	# GATE — env file present OR binary already installed: the env file
+	# (rendered by the install path's awg_params_agent_run) marks "install
+	# ran", and a pre-delivered binary marks "we own this". This is NOT an
+	# AWG-channel gate — env renders on every install, so the fetch side
+	# effectively always runs (same as the old unit-file gate); the
+	# channel witness for ENABLE is awg0.conf, checked inside
+	# _host_script_asset_enable.
 	#
 	# VERIFY — fail-CLOSED, deliberately stricter than the script class's
 	# ALLOW_UNVERIFIED leniency: this is a root daemon that writes awg0.conf
@@ -783,17 +812,17 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	# otherwise converging the managed set (the same contract
 	# ensure_amneziawg keeps).
 	# ------------------------------------------------------------------
-	local _asset _arch _asset_rel _asset_dst _asset_unit _asset_env _asset_tmp_inst
+	local _asset _arch _asset_rel _asset_dst _asset_unit _asset_env _asset_conf _asset_tmp_inst
 	for _asset in "${_HOST_SCRIPT_ASSET_FILES[@]}"; do
 		install_dir=$(_host_script_asset_install_dir "$_asset")
 		_asset_dst="$install_dir/$_asset"
 		_asset_unit="$SYSTEMD_DIR/${_asset}.service"
 		_asset_env=$(_host_script_asset_env_file "$_asset")
-		# Gate: the AWG-less no-op — the env file is absent (install path
-		# never rendered it) and no binary was ever delivered, so nothing
-		# here is ours to refresh.
+		_asset_conf=$(_host_script_asset_conf_file "$_asset")
+		# Gate: nothing-ours no-op — the env file is absent (install path
+		# never rendered it) and no binary was ever delivered.
 		if [[ -z "$_asset_env" || ! -f "$_asset_env" ]] && [[ ! -f "$_asset_dst" ]]; then
-			log "  host-asset: $_asset — no env file and no installed binary (AWG-less node) — skipping"
+			log "  host-asset: $_asset — no env file and no installed binary (nothing ours to refresh) — skipping"
 			continue
 		fi
 		if ! _arch=$(_host_script_asset_arch); then
@@ -833,7 +862,7 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 			installed_sha=$(sha256sum "$_asset_dst" | awk '{print $1}')
 			if [[ "$installed_sha" == "$actual_sha" ]]; then
 				log "  host-asset: $_asset up-to-date (sha256 match)"
-				_host_script_asset_enable "$_asset" "$_asset_dst" "$_asset_unit" "$_asset_env"
+				_host_script_asset_enable "$_asset" "$_asset_dst" "$_asset_unit" "$_asset_env" "$_asset_conf"
 				continue
 			fi
 		fi
@@ -847,7 +876,7 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 		mv -f "$_asset_tmp_inst" "$_asset_dst"
 		log "  host-asset: installed $_asset ($_asset_rel @ $tag)"
 		_any_changed=1
-		_host_script_asset_enable "$_asset" "$_asset_dst" "$_asset_unit" "$_asset_env"
+		_host_script_asset_enable "$_asset" "$_asset_dst" "$_asset_unit" "$_asset_env" "$_asset_conf"
 	done
 
 	# ------------------------------------------------------------------

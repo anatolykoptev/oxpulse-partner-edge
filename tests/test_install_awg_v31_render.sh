@@ -307,3 +307,69 @@ AWG_DISABLE_COOKIES|DisableCookies|off
 	grep -q "s3(grammar)" "$(_marker)"
 	[[ "$output" == *"DEGRADED=1"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# I-tag strict-parity — upstream splits each <…> token on the FIRST literal
+# space (strings.Cut) and hands the WHOLE remainder to the arg parser. Any
+# normalisation a whitespace-split would apply (extra args dropped, runs of
+# space collapsed, tabs treated as separators) accepts values upstream
+# rejects → the rendered conf wedges syncconf. Each value below must take
+# the i-tag grammar-drop path (client-side: line omitted, marker, no
+# degraded). Reverting _awg_itag to `read -ra` flips these RED.
+# ---------------------------------------------------------------------------
+@test "v3.1: I-tag values upstream rejects are dropped (first-space parity)" {
+	local cases=(
+		'<r 5 junk>'       # extra arg — upstream Atoi("5 junk") fails
+		'<b abcd extra>'   # extra arg — upstream hex-decode fails
+		'<r  5>'           # double space — upstream Atoi(" 5") fails
+		'<r	5>'            # literal tab — not the cut char → unknown key "r\t5"
+		'<r 5 >'           # trailing space — upstream Atoi("5 ") fails
+		'<r>'              # missing arg — upstream Atoi("") fails
+		'<b>'              # missing arg — upstream hex-decode("") fails
+		'<b 0x>'           # empty hex after prefix strip
+		'<r 65536>'        # above the u16-junk bound
+		'<r5>'             # no separator → unknown key
+		'<xyz 5>'          # unknown tag
+	)
+	local v
+	for v in "${cases[@]}"; do
+		env "AWG_I1=$v" bash -c "
+			source '$REPO_ROOT/lib/install-awg.sh'
+			log() { :; }; warn() { :; }; die() { exit 1; }
+			systemctl() { :; }; awg() { :; }; sleep() { :; }
+			command -v flock >/dev/null 2>&1 || flock() { return 0; }
+			configure_amneziawg
+		" < /dev/null
+		grep -q "^I1 = " "$TMP/awg-conf/awg0.conf" \
+			&& { echo "FAIL: I1 value ${v@Q} rendered but upstream rejects it"; return 1; }
+		grep -q "i1(grammar)" "$(_marker)" \
+			|| { echo "FAIL: i1(grammar) drop not recorded for ${v@Q}"; return 1; }
+		rm -f "$TMP/awg-conf/awg0.conf" "$(_marker)"
+	done
+}
+
+@test "v3.1: I-tag values upstream accepts still render (no over-reject)" {
+	# t/d/ds args are ignored upstream → an arg is legal there (only the
+	# numeric-arg tags must stay strict).
+	local cases=(
+		'<r 5>'
+		'<b 0xabcd>'
+		'<b abCD01>'
+		'<t>'
+		'<t anything-here>'
+		'<dz 0><rd 65535><r 32><t>'
+	)
+	local v
+	for v in "${cases[@]}"; do
+		env "AWG_I1=$v" bash -c "
+			source '$REPO_ROOT/lib/install-awg.sh'
+			log() { :; }; warn() { :; }; die() { exit 1; }
+			systemctl() { :; }; awg() { :; }; sleep() { :; }
+			command -v flock >/dev/null 2>&1 || flock() { return 0; }
+			configure_amneziawg
+		" < /dev/null
+		grep -q "^I1 = $v\$" "$TMP/awg-conf/awg0.conf" \
+			|| { echo "FAIL: upstream-valid I1 value ${v@Q} was not rendered"; return 1; }
+		rm -f "$TMP/awg-conf/awg0.conf" "$(_marker)"
+	done
+}

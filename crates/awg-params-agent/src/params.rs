@@ -265,11 +265,20 @@ pub fn validate_i_tag(field: &'static str, value: &str) -> Result<()> {
         };
         let end = start + end;
         let tag = &rest[start + 1..end];
-        let mut parts = tag.split_whitespace();
-        let Some(key) = parts.next() else {
-            return reject("has an empty `<>` tag".to_string());
+        // Mirror upstream `strings.Cut(tag, " ")`: split on the FIRST
+        // literal space only and hand the ENTIRE remainder to the arg
+        // parser. `split_whitespace` would wrongly accept `<r 5 junk>`,
+        // `<r  5>` (double space → arg " 5" fails Atoi upstream), and
+        // `<r\t5>` (tab isn't the cut char upstream — the whole token
+        // becomes an unknown key). Each wrong-accept writes a conf
+        // `syncconf` rejects → persistent wedge.
+        let (key, arg) = match tag.split_once(' ') {
+            Some((k, a)) => (k, Some(a)),
+            None => (tag, None),
         };
-        let arg = parts.next();
+        if key.is_empty() {
+            return reject("has an empty `<>` tag".to_string());
+        }
         saw_tag = true;
         match key {
             "b" => {
@@ -826,6 +835,36 @@ mod tests {
             assert!(
                 err.contains("field=i2"),
                 "{bad:?} must reject with field=i2, got: {err}"
+            );
+        }
+    }
+
+    /// First-literal-space parity: upstream `strings.Cut(tag, " ")` hands the
+    /// ENTIRE remainder to the arg parser — no whitespace normalisation. A
+    /// `split_whitespace`-style parser wrongly accepts every value below,
+    /// writing a conf `syncconf` then rejects → persistent wedge.
+    #[test]
+    fn i_tag_grammar_rejects_whitespace_drift() {
+        for bad in [
+            "<r 5 junk>",     // extra arg — upstream Atoi("5 junk") fails
+            "<b abcd extra>", // extra arg — upstream hex-decode fails
+            "<r  5>",         // double space — upstream Atoi(" 5") fails
+            "<r\t5>",         // tab is not the cut char → unknown key "r\t5"
+            "<r 5 >",         // trailing space — upstream Atoi("5 ") fails
+            "<b\t0xabcd>",    // tab → unknown key
+        ] {
+            assert!(
+                validate_i_tag("i3", bad).is_err(),
+                "{bad:?} must reject (upstream strings.Cut parity)"
+            );
+        }
+        // …and the t/d/ds tags DO take an (ignored) arg upstream — a
+        // first-space split keeps that legal where strict no-arg parsing
+        // would over-reject.
+        for ok in ["<t anything-here>", "<d x>", "<ds 0>"] {
+            assert!(
+                validate_i_tag("i4", ok).is_ok(),
+                "{ok:?} must pass — t/d/ds args are ignored upstream"
             );
         }
     }

@@ -282,10 +282,14 @@ _awg_itag() {
 		tok="${rest%%>*}"
 		[[ "$tok" != "$rest" ]] || return 1   # unterminated <
 		rest="${rest#*>}"
-		# IFS-split without glob risk (read -a never pathname-expands, unlike
-		# `set -- $tok`); leading ws is skipped = upstream split_whitespace.
-		local -a _w=(); read -ra _w <<< "$tok"
-		key="${_w[0]:-}"; arg="${_w[1]:-}"
+		# Mirror upstream strings.Cut(tag, " "): split on the FIRST literal
+		# space only — the whole remainder is the arg. IFS-splitting would
+		# wrongly accept `<r 5 junk>`, `<r  5>` (double space — upstream
+		# Atoi(" 5") fails) and `<r\t5>` (tab isn't the cut char upstream —
+		# the whole token is an unknown key there). Each wrong-accept writes
+		# a conf syncconf rejects → persistent wedge.
+		key="${tok%% *}"
+		if [[ "$tok" == *" "* ]]; then arg="${tok#* }"; else arg=""; fi
 		[[ -n "$key" ]] || return 1
 		case "$key" in
 		b)
@@ -392,6 +396,20 @@ configure_amneziawg() {
 	# byte-for-byte file; AWG_CONF_LOCK_PATH stays as a legacy alias. Both default
 	# to "<conf>.lock", identical to the agent's default_lock_path().
 	local lock_path="${OXPULSE_AWG_CONF_LOCK_PATH:-${AWG_CONF_LOCK_PATH:-${conf_path}.lock}}"
+	# Probe the lock-file open in a subshell first: `exec 9>` is a SPECIAL
+	# builtin — a redirection failure aborts the whole non-interactive shell
+	# outright (no || guard can catch it), which would skip firewall_apply
+	# and every step after — the exact consequence the fail-soft contract
+	# below exists to prevent.
+	if ! ( : >> "$lock_path" ) 2>/dev/null; then
+		warn "configure_amneziawg: cannot open lock file $lock_path — leaving awg0.conf UNTOUCHED this pass"
+		printf '%s\n' "awg0.conf write SKIPPED $(date -u +%Y-%m-%dT%H:%M:%SZ): lock file $lock_path not writable; identity rotation NOT applied; re-run the install to apply it." \
+			> "${conf_path}.rotation-skipped" 2>/dev/null || true
+		# Same dead-but-green guard as the contention path below: a fresh
+		# install with no conf at all must not report awg=active.
+		[[ -s "$conf_path" ]] || AWG_CONF_DEGRADED=1
+		return 0
+	fi
 	exec 9>"$lock_path"
 	# Fail-soft, NOT die(): AWG is an optional mesh channel (install.sh Phase 5.7
 	# Item 2) and configure_amneziawg is called directly — NOT in a die-isolating
@@ -419,6 +437,11 @@ configure_amneziawg() {
 		# never fails on the marker write itself.
 		printf '%s\n' "awg0.conf write SKIPPED $(date -u +%Y-%m-%dT%H:%M:%SZ): lock $lock_path held >10s by another writer; identity rotation NOT applied; re-run the install to apply it." \
 			> "${conf_path}.rotation-skipped" 2>/dev/null || true
+		# No conf at all + no write this pass = fresh-install dead-but-green —
+		# mark degraded so the caller doesn't record awg=active on a link
+		# that was never rendered. With a conf present the skip is a real
+		# rotation-skip (old conf may still be live) and stays non-degraded.
+		[[ -s "$conf_path" ]] || AWG_CONF_DEGRADED=1
 		exec 9>&-
 		return 0
 	fi

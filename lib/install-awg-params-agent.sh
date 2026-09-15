@@ -231,22 +231,25 @@ awg_params_agent_run() {
 		if _awg_params_agent_install_binary; then _bin_landed=1; fi
 		_awg_params_agent_install_unit
 		_awg_params_agent_render_env
-		# Enable ONLY when a binary is actually on disk — either just
-		# installed or left by a previous install. Enabling a unit whose
-		# ExecStart is absent would flap forever under Restart=on-failure; a
-		# binary-less node stays correctly dormant instead. The unit file is
-		# still installed + env rendered above on purpose: unit presence is
-		# the gate sync_host_scripts' asset step uses, so the verified binary
-		# lands on the next tagged upgrade (Step 5d in
-		# lib/host-scripts-lib.sh). Activation after that delivery is a
-		# subsequent installer re-run or operator `systemctl enable --now` —
-		# the Step 7 restart only fires for already-active units, which a
-		# never-enabled unit is not.
-		if [[ "$_bin_landed" -eq 1 || -f "$_AWG_PARAMS_AGENT_BIN" ]]; then
+		# Enable ONLY when a binary AND awg0.conf are on disk — the conf is
+		# the channel witness: it exists iff configure_amneziawg rendered it
+		# this install, i.e. the node took the AWG channel. A binary without
+		# a conf means a daemon erroring on its missing EnvironmentFile
+		# target every tick; a binary-less node stays correctly dormant. The
+		# unit file + env still render unconditionally above on purpose: they
+		# mark "this node is ours" for sync_host_scripts' asset step, which
+		# delivers the verified binary on the next tagged upgrade and
+		# activates the unit there itself (Step 5d in lib/host-scripts-lib.sh
+		# — same env+unit+binary+conf prerequisite set, then `enable --now`;
+		# no installer re-run needed).
+		local _agent_conf="${OXPULSE_AWG_CONF_PATH:-/etc/amnezia/amneziawg/awg0.conf}"
+		if [[ ( "$_bin_landed" -eq 1 || -f "$_AWG_PARAMS_AGENT_BIN" ) && -f "$_agent_conf" ]]; then
 			_awg_params_agent_enable
 			_awg_params_agent_smoke
+		elif [[ ! -f "$_agent_conf" ]]; then
+			warn "  awg-params-agent: no awg0.conf — node has no AWG channel; unit file present but NOT enabled"
 		else
-			warn "  awg-params-agent: no binary installed (see above) — unit file present but NOT enabled; sync_host_scripts delivers the verified binary on the next tagged upgrade"
+			warn "  awg-params-agent: no binary installed (see above) — unit file present but NOT enabled; sync_host_scripts delivers the verified binary + enables on the next tagged upgrade"
 		fi
 	else
 		warn "  [dry-run] skipping awg-params-agent install"

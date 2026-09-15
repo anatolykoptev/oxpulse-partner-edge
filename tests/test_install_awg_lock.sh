@@ -216,6 +216,7 @@ _load_awg_globals() {
 			AWG_S1 AWG_S2 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4 \
 			AWG_CONF_DIR AWG_LISTEN_PORT)
 		configure_amneziawg
+		echo \"DEGRADED=\${AWG_CONF_DEGRADED:-}\"
 	"
 
 	# Competitor no longer needed; reap it now (don't wait its full 12s).
@@ -238,6 +239,98 @@ _load_awg_globals() {
 	[[ "$output" != *"reconciles on its next poll"* ]]
 	[[ "$output" == *"re-run the install"* ]]
 	[[ "$output" == *"NOT identity"* ]]
+
+	# (e) A rotation-skip over an EXISTING conf is not degraded — the old conf
+	#     may still be live; degraded is reserved for "no conf at all".
+	[[ "$output" == *"DEGRADED="* ]]
+	[[ "$output" != *"DEGRADED=1"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Test 6: LOCK-FILE UNWRITABLE — `exec 9>` is a special builtin: a redirect
+# failure aborts the whole non-interactive shell outright (no || guard can
+# catch it), skipping firewall_apply and every later step. The subshell probe
+# must degrade this to the same fail-soft skip as contention: warn + marker +
+# return 0 + AWG_CONF_DEGRADED=1 on a fresh install (no conf → dead-but-green).
+# Reverting the probe makes the whole bash -c die BEFORE configure_amneziawg
+# returns → the AFTER sentinel never prints.
+# ---------------------------------------------------------------------------
+@test "unwritable lock file: fail-soft skip + marker + degraded, shell survives" {
+	_load_awg_globals
+	local conf_path="$TMP/awg-conf/awg0.conf"
+	local marker="${conf_path}.rotation-skipped"
+	# Redirect the lock path into a directory that does not exist — the
+	# subshell probe `: >> lock` fails with ENOENT, as a read-only/EPERM
+	# parent would on a real node.
+	export OXPULSE_AWG_CONF_LOCK_PATH="$TMP/no-such-dir/awg0.conf.lock"
+
+	run bash -c "
+		source '$REPO_ROOT/lib/install-awg.sh'
+		log()       { :; }
+		warn()      { echo \"WARN: \$*\"; }
+		die()       { echo \"DIE: \$*\" >&2; exit 1; }
+		systemctl() { :; }
+		awg()       { :; }
+		sleep()     { :; }
+		$(declare -p AWG_PRIV_PATH AWG_PUB_PATH AWG_MOTHERLY_PUBKEY AWG_MOTHERLY_ENDPOINT \
+			AWG_MOTHERLY_AWG_IP AWG_ALLOCATED_IP AWG_JC AWG_JMIN AWG_JMAX \
+			AWG_S1 AWG_S2 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4 \
+			AWG_CONF_DIR AWG_LISTEN_PORT OXPULSE_AWG_CONF_LOCK_PATH)
+		configure_amneziawg
+		echo \"AFTER_CONFIGURE=\$?\"
+		echo \"DEGRADED=\${AWG_CONF_DEGRADED:-}\"
+	"
+	[ "$status" -eq 0 ]
+	# The shell survived — a special-builtin redirect abort never reaches here.
+	[[ "$output" == *"AFTER_CONFIGURE=0"* ]]
+	[[ "$output" == *"cannot open lock file"* ]]
+	# Fresh install, no conf → degraded (dead-but-green guard).
+	[[ "$output" == *"DEGRADED=1"* ]]
+	# No conf, but a durable marker.
+	[ ! -f "$conf_path" ]
+	[ -f "$marker" ]
+	grep -q 're-run' "$marker"
+}
+
+# ---------------------------------------------------------------------------
+# Test 7: FRESH-INSTALL LOCK CONTENTION — same contention as test 4 but with
+# NO pre-existing conf. The skip must mark AWG_CONF_DEGRADED=1 so the caller
+# records awg=degraded, not awg=active on a link that was never rendered.
+# ---------------------------------------------------------------------------
+@test "fresh-install lock contention: degraded (no conf to fall back on)" {
+	_load_awg_globals
+	local conf_path="$TMP/awg-conf/awg0.conf"
+	local lock_path="${conf_path}.lock"
+	local marker="${conf_path}.rotation-skipped"
+	# NOTE: no awg0.conf pre-seeded — this is the fresh-install arm.
+
+	bash -c 'exec 8>"'"$lock_path"'"; flock 8; sleep 12' &
+	COMP_PID=$!
+	sleep 0.5
+
+	run bash -c "
+		source '$REPO_ROOT/lib/install-awg.sh'
+		log()       { :; }
+		warn()      { echo \"WARN: \$*\"; }
+		die()       { echo \"DIE: \$*\" >&2; exit 1; }
+		systemctl() { :; }
+		awg()       { :; }
+		sleep()     { :; }
+		$(declare -p AWG_PRIV_PATH AWG_PUB_PATH AWG_MOTHERLY_PUBKEY AWG_MOTHERLY_ENDPOINT \
+			AWG_MOTHERLY_AWG_IP AWG_ALLOCATED_IP AWG_JC AWG_JMIN AWG_JMAX \
+			AWG_S1 AWG_S2 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4 \
+			AWG_CONF_DIR AWG_LISTEN_PORT)
+		configure_amneziawg
+		echo \"DEGRADED=\${AWG_CONF_DEGRADED:-}\"
+	"
+
+	kill "$COMP_PID" 2>/dev/null
+	COMP_PID=""
+
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"DEGRADED=1"* ]]
+	[ ! -f "$conf_path" ]
+	[ -f "$marker" ]
 }
 
 # ---------------------------------------------------------------------------
