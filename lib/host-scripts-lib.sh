@@ -237,6 +237,16 @@ snapshot_host_scripts() {
 		[[ -f "$installed_path" ]] && cp -a "$installed_path" "$snap_dir/sbin/$f" || true
 	done
 
+	# Release-asset binaries (the Step 5d set) install under
+	# _host_script_asset_install_dir — PREFIX_BIN, NOT the sbin map — so they
+	# need their own pass; without it a rollback leaves the upgraded daemon
+	# running beside the rolled-back release.
+	for f in "${_HOST_SCRIPT_ASSET_FILES[@]}"; do
+		install_dir=$(_host_script_asset_install_dir "$f")
+		installed_path="$install_dir/$f"
+		[[ -f "$installed_path" ]] && cp -a "$installed_path" "$snap_dir/sbin/$f" || true
+	done
+
 	# Systemd units for the affected timers/services.
 	# Driven by _HOST_SCRIPT_SYSTEMD_FILES + _HOST_SCRIPT_SYSTEMD_TEMPLATED_FILES —
 	# the same two sets sync_host_scripts installs (Step 5 and Step 5b). The
@@ -280,6 +290,19 @@ restore_host_scripts() {
 			install_dir=$(_host_script_install_dir "$f")
 			install -d -m 0755 "$install_dir"
 			install -m "$mode" "$snap_dir/sbin/$f" "$install_dir/$f"
+			restored=1
+		fi
+	done
+
+	# Release-asset binaries (the Step 5d set). Their install dir comes from
+	# _host_script_asset_install_dir (PREFIX_BIN — the unit's ExecStart is the
+	# authority), not the sbin map; no mode-map entry either — the asset step
+	# installs 0755, so restore at 0755.
+	for f in "${_HOST_SCRIPT_ASSET_FILES[@]}"; do
+		if [[ -f "$snap_dir/sbin/$f" ]]; then
+			install_dir=$(_host_script_asset_install_dir "$f")
+			install -d -m 0755 "$install_dir"
+			install -m 0755 "$snap_dir/sbin/$f" "$install_dir/$f"
 			restored=1
 		fi
 	done

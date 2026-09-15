@@ -355,6 +355,43 @@ else
     fail "D2: unit still '$(cat "$D/state/oxpulse-partner-edge.service" 2>/dev/null)' after enable"
 fi
 
+# ---------------------------------------------------------------------------
+# Case E: rollback covers the release-asset binary. Step 5d lands
+# _HOST_SCRIPT_ASSET_FILES under PREFIX_BIN; a snapshot that skips them would
+# leave the upgraded agent running beside the rolled-back release.
+# Goes RED if the asset pass is dropped from snapshot/restore (or pointed at
+# the sbin install-dir map — the asset lives in PREFIX_BIN).
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Case E: snapshot/restore covers release-asset binaries ==="
+
+E="$TMPROOT/e"
+mkdir -p "$E"/{sbin,bin,libdir,systemd,etc,share,prev}
+printf 'OLD-AGENT-BYTES' > "$E/bin/oxpulse-awg-params-agent"
+
+env PREFIX_SBIN="$E/sbin" PREFIX_BIN="$E/bin" PREFIX_LIBDIR="$E/libdir" \
+    PREFIX_ETC="$E/etc" PREFIX_SHARE="$E/share" SYSTEMD_DIR="$E/systemd" \
+    PREV_HOST_SCRIPTS_DIR="$E/prev" \
+    bash -c "source '$PREAMBLE'; snapshot_host_scripts v1.0.0-test" >/dev/null 2>&1
+
+if [[ -f "$E/prev/sbin/oxpulse-awg-params-agent" ]]; then
+    pass "E1: snapshot captured the asset binary (from PREFIX_BIN)"
+else
+    fail "E1: asset binary absent from snapshot — rollback cannot restore it"
+fi
+
+printf 'NEW-AGENT-BYTES' > "$E/bin/oxpulse-awg-params-agent"
+env PREFIX_SBIN="$E/sbin" PREFIX_BIN="$E/bin" PREFIX_LIBDIR="$E/libdir" \
+    PREFIX_ETC="$E/etc" PREFIX_SHARE="$E/share" SYSTEMD_DIR="$E/systemd" \
+    PREV_HOST_SCRIPTS_DIR="$E/prev" SYSTEMCTL_BIN=/bin/true \
+    bash -c "source '$PREAMBLE'; restore_host_scripts" >/dev/null 2>&1
+
+if [[ "$(cat "$E/bin/oxpulse-awg-params-agent" 2>/dev/null)" == "OLD-AGENT-BYTES" ]]; then
+    pass "E2: restore returned the pre-upgrade agent bytes"
+else
+    fail "E2: post-rollback agent = '$(cat "$E/bin/oxpulse-awg-params-agent" 2>/dev/null)' — expected OLD-AGENT-BYTES"
+fi
+
 echo ""
 if [[ "$FAIL" -eq 0 ]]; then
     echo "PASS: all $PASS systemd-convergence checks passed"

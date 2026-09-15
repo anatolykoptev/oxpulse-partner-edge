@@ -320,6 +320,19 @@ try: sys.exit(0 if len(base64.b64decode(sys.argv[1], validate=True)) == 32 else 
 except Exception: sys.exit(1)" "$1" 2>/dev/null
 }
 
+# _awg_hpk_is_zero VALUE — true iff VALUE decodes to 32 zero bytes, the
+# explicit OFF form. Upstream mergeWithDevice applies the S1-S4>=12
+# precondition only to an ACTIVE key; the agent's hpk_is_active makes the
+# same distinction, so a zero HPK must render without the precondition
+# (dropping it + degrading a healthy off-state install is a false alarm).
+_awg_hpk_is_zero() {
+	python3 -c "import base64,sys
+try:
+	b = base64.b64decode(sys.argv[1], validate=True)
+	sys.exit(0 if len(b) == 32 and not any(b) else 1)
+except Exception: sys.exit(1)" "$1" 2>/dev/null
+}
+
 # Optional-line builders — used ONLY inside configure_amneziawg. Both append
 # to the caller-visible accumulators _opt_lines / _drop_mm / _drop_cl (bash
 # dynamic scope — declared `local` in configure_amneziawg before the calls).
@@ -552,13 +565,17 @@ configure_amneziawg() {
 	# HPK precondition — mirrors upstream mergeWithDevice, evaluated on the
 	# EFFECTIVE (post-extraction) set: a non-empty HeaderProtectionKey renders
 	# only when ALL of S1/S2/S3/S4 are integers >= 12 (absent S3 = 0 — so HPK
-	# without S3 always fails). Otherwise IpcSet would reject the key; we warn
-	# + omit it + mark degraded rather than ship a key the kernel refuses.
+	# without S3 always fails). The 32-zero-byte form is the explicit OFF
+	# state — upstream exempts it, so it renders without the precondition.
+	# Otherwise IpcSet would reject the key; we warn + omit it + mark
+	# degraded rather than ship a key the kernel refuses.
 	if [[ -n "${AWG_HPK:-}" ]]; then
 		if ! _awg_conf_safe "$AWG_HPK"; then
 			_drop_mm+="header_protection_key(charset) "
 		elif ! _awg_hpk32 "$AWG_HPK"; then
 			_drop_mm+="header_protection_key(grammar) "
+		elif _awg_hpk_is_zero "$AWG_HPK"; then
+			_opt_lines+="HeaderProtectionKey = ${AWG_HPK}"$'\n'
 		else
 			local _hpk_ok=1 _sv
 			for _sv in "${AWG_S1:-0}" "${AWG_S2:-0}" "${AWG_S3:-0}" "${AWG_S4:-0}"; do

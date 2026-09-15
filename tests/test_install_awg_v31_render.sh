@@ -202,6 +202,20 @@ AWG_DISABLE_COOKIES|DisableCookies|off
 	[ -f "$(_marker)" ]
 }
 
+@test "v3.1: zero-form HPK is the OFF state — renders without the S>=12 precondition" {
+	# 32 zero bytes = explicit off. Upstream mergeWithDevice exempts it from
+	# the S1-S4>=12 precondition and the agent's hpk_is_active agrees, so a
+	# zero HPK + small S is a healthy config — render the line, no degraded.
+	export AWG_S3="15" AWG_S4="6"   # S4 below 12 — would degrade an ACTIVE hpk
+	export AWG_HPK="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	_configure
+	[ "$status" -eq 0 ]
+	run grep -q "^HeaderProtectionKey = AAAA" "$TMP/awg-conf/awg0.conf"
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"DEGRADED=1"* ]]
+	[ ! -f "$(_marker)" ]
+}
+
 @test "v3.1: non-numeric required must-match S1 skips the write entirely" {
 	export AWG_S3="15" AWG_S1="abc"
 	export AWG_HPK="QUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUI="
