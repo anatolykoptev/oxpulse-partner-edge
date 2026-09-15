@@ -320,6 +320,78 @@ else
     fail "E9: $reenabled enable call(s) on an already-converged node: $(grep -E '^enable ' "$A/systemctl.log" | tr '\n' ' ')"
 fi
 
+# ---------------------------------------------------------------------------
+# Case D: enabled-runtime is NOT convergence — it dies at the next reboot.
+# The enable loop must re-run `enable` on a runtime-only unit so the state
+# becomes persistent, then verify the post-state is "enabled".
+# Goes RED if `enabled-runtime` is put back in the no-op case.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Case D: enabled-runtime unit is re-persisted ==="
+
+D="$TMPROOT/d"
+mkdir -p "$D"
+cat > "$D/install.env" <<EOF
+PARTNER_DOMAIN=$DOMAIN
+TURNS_SUBDOMAIN=$TURNS
+BACKEND_API=https://api.oxpulse.chat
+EOF
+mkdir -p "$D/state"
+printf 'enabled-runtime\n' > "$D/state/oxpulse-partner-edge.service"
+
+OUT_D=$(run_sync "$D") && RC_D=0 || RC_D=$?
+[[ $RC_D -eq 0 ]] && pass "D0: sync_host_scripts exited 0" \
+                  || fail "D0: sync_host_scripts exited $RC_D; output: $OUT_D"
+
+if grep -qx "enable oxpulse-partner-edge.service" "$D/systemctl.log"; then
+    pass "D1: enable re-ran on an enabled-runtime unit (runtime is not persistent)"
+else
+    fail "D1: no enable call for the enabled-runtime unit — it stays dead-after-reboot"
+fi
+
+if [[ "$(cat "$D/state/oxpulse-partner-edge.service" 2>/dev/null)" == "enabled" ]]; then
+    pass "D2: post-enable state is persistent 'enabled'"
+else
+    fail "D2: unit still '$(cat "$D/state/oxpulse-partner-edge.service" 2>/dev/null)' after enable"
+fi
+
+# ---------------------------------------------------------------------------
+# Case E: rollback covers the release-asset binary. Step 5d lands
+# _HOST_SCRIPT_ASSET_FILES under PREFIX_BIN; a snapshot that skips them would
+# leave the upgraded agent running beside the rolled-back release.
+# Goes RED if the asset pass is dropped from snapshot/restore (or pointed at
+# the sbin install-dir map — the asset lives in PREFIX_BIN).
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Case E: snapshot/restore covers release-asset binaries ==="
+
+E="$TMPROOT/e"
+mkdir -p "$E"/{sbin,bin,libdir,systemd,etc,share,prev}
+printf 'OLD-AGENT-BYTES' > "$E/bin/oxpulse-awg-params-agent"
+
+env PREFIX_SBIN="$E/sbin" PREFIX_BIN="$E/bin" PREFIX_LIBDIR="$E/libdir" \
+    PREFIX_ETC="$E/etc" PREFIX_SHARE="$E/share" SYSTEMD_DIR="$E/systemd" \
+    PREV_HOST_SCRIPTS_DIR="$E/prev" \
+    bash -c "source '$PREAMBLE'; snapshot_host_scripts v1.0.0-test" >/dev/null 2>&1
+
+if [[ -f "$E/prev/sbin/oxpulse-awg-params-agent" ]]; then
+    pass "E1: snapshot captured the asset binary (from PREFIX_BIN)"
+else
+    fail "E1: asset binary absent from snapshot — rollback cannot restore it"
+fi
+
+printf 'NEW-AGENT-BYTES' > "$E/bin/oxpulse-awg-params-agent"
+env PREFIX_SBIN="$E/sbin" PREFIX_BIN="$E/bin" PREFIX_LIBDIR="$E/libdir" \
+    PREFIX_ETC="$E/etc" PREFIX_SHARE="$E/share" SYSTEMD_DIR="$E/systemd" \
+    PREV_HOST_SCRIPTS_DIR="$E/prev" SYSTEMCTL_BIN=/bin/true \
+    bash -c "source '$PREAMBLE'; restore_host_scripts" >/dev/null 2>&1
+
+if [[ "$(cat "$E/bin/oxpulse-awg-params-agent" 2>/dev/null)" == "OLD-AGENT-BYTES" ]]; then
+    pass "E2: restore returned the pre-upgrade agent bytes"
+else
+    fail "E2: post-rollback agent = '$(cat "$E/bin/oxpulse-awg-params-agent" 2>/dev/null)' — expected OLD-AGENT-BYTES"
+fi
+
 echo ""
 if [[ "$FAIL" -eq 0 ]]; then
     echo "PASS: all $PASS systemd-convergence checks passed"

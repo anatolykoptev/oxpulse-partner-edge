@@ -14,21 +14,54 @@
 #   PREFIX_LIB       path, e.g. /var/lib/oxpulse-partner-edge
 #   BACKEND_API      string, e.g. https://api.oxpulse.chat (central URL)
 #   NODE_ID          string, partner node identifier
+#   OXPULSE_RELEASE_TAG      string, installer's own release tag (vX.Y.Z);
+#                          install.sh defaults it to the @RELEASE_TAG@
+#                          placeholder that release.yml substitutes at publish
+#   OXPULSE_RELEASES_BASE    string, optional test/operator override for the
+#                          release-asset base (same name as upgrade.sh's)
+#   OXPULSE_MIRROR_BASE      string, optional plain-TLS mirror base; the mirror
+#                          contract is tag-pinned layout ($MIRROR/<tag>/<asset>)
 #   log warn die     functions (install.sh provides)
 
 _AWG_PARAMS_AGENT_BIN=/usr/local/bin/oxpulse-awg-params-agent
 _AWG_PARAMS_AGENT_UNIT=oxpulse-awg-params-agent.service
 
-# Install the pre-built binary from the release bundle or REPO_RAW release assets.
-# Mirrors the _ensure_opec_binary pattern in install.sh.
-_awg_params_agent_install_binary() {
-	local _machine _arch _asset _dest _bundled
-	_machine=$(uname -m)
-	case "$_machine" in
-		x86_64)  _arch=amd64 ;;
-		aarch64) _arch=arm64 ;;
-		*) die "awg-params-agent: unsupported architecture: $_machine" ;;
+# _awg_params_agent_release_arch — uname -m → release-asset arch token
+# (amd64|arm64); returns 1 on anything else. SINGLE AUTHORITY for this map:
+# lib/host-scripts-lib.sh's _host_script_asset_arch (the upgrade-path asset
+# step that refreshes this binary) mirrors these case arms verbatim — it
+# cannot source this lib on an upgrade-only box (this file is not a
+# _stage_lib target and _install_lib_source does not persist it), so
+# tests/test_sync_asset_delivery.sh pins the two copies identical. A third
+# copy must never appear: upgrade.sh:280-283 records the resolver-drift
+# incident that is the standing lesson on parallel resolvers.
+_awg_params_agent_release_arch() {
+	case "$(uname -m)" in
+		x86_64)  printf 'amd64\n' ;;
+		aarch64) printf 'arm64\n' ;;
+		*) return 1 ;;
 	esac
+}
+
+# Install the pre-built binary from the release bundle or the pinned,
+# SHA256SUMS-verified release asset. Mirrors the _ensure_opec_binary pattern
+# in install.sh.
+#
+# FAIL-SOFT contract (returns 1, never dies, on the network path): the AWG
+# channel is optional — a binary that cannot be delivered VERIFIED must not
+# abort the enclosing install, and must never be installed unverified. The
+# caller (awg_params_agent_run) gates unit enablement on the binary actually
+# landing, so a skipped install leaves the unit file on disk but disabled —
+# sync_host_scripts' asset step then delivers the verified binary on the
+# next tagged upgrade (the unit's presence is exactly its gate).
+_awg_params_agent_install_binary() {
+	local _arch _asset _dest _bundled
+	if ! _arch=$(_awg_params_agent_release_arch); then
+		# Was die(): an arch with no release asset cannot hard-fail the
+		# optional AWG channel out of an otherwise-good install.
+		warn "awg-params-agent: unsupported architecture: $(uname -m) — no release asset exists; skipping binary install"
+		return 1
+	fi
 	_asset="oxpulse-awg-params-agent-${_arch}"
 	_dest="$_AWG_PARAMS_AGENT_BIN"
 
@@ -55,20 +88,75 @@ _awg_params_agent_install_binary() {
 		return 0
 	fi
 
-	# Fall back to release asset download from GitHub releases.
-	local _url="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download/${_asset}"
-	if [[ -n "${OXPULSE_MIRROR_BASE:-}" ]] && curl -fsSL --max-time 30 "${OXPULSE_MIRROR_BASE}/${_asset}" -o "$_dest" 2>/dev/null; then
-		log "  awg-params-agent: installed from mirror ${OXPULSE_MIRROR_BASE} (${_arch})"
-		chmod 0755 "$_dest"
-		return 0
+	# ---- network fallback: PINNED to the installer's own tag + verified ----
+	#
+	# Was: releases/latest/download (plus an OXPULSE_MIRROR_BASE flat fetch) —
+	# unpinned (a newer-than-the-installer build could land silently) and
+	# UNVERIFIED (no checksum at all). Flagged "pre-existing, not fixed" in the
+	# AWG-3.1 draft; the security review reversed that deferral IN this change
+	# because this work is what makes the binary security-critical: it is a
+	# User=root daemon that writes awg0.conf and pipes it into `awg syncconf`,
+	# soon carrying HeaderProtectionKey and must-match params to the kernel.
+	#
+	# Tag channel: OXPULSE_RELEASE_TAG — install.sh defaults it to the
+	# @RELEASE_TAG@ placeholder that release.yml substitutes with the real tag
+	# at publish. The ^v[0-9]+\. form check is the same idiom install.sh uses
+	# for its REPO_RAW pinning: an unsubstituted placeholder (dev checkout,
+	# curl|bash from main) does not match, so we SKIP — fail-soft, never an
+	# unverified install. No AWG_PARAMS_AGENT_REF env is needed: the tag
+	# channel exists.
+	local _tag="${OXPULSE_RELEASE_TAG:-}"
+	if [[ ! "$_tag" =~ ^v[0-9]+\. ]]; then
+		warn "awg-params-agent: no pinned release tag (OXPULSE_RELEASE_TAG='${_tag:-<unset>}') — skipping network install; a bundled binary or a released (tag-pinned) installer is required (root-daemon bytes are never installed unverified)"
+		return 1
 	fi
-	log "  awg-params-agent: downloading release binary ($_arch) from releases"
-	if curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 "$_url" -o "$_dest" 2>/dev/null; then
-		chmod 0755 "$_dest"
+	# Base polarity mirrors upgrade.sh's RELEASES_BASE resolution:
+	# OXPULSE_RELEASES_BASE (test/operator override) > OXPULSE_MIRROR_BASE
+	# (whose contract is the tag-pinned $MIRROR/<tag>/<asset> layout) >
+	# GitHub releases/download.
+	local _rel_base
+	if [[ -n "${OXPULSE_RELEASES_BASE:-}" ]]; then
+		_rel_base="$OXPULSE_RELEASES_BASE"
+	elif [[ -n "${OXPULSE_MIRROR_BASE:-}" ]]; then
+		_rel_base="$OXPULSE_MIRROR_BASE"
 	else
-		rm -f "$_dest"
-		die "awg-params-agent: binary download failed from $_url — check network connectivity to GitHub releases"
+		_rel_base="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/download"
 	fi
+
+	# Same field-exact manifest lookup idiom as upgrade.sh's
+	# _lookup_expected_hash and host-scripts-lib.sh's _lookup_sha256
+	# (column-2 equality, optional ./ prefix — a suffix match would resolve
+	# the wrong entry; the resolvers must agree — upgrade.sh:280-283 records
+	# what happened when two of them didn't).
+	local _sums _bintmp _expected _actual _fail=""
+	_sums=$(mktemp); _bintmp=$(mktemp)
+	if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
+		"$_rel_base/$_tag/SHA256SUMS" -o "$_sums" 2>/dev/null; then
+		_fail="could not fetch $_rel_base/$_tag/SHA256SUMS (nothing to verify against)"
+	else
+		_expected=$(awk -v n="$_asset" '$2 == n || $2 == "./" n { print $1; exit }' \
+			"$_sums" 2>/dev/null)
+		if [[ -z "$_expected" ]]; then
+			_fail="no SHA256SUMS entry for $_asset at tag $_tag"
+		elif ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 \
+			"$_rel_base/$_tag/$_asset" -o "$_bintmp" 2>/dev/null; then
+			_fail="download failed from $_rel_base/$_tag/$_asset — check network/mirror reachability"
+		else
+			_actual=$(sha256sum "$_bintmp" | awk '{print $1}')
+			if [[ "$_actual" != "$_expected" ]]; then
+				_fail="SHA256 MISMATCH for $_asset @ $_tag (expected=$_expected actual=$_actual) — possible MITM or stale mirror"
+			elif ! install -m 0755 "$_bintmp" "$_dest"; then
+				_fail="install failed: $_bintmp -> $_dest"
+			fi
+		fi
+	fi
+	rm -f "$_sums" "$_bintmp"
+	if [[ -n "$_fail" ]]; then
+		warn "awg-params-agent: $_fail — skipping binary install (fail-soft; sync_host_scripts' asset step delivers the verified binary on the next tagged upgrade)"
+		return 1
+	fi
+	log "  awg-params-agent: installed verified release binary ($_arch @ $_tag)"
+	return 0
 }
 
 # Install the systemd unit file (no placeholder substitution needed).
@@ -92,7 +180,7 @@ _awg_params_agent_render_env() {
 OXPULSE_CENTRAL_URL=${BACKEND_API}
 OXPULSE_NODE_ID=${NODE_ID}
 OXPULSE_SERVICE_TOKEN_PATH=${PREFIX_ETC}/token
-OXPULSE_AWG_CONF_PATH=/etc/amnezia/amneziawg/awg0.conf
+OXPULSE_AWG_CONF_PATH=${AWG_CONF_DIR:-/etc/amnezia/amneziawg}/awg0.conf
 OXPULSE_AWG_IFACE=awg0
 OXPULSE_STATE_PATH=${PREFIX_LIB}/awg-params-state.json
 OXPULSE_POLL_INTERVAL=30s
@@ -139,11 +227,30 @@ awg_params_agent_run() {
 	log "[8b/10] installing awg-params-agent"
 	if [[ $DRY_RUN -eq 0 ]]; then
 		_awg_params_agent_state_dir
-		_awg_params_agent_install_binary
+		local _bin_landed=0
+		if _awg_params_agent_install_binary; then _bin_landed=1; fi
 		_awg_params_agent_install_unit
 		_awg_params_agent_render_env
-		_awg_params_agent_enable
-		_awg_params_agent_smoke
+		# Enable ONLY when a binary AND awg0.conf are on disk — the conf is
+		# the channel witness: it exists iff configure_amneziawg rendered it
+		# this install, i.e. the node took the AWG channel. A binary without
+		# a conf means a daemon erroring on its missing EnvironmentFile
+		# target every tick; a binary-less node stays correctly dormant. The
+		# unit file + env still render unconditionally above on purpose: they
+		# mark "this node is ours" for sync_host_scripts' asset step, which
+		# delivers the verified binary on the next tagged upgrade and
+		# activates the unit there itself (Step 5d in lib/host-scripts-lib.sh
+		# — same env+unit+binary+conf prerequisite set, then `enable --now`;
+		# no installer re-run needed).
+		local _agent_conf="${AWG_CONF_DIR:-/etc/amnezia/amneziawg}/awg0.conf"
+		if [[ ( "$_bin_landed" -eq 1 || -f "$_AWG_PARAMS_AGENT_BIN" ) && -f "$_agent_conf" ]]; then
+			_awg_params_agent_enable
+			_awg_params_agent_smoke
+		elif [[ ! -f "$_agent_conf" ]]; then
+			warn "  awg-params-agent: no awg0.conf — node has no AWG channel; unit file present but NOT enabled"
+		else
+			warn "  awg-params-agent: no binary installed (see above) — unit file present but NOT enabled; sync_host_scripts delivers the verified binary + enables on the next tagged upgrade"
+		fi
 	else
 		warn "  [dry-run] skipping awg-params-agent install"
 	fi

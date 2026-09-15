@@ -96,6 +96,7 @@ PREFIX_ETC='$DEST_ETC'
 PREFIX_LIB='$DEST_LIB'
 BACKEND_API='https://api.oxpulse.chat'
 NODE_ID='test-node-01'
+AWG_CONF_DIR='$TMP'
 log()  { echo "log: \$*"; }
 warn() { echo "warn: \$*"; }
 die()  { echo "die: \$*" >&2; exit 1; }
@@ -203,6 +204,9 @@ ENVEOF
 }
 
 @test "awg_params_agent_run full install orchestrates all steps" {
+	# The enable gate needs the channel witness: an awg0.conf on disk (the
+	# file configure_amneziawg renders when the node takes the AWG channel).
+	: > "$TMP/awg0.conf"
 	run env FAKE_LOG="$FAKE_LOG" PATH="$TMP/bin:$PATH" bash -c "
 		$(_common_env)
 		_AWG_PARAMS_AGENT_BIN='$DEST_BIN/oxpulse-awg-params-agent'
@@ -296,11 +300,13 @@ ENVEOF
 	# same systemctl/install/curl mocks the rest of this file uses.
 
 	# Preconditions: prior install.env with NODE_ID + BACKEND_API; bundled binary
-	# present (from setup's CHECKOUT); NO agent unit installed yet.
+	# present (from setup's CHECKOUT); an awg0.conf on disk (the channel
+	# witness the enable gate requires); NO agent unit installed yet.
 	cat > "$DEST_LIB/install.env" <<EOF
 NODE_ID=stale-node-42
 BACKEND_API=https://api.oxpulse.chat
 EOF
+	: > "$TMP/awg0.conf"
 	[ ! -f "$DEST_SYSTEMD/oxpulse-awg-params-agent.service" ]
 
 	# Fake healthcheck the guard calls before exit 0.
@@ -333,6 +339,7 @@ EOF
 		PREFIX_ETC='$DEST_ETC'
 		PREFIX_LIB='$DEST_LIB'
 		PREFIX_SBIN='$TMP/sbin'
+		AWG_CONF_DIR='$TMP'
 		log()  { echo \"log: \$*\"; }
 		warn() { echo \"warn: \$*\"; }
 		die()  { echo \"die: \$*\" >&2; exit 1; }

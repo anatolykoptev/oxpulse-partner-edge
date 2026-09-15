@@ -699,6 +699,19 @@ DRYJSON
 			SERVE_COUNTRIES_JSON=$(printf '%s' "$SERVE_COUNTRIES" | jq -R '[split(",")[] | gsub("^\\s+|\\s+$";"")]' | jq -c .)
 			export SERVE_COUNTRIES_JSON
 		fi
+		# X-Installer-Version: opec reads OXPULSE_IMAGE_VERSION and sets the header
+		# (register.rs post_with_retry) — parity with hydrate.sh:151, which already
+		# sends it. Env not flag: old opec ignores env but dies on unknown flags;
+		# absent header = treated-as-old = fail-safe (ADR-004).
+		# The contract wants the installer BUNDLE tag, not the image channel —
+		# IMAGE_VERSION is `stable`/`latest` (an alias, not a version), so send
+		# OXPULSE_RELEASE_TAG when release.yml substituted it (vX.Y.Z form) and
+		# leave the env unset otherwise: no header beats a placeholder or an
+		# alias that every node shares (motherly keys schema gating on it).
+		if [[ "${OXPULSE_RELEASE_TAG}" =~ ^v[0-9]+\. ]]; then
+			OXPULSE_IMAGE_VERSION="$OXPULSE_RELEASE_TAG"
+			export OXPULSE_IMAGE_VERSION
+		fi
 		if ! opec "${_opec_register_args[@]}"; then
 			die "opec secrets register failed"
 		fi
@@ -796,26 +809,56 @@ AWG_ALLOCATED_IP=$(awg_extract     "$tmp_cfg" allocated_ip)
 # returns CIDR form, correct for awg0.conf Address= but not for bind.
 # AWG_ALLOCATED_IP is kept intact for all other consumers (ip addr add, awg0.conf).
 AWG_HOST_IP="${AWG_ALLOCATED_IP%%/*}"
-AWG_MOTHERLY_PUBKEY=$(awg_extract  "$tmp_cfg" motherly_pubkey)
-AWG_MOTHERLY_ENDPOINT=$(awg_extract "$tmp_cfg" motherly_endpoint)
-AWG_MOTHERLY_AWG_IP=$(awg_extract  "$tmp_cfg" motherly_awg_ip)
-AWG_JC=$(awg_extract               "$tmp_cfg" jc)
-AWG_JMIN=$(awg_extract             "$tmp_cfg" jmin)
-AWG_JMAX=$(awg_extract             "$tmp_cfg" jmax)
-AWG_S1=$(awg_extract               "$tmp_cfg" s1)
-AWG_S2=$(awg_extract               "$tmp_cfg" s2)
-AWG_S4=$(awg_extract               "$tmp_cfg" s4)
-AWG_H1=$(awg_extract               "$tmp_cfg" h1)
-AWG_H2=$(awg_extract               "$tmp_cfg" h2)
-AWG_H3=$(awg_extract               "$tmp_cfg" h3)
-AWG_H4=$(awg_extract               "$tmp_cfg" h4)
+# AWG 3.1: ONE python3 spawn extracts the full v3 `awg` surface as
+# NUL-delimited VAR=VALUE records (replaces ~30 per-key awg_extract spawns).
+# awg_extract_all normalizes at the choke point: JSON null/absent → '',
+# JSON bool → on|off (Python's True/False repr is parse-FATAL in awg0.conf),
+# numbers → str. NUL framing — not newlines — so a string value carrying '\n'
+# reaches the render-side _awg_conf_safe guard intact instead of being
+# silently truncated. allocated_ip stays on the pinned awg_extract line above
+# (tests/test_sfu_bind_strip_cidr.sh greps that literal for ordering).
+#
+# Pre-init every extracted var: if the spawn emits nothing (malformed JSON),
+# `set -u` consumers below still see defined-but-empty vars and the
+# required-nonempty guard stays the loud-failure path.
+AWG_MOTHERLY_PUBKEY="" AWG_MOTHERLY_ENDPOINT="" AWG_MOTHERLY_AWG_IP="" \
+AWG_JC="" AWG_JMIN="" AWG_JMAX="" \
+AWG_S1="" AWG_S2="" AWG_S3="" AWG_S4="" \
+AWG_H1="" AWG_H2="" AWG_H3="" AWG_H4="" \
+AWG_I1="" AWG_I2="" AWG_I3="" AWG_I4="" AWG_I5="" \
+AWG_HPK="" AWG_CONTENT_PADDING_ADDITION="" \
+AWG_REKEY_AFTER_TIME="" AWG_REKEY_TIMEOUT="" AWG_REJECT_AFTER_TIME="" \
+AWG_KEEPALIVE_TIMEOUT="" AWG_MAX_HANDSHAKE_ATTEMPTS="" \
+AWG_RANDOM_TRAILERS="" AWG_DISABLE_COOKIES="" \
+SFU_EDGE_ID="" OTEL_EXPORTER_OTLP_ENDPOINT=""
+# Read-loop over the NUL-delimited records — no eval. The record names come
+# from awg_extract_all's fixed table, never from JSON content, so printf -v
+# cannot be steered to an arbitrary variable; the whitelist pattern is
+# belt-and-suspenders against a malformed record name.
+# Split is FIRST-'=' only via expansion, NOT `IFS='=' read` — read would eat a
+# trailing '=' (base64 padding on motherly_pubkey / header_protection_key),
+# rendering an invalid key verbatim.
+while IFS= read -r -d '' _awg_rec; do
+	[[ "$_awg_rec" == *=* ]] || continue
+	_awg_var="${_awg_rec%%=*}"
+	_awg_val="${_awg_rec#*=}"
+	[[ "$_awg_var" =~ ^(AWG_[A-Z0-9_]+|SFU_EDGE_ID|OTEL_EXPORTER_OTLP_ENDPOINT)$ ]] \
+		&& printf -v "$_awg_var" '%s' "$_awg_val"
+done < <(awg_extract_all "$tmp_cfg")
+unset _awg_rec _awg_var _awg_val
+export OTEL_EXPORTER_OTLP_ENDPOINT
 # AWG_* above are consumed by configure_amneziawg() in lib/install-awg.sh via
 # the _install_lib_source indirection that shellcheck cannot follow (SC2034
 # false-positive). This `:` reference makes the intent explicit.
 : "${AWG_ALLOCATED_IP:-}" "${AWG_MOTHERLY_PUBKEY:-}" "${AWG_MOTHERLY_ENDPOINT:-}" \
 	"${AWG_MOTHERLY_AWG_IP:-}" "${AWG_JC:-}" "${AWG_JMIN:-}" "${AWG_JMAX:-}" \
 	"${AWG_S1:-}" "${AWG_S2:-}" "${AWG_S4:-}" "${AWG_H1:-}" "${AWG_H2:-}" \
-	"${AWG_H3:-}" "${AWG_H4:-}"
+	"${AWG_H3:-}" "${AWG_H4:-}" "${AWG_S3:-}" "${AWG_HPK:-}" \
+	"${AWG_I1:-}" "${AWG_I2:-}" "${AWG_I3:-}" "${AWG_I4:-}" "${AWG_I5:-}" \
+	"${AWG_CONTENT_PADDING_ADDITION:-}" "${AWG_REKEY_AFTER_TIME:-}" \
+	"${AWG_REKEY_TIMEOUT:-}" "${AWG_REJECT_AFTER_TIME:-}" \
+	"${AWG_KEEPALIVE_TIMEOUT:-}" "${AWG_MAX_HANDSHAKE_ATTEMPTS:-}" \
+	"${AWG_RANDOM_TRAILERS:-}" "${AWG_DISABLE_COOKIES:-}"
 
 # Validate AWG_* vars are non-empty when the backend signalled it allocated
 # an AWG IP. awg_extract() returns "" silently on python3 / JSON failure
@@ -842,9 +885,8 @@ Diagnose locally: python3 -m json.tool < \"\$tmp_cfg\" | grep -A 20 awg"
 	done
 	unset _awg_var
 fi
-SFU_EDGE_ID=$(awg_extract          "$tmp_cfg" edge_id)
-export OTEL_EXPORTER_OTLP_ENDPOINT
-OTEL_EXPORTER_OTLP_ENDPOINT=$(awg_extract "$tmp_cfg" otel_endpoint)
+# SFU_EDGE_ID / OTEL_EXPORTER_OTLP_ENDPOINT were populated by the
+# awg_extract_all read-loop above (both keys live inside the `awg` block).
 # Pre-existing SFU_EDGE_ID derivation (post-arg-parse) is the fallback when
 # backend doesn't return one — keep that path.
 [[ -z "$SFU_EDGE_ID" ]] && SFU_EDGE_ID="${PARTNER_ID}1"
@@ -1389,13 +1431,22 @@ render_with_opec coturn  "$stage/coturn.tpl"  "$coturn_out"
 # Side-effect: the PATH export inside install_amneziawg is not visible to the
 # parent after the subshell exits, but configure_amneziawg only needs the awg
 # binaries which are installed on disk, not the Go toolchain PATH.
-# Status is written to channels-status.env below (awg=active|failed_at_setup|skipped).
+# Status is written to channels-status.env below (awg=active|degraded|
+# failed_at_setup|skipped). degraded is the AWG 3.1 D9 signal: the conf
+# rendered but a must-match param was dropped (charset guard / HPK
+# precondition) — the link will NOT come up while motherly expects it.
+# healthcheck check 21 has no `degraded` arm yet, so it falls into the
+# unknown-status case → counted as failed → overall=degraded WARN: the
+# right severity, pending the healthcheck vocab extension (not this change).
 _awg_status="skipped"
 if [[ -n "${AWG_ALLOCATED_IP:-}" && -n "${AWG_MOTHERLY_PUBKEY:-}" && $DRY_RUN -eq 0 ]]; then
 	log "[awg] central allocated $AWG_ALLOCATED_IP edge_id=$SFU_EDGE_ID — bringing up awg0"
 	if ( install_amneziawg ); then
 		configure_amneziawg
 		_awg_status="active"
+		# configure_amneziawg sets AWG_CONF_DEGRADED=1 + drops a
+		# <conf>.param-dropped marker when a must-match field was refused.
+		[[ "${AWG_CONF_DEGRADED:-}" == "1" ]] && _awg_status="degraded"
 		# Host firewall hardening — must run AFTER awg0 is up so the AWG
 		# listen port is discoverable. Without this, partner hosts ship with
 		# :9317 (SFU /metrics) + :8912 (relay API) publicly reachable; see
@@ -1555,7 +1606,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		# resolves it). If it somehow does, treat as failed_at_render.
 		[[ "${_naive_status}" == "pending" ]] && _naive_status="failed_at_render"
 		printf 'naive=%s\n' "${_naive_status}"
-		# Phase 5.7: AWG mesh channel status (active|failed_at_setup|skipped)
+		# Phase 5.7: AWG mesh channel status (active|degraded|failed_at_setup|skipped)
 		printf 'awg=%s\n' "${_awg_status}"
 	} > "$_chs_tmp"
 	chmod 0640 "$_chs_tmp"
@@ -1726,7 +1777,7 @@ healthcheck_run
 
 # ---------- Step 8b: awg-params-agent ----------
 # Must be inside BAKE_MODE=0 block: _awg_params_agent_render_env expands
-#  which is only assigned during the hydrate path above.
+# NODE_ID/BACKEND_API, only assigned during the hydrate path above.
 awg_params_agent_run
 
 fi  # end BAKE_MODE=0 (hydrate path)

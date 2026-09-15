@@ -266,12 +266,20 @@ fn post_with_retry(
     retries: u32,
 ) -> Result<(String, RegisterResponseRaw), SecretsError> {
     let mut last_err: Option<SecretsError> = None;
+    // X-Installer-Version: hydrate.sh:151 already sends this header on the same
+    // endpoint; the opec path was the telemetry hole. Env-fed (NOT a CLI flag)
+    // because an old opec binary dies on an unknown flag but silently ignores an
+    // env var — absent header = treated-as-old = the fail-safe direction for the
+    // central register-omission gates this enables (ADR-004).
+    let installer_version = std::env::var("OXPULSE_IMAGE_VERSION").ok();
     for attempt in 0..=retries {
-        match agent
-            .post(endpoint)
-            .set("Content-Type", "application/json")
-            .send_string(body)
-        {
+        let mut req = agent.post(endpoint).set("Content-Type", "application/json");
+        if let Some(ref v) = installer_version {
+            if !v.trim().is_empty() {
+                req = req.set("X-Installer-Version", v);
+            }
+        }
+        match req.send_string(body) {
             Ok(resp) => {
                 // Read as string first, then parse — separates transport vs parse errors,
                 // and keeps us from emitting secrets via serde_json::Error Display.

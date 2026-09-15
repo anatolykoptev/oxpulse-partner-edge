@@ -2,14 +2,23 @@
 # tests/test_restarted_units_are_delivered.sh
 #
 # Every binary a shipped systemd unit executes must reach a node by a KNOWN
-# mechanism, and upgrade must refresh it — or the gap must be declared here.
+# mechanism, and upgrade must refresh it.
 #
 # The measurement this exists for, taken across all five production edges
 # 2026-08-07: FOUR distinct sha256 of /usr/local/bin/oxpulse-awg-params-agent,
 # while all 27 managed host SCRIPTS were byte-identical. Its unit is in
 # _HOST_SCRIPT_RESTART_UNITS, so every upgrade restarts it — and nothing ever
-# updates it. Each node still runs the build it was provisioned with, and the
-# four hashes line up with the four provisioning dates.
+# updated it. Each node ran the build it was provisioned with, and the four
+# hashes lined up with the four provisioning dates.
+#
+# FIXED: sync_host_scripts' asset step (Step 5d in lib/host-scripts-lib.sh)
+# now delivers release-asset binaries — arch-mapped, tag-pinned, verified
+# against the tag's SHA256SUMS, atomically installed, restart fired via
+# _any_changed. This test's job is to keep that wiring honest: the declared
+# asset set (_HOST_SCRIPT_ASSET_FILES) must equal the set of unit-executed
+# asset-class binaries, each declared asset's install dir must match its
+# unit's ExecStart, and its unit must be in _HOST_SCRIPT_RESTART_UNITS —
+# otherwise bytes would land without ever taking effect.
 #
 # The first version of this test asserted that every unit-executed binary must
 # be in _HOST_SCRIPT_SBIN_FILES. That was WRONG and the repo's own
@@ -32,28 +41,15 @@
 #   D2  route one to a directory its unit does not name          → RED
 #   D3  make the ExecStart filter match nothing                  → RED (floor)
 #   D4  drop a lib install expects but no unit executes          → RED
-#   D5  add a new asset-class binary without declaring the gap   → RED
+#   D5  add a new asset-class binary without wiring it into
+#       _HOST_SCRIPT_ASSET_FILES                                 → RED
 set -uo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 UPGRADE="$REPO_ROOT/upgrade.sh"
 INSTALL_SYSTEMD="$REPO_ROOT/lib/install-systemd.sh"
+HOST_SCRIPTS_LIB="$REPO_ROOT/lib/host-scripts-lib.sh"
 UNIT_DIR="$REPO_ROOT/systemd"
-
-# Binaries that reach a node as a RELEASE ASSET rather than a repo script, and
-# that upgrade does NOT currently refresh. Each entry is a live defect with a
-# measurement behind it, not an exemption:
-#
-#   oxpulse-awg-params-agent — compiled from crates/awg-params-agent, installed
-#     once by lib/install-awg-params-agent.sh from
-#     releases/latest/download/oxpulse-awg-params-agent-<arch>. Note "latest",
-#     not the tag being installed: even a fresh install does not record which
-#     build it took. Measured 4 distinct hashes across 5 edges.
-#
-# Fixing this needs an arch-aware, tag-pinned asset refresh on the upgrade path
-# — a different surface kind from the script sync, which is why it is declared
-# here rather than bodged into the script array.
-KNOWN_UNREFRESHED_ASSETS="oxpulse-awg-params-agent"
 
 PASS=0
 FAIL=0
@@ -69,7 +65,7 @@ fail() {
 echo ""
 echo "=== every unit-executed binary has a delivery mechanism ==="
 
-for f in "$UPGRADE" "$INSTALL_SYSTEMD"; do
+for f in "$UPGRADE" "$INSTALL_SYSTEMD" "$HOST_SCRIPTS_LIB"; do
 	[[ -f "$f" ]] || {
 		fail "D0: $f not found"
 		exit 1
@@ -87,15 +83,18 @@ arr() {
 
 DELIVERED=$(arr "$UPGRADE" _HOST_SCRIPT_SBIN_FILES)
 EXPECTED=$(arr "$INSTALL_SYSTEMD" EXPECTED_SBIN_FILES)
+ASSET_DELIVERED=$(arr "$HOST_SCRIPTS_LIB" _HOST_SCRIPT_ASSET_FILES)
+RESTART_UNITS=$(arr "$UPGRADE" _HOST_SCRIPT_RESTART_UNITS)
 
-# The real routing function, not a reimplementation of it.
-# Consumed by the eval'd _host_script_install_dir, which shellcheck cannot see
+# The real routing functions, not reimplementations of them.
+# Consumed by the eval'd functions, which shellcheck cannot see
 # into — hence the disables rather than a rewrite.
 # shellcheck disable=SC2034
 PREFIX_BIN=/usr/local/bin
 # shellcheck disable=SC2034
 PREFIX_SBIN=/usr/local/sbin
 eval "$(awk '/^_host_script_install_dir\(\)/{f=1} f{print} f&&/^}/{exit}' "$UPGRADE")"
+eval "$(awk '/^_host_script_asset_install_dir\(\)/{f=1} f{print} f&&/^}/{exit}' "$HOST_SCRIPTS_LIB")"
 
 # /usr/local/** only — /usr/bin/docker is the OS's, not ours to deliver.
 PAIRS=$(grep -h '^ExecStart=' "$UNIT_DIR"/*.service 2>/dev/null |
@@ -131,10 +130,17 @@ while IFS= read -r path; do
 		[[ "$got" == "$want" ]] || wrongdir="$wrongdir ${base}(unit:${want} install:${got})"
 	else
 		# Not in the script sync, so it must arrive some other way. An installer
-		# lib naming it is the only other declared mechanism; anything else has
-		# no delivery path at all and is a unit pointing at nothing.
+		# lib naming it plus a slot in the asset delivery array is the declared
+		# mechanism; anything else has no delivery path at all and is a unit
+		# pointing at nothing.
 		if grep -rqlF "$base" "$REPO_ROOT"/lib/install-*.sh 2>/dev/null; then
 			seen_assets="$seen_assets $base"
+			# Asset-class binaries get their own routing fn (their home is
+			# PREFIX_BIN, not the script class's sbin default); it must agree
+			# with the unit's ExecStart or the refresh lands where nothing
+			# executes it.
+			got=$(_host_script_asset_install_dir "$base")
+			[[ "$got" == "$want" ]] || wrongdir="$wrongdir ${base}(unit:${want} asset-install:${got})"
 		else
 			missing="$missing $base"
 		fi
@@ -156,27 +162,41 @@ else
 	echo "    delivered: the unit keeps running the stale copy and upgrade reports success."
 fi
 
-# --- D5: asset-class binaries are all accounted for ------------------------
+# --- D5: asset-class binaries are all delivered by the asset step ----------
 # Both directions. A new asset-class binary must not appear silently, and a
-# baseline entry that no longer exists must not linger as a stale exemption.
+# _HOST_SCRIPT_ASSET_FILES entry that no unit executes must not linger as a
+# stale declaration (the old KNOWN_UNREFRESHED_ASSETS registry was deleted
+# when delivery landed — it would now be a stale lie this test cannot see).
 for a in $seen_assets; do
-	grep -qw "$a" <<<"$KNOWN_UNREFRESHED_ASSETS" || undeclared_asset="$undeclared_asset $a"
+	grep -qw "$a" <<<"$ASSET_DELIVERED" || undeclared_asset="$undeclared_asset $a"
 done
 stale=""
-for k in $KNOWN_UNREFRESHED_ASSETS; do
+for k in $ASSET_DELIVERED; do
 	grep -qw "$k" <<<"$seen_assets" || stale="$stale $k"
 done
 
 if [[ -z "${undeclared_asset// /}" && -z "${stale// /}" ]]; then
-	pass "D5: asset-class unit binaries match the declared set ($KNOWN_UNREFRESHED_ASSETS)"
-	echo "    NOTE: those are NOT refreshed by upgrade — a live gap, declared so it"
-	echo "    cannot grow silently. Closing it needs an arch-aware, tag-pinned asset"
-	echo "    refresh on the upgrade path."
+	pass "D5: asset-class unit binaries match the delivered set ($ASSET_DELIVERED)"
 else
 	[[ -n "${undeclared_asset// /}" ]] &&
-		fail "D5: unit binaries with no declared delivery mechanism:$undeclared_asset"
+		fail "D5: unit binaries not wired into _HOST_SCRIPT_ASSET_FILES:$undeclared_asset"
 	[[ -n "${stale// /}" ]] &&
-		fail "D5: declared asset no longer executed by any unit (stale exemption):$stale"
+		fail "D5: declared asset no longer executed by any unit (stale entry):$stale"
+fi
+
+# --- D5b: delivery is only real if the bytes take effect --------------------
+# The asset step flips _any_changed, which drives Step 7's restart loop over
+# _HOST_SCRIPT_RESTART_UNITS. A delivered asset whose unit is NOT in that list
+# would land new bytes that never run — the binary equivalent of "delivered to
+# the wrong directory".
+unrestarted=""
+for a in $seen_assets; do
+	grep -qw "${a}.service" <<<"$RESTART_UNITS" || unrestarted="$unrestarted $a"
+done
+if [[ -z "${unrestarted// /}" ]]; then
+	pass "D5b: every delivered asset's unit is in _HOST_SCRIPT_RESTART_UNITS"
+else
+	fail "D5b: assets delivered but never restarted:$unrestarted"
 fi
 
 # --- D4: the two hand-maintained arrays cannot diverge downward -----------

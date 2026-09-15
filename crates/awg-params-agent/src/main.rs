@@ -1,6 +1,6 @@
 //! oxpulse-awg-params-agent — T1.3.d: pull side of AWG params federation.
 //!
-//! Polls `GET /api/partner/awg-params/latest?component=awg`, applies new
+//! Polls `GET /api/partner/awg-params/latest?component=awg&schema=2`, applies new
 //! AmneziaWG obfuscation params to the kernel, and reports back (best-effort)
 //! via `POST /api/partner/awg-params/applied`.
 //!

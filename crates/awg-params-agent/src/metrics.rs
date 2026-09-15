@@ -13,9 +13,17 @@
 //!     here from the interim implementation that used to live in `agent.rs`
 //!     (see [`ConflictReason`]); same two reasons, same semantics.
 //!   * `awg_params_agent_param_rejected_total{field=...}` — central-sourced
-//!     obfuscation params rejected by `AwgParams::validate()` before splice
-//!     into awg0.conf (params.rs, T4 crypto_invariant). Non-zero is a
-//!     hostile-central / MITM signal — critical alert, not routine.
+//!     obfuscation params rejected by the FIELD_SPECS validators before
+//!     splice into awg0.conf (conf_merge.rs, T4 crypto_invariant + v2
+//!     preconditions). Non-zero is a hostile-central / MITM signal —
+//!     critical alert, not routine.
+//!   * `awg_params_agent_apply_failures_total` — `awg-quick strip` /
+//!     `awg syncconf` non-zero exits, cumulative. A nonzero rate while
+//!     `last_success_timestamp_seconds` keeps advancing = epochs poll fine
+//!     but never land — the fail-soft-invisible stall class D9 exists to
+//!     close (a permanently-failing syncconf loop looks green otherwise).
+//!   * `awg_params_agent_last_apply_success_timestamp_seconds` — gauge,
+//!     unix time of the last successful kernel apply. `0` = never applied.
 //!
 //! Convention matches the sibling `oxpulse-partner-edge-refresh.sh`'s
 //! `emit_metric` (temp-file + atomic rename under `textfile_dir`) — this
@@ -45,13 +53,16 @@ pub(crate) const POLL_FAILURES_METRIC: &str = "awg_params_agent_poll_failures_to
 pub(crate) const LAST_SUCCESS_METRIC: &str = "awg_params_agent_last_success_timestamp_seconds";
 pub(crate) const CONF_CONFLICT_METRIC: &str = "awg_params_agent_conf_write_conflicts_total";
 pub(crate) const PARAM_REJECTED_METRIC: &str = "awg_params_agent_param_rejected_total";
+pub(crate) const APPLY_FAILURES_METRIC: &str = "awg_params_agent_apply_failures_total";
+pub(crate) const LAST_APPLY_SUCCESS_METRIC: &str =
+    "awg_params_agent_last_apply_success_timestamp_seconds";
 
 /// Max distinct `field=` labels tracked for `param_rejected_total`. Defensive
-/// cardinality cap — the label always comes from THIS crate's own
-/// `validate()` error text (params.rs), never central-sourced content
-/// directly, so today's real ceiling is 1 (`"i1"`); this bounds future
-/// growth rather than responding to an attacker-controlled label.
-const MAX_PARAM_REJECTED_FIELDS: usize = 16;
+/// cardinality cap — the label always comes from THIS crate's own FIELD_SPECS
+/// validators (params.rs), never central-sourced content directly; the v2
+/// schema puts the real ceiling at ~25 spec'd fields — 32 bounds that with
+/// headroom rather than responding to an attacker-controlled label.
+const MAX_PARAM_REJECTED_FIELDS: usize = 32;
 
 /// Why the agent skipped an awg0.conf write/apply this tick. Each maps to its
 /// own `reason=` label on [`CONF_CONFLICT_METRIC`] so the two mechanics stay
@@ -110,7 +121,7 @@ impl ConflictCounts {
 /// marker (the normal case for every non-validation error).
 ///
 /// Public so it is independently unit-testable against the REAL
-/// `params::validate_i1` error shape rather than a hand-copied string.
+/// `params::validate_conf_string` error shape rather than a hand-copied string.
 pub(crate) fn extract_rejected_field(err: &anyhow::Error) -> Option<String> {
     const MARKER: &str = "field=";
     for cause in err.chain() {
@@ -140,6 +151,8 @@ pub(crate) struct Metrics {
     conf_write_conflicts_lock_timeout: AtomicU64,
     conf_write_conflicts_apply_superseded: AtomicU64,
     param_rejected: Mutex<BTreeMap<String, u64>>,
+    apply_failures: AtomicU64,
+    last_apply_success_epoch_secs: AtomicI64,
 }
 
 impl Metrics {
@@ -151,6 +164,8 @@ impl Metrics {
         let mut last_success = 0i64;
         let mut conflicts = ConflictCounts::default();
         let mut param_rejected = BTreeMap::new();
+        let mut apply_failures = 0u64;
+        let mut last_apply_success = 0i64;
 
         if let Ok(text) = std::fs::read_to_string(dir.join(PROM_FILE)) {
             for line in text.lines() {
@@ -168,6 +183,14 @@ impl Metrics {
                 } else if series == LAST_SUCCESS_METRIC {
                     if let Ok(n) = value.parse() {
                         last_success = n;
+                    }
+                } else if series == APPLY_FAILURES_METRIC {
+                    if let Ok(n) = value.parse() {
+                        apply_failures = n;
+                    }
+                } else if series == LAST_APPLY_SUCCESS_METRIC {
+                    if let Ok(n) = value.parse() {
+                        last_apply_success = n;
                     }
                 } else if let Some(reason) = ConflictReason::ALL
                     .iter()
@@ -194,6 +217,8 @@ impl Metrics {
             conf_write_conflicts_lock_timeout: AtomicU64::new(conflicts.lock_timeout),
             conf_write_conflicts_apply_superseded: AtomicU64::new(conflicts.apply_superseded),
             param_rejected: Mutex::new(param_rejected),
+            apply_failures: AtomicU64::new(apply_failures),
+            last_apply_success_epoch_secs: AtomicI64::new(last_apply_success),
         }
     }
 
@@ -253,6 +278,24 @@ impl Metrics {
         }
     }
 
+    /// Bump `apply_failures_total` and flush. Called when `awg-quick strip`
+    /// or `awg syncconf` exits non-zero / fails to spawn — without it, a
+    /// permanently-failing apply loop is invisible: polls stay green while
+    /// the epoch never lands (the exact silent-drop class D9 closes).
+    pub(crate) fn record_apply_failure(&self) -> Result<()> {
+        self.apply_failures.fetch_add(1, Ordering::Relaxed);
+        self.flush()
+    }
+
+    /// Set `last_apply_success_timestamp_seconds` to now and flush. Called
+    /// only after `awg syncconf` returns success — the "epoch actually
+    /// landed on the kernel" signal, disjoint from poll success.
+    pub(crate) fn record_apply_success(&self) -> Result<()> {
+        self.last_apply_success_epoch_secs
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
+        self.flush()
+    }
+
     /// Atomically rewrite [`PROM_FILE`] with a complete, self-consistent
     /// snapshot of every series. Temp file + rename + dir-fsync, matching
     /// `agent.rs`'s `write_conf_atomic` crash-safety pattern.
@@ -265,6 +308,8 @@ impl Metrics {
         let apply_superseded = self
             .conf_write_conflicts_apply_superseded
             .load(Ordering::Relaxed);
+        let apply_failures = self.apply_failures.load(Ordering::Relaxed);
+        let last_apply_success = self.last_apply_success_epoch_secs.load(Ordering::Relaxed);
         let rejected = self
             .param_rejected
             .lock()
@@ -300,9 +345,10 @@ impl Metrics {
             as_series = ConflictReason::ApplySuperseded.series_prefix(),
         ));
         body.push_str(&format!(
-            "# HELP {m} Central-sourced obfuscation params rejected by validate() before \
-             splice into awg0.conf, by field (see params.rs I1 conf-injection guard). \
-             Non-zero is a hostile-central / MITM signal — critical alert, not routine.\n\
+            "# HELP {m} Central-sourced obfuscation params rejected by FIELD_SPECS \
+             validators before splice into awg0.conf, by field (params.rs charset/grammar \
+             guards + post-merge preconditions). Non-zero is a hostile-central / MITM \
+             signal — critical alert, not routine.\n\
              # TYPE {m} counter\n",
             m = PARAM_REJECTED_METRIC,
         ));
@@ -311,6 +357,22 @@ impl Metrics {
                 "{PARAM_REJECTED_METRIC}{{field=\"{field}\"}} {count}\n"
             ));
         }
+        body.push_str(&format!(
+            "# HELP {m} awg-quick strip / awg syncconf non-zero exits, cumulative. \
+             Nonzero while {LAST_SUCCESS_METRIC} advances = polls succeed but the epoch \
+             never reaches the kernel (the fail-soft-invisible stall).\n\
+             # TYPE {m} counter\n{m} {apply_failures}\n",
+            m = APPLY_FAILURES_METRIC,
+            apply_failures = apply_failures,
+        ));
+        body.push_str(&format!(
+            "# HELP {m} Unix timestamp of the last successful kernel apply (awg syncconf \
+             exit 0). 0 = never applied. Alert on `time() - {m} > N` alongside the poll \
+             gauge — poll-green + apply-stale is the silent-drop signature.\n\
+             # TYPE {m} gauge\n{m} {last_apply_success}\n",
+            m = LAST_APPLY_SUCCESS_METRIC,
+            last_apply_success = last_apply_success,
+        ));
 
         let mut tmp = NamedTempFile::new_in(&self.dir)
             .with_context(|| format!("temp textfile in {:?}", self.dir))?;
@@ -332,11 +394,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_rejected_field_finds_field_in_real_validate_i1_error_chain() {
-        // Exercises the REAL params::validate_i1 (not a hand-copied error
-        // string), wrapped exactly as conf_merge::merge_obfuscation_params
+    fn extract_rejected_field_finds_field_in_real_validate_error_chain() {
+        // Exercises the REAL params::validate_conf_string (not a hand-copied
+        // error string), wrapped exactly as conf_merge::merge_obfuscation_params
         // wraps it — proves the parser matches the actual shipped chain.
-        let base = crate::params::validate_i1("bad\n[Peer]").unwrap_err();
+        let base = crate::params::validate_conf_string("i1", "bad\n[Peer]").unwrap_err();
         let wrapped = base.context("merge obfuscation params");
         assert_eq!(
             extract_rejected_field(&wrapped).as_deref(),
@@ -438,6 +500,76 @@ mod tests {
         assert!(
             prom.contains(&format!("{PARAM_REJECTED_METRIC}{{field=\"i1\"}} 1")),
             "param_rejected must reseed. Got:\n{prom}"
+        );
+    }
+
+    #[test]
+    fn apply_failure_and_success_series_emit_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = Metrics::load(dir.path());
+
+        metrics.record_apply_failure().unwrap();
+        metrics.record_apply_failure().unwrap();
+        let prom = std::fs::read_to_string(dir.path().join(PROM_FILE)).unwrap();
+        assert!(
+            prom.contains(&format!("{APPLY_FAILURES_METRIC} 2")),
+            "two failed applies must count 2. Got:\n{prom}"
+        );
+        assert!(
+            prom.contains(&format!("{LAST_APPLY_SUCCESS_METRIC} 0")),
+            "last_apply_success must stay at the never-applied sentinel. Got:\n{prom}"
+        );
+
+        metrics.record_apply_success().unwrap();
+        let prom = std::fs::read_to_string(dir.path().join(PROM_FILE)).unwrap();
+        let ts_line = prom
+            .lines()
+            .find(|l| l.starts_with(LAST_APPLY_SUCCESS_METRIC))
+            .expect("last_apply_success series must be present");
+        let ts: i64 = ts_line
+            .rsplit(' ')
+            .next()
+            .and_then(|v| v.parse().ok())
+            .expect("last_apply_success value must parse");
+        assert!(
+            ts > 0,
+            "a real apply success must advance off 0: {ts_line:?}"
+        );
+        // The failure count survives a later success — the two series are
+        // independent (failure history is not cleared by recovery).
+        assert!(
+            prom.contains(&format!("{APPLY_FAILURES_METRIC} 2")),
+            "apply success must not reset apply_failures_total. Got:\n{prom}"
+        );
+    }
+
+    #[test]
+    fn apply_series_reseed_from_disk_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let m = Metrics::load(dir.path());
+            m.record_apply_failure().unwrap();
+            m.record_apply_success().unwrap();
+        }
+        let m2 = Metrics::load(dir.path());
+        m2.record_apply_failure().unwrap();
+        let prom = std::fs::read_to_string(dir.path().join(PROM_FILE)).unwrap();
+        assert!(
+            prom.contains(&format!("{APPLY_FAILURES_METRIC} 2")),
+            "apply_failures must resume at seeded 1 then +1 = 2. Got:\n{prom}"
+        );
+        let ts_line = prom
+            .lines()
+            .find(|l| l.starts_with(LAST_APPLY_SUCCESS_METRIC))
+            .expect("last_apply_success series must be present");
+        let ts: i64 = ts_line
+            .rsplit(' ')
+            .next()
+            .and_then(|v| v.parse().ok())
+            .expect("must parse");
+        assert!(
+            ts > 0,
+            "reseeded last_apply_success must keep its nonzero stamp"
         );
     }
 }

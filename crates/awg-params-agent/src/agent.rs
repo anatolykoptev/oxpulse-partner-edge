@@ -2,7 +2,7 @@
 
 use crate::{
     client::AgentClient,
-    conf_merge::merge_obfuscation_params,
+    conf_merge::{merge_obfuscation_params_reporting, ClientDefaults},
     error::{Context, Result},
     metrics::{ConflictReason, Metrics},
     params::AwgParams,
@@ -77,10 +77,17 @@ pub struct AgentLoop {
     cfg: AgentConfig,
     client: AgentClient,
     /// Task 12 shared metrics/textfile-writer state (poll failures/success,
-    /// conf-write conflicts, param rejections — see `metrics.rs`). `Arc`
-    /// because `AgentClient` also records into it (poll failures/success)
-    /// from its own async methods, independent of `AgentLoop`'s tick.
+    /// conf-write conflicts, param rejections, kernel-apply failures — see
+    /// `metrics.rs`). `Arc` because `AgentClient` also records into it (poll
+    /// failures/success) from its own async methods, independent of
+    /// `AgentLoop`'s tick.
     metrics: Arc<Metrics>,
+    /// Process-lifetime client-class defaults (I1/CPA/jc trio), drawn once
+    /// from OS entropy at startup — the D2 sole generator. Each default only
+    /// fires on a key absent from BOTH epoch and conf, so drawing fresh
+    /// values per process start cannot re-randomize a written conf (the
+    /// conf is the persistence).
+    defaults: ClientDefaults,
 }
 
 impl AgentLoop {
@@ -91,10 +98,13 @@ impl AgentLoop {
             cfg.service_token_path.clone(),
             metrics.clone(),
         )?;
+        let defaults =
+            ClientDefaults::generate().context("draw client-side AWG defaults from OS entropy")?;
         Ok(Self {
             cfg,
             client,
             metrics,
+            defaults,
         })
     }
 
@@ -109,6 +119,19 @@ impl AgentLoop {
             restart_unit_after_apply = ?self.cfg.restart_unit_after_apply,
             "awg-params-agent starting"
         );
+
+        // D3 startup top-up: merge(conf, None, &defaults) once per process
+        // start, bypassing the epoch gate entirely. Lands the v3.1
+        // client-side posture (I1/CPA/jc trio) at binary delivery instead of
+        // waiting on a post-gate epoch the central writer deliberately
+        // withholds. Client-class insert-if-absent only — must-match fields
+        // can never be fabricated (params=None ⇒ no epoch source), the conf
+        // file is the persistence (second run is a byte-identical no-op),
+        // and NO state-file write happens so last_applied_epoch is never
+        // advanced by a params-less merge. Best-effort: a failure here is
+        // a warn, not a startup abort — the next epoch apply re-runs the
+        // same insert-if-absent logic.
+        self.startup_defaults_top_up().await;
 
         loop {
             if let Err(e) = self.tick().await {
@@ -152,11 +175,11 @@ impl AgentLoop {
         // PrivateKey/Endpoint. The lock is released BEFORE apply_to_kernel so the
         // installer's `flock -w 10` never waits on the up-to-30s kernel apply.
         let written = match self
-            .merge_and_write_conf_locked(&response.params)
+            .merge_and_write_conf_locked(Some(&response.params))
             .await
             .context("merge+write conf under lock")?
         {
-            Some(id) => id,
+            Some(w) => w,
             None => {
                 // Another writer (the installer, or an overlapping tick) held the
                 // lock past the timeout. Skip this tick WITHOUT saving state so the
@@ -186,7 +209,7 @@ impl AgentLoop {
         // microsecond-wide TOCTOU between this re-stat and awg-quick's open(),
         // which leaves the kernel running the installer's own valid conf,
         // self-healing on the next epoch bump.)
-        match self.conf_changed_since(&written) {
+        match self.conf_changed_since(&written.identity) {
             Ok(false) => {}
             Ok(true) => {
                 warn!(
@@ -281,21 +304,114 @@ impl AgentLoop {
         }
     }
 
-    /// Merge new obfuscation `params` into awg0.conf and atomically rewrite it,
+    /// One-shot client-side top-up, run once at process start before the
+    /// poll loop (D3). `merge(conf, None, &defaults)` under the shared lock:
+    /// only client-class insert-if-absent writes can fire — must-match
+    /// params have no epoch source here and no edge default. Never touches
+    /// the state file, so the epoch gate still decides the first real apply.
+    ///
+    /// When the merge actually changed bytes, the conf is pushed to the
+    /// kernel immediately (same supersede guard as the epoch path). Without
+    /// that apply the fresh-install ordering leaves the generated lines
+    /// inert indefinitely: configure_amneziawg brings awg0 up BEFORE this
+    /// process starts, the first post-gate epoch is deliberately withheld
+    /// (ADR-004 D6), and ensure_amneziawg skips when versions already match
+    /// — nothing else ever re-reads the conf.
+    ///
+    /// Best-effort by contract: a lock-busy or merge rejection is a warn —
+    /// the next epoch apply runs the identical insert-if-absent logic, so
+    /// nothing stays missing forever.
+    async fn startup_defaults_top_up(&self) {
+        let written = match self.merge_and_write_conf_locked(None).await {
+            Ok(Some(w)) => w,
+            Ok(None) => {
+                warn!(
+                    lock = ?self.cfg.awg_conf_lock_path,
+                    "startup top-up skipped — conf lock held by another writer (installer mid-flight); \
+                     first epoch apply re-runs the same insert-if-absent merge"
+                );
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "startup top-up failed (non-fatal) — continuing; first epoch apply re-runs it"
+                );
+                return;
+            }
+        };
+        if !written.changed {
+            debug!("startup top-up: awg0.conf already carries every client-side default");
+            return;
+        }
+        info!("startup top-up: client-side AWG defaults written — pushing to kernel");
+        match self.conf_changed_since(&written.identity) {
+            Ok(false) => {}
+            Ok(true) => {
+                warn!(
+                    conf = ?self.cfg.awg_conf_path,
+                    "awg0.conf superseded after top-up write — skipping kernel apply; \
+                     the first epoch apply re-merges onto the fresh conf"
+                );
+                self.record_conf_write_conflict(ConflictReason::ApplySuperseded)
+                    .await;
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "could not re-stat awg0.conf before top-up apply — skipping"
+                );
+                return;
+            }
+        }
+        match self.apply_to_kernel().await {
+            Ok(()) => {
+                self.record_apply_success().await;
+                info!("startup top-up: client-side defaults live on awg0");
+            }
+            Err(e) => {
+                // Fail-soft, same contract as the write: the conf durably
+                // carries the lines; the first applied epoch (or an
+                // awg-quick restart, e.g. the same upgrade's
+                // ensure_amneziawg converge) pushes them. A likely cause on
+                // the fleet path is the pre-converge tools being too old to
+                // parse the new keys — self-heals once binaries converge.
+                warn!(
+                    error = %e,
+                    "startup top-up kernel apply failed (non-fatal) — conf carries the defaults"
+                );
+                self.record_apply_failure().await;
+            }
+        }
+    }
+
+    /// Merge obfuscation `params` into awg0.conf and atomically rewrite it,
     /// holding the installer-shared advisory lock across the entire read→rename
     /// span (the lost-update-critical section). The lock is released when `_lock`
     /// drops at the end of this method — i.e. BEFORE the caller runs
     /// `apply_to_kernel`, keeping the critical section sub-second so the
     /// installer's `flock -w 10` never times out on a concurrent kernel apply.
     ///
-    /// Returns `Ok(Some(identity))` with the filesystem identity of the conf we
-    /// just wrote (captured under the lock, for the caller's supersede guard); or
-    /// `Ok(None)` if the lock could not be acquired within `lock_acquire_timeout`
-    /// (caller skips this tick and retries on the next poll).
+    /// `params` is `Some` on an epoch apply, `None` on the startup top-up —
+    /// the `Option` wrapper sits at the params level, not per-field, so a
+    /// params-less merge can only ever write client-class insert-if-absent
+    /// defaults; must-match fields are unforgeable there (D3).
+    ///
+    /// A byte-identical merge result skips the rename entirely — pointless
+    /// rewrites churn the inode (inode change = how `conf_changed_since`
+    /// detects supersede, and rename is what a `.path` watcher fires on).
+    ///
+    /// Returns `Ok(Some(ConfWrite))` with the filesystem identity of the conf
+    /// (captured under the lock, for the caller's supersede guard) and whether
+    /// the merge changed bytes — `changed` is what lets the startup top-up
+    /// decide a kernel apply is needed; a byte-identical conf has nothing to
+    /// push. `Ok(None)` if the lock could not be acquired within
+    /// `lock_acquire_timeout` (caller skips this tick and retries next poll).
     async fn merge_and_write_conf_locked(
         &self,
-        params: &AwgParams,
-    ) -> Result<Option<ConfIdentity>> {
+        params: Option<&AwgParams>,
+    ) -> Result<Option<ConfWrite>> {
         let _lock = match self
             .acquire_conf_lock()
             .await
@@ -318,19 +434,50 @@ impl AgentLoop {
             sleep(self.cfg.test_read_write_delay).await;
         }
 
-        let new_conf = match merge_obfuscation_params(&conf_text, params) {
-            Ok(c) => c,
-            Err(e) => {
-                // Task 12: a rejection here carries a `field=<name>` marker
-                // (params.rs's named-field contract for AwgParams::validate)
-                // — surface it as param_rejected_total{field=...} BEFORE
-                // propagating, so a hostile/MITM central is alert-visible,
-                // not just logged. `extract_rejected_field` is a no-op for
-                // any other error shape.
-                self.record_param_rejection(&e).await;
-                return Err(e).context("merge obfuscation params");
-            }
-        };
+        let (new_conf, dropped) =
+            match merge_obfuscation_params_reporting(&conf_text, params, &self.defaults) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    // Task 12: a rejection here carries a `field=<name>` marker
+                    // (the FIELD_SPECS validators' named-field contract — charset
+                    // guard, S/H/range/HPK grammar, post-merge preconditions)
+                    // — surface it as param_rejected_total{field=...} BEFORE
+                    // propagating, so a hostile/MITM central is alert-visible,
+                    // not just logged. `extract_rejected_field` is a no-op for
+                    // any other error shape.
+                    self.record_param_rejection(&e).await;
+                    return Err(e).context("merge obfuscation params");
+                }
+            };
+        // Client-side rejections return Ok (omit-and-continue), so the Err
+        // path above never sees them — each dropped field still counts on the
+        // same param_rejected_total series (a hostile central fuzzing the
+        // freeform-string surface must be alert-visible too).
+        for field in &dropped {
+            self.record_param_rejected_field(field).await;
+        }
+
+        // `.param-dropped` is owned by whoever evaluated the conf LAST — this
+        // merge just re-derived the definitive drop list, so an installer
+        // render-SKIP or an older drop ledger older than this pass is stale
+        // history (refresh's degraded→active healer keys off the file).
+        // Runs even on the no-op-merge path below: a byte-identical conf with
+        // an empty drop list PROVES a prior marker is stale.
+        self.sync_param_dropped_marker(&dropped).await;
+
+        if new_conf == conf_text {
+            // No-op merge (e.g. a repeat top-up, or an epoch that changed
+            // nothing on disk) — skip the rename so the inode stays stable
+            // and no `.path` watcher fires on a nothing-changed write. The
+            // identity the caller compares pre-apply is just the current file.
+            let identity =
+                conf_identity(&self.cfg.awg_conf_path).context("stat conf after no-op merge")?;
+            debug!("merge produced a byte-identical conf — skipping atomic rewrite");
+            return Ok(Some(ConfWrite {
+                identity,
+                changed: false,
+            }));
+        }
 
         self.write_conf_atomic(&new_conf)
             .await
@@ -344,7 +491,44 @@ impl AgentLoop {
             conf_identity(&self.cfg.awg_conf_path).context("stat conf after atomic write")?;
 
         // `_lock` drops here → flock released before apply_to_kernel.
-        Ok(Some(identity))
+        Ok(Some(ConfWrite {
+            identity,
+            changed: true,
+        }))
+    }
+
+    /// Sync `{conf}.param-dropped` to this merge's drop list: removed when the
+    /// merge dropped nothing, (re)written with the current client-side
+    /// omissions otherwise — same two-line ledger format the installer emits
+    /// (`must-match dropped:` never appears here; must-match failures are the
+    /// Err path above, not drops). Best-effort: a marker IO error must not
+    /// fail a merge whose conf write may already have landed.
+    async fn sync_param_dropped_marker(&self, dropped: &[&'static str]) {
+        let marker = format!("{}.param-dropped", self.cfg.awg_conf_path.display());
+        if dropped.is_empty() {
+            match tokio::fs::remove_file(&marker).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    warn!(marker = %marker, error = %e, "param-dropped marker removal failed")
+                }
+            }
+            return;
+        }
+        let body = format!(
+            "awg0.conf param-drop {}:\n  client-side omitted: {}— feature degraded, link unaffected (params agent may re-add via a later epoch)\n",
+            Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+            dropped.join(" ")
+        );
+        // Read-compare to avoid mtime churn on every no-op poll.
+        if let Ok(cur) = tokio::fs::read_to_string(&marker).await {
+            if cur == body {
+                return;
+            }
+        }
+        if let Err(e) = tokio::fs::write(&marker, &body).await {
+            warn!(marker = %marker, error = %e, "param-dropped marker write failed");
+        }
     }
 
     /// Re-stat `awg_conf_path` and report whether it differs from the identity
@@ -387,14 +571,23 @@ impl AgentLoop {
     }
 
     /// If `err`'s source chain carries a `field=<name>` marker (the
-    /// named-field rejection contract from `params::validate_i1` /
-    /// `AwgParams::validate`), bump `param_rejected_total{field}` and mirror
+    /// named-field rejection contract of the FIELD_SPECS validators in
+    /// `conf_merge.rs` / `params.rs`), bump `param_rejected_total{field}` and mirror
     /// it via [`Metrics`]. A no-op for every other error shape. Non-fatal on
     /// write failure, same as [`Self::record_conf_write_conflict`].
     async fn record_param_rejection(&self, err: &anyhow::Error) {
         let Some(field) = crate::metrics::extract_rejected_field(err) else {
             return;
         };
+        self.record_param_rejected_field(&field).await;
+    }
+
+    /// Bump `param_rejected_total{field}` for a rejection already known by
+    /// field name — the client-side omit path reports fields by name rather
+    /// than via an error chain. Non-fatal on write failure, same as
+    /// [`Self::record_conf_write_conflict`].
+    async fn record_param_rejected_field(&self, field: &str) {
+        let field = field.to_owned();
         let metrics = self.metrics.clone();
         match tokio::task::spawn_blocking(move || metrics.record_param_rejected(&field)).await {
             Ok(Ok(())) => {}
@@ -447,6 +640,18 @@ impl AgentLoop {
 
     /// Run `awg-quick strip <conf> | awg syncconf <iface> /dev/stdin`.
     /// Bounded by 30s timeout. Non-zero exit → Err (state file NOT updated).
+    ///
+    /// Every child-output byte that enters the error chain is scrubbed by
+    /// [`scrub_key_material`] first: `awg-quick strip` echoes conf lines on
+    /// parse errors, and the conf carries PrivateKey / PresharedKey /
+    /// HeaderProtectionKey — an unscrubbed stderr string would land those
+    /// keys in journald and (worse) in any error text the loop forwards.
+    ///
+    /// Outcome is mirrored to the apply metrics: any Err (spawn failure,
+    /// non-zero exit, timeout) bumps `apply_failures_total`; success stamps
+    /// `last_apply_success_timestamp_seconds`. Without the failure counter a
+    /// permanently-failing apply loop is indistinguishable from a healthy
+    /// one — polls stay green while epochs never reach the kernel (D9).
     async fn apply_to_kernel(&self) -> Result<()> {
         use tokio::time::timeout;
 
@@ -463,7 +668,7 @@ impl AgentLoop {
                 .context("awg-quick strip: spawn")?;
 
             if !strip_out.status.success() {
-                let stderr = String::from_utf8_lossy(&strip_out.stderr);
+                let stderr = scrub_key_material(&String::from_utf8_lossy(&strip_out.stderr));
                 return Err(crate::error::anyhow!(
                     "awg-quick strip failed (exit {}): {}",
                     strip_out.status,
@@ -498,8 +703,8 @@ impl AgentLoop {
                 .context("awg syncconf: wait")?;
 
             if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = scrub_key_material(&String::from_utf8_lossy(&out.stderr));
+                let stdout = scrub_key_material(&String::from_utf8_lossy(&out.stdout));
                 return Err(crate::error::anyhow!(
                     "awg syncconf failed (exit {}): {} {}",
                     out.status,
@@ -512,10 +717,65 @@ impl AgentLoop {
             Ok(())
         };
 
-        timeout(Duration::from_secs(30), apply)
-            .await
-            .context("awg apply timed out after 30s")?
+        let outcome: Result<()> = match timeout(Duration::from_secs(30), apply).await {
+            Ok(inner) => inner,
+            Err(_) => Err(crate::error::anyhow!("awg apply timed out after 30s")),
+        };
+        match &outcome {
+            Ok(()) => self.record_apply_success().await,
+            Err(_) => self.record_apply_failure().await,
+        }
+        outcome
     }
+
+    /// Bump `apply_failures_total` via [`Metrics`] — see
+    /// [`Self::record_conf_write_conflict`] for the non-fatal spawn_blocking
+    /// pattern this mirrors.
+    async fn record_apply_failure(&self) {
+        let metrics = self.metrics.clone();
+        match tokio::task::spawn_blocking(move || metrics.record_apply_failure()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug!(error = %e, "apply-failure textfile metric write failed (non-fatal)")
+            }
+            Err(e) => {
+                debug!(error = %e, "apply-failure textfile metric spawn_blocking join failed (non-fatal)")
+            }
+        }
+    }
+
+    /// Stamp `last_apply_success_timestamp_seconds` via [`Metrics`].
+    async fn record_apply_success(&self) {
+        let metrics = self.metrics.clone();
+        match tokio::task::spawn_blocking(move || metrics.record_apply_success()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                debug!(error = %e, "apply-success textfile metric write failed (non-fatal)")
+            }
+            Err(e) => {
+                debug!(error = %e, "apply-success textfile metric spawn_blocking join failed (non-fatal)")
+            }
+        }
+    }
+}
+
+/// Redact `Key = <value>` assignments for the secret-bearing conf keys from
+/// child-process output before it enters an error/log chain. Covers
+/// `PrivateKey`, `PresharedKey`, and `HeaderProtectionKey` — the three
+/// values whose presence in `awg-quick strip` / `awg syncconf` stderr or
+/// stdout would otherwise leak key material into journald on a parse-error
+/// path. Tolerates cosmetic whitespace around `=`; replaces only the value,
+/// keeping the key name for diagnostic context.
+fn scrub_key_material(text: &str) -> String {
+    static KEY_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        // (?i) + `_?`: conf keys are PascalCase (`PrivateKey =`), uapi keys
+        // lower_snake (`private_key=`) — a child echoing either must redact.
+        regex::Regex::new(
+            r"(?im)(private_?key|preshared_?key|header_?protection_?key)[ \t]*=[ \t]*[^\n]*",
+        )
+        .expect("static regex is valid")
+    });
+    KEY_RE.replace_all(text, "$1 = [redacted]").into_owned()
 }
 
 /// Filesystem identity of awg0.conf, captured under the shared lock immediately
@@ -530,6 +790,16 @@ struct ConfIdentity {
     size: u64,
     mtime_sec: i64,
     mtime_nsec: i64,
+}
+
+/// Outcome of `merge_and_write_conf_locked`: the conf identity captured under
+/// the lock, plus whether the merge actually rewrote bytes. `changed` is what
+/// lets the startup top-up decide a kernel apply is needed — a byte-identical
+/// conf (repeat top-up, or an epoch that changed nothing on disk) has nothing
+/// to push.
+struct ConfWrite {
+    identity: ConfIdentity,
+    changed: bool,
 }
 
 /// Stat `path` into a `ConfIdentity`.
@@ -671,18 +941,36 @@ mod conf_lock_tests {
     const NEW_ENDPOINT: &str = "2.2.2.2:51820";
 
     fn params(jc: i64) -> AwgParams {
+        use crate::params::IntOrRange;
+        // H tags must be >= 5 (1-4 are vanilla WG message types — the
+        // FIELD_SPECS grammar now rejects them as must-match failures).
+        // s1+56 != s2 holds: 10+56=66 != 20.
         AwgParams {
-            jc,
-            jmin: 3,
-            jmax: 500,
+            jc: Some(jc),
+            jmin: Some(3),
+            jmax: Some(500),
             s1: 10,
             s2: 20,
+            s3: None,
             s4: 30,
-            h1: 1,
-            h2: 2,
-            h3: 3,
-            h4: 4,
+            h1: IntOrRange::Single(5),
+            h2: IntOrRange::Single(6),
+            h3: IntOrRange::Single(7),
+            h4: IntOrRange::Single(8),
             i1: None,
+            i2: None,
+            i3: None,
+            i4: None,
+            i5: None,
+            header_protection_key: None,
+            content_padding_addition: None,
+            rekey_after_time: None,
+            rekey_timeout: None,
+            reject_after_time: None,
+            keepalive_timeout: None,
+            max_handshake_attempts: None,
+            random_trailers: None,
+            disable_cookies: None,
         }
     }
 
@@ -796,7 +1084,9 @@ mod conf_lock_tests {
         // Start the agent write; it acquires the lock, reads OLD, then holds the
         // lock through the 700ms delay.
         let agent_task =
-            tokio::spawn(async move { agent.merge_and_write_conf_locked(&agent_params).await });
+            tokio::spawn(
+                async move { agent.merge_and_write_conf_locked(Some(&agent_params)).await },
+            );
 
         // Give the agent a head start so it is provably mid-delay (holding the
         // lock, having already read OLD) before the installer attempts its write.
@@ -872,7 +1162,7 @@ mod conf_lock_tests {
 
         let agent = AgentLoop::new(cfg).unwrap();
         let wrote = agent
-            .merge_and_write_conf_locked(&params(7))
+            .merge_and_write_conf_locked(Some(&params(7)))
             .await
             .expect("busy lock must not error");
         assert!(
@@ -1033,7 +1323,7 @@ mod conf_lock_tests {
 
         let agent = AgentLoop::new(cfg).unwrap();
         let wrote = agent
-            .merge_and_write_conf_locked(&params(42))
+            .merge_and_write_conf_locked(Some(&params(42)))
             .await
             .expect("write ok");
         assert!(wrote.is_some());
@@ -1046,20 +1336,64 @@ mod conf_lock_tests {
         );
     }
 
-    // Task 12: a malicious/MITM'd I1 must still be rejected by the merge (the
-    // params.rs/T4 security guard is untouched by this task) AND must bump
-    // param_rejected_total{field="i1"} via the REAL merge_and_write_conf_locked
-    // path. Falsification: revert the `record_param_rejection` call added to
-    // that function and this test goes RED at the metric assertion while the
-    // merge still correctly returns Err (the pre-existing security tests in
-    // params.rs / conf_merge.rs are unaffected — this is a NEW, independent
-    // assertion about the Task 12 wiring, not a re-test of the guard itself).
+    // Task 12 (v2 class-split update): a malicious/MITM'd field on the
+    // MUST-MATCH class path (here HeaderProtectionKey carrying an embedded
+    // newline + `[Peer]` splice) is rejected by the merge AND must bump
+    // param_rejected_total{field=...} via the REAL
+    // merge_and_write_conf_locked path. Falsification: revert the
+    // `record_param_rejection` call added to that function and this test
+    // goes RED at the metric assertion while the merge still correctly
+    // returns Err (the guard-level tests in params.rs / conf_merge.rs are
+    // unaffected — this asserts the metric WIRING, not the guard).
+    //
+    // Under the v2 failure split a hostile CLIENT-side field (I1 etc.) is
+    // omitted, not merge-rejected — so the metric-path assertion needs a
+    // must-match field; the omit-without-render path is covered by
+    // `agent_omits_malicious_client_side_field` below.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn agent_records_param_rejected_metric_on_malicious_i1() {
+    async fn agent_records_param_rejected_metric_on_malicious_must_match_field() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = base_cfg(dir.path());
         let textfile_dir = cfg.textfile_dir.clone();
         seed_conf(&cfg.awg_conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+
+        let agent = AgentLoop::new(cfg).unwrap();
+        let malicious = AwgParams {
+            header_protection_key: Some(
+                "AAAA\n[Peer]\nPublicKey = ATTACKERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\
+                 AllowedIPs = 0.0.0.0/0\nEndpoint = attacker.example.com:51820"
+                    .to_string(),
+            ),
+            ..params(7)
+        };
+
+        let result = agent.merge_and_write_conf_locked(Some(&malicious)).await;
+        assert!(
+            result.is_err(),
+            "malicious must-match HPK must be rejected by merge_and_write_conf_locked"
+        );
+
+        let prom = std::fs::read_to_string(textfile_dir.join(PROM_FILE)).unwrap();
+        assert!(
+            prom.contains(&format!(
+                "{PARAM_REJECTED_METRIC}{{field=\"header_protection_key\"}} 1"
+            )),
+            "a malicious must-match rejection must bump param_rejected_total{{field=...}} via the \
+             REAL merge_and_write_conf_locked path. Got:\n{prom}"
+        );
+    }
+
+    // The client-side half of the D5 failure split, end-to-end: a hostile
+    // I1 (newline + [Peer] splice) is OMITTED — merge_and_write_conf_locked
+    // SUCCEEDS, the conf on disk carries none of the injected bytes, and the
+    // rest of the epoch still lands. The conf file IS the assertion target
+    // (this is where the splice would have reached the kernel from).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_omits_malicious_client_side_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let conf_path = cfg.awg_conf_path.clone();
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
 
         let agent = AgentLoop::new(cfg).unwrap();
         let malicious = AwgParams {
@@ -1068,20 +1402,23 @@ mod conf_lock_tests {
                  AllowedIPs = 0.0.0.0/0\nEndpoint = attacker.example.com:51820"
                     .to_string(),
             ),
-            ..params(7)
+            ..params(42)
         };
 
-        let result = agent.merge_and_write_conf_locked(&malicious).await;
-        assert!(
-            result.is_err(),
-            "malicious I1 must still be rejected by merge_and_write_conf_locked"
-        );
+        let result = agent
+            .merge_and_write_conf_locked(Some(&malicious))
+            .await
+            .expect("client-side omit must not fail the merge");
+        assert!(result.is_some(), "the epoch merge must still write");
 
-        let prom = std::fs::read_to_string(textfile_dir.join(PROM_FILE)).unwrap();
+        let out = std::fs::read_to_string(&conf_path).unwrap();
         assert!(
-            prom.contains(&format!("{PARAM_REJECTED_METRIC}{{field=\"i1\"}} 1")),
-            "a malicious I1 rejection must bump param_rejected_total{{field=\"i1\"}} via the \
-             REAL merge_and_write_conf_locked path. Got:\n{prom}"
+            !out.contains("ATTACKER") && !out.contains("AllowedIPs = 0.0.0.0/0"),
+            "injected bytes must never reach awg0.conf. Got:\n{out}"
+        );
+        assert!(
+            out.contains("Jc = 42"),
+            "the rest of the epoch must still apply:\n{out}"
         );
     }
 
@@ -1103,14 +1440,14 @@ mod conf_lock_tests {
 
         let agent = AgentLoop::new(cfg).unwrap();
         let written = agent
-            .merge_and_write_conf_locked(&params(7))
+            .merge_and_write_conf_locked(Some(&params(7)))
             .await
             .expect("write ok")
             .expect("agent should have written the conf");
 
         // No supersede yet → the guard reads the conf as unchanged.
         assert!(
-            !agent.conf_changed_since(&written).unwrap(),
+            !agent.conf_changed_since(&written.identity).unwrap(),
             "conf must read as unchanged immediately after the locked write"
         );
 
@@ -1124,8 +1461,220 @@ mod conf_lock_tests {
         // and re-merge next poll instead of applying the installer's params under
         // the agent's epoch.
         assert!(
-            agent.conf_changed_since(&written).unwrap(),
+            agent.conf_changed_since(&written.identity).unwrap(),
             "conf_changed_since must detect the installer supersede so the apply is skipped"
+        );
+    }
+
+    // ── v2: startup top-up, apply metrics, secret scrub ────────────────────
+
+    // D3: `merge(conf, None, &defaults)` through the REAL locked write path.
+    // Client-class insert-if-absent lands (I1/CPA on a bootstrap conf), the
+    // state file is NEVER written (no epoch advance), and a second top-up is
+    // a byte-identical no-op — the conf is the persistence.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_top_up_inserts_client_defaults_without_epoch_advance_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let conf_path = cfg.awg_conf_path.clone();
+        let state_path = cfg.state_path.clone();
+
+        // Bootstrap-shape conf: no I1, no CPA, no jc trio — only the
+        // must-match set + identity (what a pre-3.1 install leaves behind).
+        std::fs::write(
+            &conf_path,
+            format!(
+                "[Interface]\n\
+                 PrivateKey = {OLD_PRIV}\n\
+                 Address = 10.0.0.9/32\n\
+                 S1 = 10\n\
+                 S2 = 20\n\
+                 S4 = 30\n\
+                 H1 = 100\n\
+                 H2 = 200\n\
+                 H3 = 300\n\
+                 H4 = 400\n\
+                 \n\
+                 [Peer]\n\
+                 PublicKey = SOMEPUBKEYbase64000000000000000000000000000=\n\
+                 Endpoint = {OLD_ENDPOINT}\n\
+                 AllowedIPs = 10.0.0.1/32\n"
+            ),
+        )
+        .unwrap();
+
+        let agent = AgentLoop::new(cfg).unwrap();
+        agent.startup_defaults_top_up().await;
+
+        let out = std::fs::read_to_string(&conf_path).unwrap();
+        // Client-class inserts landed — the actual drawn values come from the
+        // agent's own defaults, so assert on the keys' presence and bands.
+        let i1_line = out
+            .lines()
+            .find(|l| l.starts_with("I1 = "))
+            .expect("top-up must insert I1");
+        let i1_val = &i1_line["I1 = ".len()..];
+        assert!(
+            crate::params::validate_i_tag("i1", i1_val).is_ok(),
+            "top-up I1 must satisfy the upstream tag grammar: {i1_val:?}"
+        );
+        let cpa_line = out
+            .lines()
+            .find(|l| l.starts_with("ContentPaddingAddition = "))
+            .expect("top-up must insert CPA");
+        let cpa_val = &cpa_line["ContentPaddingAddition = ".len()..];
+        assert!(
+            crate::params::validate_range_string("content_padding_addition", cpa_val).is_ok(),
+            "top-up CPA must satisfy its own grammar: {cpa_val:?}"
+        );
+        for key in ["Jc = ", "Jmin = ", "Jmax = "] {
+            assert!(out.contains(key), "top-up must insert {key}:\n{out}");
+        }
+        // Must-match lines are never fabricated by a params-less merge.
+        assert!(!out.contains("S3 =") && !out.contains("HeaderProtectionKey"));
+        assert!(!out.contains("RandomTrailers") && !out.contains("DisableCookies"));
+        // Identity preserved.
+        assert!(out.contains(&format!("PrivateKey = {OLD_PRIV}")));
+        // NO epoch advance: the state file must not exist at all.
+        assert!(
+            !state_path.exists(),
+            "top-up must never write state (no epoch advance)"
+        );
+
+        // Idempotent: second top-up leaves the file byte-identical.
+        let agent2 = AgentLoop::new(base_cfg(dir.path())).unwrap();
+        agent2.startup_defaults_top_up().await;
+        let out2 = std::fs::read_to_string(&conf_path).unwrap();
+        assert_eq!(out, out2, "second top-up must be a byte-identical no-op");
+    }
+
+    // D9: a failed kernel apply must bump apply_failures_total and leave
+    // last_apply_success_timestamp_seconds at the never-applied 0 sentinel.
+    // Deterministic on every host: pointing awg_conf_path at a DIRECTORY
+    // makes `awg-quick strip` fail (spawn error where the binary is absent;
+    // non-zero exit where present) — either way the failure path runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn apply_failure_records_apply_failures_metric() {
+        use crate::metrics::{APPLY_FAILURES_METRIC, LAST_APPLY_SUCCESS_METRIC};
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = base_cfg(dir.path());
+        let textfile_dir = cfg.textfile_dir.clone();
+        cfg.awg_conf_path = dir.path().join("not-a-file-dir");
+        std::fs::create_dir_all(&cfg.awg_conf_path).unwrap();
+
+        let agent = AgentLoop::new(cfg).unwrap();
+        let res = agent.apply_to_kernel().await;
+        assert!(res.is_err(), "apply against a directory must fail");
+
+        let prom = std::fs::read_to_string(textfile_dir.join(PROM_FILE)).unwrap();
+        assert!(
+            prom.contains(&format!("{APPLY_FAILURES_METRIC} 1")),
+            "failed apply must bump apply_failures_total. Got:\n{prom}"
+        );
+        assert!(
+            prom.contains(&format!("{LAST_APPLY_SUCCESS_METRIC} 0")),
+            "last_apply_success must stay at the 0 sentinel. Got:\n{prom}"
+        );
+    }
+
+    // Secret scrub: a child stderr echoing conf lines must lose the key
+    // VALUES (PrivateKey/PresharedKey/HeaderProtectionKey) while keeping
+    // the key names and non-secret content for diagnostics.
+    #[test]
+    fn scrub_key_material_redacts_secrets_and_keeps_context() {
+        let raw = "line one\n\
+                   PrivateKey = SECRETPRIVATEKEYAAAAAAAAAAAAAAAAAAAAAAA=\n\
+                   PresharedKey= SECRETPSKBBBBBBBBBBBBBBBBBBBBBBBBBB=\n\
+                   HeaderProtectionKey  =  SECRETHPKCCCCCCCCCCCCCCCCCCCCC=\n\
+                   private_key=SECRETUAPIKEYDDDDDDDDDDDDDDDDDDDDDDDDD=\n\
+                   AllowedIPs = 0.0.0.0/0\n";
+        let out = scrub_key_material(raw);
+        for secret in [
+            "SECRETPRIVATEKEY",
+            "SECRETPSK",
+            "SECRETHPK",
+            "SECRETUAPIKEY",
+        ] {
+            assert!(
+                !out.contains(secret),
+                "secret {secret} must be redacted:\n{out}"
+            );
+        }
+        assert!(out.contains("PrivateKey = [redacted]"));
+        assert!(out.contains("PresharedKey = [redacted]"));
+        assert!(out.contains("HeaderProtectionKey = [redacted]"));
+        // (?i): uapi lower_snake spellings redact too — awg dump output.
+        assert!(out.contains("private_key = [redacted]"));
+        assert!(
+            out.contains("AllowedIPs = 0.0.0.0/0"),
+            "non-secret lines pass through"
+        );
+        assert!(out.contains("line one"));
+    }
+
+    // .param-dropped ownership: whoever evaluated the conf last owns the
+    // marker — a stale installer render-SKIP ledger must be retired by a
+    // clean merge (even a NO-OP one: byte-identical conf + empty drop list
+    // proves staleness), and a client-side drop REWRITES it in the same
+    // ledger format. Refresh's degraded→active healer keys off this file,
+    // so staleness here is a silent-false-status bug. Falsification: revert
+    // sync_param_dropped_marker and all three asserts go red.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn merge_syncs_param_dropped_marker_with_last_evaluator() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = base_cfg(dir.path());
+        let conf_path = cfg.awg_conf_path.clone();
+        let marker = PathBuf::from(format!("{}.param-dropped", conf_path.display()));
+        seed_conf(&conf_path, OLD_PRIV, OLD_ENDPOINT, 4);
+        // A stale installer render-SKIP ledger outlives its payload.
+        std::fs::write(
+            &marker,
+            "awg0.conf render SKIPPED 2001-01-01T00:00:00Z: required/identity field(s) \
+             failed the conf-injection charset/grammar guard: AWG_H4 — never written\n",
+        )
+        .unwrap();
+
+        let agent = AgentLoop::new(cfg).unwrap();
+
+        // 1. Clean merge (jc 4→5 writes) → stale marker retired.
+        agent
+            .merge_and_write_conf_locked(Some(&params(5)))
+            .await
+            .expect("merge ok");
+        assert!(
+            !marker.exists(),
+            "a clean merge must retire the stale installer marker"
+        );
+
+        // 2. Client-side grammar drop → marker rewritten in the ledger
+        //    format WITHOUT a must-match line (link stays up).
+        let bad_i1 = AwgParams {
+            i1: Some("<bogus 9>".to_string()),
+            ..params(6)
+        };
+        agent
+            .merge_and_write_conf_locked(Some(&bad_i1))
+            .await
+            .expect("client-side omit must not fail the merge");
+        let body = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            body.contains("client-side omitted:") && body.contains("i1"),
+            "a client-side drop must be ledgered with the field name:\n{body}"
+        );
+        assert!(
+            !body.contains("must-match dropped:"),
+            "client-side drops never produce a must-match line:\n{body}"
+        );
+
+        // 3. NO-OP clean merge (same params → byte-identical conf) still
+        //    retires the marker — the merge result is the ground truth.
+        agent
+            .merge_and_write_conf_locked(Some(&params(6)))
+            .await
+            .expect("merge ok");
+        assert!(
+            !marker.exists(),
+            "a no-op clean merge must still retire a stale marker"
         );
     }
 }

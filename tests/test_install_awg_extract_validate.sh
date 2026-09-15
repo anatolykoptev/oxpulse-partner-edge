@@ -103,3 +103,46 @@ setup() {
 	grep -E "for _pkg in .* python3" "$DEPS" >/dev/null 2>&1 \
 		|| { echo "python3 not in deps_install for-loop"; return 1; }
 }
+
+# 6. The required-nonempty list must keep covering the jc trio — the
+#    2026-05-18 mesh-bridge-online-drop incident guard stays load-bearing
+#    until Phase E shrinks it alongside the agent-side omission gate.
+@test "install.sh required-nonempty list still covers AWG_JC AWG_JMIN AWG_JMAX" {
+	guard_block=$(awk '
+		/\[\[ -n "\$\{?AWG_ALLOCATED_IP/ { capture=1 }
+		capture { print }
+		capture && /^fi$/ { exit }
+	' "$INSTALL")
+
+	for _v in AWG_JC AWG_JMIN AWG_JMAX AWG_S1 AWG_S2 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4; do
+		echo "$guard_block" | grep -q "$_v" \
+			|| { echo "required-nonempty list dropped $_v"; return 1; }
+	done
+}
+
+# 7. AWG 3.1: the awg block is extracted by ONE awg_extract_all spawn feeding
+#    a NUL-delimited read-loop (no eval, no ~30x per-key python3 spawns).
+@test "install.sh extracts the awg block via one awg_extract_all read-loop" {
+	grep -q "awg_extract_all" "$INSTALL" \
+		|| { echo "install.sh does not call awg_extract_all"; return 1; }
+
+	# The read-loop must be the NUL-delimited no-eval form.
+	grep -q "read -r -d ''" "$INSTALL" \
+		|| { echo "awg_extract_all consumer is not the NUL-delimited read-loop"; return 1; }
+	# `run` + status check — a bare `!` mid-test silently masks under SC2314.
+	run grep -qE "eval.*awg_extract_all" "$INSTALL"
+	[ "$status" -ne 0 ] \
+		|| { echo "eval found in awg_extract_all consumption"; return 1; }
+}
+
+# 8. The v3.1 optional keys must actually be populated (pre-init proves the
+#    vars are wired even when extraction emits nothing).
+@test "install.sh populates the v3.1 optional AWG_* vars" {
+	for _v in AWG_S3 AWG_HPK AWG_I1 AWG_I5 AWG_CONTENT_PADDING_ADDITION \
+	          AWG_REKEY_AFTER_TIME AWG_REKEY_TIMEOUT AWG_REJECT_AFTER_TIME \
+	          AWG_KEEPALIVE_TIMEOUT AWG_MAX_HANDSHAKE_ATTEMPTS \
+	          AWG_RANDOM_TRAILERS AWG_DISABLE_COOKIES; do
+		grep -q "$_v" "$INSTALL" \
+			|| { echo "install.sh never references $_v"; return 1; }
+	done
+}
