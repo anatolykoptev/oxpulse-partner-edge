@@ -320,6 +320,41 @@ else
     fail "E9: $reenabled enable call(s) on an already-converged node: $(grep -E '^enable ' "$A/systemctl.log" | tr '\n' ' ')"
 fi
 
+# ---------------------------------------------------------------------------
+# Case D: enabled-runtime is NOT convergence — it dies at the next reboot.
+# The enable loop must re-run `enable` on a runtime-only unit so the state
+# becomes persistent, then verify the post-state is "enabled".
+# Goes RED if `enabled-runtime` is put back in the no-op case.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Case D: enabled-runtime unit is re-persisted ==="
+
+D="$TMPROOT/d"
+mkdir -p "$D"
+cat > "$D/install.env" <<EOF
+PARTNER_DOMAIN=$DOMAIN
+TURNS_SUBDOMAIN=$TURNS
+BACKEND_API=https://api.oxpulse.chat
+EOF
+mkdir -p "$D/state"
+printf 'enabled-runtime\n' > "$D/state/oxpulse-partner-edge.service"
+
+OUT_D=$(run_sync "$D") && RC_D=0 || RC_D=$?
+[[ $RC_D -eq 0 ]] && pass "D0: sync_host_scripts exited 0" \
+                  || fail "D0: sync_host_scripts exited $RC_D; output: $OUT_D"
+
+if grep -qx "enable oxpulse-partner-edge.service" "$D/systemctl.log"; then
+    pass "D1: enable re-ran on an enabled-runtime unit (runtime is not persistent)"
+else
+    fail "D1: no enable call for the enabled-runtime unit — it stays dead-after-reboot"
+fi
+
+if [[ "$(cat "$D/state/oxpulse-partner-edge.service" 2>/dev/null)" == "enabled" ]]; then
+    pass "D2: post-enable state is persistent 'enabled'"
+else
+    fail "D2: unit still '$(cat "$D/state/oxpulse-partner-edge.service" 2>/dev/null)' after enable"
+fi
+
 echo ""
 if [[ "$FAIL" -eq 0 ]]; then
     echo "PASS: all $PASS systemd-convergence checks passed"

@@ -761,8 +761,11 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 		_eu_state=$("$SYSTEMCTL_BIN" is-enabled "$_eu" 2>/dev/null || true)
 		# `static` and `indirect` units have no [Install] to enable; `enabled`
 		# is already converged. All three are no-ops, not failures.
+		# `enabled-runtime` is NOT converged — it is dead after the next
+		# reboot — so it falls through to the enable call, which converts a
+		# runtime enable into a persistent one (idempotent, post-verified).
 		case "$_eu_state" in
-			enabled | enabled-runtime | static | indirect) continue ;;
+			enabled | static | indirect) continue ;;
 		esac
 
 		"$SYSTEMCTL_BIN" enable "$_eu" >/dev/null 2>&1 \
