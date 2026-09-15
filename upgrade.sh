@@ -1238,6 +1238,13 @@ _HOST_SCRIPT_SBIN_FILES=(
 	# other. Same fetch+sha256-verify path as surgical-restart-lib.sh directly
 	# above.
 	xprb-refresh-lib.sh
+	# AWG installer lib — same-dir sibling CANDIDATE of this script's own
+	# _ensure_awg_lib (the AWG 3.1 version-converge step). Delivering it makes
+	# tier-1 ($_sd/install-awg.sh) hit on installed edges, so the converge
+	# works offline instead of falling through to the tier-3 verified fetch
+	# (soft — skipped when REPO_RAW is unreachable). Lives in lib/ in the
+	# repo; flattens next to upgrade.sh in the release bundle.
+	install-awg.sh
 	# Split-routing scripts (PR #280; RU profile only, ship to all edges for idempotency).
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable
@@ -1286,6 +1293,7 @@ _host_script_remote_name() {
 		surgical-restart-lib.sh)         echo "lib/surgical-restart-lib.sh" ;;
 		xprb-refresh-lib.sh)             echo "lib/xprb-refresh-lib.sh" ;;
 		hydrate-hy2.sh)                  echo "lib/hydrate-hy2.sh" ;;
+		install-awg.sh)                  echo "lib/install-awg.sh" ;;
 		oxpulse-partner-edge-split-routing)    echo "oxpulse-partner-edge-split-routing.sh" ;;
 		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
 		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;
@@ -1310,7 +1318,7 @@ _host_script_install_dir() {
 _host_script_mode() {
 	local installed_name="$1"
 	case "$installed_name" in
-		channel-render-lib.sh|ghcr-auth-lib.sh|render-channel-lib.sh|oxpulse-token-lib.sh|cross-probe-lib.sh|metric-sink-lib.sh|surgical-restart-lib.sh|xprb-refresh-lib.sh|sni-select-lib.sh)
+		channel-render-lib.sh|ghcr-auth-lib.sh|render-channel-lib.sh|oxpulse-token-lib.sh|cross-probe-lib.sh|metric-sink-lib.sh|surgical-restart-lib.sh|xprb-refresh-lib.sh|sni-select-lib.sh|install-awg.sh)
 			echo "0644" ;;
 		*)  echo "0755" ;;
 	esac

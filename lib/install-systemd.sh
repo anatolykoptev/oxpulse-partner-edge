@@ -160,6 +160,23 @@ _systemd_install_lib_scripts() {
 		chmod 0755 "$PREFIX_SBIN/peer-ip-guard-lib.sh"
 	fi
 
+	# AWG installer lib — _ensure_awg_lib in upgrade.sh sources it as a
+	# same-dir sibling CANDIDATE ($_sd/install-awg.sh → tier-1 of _source_lib)
+	# for the AWG 3.1 version-converge step. Same 4-way src_dir/lib → flat →
+	# operator-staged → curl shape as peer-ip-guard-lib.sh above; without it
+	# installed edges converge only via the online tier-3 fetch.
+	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/install-awg.sh" ]]; then
+		install -m 0644 "$src_dir/lib/install-awg.sh" "$PREFIX_SBIN/install-awg.sh"
+	elif [[ -n "${src_dir:-}" && -f "$src_dir/install-awg.sh" ]]; then
+		install -m 0644 "$src_dir/install-awg.sh" "$PREFIX_SBIN/install-awg.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/install-awg.sh" ]]; then
+		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/install-awg.sh" \
+			"$PREFIX_SBIN/install-awg.sh"
+	else
+		curl -fsSL "$REPO_RAW/lib/install-awg.sh" -o "$PREFIX_SBIN/install-awg.sh"
+		chmod 0644 "$PREFIX_SBIN/install-awg.sh"
+	fi
+
 	# Service token lib (sourced by refresh.sh + any script calling authenticated
 	# /api/partner/* endpoints)
 	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-token-lib.sh" ]]; then
@@ -485,6 +502,9 @@ EXPECTED_SBIN_FILES=(
 	oxpulse-token-lib.sh
 	# Hy2 channel render lib — sourced by oxpulse-partner-edge-hydrate.
 	hydrate-hy2.sh
+	# AWG installer lib — _ensure_awg_lib sibling candidate of
+	# oxpulse-partner-edge-upgrade (the AWG 3.1 converge step).
+	install-awg.sh
 	# CL-2: split-routing scripts (suffixless executables — matches sbin convention)
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable

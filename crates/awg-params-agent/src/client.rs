@@ -81,18 +81,26 @@ impl AgentClient {
         Ok(token)
     }
 
-    /// Poll `GET /api/partner/awg-params/latest?component=awg`.
+    /// Poll `GET /api/partner/awg-params/latest?component=awg&schema=2`.
     /// Returns `Ok(None)` on 4xx/5xx — loop logs and retries next interval.
+    ///
+    /// `schema=2` opts the poll into the v2 epoch shape (S3 / HPK / H ranges /
+    /// I2-I5 / CPA / timings / bools — the additive [`AwgParams`] Option
+    /// fields). A central that predates the schema parameter ignores the
+    /// extra query arg and keeps emitting v1 rows, which decode fine (every
+    /// v2 member defaults to None).
     ///
     /// Task 12: this is the sole detector for central-unreachable staleness —
     /// every path that fails to reach central (network error or non-2xx)
     /// bumps `poll_failures_total`; the sole 2xx-success path advances
     /// `last_success_timestamp_seconds`. A token-read failure (local
     /// misconfig, not a central-reachability signal) is deliberately NOT
-    /// recorded here.
+    /// recorded here. A 2xx body that FAILS decode is a poll failure too:
+    /// the edge received bytes it cannot act on — last_success must NOT
+    /// advance or a garbage-emitting central looks healthy.
     pub async fn poll_latest(&self) -> Result<Option<AwgParamsLatestResponse>> {
         let url = format!(
-            "{}/api/partner/awg-params/latest?component=awg",
+            "{}/api/partner/awg-params/latest?component=awg&schema=2",
             self.central_url
         );
         debug!(%url, "polling awg-params");
@@ -108,10 +116,17 @@ impl AgentClient {
 
         let status = resp.status();
         if status.is_success() {
-            let body = resp
-                .json::<AwgParamsLatestResponse>()
-                .await
-                .context("decode awg-params response")?;
+            let body = match resp.json::<AwgParamsLatestResponse>().await {
+                Ok(b) => b,
+                Err(e) => {
+                    // 2xx + undecodable body = the poll FAILED for every
+                    // purpose that matters (the epoch can never apply).
+                    // Count it before propagating so poll_failures_total
+                    // catches a garbage-emitting central.
+                    self.record_poll_failure().await;
+                    return Err(e).context("decode awg-params response");
+                }
+            };
             self.record_poll_success().await;
             return Ok(Some(body));
         }
@@ -223,6 +238,44 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Same one-shot server, but the first request line is captured and
+    /// returned through a channel — lets a test assert on the REAL URL path
+    /// + query reqwest emitted (the `schema=2` wiring assertion).
+    fn spawn_capturing_http_server(
+        response: String,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&chunk[..n]);
+                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let request_line = String::from_utf8_lossy(&buf)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_owned();
+                let _ = tx.send(request_line);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
     #[test]
     fn read_token_reads_current_file_contents() {
         let mut f = tempfile::NamedTempFile::new().expect("create tempfile");
@@ -322,6 +375,77 @@ mod tests {
             ts > 0,
             "a real 2xx poll must advance last_success_timestamp off the 0 sentinel via the \
              REAL poll_latest path. Got line: {ts_line:?}"
+        );
+    }
+
+    // v2: the poll URL must opt into the v2 epoch schema — assert the REAL
+    // request line reqwest emits carries `component=awg&schema=2`.
+    #[tokio::test]
+    async fn poll_latest_requests_schema_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = Arc::new(Metrics::load(dir.path()));
+        let token_path = write_token(dir.path(), "stkn_test\n");
+        let body = r#"{"epoch":1,"params":{"S1":10,"S2":20,"S4":30,"H1":5,"H2":6,"H3":7,"H4":8}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let (base_url, rx) = spawn_capturing_http_server(response);
+
+        let client = AgentClient::new(base_url, token_path, metrics).expect("build client");
+        client.poll_latest().await.expect("200 must decode");
+
+        let request_line = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("server must capture the request line");
+        assert!(
+            request_line.contains("/api/partner/awg-params/latest?"),
+            "request must hit the latest endpoint: {request_line}"
+        );
+        assert!(
+            request_line.contains("component=awg"),
+            "component=awg required: {request_line}"
+        );
+        assert!(
+            request_line.contains("schema=2"),
+            "schema=2 must be on the wire — a central honoring it emits the v2 shape. Got: {request_line}"
+        );
+    }
+
+    // v2/D9: a 2xx whose body fails JSON decode is a POLL FAILURE — the edge
+    // received bytes it cannot act on, so poll_failures_total must bump and
+    // last_success must stay 0. Reverting the record_poll_failure call in
+    // the decode branch makes this go RED while the Err still propagates.
+    #[tokio::test]
+    async fn poll_latest_2xx_malformed_body_records_poll_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = Arc::new(Metrics::load(dir.path()));
+        let token_path = write_token(dir.path(), "stkn_test\n");
+        let body = "this is not json{{{";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let base_url = spawn_one_shot_http_server(response);
+
+        let client = AgentClient::new(base_url, token_path, metrics).expect("build client");
+        let result = client.poll_latest().await;
+        assert!(
+            result.is_err(),
+            "a 2xx with an undecodable body must surface as Err"
+        );
+
+        let prom = std::fs::read_to_string(dir.path().join(crate::metrics::PROM_FILE))
+            .expect("metrics textfile must exist after a recorded poll failure");
+        assert!(
+            prom.contains(&format!("{} 1", crate::metrics::POLL_FAILURES_METRIC)),
+            "a malformed 2xx body must bump poll_failures_total. Got:\n{prom}"
+        );
+        assert!(
+            prom.contains(&format!("{} 0", crate::metrics::LAST_SUCCESS_METRIC)),
+            "last_success must stay at 0 — the garbage poll must not look healthy. Got:\n{prom}"
         );
     }
 }

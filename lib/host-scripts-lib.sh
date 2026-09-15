@@ -51,19 +51,97 @@
 # Every helper this file's functions call BY NAME (log/warn/die,
 # _HOST_SCRIPT_SBIN_FILES/_HOST_SCRIPT_SYSTEMD_FILES/_HOST_SCRIPT_RESTART_UNITS,
 # _host_script_remote_name/_host_script_install_dir/_host_script_mode,
-# PREV_HOST_SCRIPTS_DIR, PREFIX_SHARE/PREFIX_LIBDIR/PREFIX_SBIN/PREFIX_ETC,
-# SYSTEMD_DIR, SYSTEMCTL_BIN, REPO_RAW, RELEASES_BASE, STATE_FILE, DRY_RUN,
-# ALLOW_UNVERIFIED) deliberately STAYS in upgrade.sh, resolved dynamically at
-# CALL time against the sourcing script's function/variable table — the same
-# established convention lib/reconcile.sh and lib/compose-lib.sh already use
-# (their functions likewise call log()/warn()/die()/DOCKER_BIN, defined by
-# whichever script sources them, never redefined locally in the lib).
+# PREV_HOST_SCRIPTS_DIR, PREFIX_SHARE/PREFIX_LIBDIR/PREFIX_SBIN/PREFIX_BIN/
+# PREFIX_ETC, SYSTEMD_DIR, SYSTEMCTL_BIN, REPO_RAW, RELEASES_BASE, STATE_FILE,
+# DRY_RUN, ALLOW_UNVERIFIED) deliberately STAYS in upgrade.sh, resolved
+# dynamically at CALL time against the sourcing script's function/variable
+# table — the same established convention lib/reconcile.sh and
+# lib/compose-lib.sh already use (their functions likewise call
+# log()/warn()/die()/DOCKER_BIN, defined by whichever script sources them,
+# never redefined locally in the lib).
+#
+# Two names are the deliberate EXCEPTION to that convention and are owned by
+# THIS file: _HOST_SCRIPT_ASSET_FILES and its _host_script_asset_* helpers
+# (below). The release-asset step they drive is lib-internal machinery — no
+# symbol in upgrade.sh references them, and the binary's install dir is
+# PREFIX_BIN (not the script class's sbin default), so the routing table for
+# this surface kind cannot ride _host_script_install_dir.
 #
 # Not executable on its own.
 
 # Guard against double-sourcing.
 [[ "${_HOST_SCRIPTS_LIB_LOADED:-0}" -eq 1 ]] && return 0
 _HOST_SCRIPTS_LIB_LOADED=1
+
+# ---------------------------------------------------------------------------
+# _HOST_SCRIPT_ASSET_FILES — release-asset binaries delivered by
+# sync_host_scripts' asset step (Step 5d below). A THIRD surface kind beside
+# _HOST_SCRIPT_SBIN_FILES (scripts fetched from REPO_RAW) and
+# _HOST_SCRIPT_SYSTEMD_FILES (units): compiled per-arch binaries that exist
+# ONLY as GitHub release assets — there is no repo path to fetch them from,
+# so they can never ride the script loop.
+#
+# The registry lives HERE in the lib, not in upgrade.sh beside the other
+# _HOST_SCRIPT_* arrays: the asset step is lib-internal machinery and nothing
+# in upgrade.sh references the list by name.
+# tests/test_restarted_units_are_delivered.sh extracts this array from this
+# file and asserts it equals the set of unit-executed asset-class binaries —
+# the defect registry that measured FOUR distinct agent-binary sha256 across
+# 5 edges on 2026-08-07 (every upgrade restarted the unit; nothing ever
+# refreshed the binary).
+#
+# Everything about an entry is DERIVED, never listed — a future asset that
+# breaks a convention extends the helpers below, not the step:
+#   release asset name : <name>-<arch>   (arch via _host_script_asset_arch)
+#   systemd unit       : <name>.service  (the step's presence gate, and the
+#                        unit that must ALSO sit in _HOST_SCRIPT_RESTART_UNITS
+#                        for the bytes to take effect — the registry test
+#                        asserts that pairing)
+#   install dir        : _host_script_asset_install_dir → $PREFIX_BIN
+#   install mode       : 0755
+# ---------------------------------------------------------------------------
+_HOST_SCRIPT_ASSET_FILES=(
+	# Compiled from crates/awg-params-agent; shipped per-arch in every release
+	# (release.yml stages oxpulse-awg-params-agent-{amd64,arm64} into the
+	# tag's SHA256SUMS). systemd/oxpulse-awg-params-agent.service ExecStarts
+	# /usr/local/bin/oxpulse-awg-params-agent and is already in
+	# _HOST_SCRIPT_RESTART_UNITS, so landing bytes flips _any_changed and the
+	# existing Step 7 restart picks the new binary up.
+	oxpulse-awg-params-agent
+)
+
+# _host_script_asset_arch — uname -m → release-asset arch token (amd64|arm64);
+# return 1 on anything else. MIRRORS _awg_params_agent_release_arch in
+# lib/install-awg-params-agent.sh — that file is the single authority for the
+# map. This copy exists because the install-side lib is NOT guaranteed present
+# on an upgrade-only box (it is not a _stage_lib target and _install_lib_source
+# does not persist it to INSTALL_LIB_DIR), so sourcing it here would make the
+# asset step depend on a file it cannot resolve. The two copies are pinned
+# identical by tests/test_sync_asset_delivery.sh — the repo's resolver-drift
+# incident (upgrade.sh:280-283, _source_lib vs _stage_lib diverging on the
+# identical manifest lookup) is why the mirror is test-pinned rather than a
+# third resolver being built.
+_host_script_asset_arch() {
+	case "$(uname -m)" in
+		x86_64)  printf 'amd64\n' ;;
+		aarch64) printf 'arm64\n' ;;
+		*) return 1 ;;
+	esac
+}
+
+# _host_script_asset_install_dir NAME — where asset binary NAME installs.
+# Separate map from _host_script_install_dir (script class): the unit's
+# ExecStart is the authority — systemd/oxpulse-awg-params-agent.service runs
+# /usr/local/bin/…, i.e. PREFIX_BIN, not the sbin default the script map would
+# give. tests/test_restarted_units_are_delivered.sh eval-extracts this fn and
+# asserts it agrees with every asset's unit ExecStart directory.
+_host_script_asset_install_dir() {
+	case "$1" in
+		# systemd/oxpulse-awg-params-agent.service: ExecStart=/usr/local/bin/…
+		oxpulse-awg-params-agent) printf '%s\n' "$PREFIX_BIN" ;;
+		*)                        printf '%s\n' "$PREFIX_BIN" ;;
+	esac
+}
 
 # snapshot_host_scripts TAG — copy every managed sbin file + relevant systemd
 # units into PREV_HOST_SCRIPTS_DIR/TAG so rollback can restore them.
@@ -207,6 +285,7 @@ sync_host_scripts() {
 		log "[dry-run]   units: oxpulse-channels-health-report.{service,timer} + refresh/sni-rotate/xray-update/geoip-refresh"
 		log "[dry-run]   templated units (rendered from STATE): ${_HOST_SCRIPT_SYSTEMD_TEMPLATED_FILES[*]}"
 		log "[dry-run]   enable (enable-only, never disable): ${_HOST_SCRIPT_ENABLE_UNITS[*]}"
+		log "[dry-run]   release-asset binaries (unit-or-binary gated): ${_HOST_SCRIPT_ASSET_FILES[*]}"
 		log "[dry-run]   reload: $SYSTEMCTL_BIN daemon-reload + restart affected timers"
 		log "[dry-run]   idempotency: sha256 comparison (no-op if already current)"
 		log "[dry-run]   VERSION: would install to $PREFIX_SHARE/oxpulse-partner-edge/VERSION"
@@ -626,6 +705,101 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 					|| warn "unit-enable: could not start $_eu now — it will arm at the next boot"
 				;;
 		esac
+	done
+
+	# ------------------------------------------------------------------
+	# Step 5d: release-asset binaries (_HOST_SCRIPT_ASSET_FILES) — the third
+	# delivery surface beside scripts (Step 2, from REPO_RAW) and units
+	# (Step 5): compiled per-arch binaries that exist ONLY as release assets.
+	#
+	# WHY THIS LIVES HERE (strangler-fig, not a parallel pipeline): every link
+	# in the fetch→verify→install→restart chain this step needs already exists
+	# in this function — SHA256SUMS is fetched once per tag at Step 1 (this
+	# step never re-fetches it), entries resolve via _lookup_sha256, the
+	# fetch URL reuses the use_releases_asset polarity ($RELEASES_BASE/$tag,
+	# which already encodes OXPULSE_MIRROR_BASE), and _any_changed drives the
+	# Step 7 restart that already lists oxpulse-awg-params-agent.service. A
+	# separate converge would be the THIRD fetch+verify implementation in a
+	# repo that already recorded the two-resolver drift incident
+	# (upgrade.sh:280-283 — _source_lib vs _stage_lib diverging on the
+	# identical manifest lookup). The defect being closed is codified in
+	# tests/test_restarted_units_are_delivered.sh: four distinct
+	# agent-binary hashes across five edges, because every upgrade restarted
+	# the unit and none ever refreshed the binary.
+	#
+	# GATE — systemd unit present OR binary already installed: nodes that
+	# never took the AWG channel no-op entirely (no fetch attempted).
+	#
+	# VERIFY — fail-CLOSED, deliberately stricter than the script class's
+	# ALLOW_UNVERIFIED leniency: this is a root daemon that writes awg0.conf
+	# and pipes it into `awg syncconf` — it carries HPK and must-match params
+	# to the kernel. No per-tag SHA256SUMS entry → no install, period. The
+	# unverified bytes this replaces came from releases/latest/download —
+	# unpinned AND unverified.
+	#
+	# FAIL-SOFT — every failure below is warn+skip, never die: a delivery
+	# failure on the optional AWG channel must not abort an upgrade that is
+	# otherwise converging the managed set (the same contract
+	# ensure_amneziawg keeps).
+	# ------------------------------------------------------------------
+	local _asset _arch _asset_rel _asset_dst _asset_unit _asset_tmp_inst
+	for _asset in "${_HOST_SCRIPT_ASSET_FILES[@]}"; do
+		install_dir=$(_host_script_asset_install_dir "$_asset")
+		_asset_dst="$install_dir/$_asset"
+		_asset_unit="$SYSTEMD_DIR/${_asset}.service"
+		# Gate: the AWG-less no-op — neither the unit nor the binary has ever
+		# been delivered to this node, so nothing here is ours to refresh.
+		if [[ ! -f "$_asset_unit" && ! -f "$_asset_dst" ]]; then
+			log "  host-asset: $_asset — no unit and no installed binary (AWG-less node) — skipping"
+			continue
+		fi
+		if ! _arch=$(_host_script_asset_arch); then
+			warn "  host-asset: $_asset — unsupported arch $(uname -m) — skipping (no release asset exists for it)"
+			continue
+		fi
+		_asset_rel="${_asset}-${_arch}"
+		# A root daemon is never installed unverified: without this tag's
+		# SHA256SUMS (floating 'latest' tag, fetch failure tolerated by
+		# --allow-unverified, or a release that predates the asset) there is
+		# nothing to check the bytes against — skip rather than fetch.
+		if [[ "$sha256sums_ok" -ne 1 ]]; then
+			warn "  host-asset: $_asset — no SHA256SUMS for tag $tag — skipping (root-daemon bytes are never installed unverified)"
+			continue
+		fi
+		expected_sha=$(_lookup_sha256 "$_asset_rel")
+		if [[ -z "$expected_sha" ]]; then
+			warn "  host-asset: no SHA256SUMS entry for $_asset_rel at tag $tag — skipping (possible MITM or a release that predates the asset)"
+			continue
+		fi
+		fetch_url="$RELEASES_BASE/$tag/$_asset_rel"
+		fetch_tmp="$tmpdir/$_asset_rel"
+		if ! curl -fsSL --max-time 60 "$fetch_url" -o "$fetch_tmp" 2>/dev/null; then
+			warn "  host-asset: could not fetch $fetch_url — skipping $_asset"
+			continue
+		fi
+		actual_sha=$(sha256sum "$fetch_tmp" | awk '{print $1}')
+		if [[ "$actual_sha" != "$expected_sha" ]]; then
+			warn "  host-asset: SHA256 MISMATCH for $_asset_rel (expected=$expected_sha actual=$actual_sha) — skipping (possible MITM or stale CDN)"
+			continue
+		fi
+		# Idempotency: same bytes already installed → no install, no restart.
+		if [[ -f "$_asset_dst" ]]; then
+			installed_sha=$(sha256sum "$_asset_dst" | awk '{print $1}')
+			if [[ "$installed_sha" == "$actual_sha" ]]; then
+				log "  host-asset: $_asset up-to-date (sha256 match)"
+				continue
+			fi
+		fi
+		# Atomic install: sibling temp + rename(2). Atomicity matters beyond
+		# crash-consistency here: the daemon this replaces may be RUNNING —
+		# rename swaps the path's inode without touching the live image,
+		# where a truncate+write would ETXTBSY or corrupt it.
+		install -d -m 0755 "$install_dir"
+		_asset_tmp_inst="$_asset_dst.new.$$"
+		install -m 0755 "$fetch_tmp" "$_asset_tmp_inst"
+		mv -f "$_asset_tmp_inst" "$_asset_dst"
+		log "  host-asset: installed $_asset ($_asset_rel @ $tag)"
+		_any_changed=1
 	done
 
 	# ------------------------------------------------------------------

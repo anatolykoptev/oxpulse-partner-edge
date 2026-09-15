@@ -7,7 +7,11 @@
 # Exports:
 #   install_amneziawg     — idempotent build of amneziawg-go + amneziawg-tools
 #   configure_amneziawg   — render awg0.conf + bring up interface
-#   awg_extract           — parse key from JSON file (used by Step 4 in install.sh)
+#   awg_extract           — parse one key from the JSON `awg` block (allocated_ip
+#                           stays on this pinned legacy path in install.sh)
+#   awg_extract_all       — ONE python3 spawn emitting the full v3 awg-block
+#                           surface as NUL-delimited VAR=VALUE records
+#                           (install.sh consumes it via a read-loop, no eval)
 #
 # Requires (caller globals):
 #   AWG_PRIV_PATH AWG_PUB_PATH          private/public key file paths
@@ -24,7 +28,27 @@
 #   randomize, compute, or default these values here — write them
 #   verbatim from the registration response. See docs/AWG_PARAM_INVARIANT.md
 #   for the full failure mode and the 2026-05-20 edge-b.example outage RCA.
-#   AWG_H1 AWG_H2 AWG_H3 AWG_H4         packet-header hashes
+#   The same rule now covers every v3.1 field below: this file is a pure
+#   renderer of central values — the ONLY edge-side client-param generator
+#   lives in the awg-params-agent (AWG-3.1 D2), so nothing here invents a
+#   value.
+#   AWG_H1 AWG_H2 AWG_H3 AWG_H4         packet-header hashes (int or x-y range)
+#
+#   Optional v3.1 fields — render-if-present (never generated here):
+#   AWG_S3                            third junk-packet size  [must-match]
+#   AWG_HPK                           HeaderProtectionKey b64 [must-match;
+#                                     renders only when effective S1-S4 >= 12]
+#   AWG_RANDOM_TRAILERS               on|off                  [must-match]
+#   AWG_I1..AWG_I5                    init-packet tags        [client-side]
+#   AWG_CONTENT_PADDING_ADDITION      a or a-b                [client-side]
+#   AWG_REKEY_AFTER_TIME AWG_REKEY_TIMEOUT AWG_REJECT_AFTER_TIME
+#   AWG_KEEPALIVE_TIMEOUT AWG_MAX_HANDSHAKE_ATTEMPTS          [client-side]
+#   AWG_DISABLE_COOKIES               on|off                  [client-side]
+#
+#   AWG_CONF_DEGRADED — OUT-param: configure_amneziawg sets it to 1 when a
+#   required/identity/must-match field was dropped by the charset guard or
+#   the HPK precondition. The caller surfaces it as awg=degraded (the link
+#   will NOT come up while motherly expects a param we refused to render).
 #   log warn die                        functions (install.sh provides)
 #
 # Pinned upstream refs — the single place the fleet's AWG dataplane version is
@@ -174,6 +198,61 @@ ensure_amneziawg() {
 	return 0
 }
 
+# ---------------------------------------------------------------------------
+# _awg_conf_safe VALUE — charset guard for every central-sourced string
+# interpolated into awg0.conf. The forbidden set (\n \r [ ]) is byte-identical
+# to I1_FORBIDDEN_CHARS at crates/awg-params-agent/src/params.rs:57 — the
+# single grammar authority (opec/src/secrets/sfu_key.rs is the other
+# sanctioned mirror). A value carrying these primitives can splice an
+# injected [Peer] section into the conf: '\n'/'\r' start a new directive,
+# '['/']' open a section header. TLS+bearer authenticates the CONNECTION, not
+# the field content — so the register payload is an injection surface and the
+# guard covers the pre-existing identity fields too (motherly_pubkey /
+# motherly_endpoint / motherly_awg_ip / allocated_ip were injectable before).
+# ---------------------------------------------------------------------------
+_awg_conf_safe() {
+	case "$1" in
+		*$'\n'*|*$'\r'*|*'['*|*']'*) return 1 ;;
+	esac
+	return 0
+}
+
+# Optional-line builders — used ONLY inside configure_amneziawg. Both append
+# to the caller-visible accumulators _opt_lines / _drop_mm / _drop_cl (bash
+# dynamic scope — declared `local` in configure_amneziawg before the calls).
+#
+#   _awg_opt_mm <field-label> <ConfKey> <value>
+#       MUST-MATCH param (s3, header_protection_key, random_trailers): charset
+#       guard, then render VERBATIM — no bash grammar layer (upstream IpcSet
+#       names the field on a grammar failure; the edge must not silently edit
+#       a must-match value). Charset failure → record the drop; the bytes
+#       NEVER render.
+#
+#   _awg_opt_cl <field-label> <ConfKey> <value> <grammar-ERE>
+#       CLIENT-SIDE param (i1-i5, content_padding_addition, the 5 timings,
+#       disable_cookies): charset guard + whole-value grammar check; either
+#       failure omits just that line — degrade the feature, keep the link
+#       (the params agent may re-add the field from a later epoch).
+_awg_opt_mm() {
+	[[ -z "$3" ]] && return 0
+	if _awg_conf_safe "$3"; then
+		_opt_lines+="$2 = $3"$'\n'
+	else
+		_drop_mm+="$1(charset) "
+	fi
+}
+
+_awg_opt_cl() {
+	[[ -z "$3" ]] && return 0
+	if ! _awg_conf_safe "$3"; then
+		_drop_cl+="$1(charset) "
+	elif [[ ! "$3" =~ $4 ]]; then
+		_drop_cl+="$1(grammar) "
+	else
+		_opt_lines+="$2 = $3"$'\n'
+	fi
+}
+
 # Render /etc/amnezia/amneziawg/awg0.conf from the register response and
 # bring the interface up. Reads AWG_* vars set by the json_get block after
 # registration, plus AWG_PRIV_PATH from earlier in install.sh.
@@ -231,15 +310,104 @@ configure_amneziawg() {
 		exec 9>&-
 		return 0
 	fi
+	# --- AWG 3.1 pre-render guard (design D5: charset → never render) --------
+	# Every central-sourced string interpolated below passes _awg_conf_safe.
+	# Failure semantics by field class:
+	#   identity/required — the conf can never be valid without the field, and
+	#     a scrubbed placeholder would render a dead conf over a possibly
+	#     working one. So: skip the whole write (mirrors the lock-contention
+	#     path above — any existing awg0.conf stays byte-untouched), drop the
+	#     .param-dropped marker, set AWG_CONF_DEGRADED for the caller's
+	#     awg=degraded status. The injected bytes never reach the file.
+	#   must-match option (S3/HeaderProtectionKey/RandomTrailers) — drop the
+	#     line, still write the conf so the other params land; but while
+	#     motherly expects the dropped param the link will NOT come up →
+	#     marker + degraded.
+	#   client-side (I1-I5/CPA/timings/DisableCookies) — drop just that line
+	#     on charset OR grammar failure; marker records the omission; the link
+	#     is unaffected and the agent may re-add the field via a later epoch.
+	AWG_CONF_DEGRADED=""
+	local _drop_ident="" _drop_mm="" _drop_cl="" _opt_lines=""
+	local _marker="${conf_path}.param-dropped"
+	local _f
+	for _f in AWG_ALLOCATED_IP AWG_MOTHERLY_PUBKEY AWG_MOTHERLY_ENDPOINT \
+	          AWG_MOTHERLY_AWG_IP AWG_JC AWG_JMIN AWG_JMAX \
+	          AWG_S1 AWG_S2 AWG_S4 AWG_H1 AWG_H2 AWG_H3 AWG_H4; do
+		_awg_conf_safe "${!_f:-}" || _drop_ident+="$_f "
+	done
+	# The private key is locally generated (not central) but interpolates the
+	# same way — a corrupt key file is the same silent-dead-render class.
+	# Read it once here; the template below uses ${_privkey}.
+	local _privkey
+	_privkey=$(cat "$AWG_PRIV_PATH" 2>/dev/null)
+	_awg_conf_safe "$_privkey" || _drop_ident+="AWG_PRIV_PATH "
+	_awg_conf_safe "$listen_port" || _drop_ident+="AWG_LISTEN_PORT "
+	if [[ -n "$_drop_ident" ]]; then
+		printf '%s\n' "awg0.conf render SKIPPED $(date -u +%Y-%m-%dT%H:%M:%SZ): required/identity field(s) failed the conf-injection charset guard: ${_drop_ident}— the offending bytes were NEVER written; any previous awg0.conf left untouched; fix the register payload and re-run." \
+			> "$_marker" 2>/dev/null || true
+		AWG_CONF_DEGRADED=1
+		warn "configure_amneziawg: required AWG field(s) failed the conf-injection charset guard: ${_drop_ident}— awg0.conf NOT written this pass (existing conf, if any, untouched). The AWG link will NOT come up from this render. See ${_marker}."
+		exec 9>&-
+		return 0
+	fi
+	# Render-if-present optional lines (v3.1). Values arrive normalized from
+	# awg_extract_all (bools already on|off). Install NEVER generates values —
+	# the single client-param generator is agent-side (D2). Emission order is
+	# fixed: S3, I1-I5, HPK, CPA, the 5 timings, RandomTrailers, DisableCookies.
+	_awg_opt_mm s3 S3 "${AWG_S3:-}"
+	# I-tag grammar: the whole value must be a sequence of <tag> / <tag arg>
+	# tokens (upstream I1-I5 shape `<r 32><b 0x01><rd 4><rc 8><t>`); arg content
+	# is anything but brackets — the charset guard already removed [ ].
+	local _itag_re='^(<[a-z]+( [^<>]+)?>)+$'
+	local _range_re='^[0-9]+(-[0-9]+)?$'
+	_awg_opt_cl i1 I1 "${AWG_I1:-}" "$_itag_re"
+	_awg_opt_cl i2 I2 "${AWG_I2:-}" "$_itag_re"
+	_awg_opt_cl i3 I3 "${AWG_I3:-}" "$_itag_re"
+	_awg_opt_cl i4 I4 "${AWG_I4:-}" "$_itag_re"
+	_awg_opt_cl i5 I5 "${AWG_I5:-}" "$_itag_re"
+	# HPK precondition — mirrors upstream mergeWithDevice, evaluated on the
+	# EFFECTIVE (post-extraction) set: a non-empty HeaderProtectionKey renders
+	# only when ALL of S1/S2/S3/S4 are integers >= 12 (absent S3 = 0 — so HPK
+	# without S3 always fails). Otherwise IpcSet would reject the key; we warn
+	# + omit it + mark degraded rather than ship a key the kernel refuses.
+	if [[ -n "${AWG_HPK:-}" ]]; then
+		if ! _awg_conf_safe "$AWG_HPK"; then
+			_drop_mm+="header_protection_key(charset) "
+		else
+			local _hpk_ok=1 _sv
+			for _sv in "${AWG_S1:-0}" "${AWG_S2:-0}" "${AWG_S3:-0}" "${AWG_S4:-0}"; do
+				[[ "$_sv" =~ ^[0-9]+$ ]] || { _hpk_ok=0; break; }
+				(( 10#${_sv} >= 12 )) || { _hpk_ok=0; break; }
+			done
+			if [[ "$_hpk_ok" -eq 1 ]]; then
+				_opt_lines+="HeaderProtectionKey = ${AWG_HPK}"$'\n'
+			else
+				_drop_mm+="header_protection_key(requires-S1-S4>=12) "
+			fi
+		fi
+	fi
+	_awg_opt_cl content_padding_addition ContentPaddingAddition "${AWG_CONTENT_PADDING_ADDITION:-}" "$_range_re"
+	_awg_opt_cl rekey_after_time RekeyAfterTime "${AWG_REKEY_AFTER_TIME:-}" "$_range_re"
+	_awg_opt_cl rekey_timeout RekeyTimeout "${AWG_REKEY_TIMEOUT:-}" "$_range_re"
+	_awg_opt_cl reject_after_time RejectAfterTime "${AWG_REJECT_AFTER_TIME:-}" "$_range_re"
+	_awg_opt_cl keepalive_timeout KeepaliveTimeout "${AWG_KEEPALIVE_TIMEOUT:-}" "$_range_re"
+	_awg_opt_cl max_handshake_attempts MaxHandshakeAttempts "${AWG_MAX_HANDSHAKE_ATTEMPTS:-}" "$_range_re"
+	_awg_opt_mm random_trailers RandomTrailers "${AWG_RANDOM_TRAILERS:-}"
+	_awg_opt_cl disable_cookies DisableCookies "${AWG_DISABLE_COOKIES:-}" '^(on|off)$'
 	# Atomic write: stream into a temp file in the SAME dir, chmod, then rename(2)
 	# over awg0.conf. The agent's apply_to_kernel() reads the conf via awg-quick
 	# strip OUTSIDE this shared lock, so a plain in-place "cat >" truncate could be
 	# observed half-written; rename(2) is atomic, so that reader sees either the
 	# whole old file or the whole new one. Mirrors the agent write_conf_atomic.
 	local conf_tmp="${conf_path}.tmp.$$"
+	# ${_opt_lines} sits glued at the head of the "Table = off" line: it expands
+	# to "Key = value\n" rows (each \n-terminated) or to NOTHING — so with every
+	# optional var empty the render stays byte-identical to the pre-3.1
+	# template (the golden fixture proves it). No comment can live inside the
+	# heredoc — it would render into the conf.
 	cat > "$conf_tmp" <<-AWGCONF
 		[Interface]
-		PrivateKey = $(cat "$AWG_PRIV_PATH")
+		PrivateKey = ${_privkey}
 		Address = ${AWG_ALLOCATED_IP}
 		ListenPort = ${listen_port}
 		Jc = ${AWG_JC}
@@ -252,7 +420,7 @@ configure_amneziawg() {
 		H2 = ${AWG_H2}
 		H3 = ${AWG_H3}
 		H4 = ${AWG_H4}
-		Table = off
+		${_opt_lines}Table = off
 		MTU = 1300
 
 		[Peer]
@@ -266,6 +434,35 @@ configure_amneziawg() {
 	# This pass wrote a fresh conf under the lock — clear any stale skip marker a
 	# prior lock-contended run left behind so it cannot linger as a false signal.
 	rm -f "${conf_path}.rotation-skipped"
+	# Param-drop ledger (AWG 3.1 D9): every field the guards omitted lands here
+	# with timestamp + field + why — mirroring the .rotation-skipped marker
+	# pattern. A MUST-MATCH drop (charset-failed S3/HPK/RT, or HPK whose
+	# effective S1-S4 are not all >= 12) means motherly expects a param this
+	# conf lacks → the AWG link will NOT come up → AWG_CONF_DEGRADED=1 so the
+	# caller writes awg=degraded (a dead-but-green install is the failure class
+	# this exists to close). A client-side drop is feature-degraded only — the
+	# link is unaffected and the params agent may re-add the field via epoch.
+	# A clean pass removes a stale marker so it cannot linger as false signal.
+	if [[ -n "$_drop_mm" || -n "$_drop_cl" ]]; then
+		{
+			printf '%s\n' "awg0.conf param-drop $(date -u +%Y-%m-%dT%H:%M:%SZ):"
+			if [[ -n "$_drop_mm" ]]; then
+				printf '%s\n' "  must-match dropped: ${_drop_mm% }— the AWG link will NOT come up while motherly expects these params (caller status: awg=degraded)"
+			fi
+			if [[ -n "$_drop_cl" ]]; then
+				printf '%s\n' "  client-side omitted: ${_drop_cl% }— feature degraded, link unaffected (params agent may re-add via a later epoch)"
+			fi
+		} > "$_marker" 2>/dev/null || true
+	else
+		rm -f "$_marker"
+	fi
+	if [[ -n "$_drop_mm" ]]; then
+		AWG_CONF_DEGRADED=1
+		warn "configure_amneziawg: rendered awg0.conf WITHOUT must-match param(s): ${_drop_mm}— the AWG link will NOT come up while motherly requires them (an omitted must-match is a dead link, not a degraded feature). See ${_marker}."
+	fi
+	if [[ -n "$_drop_cl" ]]; then
+		warn "configure_amneziawg: omitted client-side param(s) that failed validation: ${_drop_cl}— feature degraded, link unaffected. See ${_marker}."
+	fi
 	# Release the conf lock (close fd 9) before the slow systemctl/handshake
 	# steps so a waiting agent tick is unblocked as soon as the write is durable.
 	exec 9>&-
@@ -283,6 +480,82 @@ configure_amneziawg() {
 	fi
 }
 
+# awg_extract FILE KEY — single-key extraction, kept for the pinned legacy
+# allocated_ip line in install.sh (tests/test_sfu_bind_strip_cidr.sh greps
+# that literal for line ordering). Normalization now matches awg_extract_all:
+# JSON null/absent → '' (the old a.get(key,'') printed the literal "None" on
+# an explicit JSON null), JSON bool → on|off, else str — so no caller can
+# leak Python repr literals (None/True/False) into the conf.
 awg_extract() {
-	python3 -c "import json,sys; d=json.load(open(sys.argv[1])); a=d.get('awg') or {}; print(a.get(sys.argv[2],''))" "$1" "$2" 2>/dev/null
+	python3 -c "import json,sys; d=json.load(open(sys.argv[1])); a=d.get('awg') or {}; v=a.get(sys.argv[2]); print('' if v is None else ('on' if v else 'off') if isinstance(v,bool) else v)" "$1" "$2" 2>/dev/null
+}
+
+# awg_extract_all FILE — ONE python3 spawn emitting the full v3 awg-block
+# surface as NUL-delimited VAR=VALUE records, consumed by the read-loop in
+# install.sh (no eval, ~30 fewer python3 spawns than the per-key path).
+#
+# NUL framing, NOT newlines: a legit string value may itself carry '\n' (e.g.
+# a hostile i1) — line framing would silently truncate it at the first
+# newline, hiding the injected tail from the render-side _awg_conf_safe guard.
+# NUL cannot appear in a conf value, so records stay lossless and the guard
+# sees the true bytes. (A JSON '\u0000' inside a string is stripped below —
+# it can only split a record, never be a legit value.)
+#
+# Normalization lives at this single choke point (the fix for the per-key
+# repr leak): JSON null/absent → ''; JSON bool → 'on'|'off' — upstream
+# parse_bool (amneziawg-tools config.c:414-445) accepts on|off|0|1, and
+# Python's True/False repr would render `RandomTrailers = True`, parse-FATAL
+# for the whole conf; numbers → str (covers i64 fields and IntOrRange
+# number-form H values; range-form "x-y" arrives already a string).
+#
+# The emitted VAR names come from this fixed table — JSON content can never
+# name or inject a variable into the caller's `printf -v`. allocated_ip stays
+# on the pinned awg_extract line (see above), everything else is here.
+awg_extract_all() {
+	python3 - "$1" <<'AWGEXTRACT' 2>/dev/null
+import json, sys
+KEYS = [
+    ("motherly_pubkey",           "AWG_MOTHERLY_PUBKEY"),
+    ("motherly_endpoint",         "AWG_MOTHERLY_ENDPOINT"),
+    ("motherly_awg_ip",           "AWG_MOTHERLY_AWG_IP"),
+    ("jc",                        "AWG_JC"),
+    ("jmin",                      "AWG_JMIN"),
+    ("jmax",                      "AWG_JMAX"),
+    ("s1",                        "AWG_S1"),
+    ("s2",                        "AWG_S2"),
+    ("s3",                        "AWG_S3"),
+    ("s4",                        "AWG_S4"),
+    ("h1",                        "AWG_H1"),
+    ("h2",                        "AWG_H2"),
+    ("h3",                        "AWG_H3"),
+    ("h4",                        "AWG_H4"),
+    ("i1",                        "AWG_I1"),
+    ("i2",                        "AWG_I2"),
+    ("i3",                        "AWG_I3"),
+    ("i4",                        "AWG_I4"),
+    ("i5",                        "AWG_I5"),
+    ("header_protection_key",     "AWG_HPK"),
+    ("content_padding_addition",  "AWG_CONTENT_PADDING_ADDITION"),
+    ("rekey_after_time",          "AWG_REKEY_AFTER_TIME"),
+    ("rekey_timeout",             "AWG_REKEY_TIMEOUT"),
+    ("reject_after_time",         "AWG_REJECT_AFTER_TIME"),
+    ("keepalive_timeout",         "AWG_KEEPALIVE_TIMEOUT"),
+    ("max_handshake_attempts",    "AWG_MAX_HANDSHAKE_ATTEMPTS"),
+    ("random_trailers",           "AWG_RANDOM_TRAILERS"),
+    ("disable_cookies",           "AWG_DISABLE_COOKIES"),
+    ("edge_id",                   "SFU_EDGE_ID"),
+    ("otel_endpoint",             "OTEL_EXPORTER_OTLP_ENDPOINT"),
+]
+a = json.load(open(sys.argv[1])).get("awg") or {}
+w = sys.stdout.write
+for jk, var in KEYS:
+    v = a.get(jk)
+    if v is None:
+        s = ""
+    elif isinstance(v, bool):
+        s = "on" if v else "off"
+    else:
+        s = str(v)
+    w(var + "=" + s.replace("\x00", "") + "\x00")
+AWGEXTRACT
 }

@@ -304,6 +304,9 @@ EOF
         systemctl() { :; }
         awg()      { :; }
         sleep()    { :; }
+        # flock(1) is absent on macOS — stub only there; on Linux CI the real
+        # lock acquisition runs (locking itself is covered by test_install_awg_lock.sh).
+        command -v flock >/dev/null 2>&1 || flock() { return 0; }
 
         $(declare -p AWG_PRIV_PATH AWG_PUB_PATH AWG_MOTHERLY_PUBKEY AWG_MOTHERLY_ENDPOINT \
             AWG_MOTHERLY_AWG_IP AWG_ALLOCATED_IP AWG_JC AWG_JMIN AWG_JMAX \
@@ -340,6 +343,7 @@ EOF
                 *) return 0 ;;
             esac
         }
+        command -v flock >/dev/null 2>&1 || flock() { return 0; }
 
         $(declare -p AWG_PRIV_PATH AWG_PUB_PATH AWG_MOTHERLY_PUBKEY AWG_MOTHERLY_ENDPOINT \
             AWG_MOTHERLY_AWG_IP AWG_ALLOCATED_IP AWG_JC AWG_JMIN AWG_JMAX \
@@ -403,4 +407,159 @@ EOF
     "
     [ "$status" -eq 0 ]
     [[ "$output" == *"result=[]"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Test 7d: awg_extract — explicit JSON null normalizes to empty (the old
+# a.get(key,'') printed the literal "None", which would render `Address = None`)
+# ---------------------------------------------------------------------------
+@test "awg_extract normalizes explicit JSON null to empty" {
+    local json_file="$TMP/reg.json"
+    cat > "$json_file" <<'EOF'
+{"awg": {"allocated_ip": null, "jc": 2}}
+EOF
+
+    run bash -c "
+        source '$REPO_ROOT/lib/install-awg.sh'
+        result=\$(awg_extract '$json_file' allocated_ip)
+        echo \"result=[\$result]\"
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == "result=[]" ]]
+}
+
+# ===========================================================================
+# awg_extract_all — ONE python3 spawn, NUL-delimited VAR=VALUE records,
+# normalized at the single choke point (AWG 3.1).
+# ===========================================================================
+
+# Helper: consume awg_extract_all exactly the way install.sh does (NUL read,
+# first-'=' expansion split — never `IFS='=' read`, which eats trailing '='
+# base64 padding — whitelist, printf -v, no eval) and report the vars asked
+# for. `[[ -v ]]` distinguishes an emitted-but-empty record (`NAME=[]`) from
+# a var the loop never saw (`NAME=UNSET`).
+_extract_all_into_vars() {  # $1 = json file; $2.. = var names to report
+    local _jf="$1"; shift
+    bash -c "
+        source '$REPO_ROOT/lib/install-awg.sh'
+        while IFS= read -r -d '' _rec; do
+            [[ \"\$_rec\" == *=* ]] || continue
+            _k=\"\${_rec%%=*}\"; _v=\"\${_rec#*=}\"
+            [[ \"\$_k\" =~ ^(AWG_[A-Z0-9_]+|SFU_EDGE_ID|OTEL_EXPORTER_OTLP_ENDPOINT)\$ ]] \
+                && printf -v \"\$_k\" '%s' \"\$_v\"
+        done < <(awg_extract_all '$_jf')
+        for _v in \"\$@\"; do
+            [[ -v \$_v ]] && printf '%s=[%s]\n' \"\$_v\" \"\${!_v}\" || printf '%s=UNSET\n' \"\$_v\"
+        done
+    " _ "$@"
+}
+
+@test "awg_extract_all emits every v3.1 key (absent keys emit empty records)" {
+    local json_file="$TMP/reg.json"
+    cat > "$json_file" <<'EOF'
+{"awg": {"jc": 5}}
+EOF
+
+    run bash -c "
+        source '$REPO_ROOT/lib/install-awg.sh'
+        awg_extract_all '$json_file' | tr '\0' '\n'
+    "
+    [ "$status" -eq 0 ]
+    # Full v3 surface present as records, even when the JSON omits them.
+    for _k in AWG_MOTHERLY_PUBKEY AWG_MOTHERLY_ENDPOINT AWG_MOTHERLY_AWG_IP \
+              AWG_JC AWG_JMIN AWG_JMAX AWG_S1 AWG_S2 AWG_S3 AWG_S4 \
+              AWG_H1 AWG_H2 AWG_H3 AWG_H4 AWG_I1 AWG_I2 AWG_I3 AWG_I4 AWG_I5 \
+              AWG_HPK AWG_CONTENT_PADDING_ADDITION AWG_REKEY_AFTER_TIME \
+              AWG_REKEY_TIMEOUT AWG_REJECT_AFTER_TIME AWG_KEEPALIVE_TIMEOUT \
+              AWG_MAX_HANDSHAKE_ATTEMPTS AWG_RANDOM_TRAILERS AWG_DISABLE_COOKIES \
+              SFU_EDGE_ID OTEL_EXPORTER_OTLP_ENDPOINT; do
+        [[ "$output" == *"$_k="* ]] || { echo "missing record for $_k"; return 1; }
+    done
+    [[ "$output" == *"AWG_JC=5"* ]]
+}
+
+@test "awg_extract_all normalizes null/absent -> '', bool -> on|off, numbers -> str" {
+    local json_file="$TMP/reg.json"
+    cat > "$json_file" <<'EOF'
+{"awg": {
+  "jc": 5, "s3": null, "h2": "123-456",
+  "random_trailers": true, "disable_cookies": false,
+  "edge_id": "edge-z9", "otel_endpoint": "https://otel.example:4317"
+}}
+EOF
+
+    run bash -c "
+        source '$REPO_ROOT/lib/install-awg.sh'
+        awg_extract_all '$json_file' | tr '\0' '\n'
+    "
+    [ "$status" -eq 0 ]
+    # JSON true/false -> on/off — Python repr True/False is parse-FATAL in
+    # awg0.conf (upstream parse_bool accepts on|off|0|1 only).
+    [[ "$output" == *"AWG_RANDOM_TRAILERS=on"* ]]
+    [[ "$output" == *"AWG_DISABLE_COOKIES=off"* ]]
+    [[ "$output" != *"True"* && "$output" != *"False"* ]]
+    # explicit JSON null -> empty, never the literal 'None'
+    [[ "$output" == *"AWG_S3="* && "$output" != *"AWG_S3=None"* && "$output" != *"AWG_S3=null"* ]]
+    # absent keys -> empty records
+    [[ "$output" == *"AWG_HPK="* ]]
+    # numbers -> str; IntOrRange range-form passes through as a string
+    [[ "$output" == *"AWG_JC=5"* ]]
+    [[ "$output" == *"AWG_H2=123-456"* ]]
+    # non-awg-prefixed consumers ride the same records
+    [[ "$output" == *"SFU_EDGE_ID=edge-z9"* ]]
+    [[ "$output" == *"OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.example:4317"* ]]
+}
+
+@test "awg_extract_all read-loop populates vars without eval" {
+    local json_file="$TMP/reg.json"
+    cat > "$json_file" <<'EOF'
+{"awg": {"jc": 5, "s1": 17, "random_trailers": true, "i1": "<r 32><t>"}}
+EOF
+
+    run _extract_all_into_vars "$json_file" AWG_JC AWG_S1 AWG_RANDOM_TRAILERS AWG_I1 AWG_S3
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"AWG_JC=[5]"* ]]
+    [[ "$output" == *"AWG_S1=[17]"* ]]
+    [[ "$output" == *"AWG_RANDOM_TRAILERS=[on]"* ]]
+    [[ "$output" == *"AWG_I1=[<r 32><t>]"* ]]
+    [[ "$output" == *"AWG_S3=[]"* ]]
+}
+
+@test "awg_extract_all transports a newline-carrying i1 losslessly (NUL framing)" {
+    # A hostile i1 must reach the render-side charset guard INTACT — line
+    # framing would truncate at the first '\n' and hide the injected tail.
+    local json_file="$TMP/reg.json"
+    python3 -c 'import json; json.dump({"awg": {"i1": "<r 2>\n[Peer]\nAllowedIPs = 0.0.0.0/0"}}, open("'"$json_file"'","w"))'
+
+    run _extract_all_into_vars "$json_file" AWG_I1
+    [ "$status" -eq 0 ]
+    # The full multi-line payload survives extraction so _awg_conf_safe can
+    # see the '[' and reject it at render time.
+    [[ "$output" == *"[Peer]"* ]]
+    [[ "$output" == *"AllowedIPs = 0.0.0.0/0"* ]]
+}
+
+@test "awg_extract_all emits nothing on malformed JSON (fail-soft)" {
+    local json_file="$TMP/bad.json"
+    printf 'not valid json' > "$json_file"
+
+    run bash -c "
+        source '$REPO_ROOT/lib/install-awg.sh'
+        awg_extract_all '$json_file' | tr '\0' '\n' | wc -l
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"0"* ]]
+}
+
+@test "awg_extract_all values containing '=' survive the record split" {
+    # base64 padding ends in '=' — IFS='=' read must split on the FIRST '=' only.
+    local json_file="$TMP/reg.json"
+    cat > "$json_file" <<'EOF'
+{"awg": {"motherly_pubkey": "MOTHERLY_PUBKEY_FIXTURE_AAAA1234=", "header_protection_key": "QUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUI="}}
+EOF
+
+    run _extract_all_into_vars "$json_file" AWG_MOTHERLY_PUBKEY AWG_HPK
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"AWG_MOTHERLY_PUBKEY=[MOTHERLY_PUBKEY_FIXTURE_AAAA1234=]"* ]]
+    [[ "$output" == *"AWG_HPK=[QUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUI=]"* ]]
 }
