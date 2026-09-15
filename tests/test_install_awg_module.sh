@@ -41,18 +41,27 @@ _load_awg_globals() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 1: install_amneziawg — idempotent skip when binaries present
+# Test 1: install_amneziawg — idempotent skip when binaries present AND at the
+# pinned refs. The gate is version-aware: binaries that don't report the pinned
+# tag are drift, not presence, and trigger a rebuild.
 # ---------------------------------------------------------------------------
-@test "install_amneziawg skips build when binaries already present" {
-    # Real production idempotency gate now uses AWG_QUICK_BIN env hook
-    # (defaults to /usr/bin/awg-quick). Test injects writable shim path
-    # so we exercise the live skip branch without root or /usr/bin write.
+@test "install_amneziawg skips build when installed versions match the pins" {
     local prefix="$TMP/usr/local"
     mkdir -p "$prefix/bin"
-    echo "fake" > "$prefix/bin/amneziawg-go"
     echo '#!/bin/sh' > "$prefix/bin/awg-quick"
     chmod +x "$prefix/bin/awg-quick"
     CALLS="$TMP/calls"
+    # Quoted heredoc keeps $1 literal; refs come from the env override —
+    # both sides pin to the same sentinel so the gate sees an exact match.
+    cat > "$prefix/bin/amneziawg-go" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = --version ] && echo "amneziawg-go v9.9.9-test"
+EOF
+    cat > "$TMP/awg" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = --version ] && echo "amneziawg-tools v9.9.9-test-tools"
+EOF
+    chmod +x "$prefix/bin/amneziawg-go" "$TMP/awg"
 
     run bash -c "
         source '$REPO_ROOT/lib/install-awg.sh'
@@ -65,12 +74,71 @@ _load_awg_globals() {
 
         AWG_INSTALL_PREFIX='$prefix'
         AWG_QUICK_BIN='$prefix/bin/awg-quick'
+        AWG_BIN='$TMP/awg'
+        AWG_GO_REF='v9.9.9-test'
+        AWG_TOOLS_REF='v9.9.9-test-tools'
         install_amneziawg
         echo EXIT=\$?
     "
     [ "$status" -eq 0 ]
-    [[ "$output" == *"amneziawg already installed (skip)"* ]]
+    [[ "$output" == *"already at"* ]]
     [[ ! -f "$CALLS" ]]
+}
+
+# ---------------------------------------------------------------------------
+# Test 1b: install_amneziawg — version drift triggers a pinned-tag rebuild
+# ---------------------------------------------------------------------------
+@test "install_amneziawg rebuilds from pinned tags when installed version is old" {
+    local prefix="$TMP/usr/local"
+    mkdir -p "$prefix/bin"
+    echo '#!/bin/sh' > "$prefix/bin/awg-quick"
+    chmod +x "$prefix/bin/awg-quick"
+    # Installed stack reports the pre-3.x versions the fleet actually carries.
+    cat > "$prefix/bin/amneziawg-go" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = --version ] && echo "amneziawg-go v0.2.18"
+EOF
+    cat > "$TMP/awg" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = --version ] && echo "amneziawg-tools v1.0.20210914"
+EOF
+    chmod +x "$prefix/bin/amneziawg-go" "$TMP/awg"
+    mkdir -p "$TMP/build"
+    local git_log="$TMP/git_log"
+
+    run bash -c "
+        source '$REPO_ROOT/lib/install-awg.sh'
+        log()  { :; }
+        warn() { :; }
+        die()  { echo \"DIE: \$*\" >&2; exit 1; }
+        # Reach the clone step with no network: go fresh enough, pkg mgr no-op.
+        cat > '$TMP/fake_go' <<'EOF'
+#!/usr/bin/env bash
+echo 'go version go1.26.0 linux/amd64'
+EOF
+        chmod +x '$TMP/fake_go'
+        dnf() { :; }
+        # git clone must SUCCEED (returns 0) or the && chain skips the second
+        # clone; create the repo dirs so the build steps below survive.
+        git() {
+            echo \"git \$*\" >> '$git_log'
+            mkdir -p \"\$(basename \"\${@:\$#}\" .git)/src\"
+        }
+        make()    { :; }
+        install() { :; }
+
+        AWG_INSTALL_PREFIX='$prefix'
+        AWG_QUICK_BIN='$prefix/bin/awg-quick'
+        AWG_BIN='$TMP/awg'
+        AWG_GO_BIN_PATH='$TMP/fake_go'
+        AWG_BUILD_ROOT='$TMP/build'
+        install_amneziawg
+        echo EXIT=\$?
+    "
+    # Clone must be attempted with -b <pinned ref> for both upstreams.
+    [ -f "$git_log" ]
+    grep -qE 'clone .*-b v[0-9]+\.[0-9]+.*amneziawg-go' "$git_log"
+    grep -qE 'clone .*-b v[0-9]+\.[0-9]+.*amneziawg-tools' "$git_log"
 }
 
 # ---------------------------------------------------------------------------
@@ -104,11 +172,11 @@ EOF
 # Test 3: install_amneziawg — no package manager dies
 # ---------------------------------------------------------------------------
 @test "install_amneziawg dies when no supported package manager" {
-    # Mock go binary to report 1.24.4 so we skip go download and reach pkg check.
+    # Mock go binary to report 1.26 so we skip go download and reach pkg check.
     local fake_go="$TMP/fake_go_new"
     cat > "$fake_go" <<'EOF'
 #!/usr/bin/env bash
-echo "go version go1.24.4 linux/amd64"
+echo "go version go1.26.0 linux/amd64"
 EOF
     chmod +x "$fake_go"
 
@@ -188,19 +256,19 @@ EOF
         AWG_GO_DL_BASE='https://go.dev/dl'
         install_amneziawg || true
     "
-    # curl should have been called with a go1.24+ URL
+    # curl should have been called with a go1.25+ URL (v3 go.mod floor)
     [ -f "$curl_log" ]
-    grep -qE 'go1\.(2[4-9]|[3-9][0-9])' "$curl_log"
+    grep -qE 'go1\.(2[5-9]|[3-9][0-9])' "$curl_log"
 }
 
 # ---------------------------------------------------------------------------
-# Test 4b: install_amneziawg — Go 1.24.4 present, no curl re-download
+# Test 4b: install_amneziawg — Go 1.26 present, no curl re-download
 # ---------------------------------------------------------------------------
-@test "install_amneziawg skips Go download when 1.24.4 already present" {
+@test "install_amneziawg skips Go download when 1.26 already present" {
     local fake_go_new="$TMP/fake_go_new2"
     cat > "$fake_go_new" <<'EOF'
 #!/usr/bin/env bash
-echo "go version go1.24.4 linux/amd64"
+echo "go version go1.26.0 linux/amd64"
 EOF
     chmod +x "$fake_go_new"
 

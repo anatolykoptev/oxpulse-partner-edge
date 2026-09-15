@@ -582,6 +582,28 @@ _ensure_channel_render_lib() {
         "$REPO_RAW/channel-render-lib.sh" "refetch_node_config"
 }
 
+# _ensure_awg_lib — source install-awg.sh so ensure_amneziawg is defined.
+# Always SOFT-fetch: the AWG converge is a post-gate optional-channel step, so a
+# tier-3 fetch failure must skip it (previous binaries keep running), never die
+# mid-upgrade. A sha256 MISMATCH still dies inside _source_lib — tampering is
+# security-critical and never degrades.
+_ensure_awg_lib() {
+    command -v ensure_amneziawg >/dev/null 2>&1 && return 0
+    local _sd _adjacent _installed
+    _sd="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    # Repo checkout keeps it under lib/; the release bundle flattens it next to
+    # upgrade.sh. Installed edges have neither (INSTALL_LIB_DIR only holds
+    # render-channel-lib.sh) and resolve through the tier-3 fetch.
+    if [[ -f "$_sd/lib/install-awg.sh" ]]; then
+        _adjacent="$_sd/lib/install-awg.sh"
+    else
+        _adjacent="$_sd/install-awg.sh"
+    fi
+    _installed="${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/install-awg.sh"
+    _source_lib "install-awg.sh" "$_adjacent" "$_installed" \
+        "$REPO_RAW/lib/install-awg.sh" "ensure_amneziawg" "soft"
+}
+
 # _stage_lib NAME LOCAL_PATH INSTALLED_PATH REPO_RAW_PATH DEST_DIR — resolve a
 # shared library FILE onto disk in DEST_DIR (does NOT source it). Sibling to
 # _source_lib with the SAME 3-tier resolution (adjacent → installed → REPO_RAW),
@@ -3941,6 +3963,18 @@ if [[ "$MODE" == with_templates ]]; then
 		die "--with-templates upgrade applied but the post-upgrade re-render regressed health — pre-render channel config restored; images and compose left on $TARGET"
 	fi
 
+	# Converge the amneziawg userspace stack to the pinned AWG_*_REF (3.x).
+	# Post-gate by design: the rebuild + awg-quick@awg0 restart briefly drops
+	# the mesh, so it must not contaminate the settle/baseline regression diff
+	# above. Fail-soft — AWG is the optional channel; a failed converge leaves
+	# the previous binaries and only warns (never rolls back a green release).
+	if _ensure_awg_lib; then
+		ensure_amneziawg || \
+			warn "amneziawg converge failed — node stays on its previous version; re-run upgrade to retry"
+	else
+		warn "install-awg.sh unavailable (offline?) — skipping amneziawg version converge"
+	fi
+
 	log "--with-templates upgrade to $TARGET complete"
 	_collect_stale_images
 	exit 0
@@ -3982,6 +4016,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 	log "  8. recreate services whose digest changed (running → $TARGET)"
 	log "  9. settle-retry healthcheck (poll ${OXPULSE_UPGRADE_HEALTH_TIMEOUT:-30}s budget, 3s interval)"
 	log "  10. on failure: rollback compose + host-scripts + compose pull + up"
+	log "  11. post-gate: converge amneziawg to the pinned ref (fail-soft, no rollback)"
 	log "[dry-run] no docker pull, no container recreate, no rollback performed"
 	exit 0
 fi
@@ -4152,6 +4187,18 @@ rm -f "${_baseline_snapshot:-}"
 _ensure_channel_render_lib
 if ! _render_gate "plain-upgrade-render"; then
 	die "upgrade applied but the post-upgrade re-render regressed health — pre-render channel config restored; images and compose left on $TARGET"
+fi
+
+# Converge the amneziawg userspace stack to the pinned AWG_*_REF (3.x) — same
+# post-gate fail-soft semantics as the --with-templates path above: a rebuild +
+# awg-quick@awg0 restart briefly drops the mesh, so it runs only after the
+# settle and render gates have already passed, and a failure warns without
+# rolling back a green release.
+if _ensure_awg_lib; then
+	ensure_amneziawg || \
+		warn "amneziawg converge failed — node stays on its previous version; re-run upgrade to retry"
+else
+	warn "install-awg.sh unavailable (offline?) — skipping amneziawg version converge"
 fi
 
 log "upgraded to $TARGET successfully"

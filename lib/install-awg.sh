@@ -27,8 +27,18 @@
 #   AWG_H1 AWG_H2 AWG_H3 AWG_H4         packet-header hashes
 #   log warn die                        functions (install.sh provides)
 #
+# Pinned upstream refs — the single place the fleet's AWG dataplane version is
+# set. Both ends of a mesh link must run wire-compatible builds: bump together
+# and verify against the central (motherly) side before rolling to edges.
+# AWG 3.x is wire-compatible with the v1.x param set we render (Jc/Jmin/Jmax/
+# S1-S4/H1-H4 unchanged; I1-I5 + HeaderProtectionKey stay unset) — verified
+# against the amneziawg-go README at the pinned tag.
+AWG_GO_REF="${AWG_GO_REF:-v3.1.20260828}"        # amneziawg-go tag
+AWG_TOOLS_REF="${AWG_TOOLS_REF:-v3.1.20260812}"  # amneziawg-tools tag
+#
 # Optional overrides (test hooks):
-#   AWG_GO_VERSION         default 1.24.4
+#   AWG_GO_VERSION         default 1.26.8 — Go toolchain floor; amneziawg-go
+#                          v3 go.mod requires >= 1.25.0
 #   AWG_GO_DL_BASE         default https://go.dev/dl
 #   AWG_GO_BIN_PATH        default /usr/local/go/bin/go — test hook for version check
 #   AWG_BUILD_ROOT         default $(mktemp -d) — test hook to skip git clone
@@ -36,23 +46,34 @@
 #   AWG_CONF_DIR           default /etc/amnezia/amneziawg
 #   AWG_QUICK_BIN          default /usr/bin/awg-quick — test hook for idempotency
 #                          gate (binary path; not the systemd unit name at L123).
+#   AWG_BIN                default awg — test hook for the tools version check
 #   AWG_LISTEN_PORT        default $((43800 + RANDOM % 200)) — test hook for golden file
+#   AWG_HANDSHAKE_WAIT     default 8 — post-restart handshake grace (seconds)
 
 install_amneziawg() {
 	local _prefix="${AWG_INSTALL_PREFIX:-/usr/local}"
 	local _quick="${AWG_QUICK_BIN:-/usr/bin/awg-quick}"
 	if [[ -s "${_prefix}/bin/amneziawg-go" && -x "${_quick}" ]]; then
-		log "  amneziawg already installed (skip)"
-		return 0
+		local _inst_go _inst_tools
+		_inst_go=$("${_prefix}/bin/amneziawg-go" --version 2>/dev/null | awk '{print $2}')
+		_inst_tools=$("${AWG_BIN:-awg}" --version 2>/dev/null | awk '{print $2}')
+		if [[ "$_inst_go" == "$AWG_GO_REF" && "$_inst_tools" == "$AWG_TOOLS_REF" ]]; then
+			log "  amneziawg already at ${_inst_go} (skip)"
+			return 0
+		fi
+		log "  amneziawg version drift (go=${_inst_go:-?} tools=${_inst_tools:-?}, want ${AWG_GO_REF}/${AWG_TOOLS_REF}) — rebuilding at pinned tags"
+	else
+		log "  building amneziawg ${AWG_GO_REF} from source"
 	fi
-	log "  building amneziawg from source (one-time)"
-	# amneziawg-go go.mod requires Go >= 1.24. Ubuntu 22.04 apt ships golang 1.18,
-	# Debian 12 ships 1.19. Both too old. Install official Go tarball if existing
-	# /usr/local/go is missing or below 1.24 — leaves system golang package alone.
-	local _go_ver="${AWG_GO_VERSION:-1.24.4}"
+	# amneziawg-go v3 go.mod requires Go >= 1.25. Ubuntu 22.04 apt ships golang
+	# 1.18, Debian 12 ships 1.19, and edges installed under the old unpinned
+	# clone carry /usr/local/go 1.24. All too old. Install the official Go
+	# tarball if /usr/local/go is missing or below 1.25 — leaves the system
+	# golang package alone.
+	local _go_ver="${AWG_GO_VERSION:-1.26.8}"
 	local _go_dl_base="${AWG_GO_DL_BASE:-https://go.dev/dl}"
 	local _go_bin="${AWG_GO_BIN_PATH:-/usr/local/go/bin/go}"
-	if ! "$_go_bin" version 2>/dev/null | grep -qE "go1\\.(2[4-9]|[3-9][0-9])"; then
+	if ! "$_go_bin" version 2>/dev/null | grep -qE "go1\\.(2[5-9]|[3-9][0-9])|go[2-9]\\."; then
 		log "    installing Go ${_go_ver} (system golang too old for amneziawg-go)"
 		local _go_arch
 		case "$(uname -m)" in
@@ -81,14 +102,76 @@ install_amneziawg() {
 	build_root="${AWG_BUILD_ROOT:-$(mktemp -d)}"
 	(
 		cd "$build_root" && \
-		git clone --depth 1 -q https://github.com/amnezia-vpn/amneziawg-go.git && \
-		git clone --depth 1 -q https://github.com/amnezia-vpn/amneziawg-tools.git
-	) || die "amneziawg git clone failed"
+		git clone --depth 1 -q -b "$AWG_GO_REF" https://github.com/amnezia-vpn/amneziawg-go.git && \
+		git clone --depth 1 -q -b "$AWG_TOOLS_REF" https://github.com/amnezia-vpn/amneziawg-tools.git
+	) || die "amneziawg git clone failed (${AWG_GO_REF}/${AWG_TOOLS_REF})"
 	(cd "$build_root/amneziawg-go" && make) >/dev/null 2>&1 || die "amneziawg-go build failed"
 	install -m 0755 "$build_root/amneziawg-go/amneziawg-go" "${_prefix}/bin/amneziawg-go"
 	(cd "$build_root/amneziawg-tools/src" && make && make install) >/dev/null 2>&1 || \
 	  die "amneziawg-tools build failed"
 	rm -rf "$build_root"
+	log "  amneziawg installed: $("${_prefix}/bin/amneziawg-go" --version 2>/dev/null | head -1)"
+}
+
+# ensure_amneziawg — converge an ALREADY-INSTALLED node's amneziawg stack to the
+# pinned AWG_GO_REF/AWG_TOOLS_REF (the upgrade.sh apply paths call this;
+# install.sh reaches the same pin through install_amneziawg itself).
+#
+# No-ops when: the node has no AWG mesh at all (no binary AND no awg0.conf —
+# legacy installs where central returned no awg block), or the installed
+# versions already match the pins. On drift: rebuilds from the pinned tags via
+# install_amneziawg (die-isolating subshell — same contract as the install.sh
+# call site), daemon-reloads (tools' make install may refresh the
+# awg-quick@.service unit), restarts awg-quick@awg0 and verifies the handshake.
+#
+# Returns 0 on skip/converge, 1 on rebuild/restart/handshake failure — callers
+# MUST warn-and-continue: AWG is the optional mesh channel, and a failed
+# converge leaves the previous binaries running (the swap only lands on a
+# successful build), so a converge failure never justifies rolling back an
+# otherwise-green release.
+ensure_amneziawg() {
+	local _prefix="${AWG_INSTALL_PREFIX:-/usr/local}"
+	local _conf_dir="${AWG_CONF_DIR:-/etc/amnezia/amneziawg}"
+	local _go_bin="${_prefix}/bin/amneziawg-go"
+
+	if [[ ! -x "$_go_bin" && ! -s "$_conf_dir/awg0.conf" ]]; then
+		log "[awg] no amneziawg install on this node — skipping version converge"
+		return 0
+	fi
+
+	local _inst_go="" _inst_tools=""
+	[[ -x "$_go_bin" ]] && \
+		_inst_go=$("$_go_bin" --version 2>/dev/null | awk '{print $2}')
+	command -v "${AWG_BIN:-awg}" >/dev/null 2>&1 && \
+		_inst_tools=$("${AWG_BIN:-awg}" --version 2>/dev/null | awk '{print $2}')
+
+	if [[ "$_inst_go" == "$AWG_GO_REF" && "$_inst_tools" == "$AWG_TOOLS_REF" ]]; then
+		log "[awg] amneziawg already at ${AWG_GO_REF} — skip"
+		return 0
+	fi
+
+	log "[awg] converging amneziawg: go=${_inst_go:-absent}→${AWG_GO_REF} tools=${_inst_tools:-absent}→${AWG_TOOLS_REF}"
+	if ! ( install_amneziawg ); then
+		warn "[awg] rebuild failed — node keeps previous binaries (${_inst_go:-none})"
+		return 1
+	fi
+	# tools' make install may have refreshed awg-quick@.service — reload before
+	# restart so systemd does not warn about a stale unit file.
+	systemctl daemon-reload 2>/dev/null || true
+	if [[ -s "$_conf_dir/awg0.conf" ]]; then
+		if ! systemctl restart awg-quick@awg0; then
+			warn "[awg] awg-quick@awg0 restart failed after version swap"
+			return 1
+		fi
+		sleep "${AWG_HANDSHAKE_WAIT:-8}"
+		if "${AWG_BIN:-awg}" show awg0 2>/dev/null | grep -q "latest handshake"; then
+			log "[awg] awg0 handshake confirmed on ${AWG_GO_REF}"
+		else
+			warn "[awg] awg0 handshake not seen after restart — mesh may still be establishing"
+			return 1
+		fi
+	fi
+	return 0
 }
 
 # Render /etc/amnezia/amneziawg/awg0.conf from the register response and
