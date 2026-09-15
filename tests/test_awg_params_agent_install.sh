@@ -96,7 +96,7 @@ PREFIX_ETC='$DEST_ETC'
 PREFIX_LIB='$DEST_LIB'
 BACKEND_API='https://api.oxpulse.chat'
 NODE_ID='test-node-01'
-OXPULSE_AWG_CONF_PATH='$TMP/awg0.conf'
+AWG_CONF_DIR='$TMP'
 log()  { echo "log: \$*"; }
 warn() { echo "warn: \$*"; }
 die()  { echo "die: \$*" >&2; exit 1; }
@@ -339,7 +339,7 @@ EOF
 		PREFIX_ETC='$DEST_ETC'
 		PREFIX_LIB='$DEST_LIB'
 		PREFIX_SBIN='$TMP/sbin'
-		OXPULSE_AWG_CONF_PATH='$TMP/awg0.conf'
+		AWG_CONF_DIR='$TMP'
 		log()  { echo \"log: \$*\"; }
 		warn() { echo \"warn: \$*\"; }
 		die()  { echo \"die: \$*\" >&2; exit 1; }

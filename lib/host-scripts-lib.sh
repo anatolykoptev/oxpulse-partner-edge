@@ -163,11 +163,18 @@ _host_script_asset_env_file() {
 # actually took the asset's channel, or "" when the asset needs none. For
 # the params agent this is awg0.conf — the file the daemon merges into;
 # a node without it has no AWG channel and enabling the unit would just
-# run a root daemon erroring on a missing conf every tick.
+# run a root daemon erroring on a missing conf every tick. The path is
+# read out of the rendered env file — the daemon's own declared read path —
+# so a custom AWG_CONF_DIR at install can never diverge the witness from
+# what the daemon actually opens. Falls back to the AWG_CONF_DIR-derived
+# default when the env file is absent or predates the path line.
 _host_script_asset_conf_file() {
 	case "$1" in
-		oxpulse-awg-params-agent) printf '%s\n' "${OXPULSE_AWG_CONF_PATH:-/etc/amnezia/amneziawg/awg0.conf}" ;;
-		*)                        printf '%s\n' "" ;;
+		oxpulse-awg-params-agent)
+			local _e="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/awg-params-agent.env" _p
+			_p=$(sed -n 's/^OXPULSE_AWG_CONF_PATH=//p' "$_e" 2>/dev/null | head -1)
+			printf '%s\n' "${_p:-${AWG_CONF_DIR:-/etc/amnezia/amneziawg}/awg0.conf}" ;;
+		*)  printf '%s\n' "" ;;
 	esac
 }
 
@@ -184,28 +191,33 @@ _host_script_asset_conf_file() {
 # and it must not trust `is-enabled`'s exit 0, which also reports the
 # non-persistent `enabled-runtime` state (dead after reboot). The verify
 # checks BOTH persistent enable and live state — a failed --now start must
-# warn, not log "enabled + started". Fail-soft throughout: a failed enable
-# warns, never dies (same contract as the rest of Step 5d).
+# warn, not log "enabled + started". The heal log fires only when the unit
+# was not already persistently enabled+active — this runs on every tagged
+# upgrade fleet-wide, so a converged node must stay quiet. Fail-soft
+# throughout: a failed enable warns, never dies (same contract as Step 5d).
 _host_script_asset_enable() {
 	local _a="$1" _a_dst="$2" _a_unit="$3" _a_env="$4" _a_conf="$5"
-	[[ -n "$_a_env" && -f "$_a_env" && -f "$_a_unit" && -f "$_a_dst" ]] || return 0
+	# A declared-but-absent prerequisite skips; an undeclared one ("") is
+	# no requirement at all — an env-less or conf-less asset is still
+	# eligible for enable.
+	[[ -n "$_a_env" && ! -f "$_a_env" ]] && return 0
+	[[ -f "$_a_unit" && -f "$_a_dst" ]] || return 0
 	# A declared-but-absent conf means no channel was ever taken — skip.
 	[[ -z "$_a_conf" || -f "$_a_conf" ]] || return 0
+	# Pre-state: was the unit already persistently enabled AND live?
+	local _was=0
+	[[ "$("$SYSTEMCTL_BIN" is-enabled "${_a}.service" 2>/dev/null)" == "enabled" ]] \
+		&& "$SYSTEMCTL_BIN" is-active --quiet "${_a}.service" 2>/dev/null && _was=1
 	"$SYSTEMCTL_BIN" daemon-reload 2>/dev/null || true
-	if "$SYSTEMCTL_BIN" enable --now "${_a}.service" 2>/dev/null \
-		&& [[ "$("$SYSTEMCTL_BIN" is-enabled "${_a}.service" 2>/dev/null)" == "enabled" ]] \
+	"$SYSTEMCTL_BIN" enable --now "${_a}.service" 2>/dev/null || true
+	if [[ "$("$SYSTEMCTL_BIN" is-enabled "${_a}.service" 2>/dev/null)" == "enabled" ]] \
 		&& "$SYSTEMCTL_BIN" is-active --quiet "${_a}.service" 2>/dev/null; then
-		:
+		[[ "$_was" -eq 0 ]] \
+			&& log "  host-asset: $_a — enabled + active (unit was dormant or runtime-only)"
 	else
-		# Idempotent no-op on converged nodes — quiet unless something that
-		# should have worked didn't.
-		[[ "$("$SYSTEMCTL_BIN" is-enabled "${_a}.service" 2>/dev/null)" == "enabled" ]] \
-			&& "$SYSTEMCTL_BIN" is-active --quiet "${_a}.service" 2>/dev/null \
-			&& return 0
 		warn "  host-asset: $_a installed but not persistently enabled + active after 'enable --now' — check: $SYSTEMCTL_BIN status ${_a}.service"
-		return 0
 	fi
-	log "  host-asset: $_a — enabled + active (node was dormant: binary delivered, unit never enabled)"
+	return 0
 }
 
 # snapshot_host_scripts TAG — copy every managed sbin file + relevant systemd
@@ -350,7 +362,7 @@ sync_host_scripts() {
 		log "[dry-run]   units: oxpulse-channels-health-report.{service,timer} + refresh/sni-rotate/xray-update/geoip-refresh"
 		log "[dry-run]   templated units (rendered from STATE): ${_HOST_SCRIPT_SYSTEMD_TEMPLATED_FILES[*]}"
 		log "[dry-run]   enable (enable-only, never disable): ${_HOST_SCRIPT_ENABLE_UNITS[*]}"
-		log "[dry-run]   release-asset binaries (unit-or-binary gated): ${_HOST_SCRIPT_ASSET_FILES[*]}"
+		log "[dry-run]   release-asset binaries (env-or-binary gated): ${_HOST_SCRIPT_ASSET_FILES[*]}"
 		log "[dry-run]   reload: $SYSTEMCTL_BIN daemon-reload + restart affected timers"
 		log "[dry-run]   idempotency: sha256 comparison (no-op if already current)"
 		log "[dry-run]   VERSION: would install to $PREFIX_SHARE/oxpulse-partner-edge/VERSION"

@@ -298,7 +298,11 @@ _awg_itag() {
 			;;
 		t|d|ds) ;;
 		r|rc|rd|dz)
-			{ [[ "$arg" =~ ^[0-9]{1,5}$ ]] && (( 10#$arg <= 65535 )); } || return 1
+			# A leading '+' is legal — upstream strconv.Atoi("+5")=5 and the
+			# Rust twin's parse::<u64> both accept it. '-' stays rejected
+			# (upstream parses negatives then PANICS at send — we fail closed).
+			local _n="${arg#+}"
+			{ [[ "$_n" =~ ^[0-9]{1,5}$ ]] && (( 10#$_n <= 65535 )); } || return 1
 			;;
 		*) return 1 ;;
 		esac

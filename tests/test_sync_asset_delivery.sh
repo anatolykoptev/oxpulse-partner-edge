@@ -214,7 +214,7 @@ export REPO_RAW='fixture://raw'
 export RELEASES_BASE='fixture://rel'
 export DRY_RUN=0
 export FAKE_STATE='$TMP/state'
-export OXPULSE_AWG_CONF_PATH='$TMP/node/awg0.conf'
+export AWG_CONF_DIR='$TMP/node'
 ENVEOF
 }
 
@@ -235,7 +235,7 @@ export PREFIX_LIB='$FLIB'
 export BACKEND_API='https://api.oxpulse.chat'
 export NODE_ID='test-node-01'
 export FAKE_STATE='$TMP/state-agent'
-export OXPULSE_AWG_CONF_PATH='$TMP/node/awg0.conf'
+export AWG_CONF_DIR='$TMP/node'
 ENVEOF
 }
 

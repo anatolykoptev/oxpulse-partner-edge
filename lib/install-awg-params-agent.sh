@@ -180,7 +180,7 @@ _awg_params_agent_render_env() {
 OXPULSE_CENTRAL_URL=${BACKEND_API}
 OXPULSE_NODE_ID=${NODE_ID}
 OXPULSE_SERVICE_TOKEN_PATH=${PREFIX_ETC}/token
-OXPULSE_AWG_CONF_PATH=/etc/amnezia/amneziawg/awg0.conf
+OXPULSE_AWG_CONF_PATH=${AWG_CONF_DIR:-/etc/amnezia/amneziawg}/awg0.conf
 OXPULSE_AWG_IFACE=awg0
 OXPULSE_STATE_PATH=${PREFIX_LIB}/awg-params-state.json
 OXPULSE_POLL_INTERVAL=30s
@@ -242,7 +242,7 @@ awg_params_agent_run() {
 		# activates the unit there itself (Step 5d in lib/host-scripts-lib.sh
 		# — same env+unit+binary+conf prerequisite set, then `enable --now`;
 		# no installer re-run needed).
-		local _agent_conf="${OXPULSE_AWG_CONF_PATH:-/etc/amnezia/amneziawg/awg0.conf}"
+		local _agent_conf="${AWG_CONF_DIR:-/etc/amnezia/amneziawg}/awg0.conf"
 		if [[ ( "$_bin_landed" -eq 1 || -f "$_AWG_PARAMS_AGENT_BIN" ) && -f "$_agent_conf" ]]; then
 			_awg_params_agent_enable
 			_awg_params_agent_smoke
