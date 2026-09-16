@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.28](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.27...v0.16.28) (2026-09-16)
+
+
+### Features
+
+* **awg:** AmneziaWG 3.1 — pinned binaries, v2 param contract, agent delivery ([#634](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/634)) ([cad427f](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/cad427f736d46fb6e4a39479774a85b52bfdee26))
+
 ## [0.16.27](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.26...v0.16.27) (2026-08-17)
 
 
