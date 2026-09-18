@@ -257,8 +257,12 @@ stub_docker_volume() {
 	# placeholder is on its OWN line: production captures the directive via
 	# $(...) which strips trailing newlines — a placeholder fused onto another
 	# directive line renders `tls …key    encode` as one line caddy rejects.
-	run awk '$0 ~ /\{\{SERVICE_TLS_DIRECTIVE\}\}/ { if ($0 ~ /\{\{SERVICE_TLS_DIRECTIVE\}\}./ || $0 ~ /.\{\{SERVICE_TLS_DIRECTIVE\}\}/) exit 1 }' "$REPO_ROOT/Caddyfile.tpl"
+	# every line CARRYING the placeholder must be exactly `{{SERVICE_TLS_DIRECTIVE}}`
+	# (the comment above it mentions it in prose — only the bare directive line counts)
+	run grep -nF '{{SERVICE_TLS_DIRECTIVE}}' "$REPO_ROOT/Caddyfile.tpl"
 	[ "$status" -eq 0 ]
+	run grep -cFx '{{SERVICE_TLS_DIRECTIVE}}' "$REPO_ROOT/Caddyfile.tpl"
+	[ "$output" = "1" ]
 }
 
 @test "rendered Caddyfile: empty directive leaves no unresolved placeholder" {
