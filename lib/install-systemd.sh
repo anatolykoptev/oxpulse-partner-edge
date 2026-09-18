@@ -225,6 +225,23 @@ _systemd_install_lib_scripts() {
 		_install_sbin_fetch_lib install-awg.sh "$PREFIX_SBIN/install-awg.sh" 0644
 	fi
 
+	# Fronted-TLS lib (#639) — fronted-node detection + self-signed service-SNI
+	# cert, sourced by reconcile.sh's render-env setup, hydrate.sh's first-boot
+	# render, install.sh, and install --check. Same 4-way delivery tiers as
+	# hydrate-hy2.sh; upgrade.sh syncs it to existing boxes via
+	# _HOST_SCRIPT_SBIN_FILES.
+	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/fronted-tls.sh" ]]; then
+		install -m 0644 "$src_dir/lib/fronted-tls.sh" "$PREFIX_SBIN/fronted-tls.sh"
+	elif [[ -n "${src_dir:-}" && -f "$src_dir/fronted-tls.sh" ]]; then
+		install -m 0644 "$src_dir/fronted-tls.sh" "$PREFIX_SBIN/fronted-tls.sh"
+	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/fronted-tls.sh" ]]; then
+		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/fronted-tls.sh" \
+			"$PREFIX_SBIN/fronted-tls.sh"
+	else
+		curl -fsSL "$REPO_RAW/lib/fronted-tls.sh" -o "$PREFIX_SBIN/fronted-tls.sh"
+		chmod 0644 "$PREFIX_SBIN/fronted-tls.sh"
+	fi
+
 	# Service token lib (sourced by refresh.sh + any script calling authenticated
 	# /api/partner/* endpoints)
 	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-token-lib.sh" ]]; then
@@ -553,6 +570,9 @@ EXPECTED_SBIN_FILES=(
 	# AWG installer lib — _ensure_awg_lib sibling candidate of
 	# oxpulse-partner-edge-upgrade (the AWG 3.1 converge step).
 	install-awg.sh
+	# Fronted-TLS lib (#639) — sourced by reconcile.sh render-env /
+	# oxpulse-partner-edge-hydrate / install --check.
+	fronted-tls.sh
 	# CL-2: split-routing scripts (suffixless executables — matches sbin convention)
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable

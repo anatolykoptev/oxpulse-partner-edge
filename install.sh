@@ -1217,13 +1217,18 @@ export ALLOWED_PEER_IP_LINE
 # that SNI abort and the front 502s. fronted_tls_directive emits a static
 # self-signed `tls` line (cert generated into the caddy-data volume) or nothing
 # on direct-exposed nodes. PUBLIC_IP is set by network_run above.
+# PREFIX_ETC must exist first: fronted_tls_mode persists its DNS-detection
+# hint at $PREFIX_ETC/.fronted-tls-mode, and a hint lost at install means the
+# next DNS outage flips the node back to an ACME render (#639).
+if [[ $DRY_RUN -eq 0 ]]; then
+	install -d -m 0755 "$PREFIX_ETC"
+fi
 SERVICE_TLS_DIRECTIVE=$(fronted_tls_directive "$DOMAIN" "${PUBLIC_IP:-}") || SERVICE_TLS_DIRECTIVE=""
 export SERVICE_TLS_DIRECTIVE
 
 # ---------- Step 5: stage templates ----------
 log "[5/10] rendering templates"
 if [[ $DRY_RUN -eq 0 ]]; then
-	install -d -m 0755 "$PREFIX_ETC"
 	install -d -m 0700 "$PREFIX_LIB"
 fi
 
@@ -1759,7 +1764,7 @@ EOF
 	# Persist an explicit EDGE_FRONTED_TLS override (#639) so reconcile/upgrade
 	# renders resolve the same TLS mode. Absent = auto (DNS-vs-PUBLIC_IP detect
 	# at each render, with a persisted hint under $PREFIX_ETC).
-	if [[ -n "${EDGE_FRONTED_TLS:-}" ]]; then
+	if [[ -n "${EDGE_FRONTED_TLS:-}" && "${EDGE_FRONTED_TLS}" != auto ]]; then
 		printf 'EDGE_FRONTED_TLS=%s\n' "${EDGE_FRONTED_TLS}" >> "$PREFIX_LIB/install.env"
 	fi
 	chmod 0600 "$PREFIX_LIB/install.env"

@@ -197,10 +197,16 @@ _setup_caddy_render_env() {
 # ---------------------------------------------------------------------------
 _reconcile_source_fronted_tls_lib() {
     declare -F fronted_tls_directive >/dev/null 2>&1 && return 0
-    local _lib="${FRONTED_TLS_LIB:-${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}/fronted-tls.sh}"
-    [[ -f "$_lib" ]] || return 1
-    . "$_lib"
-    declare -F fronted_tls_directive >/dev/null 2>&1
+    local _lib
+    for _lib in \
+        "${FRONTED_TLS_LIB:-}" \
+        "${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}/fronted-tls.sh" \
+        "${PREFIX_SBIN:-/usr/local/sbin}/fronted-tls.sh"; do
+        [[ -n "$_lib" && -f "$_lib" ]] || continue
+        . "$_lib"
+        declare -F fronted_tls_directive >/dev/null 2>&1 && return 0
+    done
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -640,6 +646,13 @@ _assert_caddyfile_loads() {
     local -a _mounts=(-v "${_candidate}:/etc/caddy/Caddyfile:ro")
     [[ -d "$_etc/conf.d" ]] && _mounts+=(-v "$_etc/conf.d:$_etc/conf.d:ro")
     [[ -d "$_etc/cover" ]] && _mounts+=(-v "$_etc/cover:/srv/cover:ro")
+    # /data carries the static fronted-TLS cert material (#639): a rendered
+    # `tls /data/pki/...` makes `caddy validate` open those files at provision
+    # time — mount the live container's own /data source read-only so the
+    # validation sees the same files the running caddy does.
+    local _data_src
+    _data_src=$("$_docker" inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' "$_cid" 2>/dev/null || true)
+    [[ -n "$_data_src" ]] && _mounts+=(-v "$_data_src:/data:ro")
 
     local _out _rc=0
     _out=$("$_docker" run --rm "${_mounts[@]}" "$_image" \

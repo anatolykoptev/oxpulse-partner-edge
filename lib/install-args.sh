@@ -416,13 +416,18 @@ args_parse() {
 		local _check_tls_directive=""
 		local _check_ftl=""
 		for _check_ftl in \
+			"${FRONTED_TLS_LIB:-}" \
 			"${_check_src_dir:+$_check_src_dir/lib/fronted-tls.sh}" \
-			"${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/fronted-tls.sh"; do
+			"${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/fronted-tls.sh" \
+			"${PREFIX_SBIN:-/usr/local/sbin}/fronted-tls.sh"; do
 			[[ -n "$_check_ftl" && -f "$_check_ftl" ]] || continue
 			. "$_check_ftl" && break
 		done
 		if declare -F fronted_tls_directive >/dev/null 2>&1; then
-			_check_tls_directive=$(fronted_tls_directive "$DOMAIN" "${PUBLIC_IP:-}") || _check_tls_directive=""
+			# DRY_RUN=1: --check is read-only — an existing cert still emits the
+			# directive (drift detected correctly), missing cert stays a no-write
+			# acme render rather than minting one inside a diagnostic.
+			_check_tls_directive=$(DRY_RUN=1 fronted_tls_directive "$DOMAIN" "${PUBLIC_IP:-}") || _check_tls_directive=""
 		fi
 
 		# Render Caddyfile using install.env values.

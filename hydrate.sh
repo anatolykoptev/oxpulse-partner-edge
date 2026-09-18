@@ -585,6 +585,21 @@ tpl_file() {
 # that the old sed render silently left behind.
 # HYSTERIA2_SOCKS_PORT removed (T3 NIT): no {{HYSTERIA2_SOCKS_PORT}} placeholder
 # in any .tpl file — dead export with no effect on rendered output.
+# SERVICE_TLS_DIRECTIVE (#639): fronted nodes (external TLS terminator upstream)
+# need the static `tls /data/pki/<domain>.{crt,key}` line — the same resolution
+# install.sh/reconcile.sh run. Sourced from PREFIX_SBIN (installed by
+# install-systemd.sh / synced by upgrade.sh); absent → empty (acme render).
+SERVICE_TLS_DIRECTIVE=""
+for _ftl in \
+    "${SCRIPT_DIR}/lib/fronted-tls.sh" \
+    "${PREFIX_SBIN:-/usr/local/sbin}/fronted-tls.sh"; do
+    [[ -f "$_ftl" ]] && { . "$_ftl"; break; }
+done
+if declare -F fronted_tls_directive >/dev/null 2>&1; then
+    SERVICE_TLS_DIRECTIVE=$(fronted_tls_directive "$PARTNER_DOMAIN" "${PUBLIC_IP:-}") || SERVICE_TLS_DIRECTIVE=""
+fi
+unset _ftl
+
 NAIVE_SOCKS_PORT="${NAIVE_SOCKS_PORT:-18892}"
 export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        TURN_SECRET \
@@ -597,7 +612,8 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT \
        SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID OTEL_EXPORTER_OTLP_ENDPOINT \
        SFU_SIGNING_PUBLIC_KEY SIGNALING_SFU_SECRET \
-       HY2_SERVER HY2_AUTH_PASS HY2_OBFS_PASS HY2_LOCAL_LISTEN HY2_REMOTE_BACKEND
+       HY2_SERVER HY2_AUTH_PASS HY2_OBFS_PASS HY2_LOCAL_LISTEN HY2_REMOTE_BACKEND \
+       SERVICE_TLS_DIRECTIVE
 
 # Chassis renders — strict (must succeed or hydrate aborts).
 render_template "$(tpl_file docker-compose.yml.tpl)" "$PREFIX_ETC/docker-compose.yml"
