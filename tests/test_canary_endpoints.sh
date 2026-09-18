@@ -32,6 +32,7 @@ trap 'rm -f "$TMP_RENDERED" "$TMP_STRIPPED"' EXIT
 sed \
     -e 's/{{PARTNER_DOMAIN}}/example.test/g' \
     -e 's/{{TURNS_SUBDOMAIN}}/turns/g' \
+    -e 's/{{SERVICE_TLS_DIRECTIVE}}//g' \
     -e 's/__CADDYFILE_SHA__/deadbeef1234/g' \
     "$TPL" > "$TMP_RENDERED"
 

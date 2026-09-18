@@ -149,9 +149,12 @@ opec() {
     [[ -n "$_tpl" && -n "$_out" ]] || return 3    # missing/renamed flags → no render
     cp "$_tpl" "$_out"
     local _v _val
-    for _v in PARTNER_DOMAIN TURNS_SUBDOMAIN AWG_MOTHERLY_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT NAIVE_SOCKS_PORT; do
-        _val="$(printenv "$_v" 2>/dev/null || true)"
-        [[ -n "$_val" ]] && sed -i "s|{{${_v}}}|${_val}|g" "$_out"
+    for _v in PARTNER_DOMAIN TURNS_SUBDOMAIN AWG_MOTHERLY_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT NAIVE_SOCKS_PORT SERVICE_TLS_DIRECTIVE; do
+        # printenv rc distinguishes set-but-empty (real opec substitutes those
+        # with '') from unset (leftover → 6c catches the missing export).
+        if _val=$(printenv "$_v" 2>/dev/null); then
+            sed -i "s|{{${_v}}}|${_val}|g" "$_out"
+        fi
     done
     return 0
 }

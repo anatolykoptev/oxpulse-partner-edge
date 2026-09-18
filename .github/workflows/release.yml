@@ -632,7 +632,6 @@ jobs:
             surgical-restart-lib.sh \
             xprb-refresh-lib.sh \
             hydrate-hy2.sh \
-
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
@@ -710,7 +709,6 @@ jobs:
             surgical-restart-lib.sh \
             xprb-refresh-lib.sh \
             hydrate-hy2.sh \
-
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
