@@ -421,6 +421,7 @@ args_parse() {
 			"${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/fronted-tls.sh" \
 			"${PREFIX_SBIN:-/usr/local/sbin}/fronted-tls.sh"; do
 			[[ -n "$_check_ftl" && -f "$_check_ftl" ]] || continue
+			# shellcheck source=/dev/null
 			. "$_check_ftl" && break
 		done
 		if declare -F fronted_tls_directive >/dev/null 2>&1; then

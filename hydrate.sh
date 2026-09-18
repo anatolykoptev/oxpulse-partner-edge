@@ -593,6 +593,7 @@ SERVICE_TLS_DIRECTIVE=""
 for _ftl in \
     "${SCRIPT_DIR}/lib/fronted-tls.sh" \
     "${PREFIX_SBIN:-/usr/local/sbin}/fronted-tls.sh"; do
+    # shellcheck source=/dev/null
     [[ -f "$_ftl" ]] && { . "$_ftl"; break; }
 done
 if declare -F fronted_tls_directive >/dev/null 2>&1; then

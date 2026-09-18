@@ -203,6 +203,7 @@ _reconcile_source_fronted_tls_lib() {
         "${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}/fronted-tls.sh" \
         "${PREFIX_SBIN:-/usr/local/sbin}/fronted-tls.sh"; do
         [[ -n "$_lib" && -f "$_lib" ]] || continue
+        # shellcheck source=/dev/null
         . "$_lib"
         declare -F fronted_tls_directive >/dev/null 2>&1 && return 0
     done
