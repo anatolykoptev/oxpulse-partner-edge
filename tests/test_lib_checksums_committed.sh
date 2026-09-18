@@ -46,6 +46,7 @@ setup() {
 		surgical-restart-lib.sh
 		xprb-refresh-lib.sh
 		hydrate-hy2.sh
+		fronted-tls.sh
 	)
 }
 

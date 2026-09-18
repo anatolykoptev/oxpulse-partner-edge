@@ -4,13 +4,14 @@
 # PR2 finding 4a test — deferred, stage-once transitive-dep staging.
 #
 # Problem under test (live v0.14.4 fleet rollout evidence):
-#   upgrade.sh's staging of reconcile.sh's 5 transitive deps (install-firewall.sh,
-#   telegram-alert-lib.sh, healthcheck-lib.sh, compose-lib.sh, host-scripts-lib.sh)
+#   upgrade.sh's staging of reconcile.sh's 6 transitive deps (install-firewall.sh,
+#   telegram-alert-lib.sh, healthcheck-lib.sh, compose-lib.sh, host-scripts-lib.sh,
+#   fronted-tls.sh)
 #   used to run UNCONDITIONALLY at top level, before _maybe_self_update_reexec's
-#   decision. Whenever that self-update fired, the pre-reexec parent staged all 5
+#   decision. Whenever that self-update fired, the pre-reexec parent staged all 6
 #   files (about to be discarded — the process gets exec-replaced), then the
-#   re-exec'd child staged the SAME 5 files again: 10 raw.githubusercontent.com
-#   requests instead of 5 for one upgrade invocation, contributing to a 429 on
+#   re-exec'd child staged the SAME 6 files again: 12 raw.githubusercontent.com
+#   requests instead of 6 for one upgrade invocation, contributing to a 429 on
 #   2 of 5 relays.
 #
 # Fix under test:
@@ -24,8 +25,8 @@
 #   T1 drives a REAL self-update re-exec (same technique as
 #   tests/test_upgrade_self_reexec.sh — only curl is stubbed, the extracted
 #   functions are the REAL awk-extracted upgrade.sh code) and counts fetches of
-#   the 5 lib files in a log shared across the exec boundary (a real file, so
-#   it survives the process image being replaced). Exactly 5 required, not 10 —
+#   the 6 lib files in a log shared across the exec boundary (a real file, so
+#   it survives the process image being replaced). Exactly 6 required, not 12 —
 #   this test goes RED against the pre-fix "stage unconditionally at top level"
 #   shape (which would show 10) and GREEN against the fix.
 #   T2 proves the idempotency guard: calling the function twice in the SAME
@@ -50,7 +51,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 # ---------------------------------------------------------------------------
-# Structural: the 5 _stage_lib calls must live INSIDE _stage_reconcile_transitive_deps
+# Structural: the 6 _stage_lib calls must live INSIDE _stage_reconcile_transitive_deps
 # (a function), not at column-0 top level — the pre-fix shape had them unindented
 # and unconditional. An idempotency guard must exist.
 # ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ grep -qE '^_stage_reconcile_transitive_deps\(\)' "$UPGRADE" \
 if grep -nE '^_stage_lib "' "$UPGRADE" | grep -v '^\s*#' >/dev/null; then
     fail "S2: found a column-0 (top-level, unconditional) _stage_lib call — staging was not fully moved into the lazy function"
 else
-    pass "S2: no _stage_lib call sits at column 0 — all 5 are inside the lazy function"
+    pass "S2: no _stage_lib call sits at column 0 — all 6 are inside the lazy function"
 fi
 
 grep -qE '_TRANSITIVE_DEPS_STAGED' "$UPGRADE" \
@@ -157,16 +158,16 @@ COMMON_BODY="$TMP/common_body.sh"
 } > "$COMMON_BODY"
 
 # ---------------------------------------------------------------------------
-# Fixtures: the 5 staged libs + lib-checksums.txt + the "new" self-update binary
+# Fixtures: the 6 staged libs + lib-checksums.txt + the "new" self-update binary
 # + its SHA256SUMS, all served from one dir (curl stub resolves by basename,
 # same convention as test_upgrade_self_reexec.sh's SERVED_DIR).
 # ---------------------------------------------------------------------------
 SERVED="$TMP/served"; mkdir -p "$SERVED"
-for lib in install-firewall.sh telegram-alert-lib.sh healthcheck-lib.sh compose-lib.sh host-scripts-lib.sh; do
+for lib in install-firewall.sh telegram-alert-lib.sh healthcheck-lib.sh compose-lib.sh host-scripts-lib.sh fronted-tls.sh; do
     printf '#!/usr/bin/env bash\n# fixture stub for %s\n' "$lib" > "$SERVED/$lib"
 done
 : > "$SERVED/lib-checksums.txt"
-for lib in install-firewall.sh telegram-alert-lib.sh healthcheck-lib.sh compose-lib.sh host-scripts-lib.sh; do
+for lib in install-firewall.sh telegram-alert-lib.sh healthcheck-lib.sh compose-lib.sh host-scripts-lib.sh fronted-tls.sh; do
     sha=$(sha256sum "$SERVED/$lib" | awk '{print $1}')
     printf '%s  %s\n' "$sha" "$lib" >> "$SERVED/lib-checksums.txt"
 done
@@ -242,14 +243,14 @@ PRE
 }
 
 count_lib_fetches() {
-    # Count fetches of the 5 tracked lib files (basename match), excluding
+    # Count fetches of the 6 tracked lib files (basename match), excluding
     # lib-checksums.txt / SHA256SUMS / the self-update binary itself.
-    grep -ocE '(install-firewall|telegram-alert-lib|healthcheck-lib|compose-lib|host-scripts-lib)\.sh$' "$1" 2>/dev/null || echo 0
+    grep -ocE '(install-firewall|telegram-alert-lib|healthcheck-lib|compose-lib|host-scripts-lib|fronted-tls)\.sh$' "$1" 2>/dev/null || echo 0
 }
 
 # ---------------------------------------------------------------------------
 # T1: self-update reexec FIRES (SHA256SUMS resolves + bytes differ) => exactly
-#     5 lib fetches total (parent replaced by exec before its own staging call;
+#     6 lib fetches total (parent replaced by exec before its own staging call;
 #     only the child stages). Pre-fix (unconditional top-level staging before
 #     the reexec decision) would show 10.
 # ---------------------------------------------------------------------------
@@ -262,17 +263,17 @@ if [[ "$T1_CHILD" -eq 1 ]]; then
 else
     fail "T1a: expected exactly one 'RAN sentinel=1 staged=1' line; got: $T1_OUT"
 fi
-if [[ "$T1_FETCHES" -eq 5 ]]; then
-    pass "T1b: exactly 5 lib fetches logged across the WHOLE invocation (parent+child) — not 10 (the pre-fix double-fetch)"
+if [[ "$T1_FETCHES" -eq 6 ]]; then
+    pass "T1b: exactly 6 lib fetches logged across the WHOLE invocation (parent+child) — not 12 (the pre-fix double-fetch)"
 else
-    fail "T1b: expected exactly 5 lib fetches, got $T1_FETCHES (log: $(cat "$T1_LOG" 2>/dev/null))"
+    fail "T1b: expected exactly 6 lib fetches, got $T1_FETCHES (log: $(cat "$T1_LOG" 2>/dev/null))"
 fi
 
 # ---------------------------------------------------------------------------
 # T1c (anti-vacuous negative control): the SAME counting mechanism, against a
 # deliberately-reconstructed PRE-FIX call ORDER (stage BEFORE the self-update
-# decision, unconditionally — the exact shape this fix replaced), must show 10
-# fetches, not 5. This proves T1b's "not 10" claim is a real property of the
+# decision, unconditionally — the exact shape this fix replaced), must show 12
+# fetches, not 6. This proves T1b's "not 10" claim is a real property of the
 # ordering fix, not an artifact of how count_lib_fetches counts.
 # ---------------------------------------------------------------------------
 T1C_LOG=$(mktemp -p "$TMP")
@@ -332,16 +333,16 @@ env TMPDIR="$TMP" REPO_RAW="https://raw.example.test/oxpulse-partner-edge/main" 
     PREFIX_SBIN="$TMP" OXPULSE_INSTALLED_UPGRADE_PATH="$T1C_WRAP" \
     bash "$T1C_WRAP" v9.9.9 >/dev/null 2>&1 || true
 T1C_FETCHES=$(count_lib_fetches "$T1C_LOG")
-if [[ "$T1C_FETCHES" -eq 10 ]]; then
+if [[ "$T1C_FETCHES" -eq 12 ]]; then
     pass "T1c: negative control — the pre-fix call order (stage-before-reexec-decision) reproduces the 10-fetch double-stage this PR fixes, proving T1b's '5 not 10' is a real ordering property"
 else
-    fail "T1c: negative control expected 10 fetches (the bug this PR fixes) from the pre-fix ordering, got $T1C_FETCHES — count_lib_fetches or the harness itself may not be exercising a real re-exec"
+    fail "T1c: negative control expected 12 fetches (the bug this PR fixes) from the pre-fix ordering, got $T1C_FETCHES — count_lib_fetches or the harness itself may not be exercising a real re-exec"
 fi
 
 # ---------------------------------------------------------------------------
 # T2: self-update does NOT fire (no SHA256SUMS => _maybe_self_update_reexec
 #     skips per its fail-safe) => the SAME single process continues on to stage
-#     => still exactly 5 fetches (not 0 — staging must still happen), and
+#     => still exactly 6 fetches (not 0 — staging must still happen), and
 #     staged=1 with sentinel=0 (never re-exec'd).
 # ---------------------------------------------------------------------------
 T2_LOG=$(mktemp -p "$TMP")
@@ -352,10 +353,10 @@ if printf '%s\n' "$T2_OUT" | grep 'RAN sentinel=0 staged=1' >/dev/null; then
 else
     fail "T2a: expected 'RAN sentinel=0 staged=1'; got: $T2_OUT"
 fi
-if [[ "$T2_FETCHES" -eq 5 ]]; then
-    pass "T2b: no-reexec path still stages exactly 5 lib files (staging isn't accidentally skipped for every mode)"
+if [[ "$T2_FETCHES" -eq 6 ]]; then
+    pass "T2b: no-reexec path still stages exactly 6 lib files (staging isn't accidentally skipped for every mode)"
 else
-    fail "T2b: expected exactly 5 lib fetches on the no-reexec path, got $T2_FETCHES"
+    fail "T2b: expected exactly 6 lib fetches on the no-reexec path, got $T2_FETCHES"
 fi
 
 # ---------------------------------------------------------------------------
@@ -411,7 +412,7 @@ T3POST
 chmod +x "$T3_SCRIPT"
 T3_OUT=$(bash "$T3_SCRIPT" 2>&1)
 T3_FETCHES=$(count_lib_fetches "$T3_LOG")
-if [[ "$T3_FETCHES" -eq 5 ]] && printf '%s\n' "$T3_OUT" | grep 'GUARD=1' >/dev/null; then
+if [[ "$T3_FETCHES" -eq 6 ]] && printf '%s\n' "$T3_OUT" | grep 'GUARD=1' >/dev/null; then
     pass "T3: calling _stage_reconcile_transitive_deps twice in one process fetches only once (idempotency guard holds); out: $T3_OUT"
 else
     fail "T3: idempotency guard did not prevent a second fetch (fetches=$T3_FETCHES); out: $T3_OUT"

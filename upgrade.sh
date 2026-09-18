@@ -861,6 +861,11 @@ _stage_reconcile_transitive_deps() {
         "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/host-scripts-lib.sh" \
         "$REPO_RAW/lib/host-scripts-lib.sh" \
         "$_LIB_STAGE_DIR"
+    _stage_lib "fronted-tls.sh" \
+        "${_UPGRADE_SH_DIR}/lib/fronted-tls.sh" \
+        "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/fronted-tls.sh" \
+        "$REPO_RAW/lib/fronted-tls.sh" \
+        "$_LIB_STAGE_DIR"
     export LIB_DIR="$_LIB_STAGE_DIR"
     export FIREWALL_LIB="$_LIB_STAGE_DIR/install-firewall.sh"
     export TELEGRAM_ALERT_LIB="$_LIB_STAGE_DIR/telegram-alert-lib.sh"
@@ -1247,6 +1252,11 @@ _HOST_SCRIPT_SBIN_FILES=(
 	# (soft — skipped when REPO_RAW is unreachable). Lives in lib/ in the
 	# repo; flattens next to upgrade.sh in the release bundle.
 	install-awg.sh
+	# Fronted-TLS lib (#639) — sourced by reconcile.sh's render-env setup,
+	# hydrate.sh's first-boot render, and install --check. Installed nodes need
+	# a persistent copy or --check's directive resolution goes empty and a
+	# fronted node reports false Caddyfile drift. Lives in lib/ in the repo.
+	fronted-tls.sh
 	# Split-routing scripts (PR #280; RU profile only, ship to all edges for idempotency).
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable
@@ -1296,6 +1306,7 @@ _host_script_remote_name() {
 		xprb-refresh-lib.sh)             echo "lib/xprb-refresh-lib.sh" ;;
 		hydrate-hy2.sh)                  echo "lib/hydrate-hy2.sh" ;;
 		install-awg.sh)                  echo "lib/install-awg.sh" ;;
+		fronted-tls.sh)                  echo "lib/fronted-tls.sh" ;;
 		oxpulse-partner-edge-split-routing)    echo "oxpulse-partner-edge-split-routing.sh" ;;
 		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
 		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;
@@ -3076,11 +3087,23 @@ _conflict_check_1() {
 		trap "rm -rf '$cover_dir'" RETURN
 	fi
 
+	# /data carries the static fronted-TLS cert material (#639): a rendered
+	# `tls /data/pki/...` makes `caddy validate` open those files at provision
+	# time — mount the live container's own /data source read-only.
+	local data_src
+	data_src=$($DOCKER_BIN inspect oxpulse-partner-caddy \
+		--format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)
+
+	local -a validate_mounts=(
+		-v "${rendered_caddy}:/etc/caddy/Caddyfile:ro"
+		-v "${cover_dir}:/srv/cover:ro"
+	)
+	[[ -n "$data_src" ]] && validate_mounts+=(-v "$data_src:/data:ro")
+
 	local validate_out validate_rc
 	validate_rc=0
 	validate_out=$($DOCKER_BIN run --rm \
-		-v "${rendered_caddy}:/etc/caddy/Caddyfile:ro" \
-		-v "${cover_dir}:/srv/cover:ro" \
+		"${validate_mounts[@]}" \
 		"$current_image" \
 		caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1) || validate_rc=$?
 

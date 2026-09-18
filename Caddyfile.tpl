@@ -140,6 +140,10 @@
 }
 
 {{PARTNER_DOMAIN}} {
+    # {{SERVICE_TLS_DIRECTIVE}} renders `tls /data/pki/<domain>.{crt,key}` on
+    # fronted nodes (external TLS terminator upstream — ACME impossible), empty
+    # on direct-exposed nodes. See lib/fronted-tls.sh + issue #639.
+{{SERVICE_TLS_DIRECTIVE}}
     encode gzip zstd
 
     header {

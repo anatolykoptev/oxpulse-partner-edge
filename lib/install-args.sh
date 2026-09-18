@@ -409,10 +409,33 @@ args_parse() {
 		_fetch_check_tpl Caddyfile.tpl "$_check_dir/Caddyfile.tpl"
 		_fetch_check_tpl docker-compose.yml.tpl "$_check_dir/compose.tpl"
 
+		# SERVICE_TLS_DIRECTIVE (#639): resolve identically to install/reconcile so
+		# a fronted node's installed `tls /data/pki/...` line does not false-positive
+		# as drift. Lib resolved from the checkout/install lib dirs; absent → empty
+		# (acme render — matches a pre-#639 installed file).
+		local _check_tls_directive=""
+		local _check_ftl=""
+		for _check_ftl in \
+			"${FRONTED_TLS_LIB:-}" \
+			"${_check_src_dir:+$_check_src_dir/lib/fronted-tls.sh}" \
+			"${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/fronted-tls.sh" \
+			"${PREFIX_SBIN:-/usr/local/sbin}/fronted-tls.sh"; do
+			[[ -n "$_check_ftl" && -f "$_check_ftl" ]] || continue
+			# shellcheck source=/dev/null
+			. "$_check_ftl" && break
+		done
+		if declare -F fronted_tls_directive >/dev/null 2>&1; then
+			# DRY_RUN=1: --check is read-only — an existing cert still emits the
+			# directive (drift detected correctly), missing cert stays a no-write
+			# acme render rather than minting one inside a diagnostic.
+			_check_tls_directive=$(DRY_RUN=1 fronted_tls_directive "$DOMAIN" "${PUBLIC_IP:-}") || _check_tls_directive=""
+		fi
+
 		# Render Caddyfile using install.env values.
 		sed \
 			-e "s|{{PARTNER_DOMAIN}}|${DOMAIN}|g" \
 			-e "s|{{TURNS_SUBDOMAIN}}|${TURNS_SUBDOMAIN:-}|g" \
+			-e "s|{{SERVICE_TLS_DIRECTIVE}}|${_check_tls_directive}|g" \
 			"$_check_dir/Caddyfile.tpl" > "$_check_dir/Caddyfile"
 		local _check_sha
 		_check_sha=$(sha256sum "$_check_dir/Caddyfile" | awk '{print $1}')

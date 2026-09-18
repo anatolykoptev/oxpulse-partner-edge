@@ -139,6 +139,24 @@ _setup_caddy_render_env() {
     HY2_FALLBACK_HOST="${HY2_FALLBACK_HOST:-host.docker.internal}"
     HY2_FALLBACK_PORT="${HY2_FALLBACK_PORT:-18443}"
 
+    # SERVICE_TLS_DIRECTIVE (#639): fronted nodes emit `tls /data/pki/<domain>.{crt,key}`
+    # inside the service site so upstream SNI=<domain> gets a cert answer without
+    # ACME (impossible behind an external TLS terminator — challenges die at the
+    # front). Resolution: EDGE_FRONTED_TLS override → DNS-vs-PUBLIC_IP detect →
+    # persisted hint → acme. PUBLIC_IP resolves env → STATE_FILE (persisted by
+    # install.sh at install time). The directive emits only when the cert was
+    # actually generated — never renders a reference to missing files.
+    SERVICE_TLS_DIRECTIVE=""
+    if _reconcile_source_fronted_tls_lib; then
+        local _public_ip="${PUBLIC_IP:-}"
+        if [[ -z "$_public_ip" && -n "${STATE_FILE:-}" && -f "$STATE_FILE" ]]; then
+            _public_ip=$(grep '^PUBLIC_IP=' "$STATE_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        fi
+        SERVICE_TLS_DIRECTIVE=$(fronted_tls_directive "$PARTNER_DOMAIN" "$_public_ip")
+    else
+        warn "reconcile_caddy: fronted-tls.sh unavailable — SERVICE_TLS_DIRECTIVE renders empty (fronted nodes keep ACME; see #639)"
+    fi
+
     # NAIVE_SOCKS_PORT: 4-tier resolution.
     if [[ -z "${NAIVE_SOCKS_PORT:-}" ]]; then
         # Tier 2: STATE_FILE
@@ -166,7 +184,30 @@ _setup_caddy_render_env() {
 
     export PARTNER_DOMAIN TURNS_SUBDOMAIN \
            AWG_MOTHERLY_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
-           NAIVE_SOCKS_PORT
+           NAIVE_SOCKS_PORT SERVICE_TLS_DIRECTIVE
+}
+
+# ---------------------------------------------------------------------------
+# _reconcile_source_fronted_tls_lib — lazy resolve+source of lib/fronted-tls.sh
+# (#639). Same convention as the other call-time lib resolvers in this file:
+# ${FRONTED_TLS_LIB:-${LIB_DIR:-<dirname>}/fronted-tls.sh}, so upgrade.sh's
+# _stage_lib staging (LIB_DIR) and a co-located dev checkout both resolve.
+# Returns non-zero when the lib is absent — callers render the directive empty
+# rather than die (acme render is the known-safe fallback).
+# ---------------------------------------------------------------------------
+_reconcile_source_fronted_tls_lib() {
+    declare -F fronted_tls_directive >/dev/null 2>&1 && return 0
+    local _lib
+    for _lib in \
+        "${FRONTED_TLS_LIB:-}" \
+        "${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}/fronted-tls.sh" \
+        "${PREFIX_SBIN:-/usr/local/sbin}/fronted-tls.sh"; do
+        [[ -n "$_lib" && -f "$_lib" ]] || continue
+        # shellcheck source=/dev/null
+        . "$_lib"
+        declare -F fronted_tls_directive >/dev/null 2>&1 && return 0
+    done
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -606,6 +647,13 @@ _assert_caddyfile_loads() {
     local -a _mounts=(-v "${_candidate}:/etc/caddy/Caddyfile:ro")
     [[ -d "$_etc/conf.d" ]] && _mounts+=(-v "$_etc/conf.d:$_etc/conf.d:ro")
     [[ -d "$_etc/cover" ]] && _mounts+=(-v "$_etc/cover:/srv/cover:ro")
+    # /data carries the static fronted-TLS cert material (#639): a rendered
+    # `tls /data/pki/...` makes `caddy validate` open those files at provision
+    # time — mount the live container's own /data source read-only so the
+    # validation sees the same files the running caddy does.
+    local _data_src
+    _data_src=$("$_docker" inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' "$_cid" 2>/dev/null || true)
+    [[ -n "$_data_src" ]] && _mounts+=(-v "$_data_src:/data:ro")
 
     local _out _rc=0
     _out=$("$_docker" run --rm "${_mounts[@]}" "$_image" \

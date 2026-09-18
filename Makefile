@@ -86,5 +86,6 @@ lib-checksums:
 	  surgical-restart-lib.sh \
 	  xprb-refresh-lib.sh \
 	  hydrate-hy2.sh \
+	  fronted-tls.sh \
 	) > lib/lib-checksums.txt
 	@echo "lib/lib-checksums.txt regenerated — commit the result"
