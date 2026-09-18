@@ -49,6 +49,7 @@ chmod 0600 "$T_LIB/install.env"
 sed \
     -e "s|{{PARTNER_DOMAIN}}|${PARTNER_DOMAIN}|g" \
     -e "s|{{TURNS_SUBDOMAIN}}|${TURNS_SUBDOMAIN}|g" \
+    -e "s|{{SERVICE_TLS_DIRECTIVE}}||g" \
     "$REPO_ROOT/Caddyfile.tpl" > "$T_ETC/Caddyfile.raw"
 _sha=$(sha256sum "$T_ETC/Caddyfile.raw" | awk '{print $1}')
 sed "s|__CADDYFILE_SHA__|${_sha}|g" "$T_ETC/Caddyfile.raw" > "$T_ETC/Caddyfile"

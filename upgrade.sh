@@ -861,6 +861,11 @@ _stage_reconcile_transitive_deps() {
         "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/host-scripts-lib.sh" \
         "$REPO_RAW/lib/host-scripts-lib.sh" \
         "$_LIB_STAGE_DIR"
+    _stage_lib "fronted-tls.sh" \
+        "${_UPGRADE_SH_DIR}/lib/fronted-tls.sh" \
+        "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/fronted-tls.sh" \
+        "$REPO_RAW/lib/fronted-tls.sh" \
+        "$_LIB_STAGE_DIR"
     export LIB_DIR="$_LIB_STAGE_DIR"
     export FIREWALL_LIB="$_LIB_STAGE_DIR/install-firewall.sh"
     export TELEGRAM_ALERT_LIB="$_LIB_STAGE_DIR/telegram-alert-lib.sh"

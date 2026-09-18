@@ -139,6 +139,24 @@ _setup_caddy_render_env() {
     HY2_FALLBACK_HOST="${HY2_FALLBACK_HOST:-host.docker.internal}"
     HY2_FALLBACK_PORT="${HY2_FALLBACK_PORT:-18443}"
 
+    # SERVICE_TLS_DIRECTIVE (#639): fronted nodes emit `tls /data/pki/<domain>.{crt,key}`
+    # inside the service site so upstream SNI=<domain> gets a cert answer without
+    # ACME (impossible behind an external TLS terminator — challenges die at the
+    # front). Resolution: EDGE_FRONTED_TLS override → DNS-vs-PUBLIC_IP detect →
+    # persisted hint → acme. PUBLIC_IP resolves env → STATE_FILE (persisted by
+    # install.sh at install time). The directive emits only when the cert was
+    # actually generated — never renders a reference to missing files.
+    SERVICE_TLS_DIRECTIVE=""
+    if _reconcile_source_fronted_tls_lib; then
+        local _public_ip="${PUBLIC_IP:-}"
+        if [[ -z "$_public_ip" && -n "${STATE_FILE:-}" && -f "$STATE_FILE" ]]; then
+            _public_ip=$(grep '^PUBLIC_IP=' "$STATE_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        fi
+        SERVICE_TLS_DIRECTIVE=$(fronted_tls_directive "$PARTNER_DOMAIN" "$_public_ip")
+    else
+        warn "reconcile_caddy: fronted-tls.sh unavailable — SERVICE_TLS_DIRECTIVE renders empty (fronted nodes keep ACME; see #639)"
+    fi
+
     # NAIVE_SOCKS_PORT: 4-tier resolution.
     if [[ -z "${NAIVE_SOCKS_PORT:-}" ]]; then
         # Tier 2: STATE_FILE
@@ -166,7 +184,23 @@ _setup_caddy_render_env() {
 
     export PARTNER_DOMAIN TURNS_SUBDOMAIN \
            AWG_MOTHERLY_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
-           NAIVE_SOCKS_PORT
+           NAIVE_SOCKS_PORT SERVICE_TLS_DIRECTIVE
+}
+
+# ---------------------------------------------------------------------------
+# _reconcile_source_fronted_tls_lib — lazy resolve+source of lib/fronted-tls.sh
+# (#639). Same convention as the other call-time lib resolvers in this file:
+# ${FRONTED_TLS_LIB:-${LIB_DIR:-<dirname>}/fronted-tls.sh}, so upgrade.sh's
+# _stage_lib staging (LIB_DIR) and a co-located dev checkout both resolve.
+# Returns non-zero when the lib is absent — callers render the directive empty
+# rather than die (acme render is the known-safe fallback).
+# ---------------------------------------------------------------------------
+_reconcile_source_fronted_tls_lib() {
+    declare -F fronted_tls_directive >/dev/null 2>&1 && return 0
+    local _lib="${FRONTED_TLS_LIB:-${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}/fronted-tls.sh}"
+    [[ -f "$_lib" ]] || return 1
+    . "$_lib"
+    declare -F fronted_tls_directive >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------

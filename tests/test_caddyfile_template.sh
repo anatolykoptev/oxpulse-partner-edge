@@ -24,6 +24,7 @@ trap 'rm -f "$TMP"' EXIT
 # Substitute placeholders with deterministic test values
 sed -e 's/{{PARTNER_DOMAIN}}/example.test/g' \
     -e 's/{{TURNS_SUBDOMAIN}}/turns/g' \
+    -e 's/{{SERVICE_TLS_DIRECTIVE}}//g' \
     "$TPL" > "$TMP"
 
 # Validate via the partner-edge image (has caddy-l4 plugin)

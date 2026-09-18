@@ -593,6 +593,7 @@ jobs:
             surgical-restart-lib.sh \
             xprb-refresh-lib.sh \
             hydrate-hy2.sh \
+            fronted-tls.sh \
           ) > lib/lib-checksums.txt
           cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
@@ -631,6 +632,7 @@ jobs:
             surgical-restart-lib.sh \
             xprb-refresh-lib.sh \
             hydrate-hy2.sh \
+
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
@@ -708,6 +710,7 @@ jobs:
             surgical-restart-lib.sh \
             xprb-refresh-lib.sh \
             hydrate-hy2.sh \
+
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \

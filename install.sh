@@ -370,6 +370,8 @@ _install_lib_source install-firewall.sh
 _install_lib_source install-split-routing.sh
 # shellcheck source=lib/reconcile.sh
 _install_lib_source reconcile.sh
+# shellcheck source=lib/fronted-tls.sh
+_install_lib_source fronted-tls.sh
 
 preflight_run
 
@@ -1209,6 +1211,15 @@ else
 fi
 export ALLOWED_PEER_IP_LINE
 
+# SERVICE_TLS_DIRECTIVE (#639): when the node is fronted by an external TLS
+# terminator (RU reverse-proxy fronts hold the real cert and proxy upstream
+# with SNI=$DOMAIN), caddy can never ACME the domain — upstream handshakes for
+# that SNI abort and the front 502s. fronted_tls_directive emits a static
+# self-signed `tls` line (cert generated into the caddy-data volume) or nothing
+# on direct-exposed nodes. PUBLIC_IP is set by network_run above.
+SERVICE_TLS_DIRECTIVE=$(fronted_tls_directive "$DOMAIN" "${PUBLIC_IP:-}") || SERVICE_TLS_DIRECTIVE=""
+export SERVICE_TLS_DIRECTIVE
+
 # ---------- Step 5: stage templates ----------
 log "[5/10] rendering templates"
 if [[ $DRY_RUN -eq 0 ]]; then
@@ -1745,6 +1756,12 @@ EOF
 	# Values authoritative at install time (network_run: env override > autodetect).
 	printf 'PUBLIC_IP=%s\n' "${PUBLIC_IP:-}" >> "$PREFIX_LIB/install.env"
 	printf 'PRIVATE_IP=%s\n' "${PRIVATE_IP:-}" >> "$PREFIX_LIB/install.env"
+	# Persist an explicit EDGE_FRONTED_TLS override (#639) so reconcile/upgrade
+	# renders resolve the same TLS mode. Absent = auto (DNS-vs-PUBLIC_IP detect
+	# at each render, with a persisted hint under $PREFIX_ETC).
+	if [[ -n "${EDGE_FRONTED_TLS:-}" ]]; then
+		printf 'EDGE_FRONTED_TLS=%s\n' "${EDGE_FRONTED_TLS}" >> "$PREFIX_LIB/install.env"
+	fi
 	chmod 0600 "$PREFIX_LIB/install.env"
 	# Phase 1: record sha256 of rendered Caddyfile for drift detection.
 	# healthcheck.sh check 15 compares this against /canary/config-hash.
