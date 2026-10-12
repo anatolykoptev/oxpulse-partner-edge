@@ -25,6 +25,7 @@ pub mod caddy;
 pub mod compose;
 pub mod coturn;
 pub mod naive;
+pub mod secret_file;
 pub mod xray;
 
 #[derive(Error, Debug)]
@@ -59,6 +60,17 @@ pub fn substitute_from_env(tpl: &str) -> String {
 /// tmp file lives in same directory as dst (so rename is intra-fs) and uses
 /// a hidden `.basename.XXXXXX.tmp` template.
 pub fn render_to_file(src: &Path, dst: &Path) -> Result<String> {
+    render_to_file_pre(src, dst, |tpl| tpl)
+}
+
+/// Like [`render_to_file`], but `pre` rewrites the raw template text BEFORE env
+/// substitution. Used by kinds whose placeholders carry values that must never
+/// travel through the environment (the relay-node TURN secret lines).
+pub fn render_to_file_pre(
+    src: &Path,
+    dst: &Path,
+    pre: impl FnOnce(String) -> String,
+) -> Result<String> {
     if !src.is_file() {
         return Err(RenderError::SrcMissing(src.to_path_buf()).into());
     }
@@ -69,7 +81,7 @@ pub fn render_to_file(src: &Path, dst: &Path) -> Result<String> {
 
     let tpl =
         fs::read_to_string(src).with_context(|| format!("reading template {}", src.display()))?;
-    let rendered = substitute_from_env(&tpl);
+    let rendered = substitute_from_env(&pre(tpl));
 
     let mut tmp = tempfile::Builder::new()
         .prefix(&format!(

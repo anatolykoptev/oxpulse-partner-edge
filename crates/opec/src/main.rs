@@ -74,6 +74,18 @@ enum Commands {
         /// Path to the rendered output file.
         #[arg(long)]
         out: PathBuf,
+        /// coturn only: per-node TURN secret file (0600, 1-2 lines). Each line
+        /// becomes one `static-auth-secret=` line at the template's
+        /// secret-lines placeholder. Relay-only nodes; never read from env/argv.
+        #[arg(long)]
+        secret_file: Option<PathBuf>,
+    },
+    /// Validate a relay node's TURN secret file; prints only the line count.
+    /// Exit 0 = valid. Used as the relay coturn unit's ExecStartPre gate.
+    CheckNodeSecret {
+        /// Path to the secret file.
+        #[arg(long)]
+        file: PathBuf,
     },
 }
 
@@ -156,12 +168,29 @@ fn main() {
     let result = match cli.command {
         Commands::Tenant { action } => run_tenant(action),
         Commands::Secrets { action } => opec::secrets::dispatch(action),
-        Commands::Render { kind, tpl, out } => match kind {
-            RenderKind::Xray => opec::render::xray::render(&tpl, &out),
-            RenderKind::Coturn => opec::render::coturn::render(&tpl, &out),
-            RenderKind::Naive => opec::render::naive::render(&tpl, &out),
-            RenderKind::Compose => opec::render::compose::render(&tpl, &out),
-            RenderKind::Caddy => opec::render::caddy::render(&tpl, &out),
+        Commands::CheckNodeSecret { file } => opec::render::secret_file::read_node_secrets(&file)
+            .map(|s| {
+                println!("node secret ok: {} line(s)", s.len());
+            }),
+        Commands::Render {
+            kind,
+            tpl,
+            out,
+            secret_file,
+        } => match (kind, secret_file) {
+            (RenderKind::Coturn, Some(sf)) => {
+                opec::render::coturn::render_with_secret_file(&tpl, &out, &sf)
+            }
+            (_, Some(_)) => Err(anyhow::anyhow!(
+                "--secret-file is only valid for `render coturn`"
+            )),
+            (kind, None) => match kind {
+                RenderKind::Xray => opec::render::xray::render(&tpl, &out),
+                RenderKind::Coturn => opec::render::coturn::render(&tpl, &out),
+                RenderKind::Naive => opec::render::naive::render(&tpl, &out),
+                RenderKind::Compose => opec::render::compose::render(&tpl, &out),
+                RenderKind::Caddy => opec::render::caddy::render(&tpl, &out),
+            },
         },
     };
 
