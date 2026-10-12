@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.30](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.29...v0.16.30) (2026-10-12)
+
+
+### Bug Fixes
+
+* **coturn:** keep exactly this host's own relay address in allowed-peer-ip (v0.16.29 regression) ([#660](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/660)) ([b6c1f7c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/b6c1f7c0c1b6da0732a84367948fa97ea499b646))
+
 ## [0.16.29](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.28...v0.16.29) (2026-10-12)
 
 
