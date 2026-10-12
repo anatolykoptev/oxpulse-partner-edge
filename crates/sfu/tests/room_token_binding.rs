@@ -36,9 +36,20 @@ fn token(iss: Option<&str>, aud: Option<&str>) -> String {
     encode(&Header::default(), &c, &EncodingKey::from_secret(SECRET)).unwrap()
 }
 
+/// Install the strict process policy through the real `init_policy` path. All
+/// tests in this binary want the same policy, so a repeat call is ignored.
+fn install_strict_policy() {
+    let _ = init_policy(
+        RoomTokenPolicy::new(vec!["oxpulse-chat".into()], "oxpulse-sfu", true).unwrap(),
+    );
+}
+
 async fn start() -> String {
-    init_policy(RoomTokenPolicy::new(vec!["oxpulse-chat".into()], "oxpulse-sfu", true).unwrap())
-        .unwrap();
+    start_with(None).await
+}
+
+async fn start_with(signing_pubkey: Option<Arc<String>>) -> String {
+    install_strict_policy();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<PendingClient>(8);
@@ -47,7 +58,7 @@ async fn start() -> String {
         listener,
         ClientWsApiConfig {
             secret: Arc::from(SECRET),
-            signing_pubkey: None,
+            signing_pubkey,
             client_inject_tx: tx,
             local_udp_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
             additional_host_candidates: Vec::new(),
@@ -108,5 +119,59 @@ async fn upgrade_enforces_issuer_audience_binding() {
     );
     // Positive control: the correctly bound token upgrades.
     let ok = handshake(&url, &token(Some("oxpulse-chat"), Some("oxpulse-sfu"))).await;
+    assert_eq!(ok.unwrap(), StatusCode::SWITCHING_PROTOCOLS);
+}
+
+fn ed25519_pair() -> (String, String) {
+    use ed25519_dalek::pkcs8::{spki::der::pem::LineEnding, EncodePrivateKey, EncodePublicKey};
+    let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    (
+        key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string(),
+        key.verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap(),
+    )
+}
+
+fn ed_token(priv_pem: &str, iss: Option<&str>, aud: Option<&str>) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut c = serde_json::json!({"sub": 1, "room": "ROOM-1", "iat": now, "exp": now + 600});
+    if let Some(i) = iss {
+        c["iss"] = i.into();
+    }
+    if let Some(a) = aud {
+        c["aud"] = a.into();
+    }
+    let key = EncodingKey::from_ed_pem(priv_pem.as_bytes()).unwrap();
+    encode(&Header::new(jsonwebtoken::Algorithm::EdDSA), &c, &key).unwrap()
+}
+
+/// The production verify path: with `SFU_SIGNING_PUBLIC_KEY` configured the
+/// EdDSA verifier runs first. Guards `verify_room_token_ed25519` ignoring the
+/// process policy (the HS256-only test above cannot see that).
+#[tokio::test]
+async fn eddsa_upgrade_enforces_issuer_audience_binding() {
+    let (priv_pem, pub_pem) = ed25519_pair();
+    let url = start_with(Some(Arc::new(pub_pem))).await;
+    assert_401(
+        handshake(
+            &url,
+            &ed_token(&priv_pem, Some("oxpulse-staging"), Some("oxpulse-sfu")),
+        )
+        .await,
+        "eddsa foreign iss",
+    );
+    assert_401(
+        handshake(&url, &ed_token(&priv_pem, Some("oxpulse-chat"), None)).await,
+        "eddsa missing aud",
+    );
+    let ok = handshake(
+        &url,
+        &ed_token(&priv_pem, Some("oxpulse-chat"), Some("oxpulse-sfu")),
+    )
+    .await;
     assert_eq!(ok.unwrap(), StatusCode::SWITCHING_PROTOCOLS);
 }
