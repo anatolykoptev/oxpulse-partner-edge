@@ -44,6 +44,8 @@ PRE="$TC/preamble.sh"
     _extract_fn settle_healthcheck_with_retry
     _extract_fn _settle_derive_recheck_window
     _extract_fn _settle_docker_health_watch
+    _extract_fn _settle_baseline_was_healthy
+    _extract_fn _settle_docker_baseline_capture
 } > "$PRE"
 
 if bash -n "$PRE" 2>/dev/null; then
@@ -66,6 +68,7 @@ if [ "\$1" = "inspect" ]; then
   _n="\${!#}"
   case "\$*" in
     *Config.Healthcheck*) [ -f "$TC/hcfg_\$_n" ]   && cat "$TC/hcfg_\$_n";   exit 0 ;;
+    *State.Status*)       [ -f "$TC/state_\$_n" ]  && cat "$TC/state_\$_n";  exit 0 ;;
     *)                    [ -f "$TC/health_\$_n" ] && cat "$TC/health_\$_n"; exit 0 ;;
   esac
 fi
@@ -74,7 +77,7 @@ STUB
 chmod +x "$TC/bin/docker"
 export PATH="$TC/bin:$PATH"
 
-_reset() { : > "$TC/warns"; : > "$TC/metrics"; : > "$TC/logs"; rm -f "$TC"/health_* "$TC"/hcfg_*; }
+_reset() { : > "$TC/warns"; : > "$TC/metrics"; : > "$TC/logs"; rm -f "$TC"/health_* "$TC"/hcfg_* "$TC"/state_*; }
 
 # _watch -> echoes rc of _settle_docker_health_watch
 _watch() {
@@ -230,6 +233,104 @@ rc=$(WINDOW=7 _watch)
 logged=$(sed -n '/late-wedge watch for/{s/.*late-wedge watch for \([0-9]*\)s.*/\1/p;q;}' "$TC/logs" 2>/dev/null)
 [[ "$logged" == "7" ]] && ok "T9: OXPULSE_UPGRADE_SETTLE_RECHECK_SECS overrides the derivation (${logged}s)" \
                        || bad "T9: explicit override ignored — logged ${logged:-?}s instead of 7s"
+
+# ── T10..T15 — pre-upgrade BASELINE: only a container that WAS healthy can wedge ─
+# 2026-10-12 rvpn v0.16.28 -> v0.16.31: oxpulse-partner-hysteria2 was crash-looping
+# before the upgrade (never recreated by it); the watch flagged it and rolled back a
+# clean upgrade. _watchb runs the watch with a baseline file as the 2nd argument.
+_watchb() {
+    bash -c "source '$PRE'
+             export OXPULSE_UPGRADE_SETTLE_RECHECK_SECS='${WINDOW:-2}'
+             export OXPULSE_UPGRADE_SETTLE_RECHECK_INTERVAL=1
+             _settle_docker_health_watch t '$1'; echo rc=\$?" 2>/dev/null | sed -n 's/^rc=//p'
+}
+_mkbase() { { echo '#baseline-v1'; cat; } > "$TC/base"; }
+
+# T10 — baseline-unhealthy/restarting hy2 + healthy core: NO rollback, and it says so.
+_reset
+printf 'oxpulse-partner-xray\noxpulse-partner-hysteria2\n' > "$TC/names"
+printf 'healthy\n'   > "$TC/health_oxpulse-partner-xray"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-hysteria2"
+printf 'oxpulse-partner-xray running healthy\noxpulse-partner-hysteria2 restarting unhealthy\n' | _mkbase
+rc=$(_watchb "$TC/base")
+[[ "$rc" == "0" ]] && ok "T10: container unhealthy in the BASELINE does not fail the watch" \
+                   || bad "T10: pre-existing unhealthy hy2 still fails the watch (rc=$rc) - false-positive rollback"
+grep -q 'ignores oxpulse-partner-hysteria2' "$TC/warns" \
+    && ok "T10b: the ignored container is named in the log (not a silent skip)" \
+    || bad "T10b: ignored container not logged"
+
+# T11 — control: the same hy2 failure but healthy in the baseline IS a late wedge.
+printf 'oxpulse-partner-xray running healthy\noxpulse-partner-hysteria2 running healthy\n' | _mkbase
+rc=$(_watchb "$TC/base")
+[[ "$rc" != "0" ]] && ok "T11: a container healthy in the baseline that goes unhealthy still fails (rc=$rc)" \
+                   || bad "T11: baseline filtering swallowed a REAL late wedge"
+
+# T12 — a bad hy2 must not mask a real wedge in the core.
+_reset
+printf 'oxpulse-partner-xray\noxpulse-partner-hysteria2\n' > "$TC/names"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-xray"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-hysteria2"
+printf 'oxpulse-partner-xray running healthy\noxpulse-partner-hysteria2 restarting unhealthy\n' | _mkbase
+rc=$(_watchb "$TC/base")
+[[ "$rc" != "0" ]] && ok "T12: xray wedge still fails while hy2 is ignored (rc=$rc)" \
+                   || bad "T12: ignoring hy2 also hid the xray wedge"
+
+# T13 — absent from the baseline (new/down container) is not accountable either.
+_reset
+printf 'oxpulse-partner-xray\noxpulse-partner-hysteria2\n' > "$TC/names"
+printf 'healthy\n'   > "$TC/health_oxpulse-partner-xray"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-hysteria2"
+printf 'oxpulse-partner-xray running healthy\n' | _mkbase
+rc=$(_watchb "$TC/base")
+[[ "$rc" == "0" ]] && ok "T13: container absent from the baseline is ignored" \
+                   || bad "T13: absent-in-baseline container failed the watch (rc=$rc)"
+
+# T14 — an unusable baseline (no header = capture failed) degrades to STRICT, never to "ignore all".
+_reset
+printf 'oxpulse-partner-hysteria2\n' > "$TC/names"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-hysteria2"
+: > "$TC/base"
+rc=$(_watchb "$TC/base")
+[[ "$rc" != "0" ]] && ok "T14: empty/headerless baseline -> strict (watch still fails on unhealthy)" \
+                   || bad "T14: failed baseline capture silently disabled the watch"
+
+# T15 — the capture records state+health (restarting hy2 included, no-HEALTHCHECK as none).
+_reset
+printf 'oxpulse-partner-xray\noxpulse-partner-hysteria2\n' > "$TC/names"
+printf 'healthy\n'   > "$TC/health_oxpulse-partner-xray"
+printf 'running healthy\n' > "$TC/state_oxpulse-partner-xray"
+printf 'restarting unhealthy\n' > "$TC/state_oxpulse-partner-hysteria2"
+bash -c "source '$PRE'; _settle_docker_baseline_capture '$TC/cap'" >/dev/null 2>&1
+if [[ "$(head -n1 "$TC/cap")" == "#baseline-v1" ]] && grep -qx 'oxpulse-partner-hysteria2 restarting unhealthy' "$TC/cap" \
+   && grep -qx 'oxpulse-partner-xray running healthy' "$TC/cap"; then
+    ok "T15: baseline capture records header + name/state/health per container"
+else
+    bad "T15: baseline capture malformed: $(tr '\n' '|' < "$TC/cap")"
+fi
+
+# T16 — end to end through the gate: clean functional snapshot, hy2 pre-broken, 4th arg threaded.
+_reset
+printf 'oxpulse-partner-xray\noxpulse-partner-hysteria2\n' > "$TC/names"
+printf 'healthy\n'   > "$TC/health_oxpulse-partner-xray"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-hysteria2"
+printf 'oxpulse-partner-xray running healthy\noxpulse-partner-hysteria2 restarting unhealthy\n' | _mkbase
+rc=$(bash -c "source '$PRE'
+    export HEALTHCHECK='$TC/hc' HC_POST='$TC/hc_post'
+    export OXPULSE_UPGRADE_HEALTH_TIMEOUT=3 OXPULSE_UPGRADE_SETTLE_RECHECK_SECS=2 OXPULSE_UPGRADE_SETTLE_RECHECK_INTERVAL=1
+    settle_healthcheck_with_retry baseline '$TC/hc_baseline' '' '$TC/base'; echo rc=\$?" 2>/dev/null | sed -n 's/^rc=//p')
+[[ "$rc" == "0" ]] && ok "T16: gate with a baseline does not roll back on a pre-broken hy2" \
+                   || bad "T16: gate rolled back on a pre-broken hy2 (rc=$rc) - baseline not threaded through settle_healthcheck_with_retry"
+# T17 - wiring: every settle_healthcheck_with_retry CALL SITE passes a container baseline
+# captured before the change (plain, --with-templates, render gate). A site that does not
+# silently reverts to the strict watch and re-opens the hy2 false-positive rollback.
+sites=$(grep -E '^[[:space:]]*(if !? ?)?settle_healthcheck_with_retry "' "$UPGRADE" | wc -l | tr -d ' ')
+with4=$(grep -E 'settle_healthcheck_with_retry "[^"]*" "[^"]*" "[^"]*" "\$_(wt_)?(docker_baseline|dbase)"' "$UPGRADE" | wc -l | tr -d ' ')
+caps=$(grep -c '^[[:space:]]*_settle_docker_baseline_capture "' "$UPGRADE" | tr -d ' ')
+if [[ "$sites" -ge 3 && "$sites" == "$with4" && "$caps" -ge 3 ]]; then
+    ok "T17: all $sites settle call sites carry a container baseline ($caps capture sites)"
+else
+    bad "T17: settle call sites=$sites, with baseline arg=$with4, capture sites=$caps"
+fi
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
