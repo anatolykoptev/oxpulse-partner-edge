@@ -1115,7 +1115,7 @@ set -e
 STUN_ARGV18=$(grep -a -m1 'turnutils_stunclient' "$T18/docker-argv.log" 2>/dev/null || true)
 if [[ -z "$STUN_ARGV18" ]]; then
     fail "test18: docker stub never saw turnutils_stunclient; argv log: $(cat "$T18/docker-argv.log" 2>/dev/null)"
-elif [[ "$STUN_ARGV18" =~ exec\ oxpulse-partner-coturn\ timeout\ [1-9][0-9]*\ turnutils_stunclient ]]; then
+elif [[ "$STUN_ARGV18" =~ exec\ -u\ 0\ oxpulse-partner-coturn\ timeout\ [1-9][0-9]*\ turnutils_stunclient ]]; then
     ok "test18: stunclient probe is bounded INSIDE the container (timeout precedes turnutils_stunclient)"
 else
     fail "test18: no in-container timeout before turnutils_stunclient — the timed-out probe leaks in the container; argv: $STUN_ARGV18"

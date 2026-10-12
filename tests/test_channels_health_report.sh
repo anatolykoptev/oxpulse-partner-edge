@@ -1274,7 +1274,7 @@ set -e
 UCLIENT_ARGV22=$(grep -a -m1 'turnutils_uclient' "$T22/docker-argv.log" 2>/dev/null || true)
 if [[ -z "$UCLIENT_ARGV22" ]]; then
     fail "test22: docker stub never saw turnutils_uclient; argv log: $(cat "$T22/docker-argv.log" 2>/dev/null)"
-elif [[ "$UCLIENT_ARGV22" =~ exec\ oxpulse-partner-coturn\ timeout\ [1-9][0-9]*\ turnutils_uclient ]]; then
+elif [[ "$UCLIENT_ARGV22" =~ exec\ -u\ 0\ oxpulse-partner-coturn\ timeout\ [1-9][0-9]*\ turnutils_uclient ]]; then
     ok "test22: uclient probe is bounded INSIDE the container (timeout precedes turnutils_uclient)"
 else
     fail "test22: no in-container timeout before turnutils_uclient — a timed-out Allocate probe leaks in the container; argv: $UCLIENT_ARGV22"

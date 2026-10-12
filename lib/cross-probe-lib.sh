@@ -353,7 +353,7 @@ _probe_peer_udp_stun() {
         stun_timeout=5
     fi
     stun_out=$(timeout "$stun_timeout" \
-        docker exec oxpulse-partner-coturn \
+        docker exec -u 0 oxpulse-partner-coturn \
         timeout "$stun_timeout" \
         turnutils_stunclient "$dial_ip" -p "$stun_port" \
         2>&1)
@@ -513,7 +513,7 @@ _run_peer_probe_loop() {
     if [[ -n "${OXPULSE_TURN_SECRET:-}" ]]; then
         turn_secret="$OXPULSE_TURN_SECRET"
     else
-        turn_secret=$(timeout 10 docker exec oxpulse-partner-coturn \
+        turn_secret=$(timeout 10 docker exec -u 0 oxpulse-partner-coturn \
             sed -n 's/^static-auth-secret=//p' \
             /etc/coturn/turnserver.conf 2>/dev/null || true)
     fi

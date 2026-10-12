@@ -1,0 +1,25 @@
+[Unit]
+Description=Stop partner-edge coturn relaying UDP to this host's own services (nft OUTPUT guard)
+Documentation=https://github.com/anatolykoptev/oxpulse-partner-edge
+# Ordered Before docker.service, NOT merely before oxpulse-partner-edge.service:
+# dockerd itself restarts `restart: unless-stopped` containers at boot, so coturn
+# can come up without the edge unit ever running. Ordering is the only coupling —
+# deliberately NO Requires=/BindsTo= either way (a hard dependency breaks coturn
+# restarts and rollback); a missing table is surfaced by healthcheck.sh
+# (check_15_coturn_self_relay_guard) instead.
+Before=docker.service oxpulse-partner-edge.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/oxpulse-partner-edge-coturn-guard apply
+# `systemctl reload` / reload-or-restart re-applies: one nft transaction replaces
+# the table atomically (no window with the guard absent). Converge calls this
+# after every firewall_apply, because `firewall-cmd --reload` on RHEL-family edges
+# (and `flush ruleset`) wipes foreign nft tables.
+ExecReload=/usr/local/sbin/oxpulse-partner-edge-coturn-guard apply
+ExecStop=-/usr/local/sbin/oxpulse-partner-edge-coturn-guard remove
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

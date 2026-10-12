@@ -277,14 +277,10 @@ probe_ch3() {
 # PROBE TARGET (anti-SSRF-vs-loopback-self-test collision — see below):
 # the `-y` self-test relays between two allocations via a peer reached at the
 # server-address argument.  When that argument is 127.0.0.1 the relayed peer is
-# a loopback address, which TWO independent guards in the production config DENY
-# at CreatePermission:
-#   1. `denied-peer-ip=127.0.0.0-127.255.255.255` (coturn.conf.tpl) — explicit
-#      RFC-defined loopback SSRF block.
-#   2. `no-loopback-peers` (coturn.conf.tpl:42) — coturn's built-in flag that
-#      independently denies any peer address that is a loopback address, even if
-#      denied-peer-ip were removed.
-# Either guard alone is sufficient to deny the self-test peer; both are present.
+# a loopback address, which coturn denies at CreatePermission:
+#   `denied-peer-ip=127.0.0.0-127.255.255.255` (coturn.conf.tpl) — explicit
+#   RFC-defined loopback SSRF block (coturn 4.6.x also refuses loopback peers by
+#   default; its former `no-loopback-peers` flag no longer exists).
 # The data round-trip never completes, `timeout` kills the
 # client (exit 124), handshake_ok is reported false on a perfectly healthy
 # coturn, AND the killed client leaks its two allocations every tick (no
@@ -324,7 +320,7 @@ _resolve_coturn_probe_target() {
     # the value; the public part is everything before the first '/' (NAT form
     # "public/private"); no '/' → the whole value is public.
     local ext_line
-    ext_line=$(timeout 10 docker exec oxpulse-partner-coturn \
+    ext_line=$(timeout 10 docker exec -u 0 oxpulse-partner-coturn \
         sed -n 's/^external-ip=//p' \
         /etc/coturn/turnserver.conf 2>/dev/null | head -n1 || true)
     if [[ -n "$ext_line" ]]; then
@@ -388,7 +384,7 @@ probe_ch4() {
     if [[ -n "${OXPULSE_TURN_SECRET:-}" ]]; then
         turn_secret="$OXPULSE_TURN_SECRET"
     else
-        turn_secret=$(timeout 10 docker exec oxpulse-partner-coturn \
+        turn_secret=$(timeout 10 docker exec -u 0 oxpulse-partner-coturn \
             sed -n 's/^static-auth-secret=//p' \
             /etc/coturn/turnserver.conf 2>/dev/null || true)
     fi
@@ -449,7 +445,7 @@ probe_ch4() {
         # cross-probe-lib.sh _probe_peer_udp_stun). Outer keeps the SAME 10s:
         # the in-container process is reaped by its own bound regardless of
         # which layer fires first, and the service-budget model stays true.
-        uclient_out=$(timeout 10 docker exec oxpulse-partner-coturn \
+        uclient_out=$(timeout 10 docker exec -u 0 oxpulse-partner-coturn \
             timeout 10 turnutils_uclient \
                 -u "$turn_username" \
                 -w "$turn_password" \
@@ -496,7 +492,7 @@ probe_ch4() {
         t0="${EPOCHREALTIME}"
         # Inner timeout — stunclient waits forever with no Binding answer;
         # same in-container-leak guard as the Allocate probe above.
-        uclient_out=$(timeout 10 docker exec oxpulse-partner-coturn \
+        uclient_out=$(timeout 10 docker exec -u 0 oxpulse-partner-coturn \
             timeout 10 turnutils_stunclient "$probe_target" -p "$turn_port" \
             2>&1)
         exit_code=$?

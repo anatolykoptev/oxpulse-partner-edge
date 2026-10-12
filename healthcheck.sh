@@ -153,7 +153,7 @@ check "check_08_coturn_secret" "8. coturn secret matches config" bash -c '
 	expected=$(awk -F= "/^static-auth-secret=/ {print \$2; exit}" "'"$CONF_DIR"'/coturn.conf" || true)
 	[[ -z "$expected" ]] && exit 1
 	# Verify the running container loaded the same file (compare by size + head).
-	running=$(docker exec oxpulse-partner-coturn awk -F= "/^static-auth-secret=/ {print \$2; exit}" /etc/coturn/turnserver.conf 2>/dev/null || true)
+	running=$(docker exec -u 0 oxpulse-partner-coturn awk -F= "/^static-auth-secret=/ {print \$2; exit}" /etc/coturn/turnserver.conf 2>/dev/null || true)
 	[[ -n "$running" && "$running" = "$expected" ]]
 '
 
@@ -437,6 +437,18 @@ else
 	unset _ch_active_count _ch_failed_count _ch_total _ch_name _ch_status
 fi
 unset _chs_file
+
+# --- 22. coturn self-relay guard in force ---
+# coturn (network_mode: host, public credentials) must not be able to relay UDP to
+# the host's own services: nft table inet coturn_self_relay_guard + the reserved
+# relay-port range. RED when the table is absent (flushed by a firewalld reload /
+# nftables.service, nft missing) or the reservation is gone. `status` is the single
+# definition of "in force" (oxpulse-partner-edge-coturn-guard.sh).
+# check 21 ends without a newline; start this row on its own line.
+if [[ "$SNAPSHOT_MODE" -eq 0 ]]; then echo; fi
+_COTURN_GUARD_BIN="${OXPULSE_COTURN_GUARD_BIN:-${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-partner-edge-coturn-guard}"
+check "check_22_coturn_self_relay_guard" "22. coturn self-relay guard loaded" "$_COTURN_GUARD_BIN" status
+unset _COTURN_GUARD_BIN
 
 # In snapshot mode: always exit 0 (output is for diffing, not pass/fail signal).
 if [[ "$SNAPSHOT_MODE" -eq 1 ]]; then

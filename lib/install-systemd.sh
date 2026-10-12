@@ -116,6 +116,15 @@ _systemd_install_helper_scripts() {
 		curl -fsSL "$REPO_RAW/oxpulse-partner-edge-selfheal.sh" -o "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
 	fi
+
+	# coturn self-relay guard: nft OUTPUT table + relay-port sysctl reservation,
+	# applied by oxpulse-coturn-self-relay-guard.service before docker starts.
+	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-partner-edge-coturn-guard.sh" ]]; then
+		install -m 0755 "$src_dir/oxpulse-partner-edge-coturn-guard.sh" "$PREFIX_SBIN/oxpulse-partner-edge-coturn-guard"
+	else
+		curl -fsSL "$REPO_RAW/oxpulse-partner-edge-coturn-guard.sh" -o "$PREFIX_SBIN/oxpulse-partner-edge-coturn-guard"
+		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-coturn-guard"
+	fi
 }
 
 # Install channel-render-lib.sh, ghcr-auth-lib.sh, oxpulse-token-lib.sh
@@ -463,6 +472,15 @@ _systemd_install_units() {
 		fi
 	done
 
+	# coturn self-relay guard unit (script placed in PREFIX_SBIN by
+	# _systemd_install_helper_scripts)
+	unit=oxpulse-coturn-self-relay-guard.service
+	if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
+		install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
+	else
+		curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+	fi
+
 	_systemd_render_channel_health_dropin
 }
 
@@ -502,6 +520,8 @@ _systemd_install_xray_update_script() {
 _systemd_enable_units() {
 	systemctl daemon-reload
 	if [ "$BAKE_MODE" = "0" ]; then
+		# Guard BEFORE the edge unit: it must be loaded before coturn starts.
+		systemctl enable --now oxpulse-coturn-self-relay-guard.service
 		systemctl enable --now oxpulse-partner-edge.service
 		systemctl enable --now oxpulse-partner-cert-watch.path
 		systemctl enable --now oxpulse-partner-edge-refresh.timer
@@ -514,6 +534,7 @@ _systemd_enable_units() {
 		# Bake mode: enable hydrate so it fires on first boot after snapshot→clone.
 		# Do NOT start it now — secrets aren't present yet.
 		systemctl enable oxpulse-partner-edge-hydrate.service
+		systemctl enable oxpulse-coturn-self-relay-guard.service
 		systemctl enable oxpulse-partner-edge-refresh.timer
 		systemctl enable oxpulse-partner-edge-sni-rotate.timer
 		systemctl enable oxpulse-xray-update.timer
@@ -534,6 +555,7 @@ EXPECTED_SBIN_FILES=(
 	oxpulse-partner-edge-hydrate
 	oxpulse-partner-edge-refresh
 	oxpulse-partner-edge-sni-rotate
+	oxpulse-partner-edge-coturn-guard
 	oxpulse-channels-health-report
 	oxpulse-geoip-refresh
 	oxpulse-xray-update.sh

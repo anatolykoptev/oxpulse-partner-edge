@@ -547,6 +547,9 @@ jobs:
           # cp; only these two units do, exactly like the health-report pair above.
           cp systemd/oxpulse-partner-edge-selfheal.service     oxpulse-partner-edge-selfheal.service
           cp systemd/oxpulse-partner-edge-selfheal.timer       oxpulse-partner-edge-selfheal.timer
+          # coturn self-relay guard: the sbin script lives at repo root (no cp), only
+          # its unit needs staging.
+          cp systemd/oxpulse-coturn-self-relay-guard.service    oxpulse-coturn-self-relay-guard.service
           # Split-routing artifacts (PR #280): static unit + lib module + 3 sbin scripts.
           # The 3 sbin scripts (split-routing.sh, split-disable.sh, ru-subnets-update)
           # already live at repo root with the right name — no cp needed (same pattern as
@@ -648,6 +651,8 @@ jobs:
             oxpulse-partner-edge-selfheal.sh \
             oxpulse-partner-edge-selfheal.service \
             oxpulse-partner-edge-selfheal.timer \
+            oxpulse-partner-edge-coturn-guard.sh \
+            oxpulse-coturn-self-relay-guard.service \
             oxpulse-partner-edge-split-routing.sh \
             oxpulse-partner-edge-split-disable.sh \
             oxpulse-partner-edge-ru-subnets-update \
@@ -725,6 +730,8 @@ jobs:
             oxpulse-partner-edge-selfheal.sh \
             oxpulse-partner-edge-selfheal.service \
             oxpulse-partner-edge-selfheal.timer \
+            oxpulse-partner-edge-coturn-guard.sh \
+            oxpulse-coturn-self-relay-guard.service \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \

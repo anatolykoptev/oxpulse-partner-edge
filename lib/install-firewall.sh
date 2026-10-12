@@ -53,14 +53,19 @@
 _PE_FW_PUB_TCP=(22 80 443 18443 3478 5349)
 # Public UDP:
 _PE_FW_PUB_UDP=(443 18443 3478 5349 7878)
-# Public UDP RANGES — coturn/SFU ephemeral relay range for cascade-relay
-# RTP and RFC 7675 STUN consent-freshness traffic. Without this, peer-edge
-# consent packets (~104-128 byte UDP) get dropped at our INPUT chain,
-# causing silent mid-call disconnect at 25-35s on RU↔diaspora cross-TURN
-# routes. Evidence: edge-b /var/log/ufw.log* (2026-06-05 investigation,
+# Public UDP RANGES — coturn's relay port range, for cascade-relay RTP and RFC 7675
+# STUN consent-freshness traffic. Without this, peer-edge consent packets
+# (~104-128 byte UDP) get dropped at our INPUT chain, causing silent mid-call
+# disconnect at 25-35s on RU<->diaspora cross-TURN routes. Evidence: edge-b
+# /var/log/ufw.log* (2026-06-05 investigation,
 # reports/oxpulse-chat/research/2026-06-05-partner-edge-relay-disconnect-class.md).
-# Range matches coturn defaults (min-port=49152 max-port=65535).
-_PE_FW_PUB_UDP_RANGES=(49152:65535)
+# EXACTLY the range coturn.conf.tpl sets as min-port/max-port, and the range
+# oxpulse-partner-edge-coturn-guard reserves from the ephemeral pool
+# (net.ipv4.ip_local_reserved_ports) and lets the self-relay nft guard treat as
+# "a relay socket". Was 49152:65535, which overlapped the kernel ephemeral range
+# (32768-60999) — opening the upper part of the ephemeral pool to the internet and
+# making the guard's allow-range meaningless. tests/test_coturn_guard.sh pins the equality.
+_PE_FW_PUB_UDP_RANGES=(49152:49999)
 # Mesh-only TCP (sources restricted to 10.9.0.0/24):
 _PE_FW_MESH_TCP=(9317 8912)
 

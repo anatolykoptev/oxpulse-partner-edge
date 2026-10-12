@@ -84,8 +84,14 @@ EOF
 		SYSTEMD_DIR='$TMP/systemd' \
 		bash '$HEALTHCHECK' --local 2>/dev/null
 	" || true
-	# Check 21 line: should be WARN (degraded) or OK, not FAIL
-	[[ "$output" != *"21."*"FAIL"* ]]
+	# Check 21 line: should be WARN (degraded) or OK, not FAIL. Look at the "21."
+	# line itself - a glob across the whole output also matches a FAIL printed by a
+	# LATER check (22. coturn self-relay guard, which is legitimately RED in this
+	# sandbox: no nft table).
+	local line21
+	line21=$(grep -a -m1 -F "21." <<<"$output" || true)
+	[[ -n "$line21" ]]
+	[[ "$line21" != *"FAIL"* ]]
 }
 
 # ---------------------------------------------------------------------------

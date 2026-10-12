@@ -150,6 +150,7 @@ ENABLE_UNITS=(
 	oxpulse-xray-update.timer
 	oxpulse-geoip-refresh.timer
 	oxpulse-channels-health-report.timer
+	oxpulse-coturn-self-relay-guard.service
 )
 
 # Per-tick cap on systemd actions. A unit restart BLOCKS (a Type=oneshot runs to

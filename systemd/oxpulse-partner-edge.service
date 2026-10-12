@@ -2,8 +2,8 @@
 Description=OxPulse partner-edge bundle (caddy + xray-client + coturn)
 Documentation=https://github.com/anatolykoptev/oxpulse-partner-edge
 Requires=docker.service
-After=docker.service network-online.target
-Wants=network-online.target
+After=docker.service network-online.target oxpulse-coturn-self-relay-guard.service
+Wants=network-online.target oxpulse-coturn-self-relay-guard.service
 
 [Service]
 Type=oneshot
