@@ -117,6 +117,13 @@ if [[ -z "${_OXPULSE_UPGRADE_LOGGING:-}" && "$UPGRADE_LOG" != "none" ]]; then
 fi
 
 PREFIX_ETC="${OXPULSE_PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+
+# Reverse guard: a relay-only node (relay/install-relay.sh) must never be turned
+# into a full edge by running the register path on it.
+if [[ -e "${PREFIX_ETC}/relay.env" ]]; then
+	printf 'ERR %s is a relay-only node (%s/relay.env exists). Do not run %s here: it would register the host and write fleet material. See docs/relay-only-node.md.\n' "$(hostname 2>/dev/null || echo this host)" "${PREFIX_ETC}" "$(basename "$0")" >&2
+	exit 1
+fi
 PREFIX_LIB="${OXPULSE_PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
 PREFIX_SBIN="${OXPULSE_PREFIX_SBIN:-/usr/local/sbin}"
 PREFIX_BIN="${OXPULSE_PREFIX_BIN:-/usr/local/bin}"

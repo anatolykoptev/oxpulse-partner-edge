@@ -7,7 +7,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use super::{render_to_file, render_to_file_pre, secret_file, RenderError};
+use super::{render_string_pre, render_to_file, secret_file, write_atomic, RenderError};
 
 /// Render coturn.conf from `src` template into `dst`. After substitution,
 /// asserts that a non-empty `realm=<value>` line is present. coturn silently
@@ -35,7 +35,7 @@ pub fn render(src: &Path, dst: &Path) -> Result<()> {
 pub fn render_with_secret_file(src: &Path, dst: &Path, secret_path: &Path) -> Result<()> {
     let secrets = secret_file::read_node_secrets(secret_path)?;
     let lines = secret_file::secret_lines(&secrets);
-    let rendered = render_to_file_pre(src, dst, |tpl| {
+    let rendered = render_string_pre(src, dst, |tpl| {
         tpl.replace(
             secret_file::SECRET_LINES_PLACEHOLDER,
             lines.trim_end_matches('\n'),
@@ -55,7 +55,9 @@ pub fn render_with_secret_file(src: &Path, dst: &Path, secret_path: &Path) -> Re
         }
         .into());
     }
-    check_realm(&rendered)
+    // Validate fully BEFORE writing: a refused render leaves no file behind.
+    check_realm(&rendered)?;
+    write_atomic(dst, &rendered)
 }
 
 fn check_realm(rendered: &str) -> Result<()> {

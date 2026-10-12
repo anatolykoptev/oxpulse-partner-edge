@@ -21,14 +21,13 @@ use-auth-secret
 # ─── Capacity (1 vCPU / 2 GB class box) ─────────────────────────────────
 total-quota=150
 user-quota=16
-max-bps=250000
+# ~5 Mbit/s per allocation (bytes/s): HD video headroom.
+max-bps=625000
 bps-capacity=25000000
 stale-nonce=600
 max-allocate-lifetime=120
-allocation-default-timeout=120
 
 # ─── Peer policy ────────────────────────────────────────────────────────
-no-loopback-peers
 no-multicast-peers
 no-tcp-relay
 no-rfc5780
@@ -52,6 +51,10 @@ denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255
 denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 denied-peer-ip=ff00::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+# Unspecified, NAT64 and 6to4: reach v4 space through a translator.
+denied-peer-ip=::
+denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff
+denied-peer-ip=2002::-2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 
 # ─── Relay port range (matches the relay firewall rule set and the guard) ─
 min-port=49152

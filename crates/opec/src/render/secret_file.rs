@@ -6,7 +6,12 @@
 //! Every error names the rule and the line NUMBER — never the line itself.
 
 use anyhow::{bail, Context, Result};
-use std::{fs, os::unix::fs::MetadataExt, path::Path};
+use std::{
+    fs::OpenOptions,
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::Path,
+};
 
 /// Placeholder in a template, replaced by one `static-auth-secret=` line per secret.
 pub const SECRET_LINES_PLACEHOLDER: &str = "{{STATIC_AUTH_SECRET_LINES}}";
@@ -17,24 +22,41 @@ pub const MAX_SECRETS: usize = 2;
 
 /// Read and validate `path`; returns the secrets in file order.
 ///
-/// The file must be a regular non-symlink, mode exactly 0600, owned by the user
-/// running opec (root in the installer), and hold 1..=2 distinct valid lines.
+/// The file is opened ONCE with O_NOFOLLOW and every check runs on that file
+/// descriptor, so a swap between check and read cannot change what is read.
+/// It must be a regular file, mode exactly 0600, a single hard link, owned by
+/// the effective user running opec (root in the installer), and hold 1..=2
+/// distinct valid lines.
 pub fn read_node_secrets(path: &Path) -> Result<Vec<String>> {
-    let meta = fs::symlink_metadata(path)
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "secret file {}: cannot open (missing, or a symlink, which is refused)",
+                path.display()
+            )
+        })?;
+    let meta = file
+        .metadata()
         .with_context(|| format!("secret file {}: cannot stat", path.display()))?;
     if !meta.file_type().is_file() {
-        bail!(
-            "secret file {}: not a regular file (symlinks are refused)",
-            path.display()
-        );
+        bail!("secret file {}: not a regular file", path.display());
     }
     let mode = meta.mode() & 0o7777;
     if mode != 0o600 {
         bail!("secret file {}: mode {:o}, want 600", path.display(), mode);
     }
-    // The uid that owns files this process creates is the process euid; an
-    // anonymous tempfile gives it without a libc dependency.
-    let euid = tempfile::tempfile()?.metadata()?.uid();
+    if meta.nlink() != 1 {
+        bail!(
+            "secret file {}: {} hard links, want 1",
+            path.display(),
+            meta.nlink()
+        );
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
     if meta.uid() != euid {
         bail!(
             "secret file {}: owner uid {}, want {} (the user running opec)",
@@ -43,7 +65,8 @@ pub fn read_node_secrets(path: &Path) -> Result<Vec<String>> {
             euid
         );
     }
-    let text = fs::read_to_string(path)
+    let mut text = String::new();
+    file.read_to_string(&mut text)
         .with_context(|| format!("secret file {}: unreadable or not UTF-8", path.display()))?;
     parse_secrets(&text).with_context(|| format!("secret file {}", path.display()))
 }

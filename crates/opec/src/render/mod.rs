@@ -71,6 +71,18 @@ pub fn render_to_file_pre(
     dst: &Path,
     pre: impl FnOnce(String) -> String,
 ) -> Result<String> {
+    let rendered = render_string_pre(src, dst, pre)?;
+    write_atomic(dst, &rendered)?;
+    Ok(rendered)
+}
+
+/// Substitute without writing, so a caller can validate BEFORE anything lands
+/// on disk. `dst` is only checked for a usable parent directory.
+pub fn render_string_pre(
+    src: &Path,
+    dst: &Path,
+    pre: impl FnOnce(String) -> String,
+) -> Result<String> {
     if !src.is_file() {
         return Err(RenderError::SrcMissing(src.to_path_buf()).into());
     }
@@ -78,11 +90,14 @@ pub fn render_to_file_pre(
     if !dst_dir.is_dir() {
         return Err(RenderError::DstDirMissing(dst_dir.to_path_buf()).into());
     }
-
     let tpl =
         fs::read_to_string(src).with_context(|| format!("reading template {}", src.display()))?;
-    let rendered = substitute_from_env(&pre(tpl));
+    Ok(substitute_from_env(&pre(tpl)))
+}
 
+/// Write `rendered` to `dst` via a same-directory tmp file and an atomic rename.
+pub fn write_atomic(dst: &Path, rendered: &str) -> Result<()> {
+    let dst_dir = dst.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp = tempfile::Builder::new()
         .prefix(&format!(
             ".{}.",
@@ -97,6 +112,5 @@ pub fn render_to_file_pre(
     tmp.flush()?;
     tmp.persist(dst)
         .with_context(|| format!("rename tmp to {}", dst.display()))?;
-
-    Ok(rendered)
+    Ok(())
 }

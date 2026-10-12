@@ -6,8 +6,10 @@
 #
 # NO /api/partner/register, NO node-config, NO credential-refresh timer, NO
 # caddy/xray/hy2/naive/SFU/AWG/docker. The node holds only its own per-node TURN
-# secret (written by the operator to /etc/oxpulse-partner-edge/node-secret) and
-# a node-scoped service token (service-token) for the liveness heartbeat.
+# secret (written by the operator to /etc/oxpulse-partner-edge/node-secret) plus
+# a service token (service-token) for the liveness heartbeat. CAUTION: on the
+# central side that token is not yet limited to heartbeats; it also authorises
+# the node-config endpoint for this node id (a fix is pending in oxpulse-chat).
 # Fails closed when any registration material is present on the host.
 #
 # Idempotent. Run from a checkout/release tree: it reuses lib/firewall-lib.sh and
@@ -21,6 +23,10 @@ PREFIX_ETC="${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
 LIB_DST="${RELAY_LIB_DIR:-/usr/local/lib/oxpulse-relay}"
 SBIN="${PREFIX_SBIN:-/usr/local/sbin}"
 UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
+OPEC_DST="${OPEC_DST:-/usr/bin/opec}"
+SYSCTL_DIR="${SYSCTL_DIR:-/etc/sysctl.d}"
+LE_DIR="${LE_DIR:-/etc/letsencrypt}"
+RESERVED_PORTS_FILE="${RESERVED_PORTS_FILE:-/proc/sys/net/ipv4/ip_local_reserved_ports}"
 RELAY_HOSTNAME="" PUBLIC_IP="" NODE_ID="" ACME_EMAIL="" TLS_OK=1
 
 log()  { printf '\033[32m==>\033[0m %s\n' "$*" >&2; }
@@ -50,48 +56,65 @@ relay_parse_args() {
 }
 
 relay_install_packages() {
-	[[ -r /etc/os-release ]] && . /etc/os-release
+	# shellcheck source=/dev/null
+	[[ -r "${OS_RELEASE_PATH:-/etc/os-release}" ]] && . "${OS_RELEASE_PATH:-/etc/os-release}"
 	case " ${ID:-} ${ID_LIKE:-} " in *" debian "*|*" ubuntu "*) ;; *) die "relay profile supports Debian/Ubuntu only" ;; esac
 	export DEBIAN_FRONTEND=noninteractive
-	apt-get update -qq
-	apt-get install -y -qq coturn certbot jq curl python3 ufw chrony >/dev/null
-	# The package's own unit would run coturn on /etc/turnserver.conf, outside this profile.
-	systemctl disable --now coturn.service >/dev/null 2>&1 || true
+	# Mask the package unit BEFORE installing so the package's postinst can never
+	# start coturn on /etc/turnserver.conf (masking works on a not-yet-installed unit).
 	systemctl mask coturn.service >/dev/null 2>&1 || true
-	log "packages present (coturn certbot jq curl python3 ufw chrony); package coturn.service masked"
+	apt-get update -qq
+	apt-get install -y -qq coturn nftables openssl certbot jq curl python3 ufw chrony >/dev/null
+	log "packages present (coturn nftables openssl certbot jq curl python3 ufw chrony); package coturn.service masked"
+}
+
+# relay_opec_supports <bin> — the binary must know the relay subcommands; an
+# older opec would otherwise accept the flags silently or fail at start time.
+relay_opec_supports() {
+	"$1" check-node-secret --help >/dev/null 2>&1 \
+		&& "$1" render coturn --help 2>&1 | grep -q -- '--secret-file'
 }
 
 relay_ensure_opec() {
-	command -v opec >/dev/null 2>&1 && [[ "$(command -v opec)" == /usr/bin/opec ]] && return 0
-	local arch asset base tmp sums
+	if [[ -x "${OPEC_DST}" ]] && relay_opec_supports "${OPEC_DST}"; then return 0; fi
+	local arch asset ver base tmp sums fetched=0
 	case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) die "opec: unsupported arch $(uname -m)" ;; esac
 	asset="opec-${arch}"
 	if [[ -f "${REPO_DIR}/${asset}" ]]; then
-		install -m 0755 "${REPO_DIR}/${asset}" /usr/bin/opec
+		install -m 0755 "${REPO_DIR}/${asset}" "${OPEC_DST}"
 		log "opec installed from ${REPO_DIR}/${asset}"
-		return 0
+	else
+		ver="$(awk '{print $1; exit}' "${REPO_DIR}/VERSION" 2>/dev/null || true)"
+		tmp="$(mktemp -d)"; trap 'rm -rf "${tmp}"' RETURN
+		# Prefer the binary released with THIS tree; only fall back to latest.
+		for base in ${ver:+"https://github.com/anatolykoptev/oxpulse-partner-edge/releases/download/v${ver}"} \
+			"https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download"; do
+			if curl -fsSL --proto '=https' --tlsv1.2 --max-time 120 "${base}/${asset}" -o "${tmp}/${asset}" \
+				&& curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "${base}/SHA256SUMS" -o "${tmp}/SHA256SUMS"; then
+				fetched=1; break
+			fi
+		done
+		[[ "$fetched" == 1 ]] || die "opec download failed; place ${asset} next to the checkout or put a current opec at ${OPEC_DST}"
+		sums="$(awk -v a="$asset" '$2 == a || $2 == "./" a { print $1 "  " a; exit }' "${tmp}/SHA256SUMS")"
+		[[ -n "$sums" ]] || die "opec: ${asset} not listed in SHA256SUMS; refusing an unverified binary"
+		(cd "$tmp" && printf '%s\n' "$sums" | sha256sum -c --quiet) || die "opec checksum mismatch"
+		install -m 0755 "${tmp}/${asset}" "${OPEC_DST}"
+		log "opec installed (checksum verified)"
 	fi
-	base="https://github.com/anatolykoptev/oxpulse-partner-edge/releases/latest/download"
-	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp}"' RETURN
-	curl -fsSL --proto '=https' --tlsv1.2 --max-time 120 "${base}/${asset}" -o "${tmp}/${asset}" \
-		&& curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 "${base}/SHA256SUMS" -o "${tmp}/SHA256SUMS" \
-		|| die "opec download failed; place ${asset} next to the checkout or put opec at /usr/bin/opec"
-	sums="$(awk -v a="$asset" '$2 == a || $2 == "./" a { print $1 "  " a; exit }' "${tmp}/SHA256SUMS")"
-	[[ -n "$sums" ]] || die "opec: ${asset} not listed in SHA256SUMS; refusing an unverified binary"
-	(cd "$tmp" && printf '%s\n' "$sums" | sha256sum -c --quiet) || die "opec checksum mismatch"
-	install -m 0755 "${tmp}/${asset}" /usr/bin/opec
-	log "opec installed (checksum verified)"
+	relay_opec_supports "${OPEC_DST}" \
+		|| die "${OPEC_DST} lacks 'check-node-secret' / 'render coturn --secret-file' (too old); install an opec from this tree's release"
 }
 
 relay_install_files() {
-	install -d -m 0755 "${LIB_DST}" "${SBIN}"
+	install -d -m 0755 "${LIB_DST}" "${SBIN}" "${UNIT_DIR}" "${SYSCTL_DIR}"
 	install -d -m 0750 -o root -g turnserver "${PREFIX_ETC}"
 	install -m 0644 "${HERE}/relay-lib.sh" "${REPO_DIR}/lib/firewall-lib.sh" "${REPO_DIR}/lib/channel-health-lib.sh" "${LIB_DST}/"
 	install -m 0755 "${HERE}/oxpulse-relay-apply.sh" "${SBIN}/oxpulse-relay-apply"
+	install -m 0755 "${HERE}/oxpulse-relay-prestart.sh" "${SBIN}/oxpulse-relay-prestart"
 	install -m 0755 "${HERE}/oxpulse-relay-health-report.sh" "${SBIN}/oxpulse-relay-health-report.sh"
 	install -m 0644 "${HERE}/coturn-relay.conf.tpl" "${PREFIX_ETC}/coturn-relay.conf.tpl"
 	install -m 0644 "${HERE}/coturn-self-relay-guard.nft" "${PREFIX_ETC}/coturn-self-relay-guard.nft"
-	install -m 0644 "${HERE}/99-coturn-relay-ports.conf" /etc/sysctl.d/99-coturn-relay-ports.conf
+	install -m 0644 "${HERE}/99-coturn-relay-ports.conf" "${SYSCTL_DIR}/99-coturn-relay-ports.conf"
 	local u
 	for u in oxpulse-relay-coturn.service oxpulse-relay-health.service oxpulse-relay-health.timer coturn-self-relay-guard.service; do
 		install -m 0644 "${HERE}/${u}" "${UNIT_DIR}/${u}"
@@ -104,10 +127,11 @@ relay_install_files() {
 }
 
 relay_install_guard() {
-	sysctl -q -p /etc/sysctl.d/99-coturn-relay-ports.conf
+	sysctl -q -p "${SYSCTL_DIR}/99-coturn-relay-ports.conf"
 	systemctl enable coturn-self-relay-guard.service >/dev/null 2>&1
 	systemctl reload-or-restart coturn-self-relay-guard.service
-	log "self-relay guard active; reserved $(cat /proc/sys/net/ipv4/ip_local_reserved_ports)"
+	relay_assert_relay_range_clean
+	log "self-relay guard active; reserved $(cat "${RESERVED_PORTS_FILE}")"
 }
 
 relay_dns_points_here() {
@@ -115,9 +139,9 @@ relay_dns_points_here() {
 }
 
 relay_setup_tls() {
-	local certdir="${PREFIX_ETC}/relay-certs" hook=/etc/letsencrypt/renewal-hooks/deploy/oxpulse-relay-coturn.sh
+	local certdir="${PREFIX_ETC}/relay-certs" hook="${LE_DIR}/renewal-hooks/deploy/oxpulse-relay-coturn.sh"
 	install -d -m 0750 -o root -g turnserver "${certdir}"
-	install -d /etc/letsencrypt/renewal-hooks/deploy
+	install -d "${LE_DIR}/renewal-hooks/deploy"
 	cat > "${hook}" <<HOOK
 #!/bin/bash
 # certbot deploy hook (installed by install-relay.sh): hand the renewed cert to coturn.
@@ -132,13 +156,13 @@ HOOK
 		warn "TLS skipped: ${RELAY_HOSTNAME} does not resolve to ${PUBLIC_IP}. Create the A record, then re-run."
 		TLS_OK=0; return 0
 	fi
-	if [[ ! -d "/etc/letsencrypt/live/${RELAY_HOSTNAME}" ]]; then
+	if [[ ! -d "${LE_DIR}/live/${RELAY_HOSTNAME}" ]]; then
 		local mail=(--register-unsafely-without-email)
 		[[ -z "$ACME_EMAIL" ]] || mail=(-m "$ACME_EMAIL")
 		certbot certonly --standalone --non-interactive --agree-tos "${mail[@]}" -d "${RELAY_HOSTNAME}" \
 			|| { warn "certbot could not issue for ${RELAY_HOSTNAME}"; TLS_OK=0; return 0; }
 	fi
-	RENEWED_LINEAGE="/etc/letsencrypt/live/${RELAY_HOSTNAME}" bash "${hook}"
+	RENEWED_LINEAGE="${LE_DIR}/live/${RELAY_HOSTNAME}" bash "${hook}"
 	systemctl enable --now certbot.timer >/dev/null 2>&1 || true
 	log "certificate deployed to ${certdir}; renewal via certbot.timer"
 }

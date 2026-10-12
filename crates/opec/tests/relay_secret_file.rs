@@ -172,7 +172,6 @@ fn render_relay_profile_directives() {
         "tls-listening-port=443",
         "no-cli",
         "no-tcp-relay",
-        "no-loopback-peers",
         "no-multicast-peers",
         "min-port=49152",
         "max-port=65535",
@@ -249,4 +248,45 @@ fn relay_template_denies_every_range_the_full_edge_template_denies() {
     for d in denied(root.join("coturn.conf.tpl")) {
         assert!(relay.contains(&d), "relay template lost {d}");
     }
+}
+
+#[test]
+fn hard_linked_secret_file_is_refused() {
+    let d = tempfile::tempdir().unwrap();
+    let real = write_secret(d.path(), &format!("{S1}\n"), 0o600);
+    fs::hard_link(&real, d.path().join("alias")).unwrap();
+    check(&real)
+        .failure()
+        .stderr(predicates::str::contains("hard links"));
+}
+
+#[test]
+fn render_with_template_lacking_the_placeholder_fails_and_writes_nothing() {
+    // Without the placeholder the secret lines would silently not land in the
+    // config; coturn would then run with no auth secret.
+    let d = tempfile::tempdir().unwrap();
+    let sec = write_secret(d.path(), &format!("{S1}\n{S2}\n"), 0o600);
+    let no_ph = d.path().join("no-placeholder.tpl");
+    let body = fs::read_to_string(tpl())
+        .unwrap()
+        .replace("{{STATIC_AUTH_SECRET_LINES}}", "");
+    fs::write(&no_ph, body).unwrap();
+    let out = d.path().join("coturn.conf");
+    Command::cargo_bin("opec")
+        .unwrap()
+        .env("RELAY_HOSTNAME", "relay.example.org")
+        .env("EXTERNAL_IP", "203.0.113.10")
+        .args(["render", "coturn", "--tpl"])
+        .arg(&no_ph)
+        .arg("--out")
+        .arg(&out)
+        .arg("--secret-file")
+        .arg(&sec)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("static-auth-secret line"));
+    assert!(
+        !out.exists(),
+        "a config without auth secrets must not be written"
+    );
 }
