@@ -60,7 +60,7 @@ async fn start() -> String {
     format!("ws://{addr}/sfu/ws/ROOM-1")
 }
 
-async fn handshake(url: &str, token: &str) -> Result<StatusCode, WsError> {
+async fn handshake(url: &str, token: &str) -> Result<StatusCode, Box<WsError>> {
     let mut req = url.into_client_request().unwrap();
     req.headers_mut().insert(
         "sec-websocket-protocol",
@@ -77,10 +77,11 @@ async fn handshake(url: &str, token: &str) -> Result<StatusCode, WsError> {
     .await
     .expect("handshake within 2s")
     .map(|(_ws, resp)| resp.status())
+    .map_err(Box::new)
 }
 
-fn assert_401(r: Result<StatusCode, WsError>, what: &str) {
-    match r {
+fn assert_401(r: Result<StatusCode, Box<WsError>>, what: &str) {
+    match r.map_err(|e| *e) {
         Err(WsError::Http(resp)) => assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{what}"),
         other => panic!("{what}: expected Http(401), got {other:?}"),
     }
