@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.31](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.30...v0.16.31) (2026-10-12)
+
+
+### Bug Fixes
+
+* **xray:** pin uTLS fingerprint to chrome; detect REALITY auth wedge ([#664](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/664)) ([88a5981](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/88a5981425ee0bc20b598333a9fd4a20a0d0e619))
+
 ## [0.16.30](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.29...v0.16.30) (2026-10-12)
 
 
