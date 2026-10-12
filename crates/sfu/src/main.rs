@@ -106,6 +106,18 @@ async fn main() -> anyhow::Result<()> {
     let trace_provider =
         telemetry::init(&config.log_level, &edge_id, &partner_id).context("init telemetry")?;
 
+    // SEC-CR-011: iss/aud binding for room tokens. A malformed flag or an
+    // empty issuer list under SFU_REQUIRE_TOKEN_BINDING=1 aborts startup —
+    // a security flag must never silently degrade to "off".
+    let token_policy = oxpulse_sfu::room_auth::RoomTokenPolicy::from_env()
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("room token policy")?;
+    tracing::info!(
+        require_token_binding = token_policy.require_binding(),
+        "room token binding policy active"
+    );
+    oxpulse_sfu::room_auth::init_policy(token_policy).map_err(|e| anyhow::anyhow!(e))?;
+
     // M4.A6 - parse_public_ip_env() emitted any warning *before* the
     // subscriber was initialized, so re-check here for visibility.
     if let Ok(raw) = std::env::var("SFU_PUBLIC_IP") {

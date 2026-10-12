@@ -69,6 +69,16 @@ grep -q '{{SFU_UDP_PORT}}' "$TPL" \
 grep -q 'caddy' "$TPL" \
     || { echo "FAIL: sfu service missing depends_on: caddy"; exit 1; }
 
+# 6d. SEC-CR-011 room-token binding env: issuer allow-list + audience wired, and
+#     the require flag ships OFF (flipping it is a deliberate rollout step 4 —
+#     defaulting it on would break calls until central mints iss+aud).
+grep -qE '^[[:space:]]*SFU_ROOM_TOKEN_ISSUERS: "oxpulse-chat"' "$TPL" \
+    || { echo "FAIL: compose template missing SFU_ROOM_TOKEN_ISSUERS"; exit 1; }
+grep -qE '^[[:space:]]*SFU_ROOM_TOKEN_AUDIENCE: "oxpulse-sfu"' "$TPL" \
+    || { echo "FAIL: compose template missing SFU_ROOM_TOKEN_AUDIENCE"; exit 1; }
+grep -qE '^[[:space:]]*SFU_REQUIRE_TOKEN_BINDING: "0"' "$TPL" \
+    || { echo "FAIL: SFU_REQUIRE_TOKEN_BINDING must default to \"0\" in compose template"; exit 1; }
+
 # 7. Dockerfile.sfu exists and targets oxpulse-sfu binary.
 [ -f "$DOCKERFILE" ] \
     || { echo "FAIL: $DOCKERFILE missing"; exit 1; }

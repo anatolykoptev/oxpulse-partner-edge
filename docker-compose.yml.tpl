@@ -206,6 +206,16 @@ services:
       # room JWTs and refuses to expose an unauthenticated entry point.
       SFU_CLIENT_WS_PORT: "8920"
       SIGNALING_SFU_SECRET: "{{SIGNALING_SFU_SECRET}}"
+      # SEC-CR-011 room-token issuer/audience binding. The SFU always validates
+      # `iss`/`aud` when a token carries them (a foreign `iss` is rejected even
+      # now); SFU_REQUIRE_TOKEN_BINDING additionally REQUIRES both. Keep "0"
+      # until central signaling mints `aud` fleet-wide (rollout: SFU release ->
+      # signaling mints iss -> signaling mints aud -> flip to "1"; see
+      # oxpulse-chat docs/architecture/system-overview.md § Room-token binding).
+      # Flipping needs SFU_ROOM_TOKEN_ISSUERS non-empty or the SFU refuses to start.
+      SFU_ROOM_TOKEN_ISSUERS: "oxpulse-chat"
+      SFU_ROOM_TOKEN_AUDIENCE: "oxpulse-sfu"
+      SFU_REQUIRE_TOKEN_BINDING: "0"
       # Phase 7 M4.A6 — public IP advertised in WebRTC host candidates.
       # Without this the SFU emits `0.0.0.0:N` host candidates (the bind
       # address) and off-box browsers cannot complete ICE. The value

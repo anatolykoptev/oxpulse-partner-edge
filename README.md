@@ -207,6 +207,9 @@ Configured via `SFU_*` entries in `/etc/oxpulse-partner-edge/sfu-extra.env` (per
 | `SFU_PUBLIC_IP` | (set by installer) | Public IPv4 advertised in WebRTC ICE host candidates |
 | `SIGNALING_SFU_SECRET` | (set by installer) | HS256 shared secret for browser room-JWT verification |
 | `SFU_SIGNING_PUBLIC_KEY` | (auto-fetched, refreshed daily) | Ed25519 public key for relay JWT verification |
+| `SFU_ROOM_TOKEN_ISSUERS` | `oxpulse-chat` (compose) | Comma list of accepted room-token `iss` values (SEC-CR-011). A token carrying any other `iss` is rejected |
+| `SFU_ROOM_TOKEN_AUDIENCE` | `oxpulse-sfu` | Room-token `aud` this SFU accepts. A token carrying a different `aud` is rejected |
+| `SFU_REQUIRE_TOKEN_BINDING` | `0` | `1`/`true` makes `iss` + `aud` mandatory. Flip only after central mints both fleet-wide; empty `SFU_ROOM_TOKEN_ISSUERS` with `1` aborts startup, as does an unrecognised value |
 | `STR0M_STATS_INTERVAL_SECS` | `2` | str0m PeerStats/MediaStats event cadence (0 disables) |
 | `SFU_SOLO_KICK_AFTER_SECS` | `120` | How long a 1-participant room persists before the lone peer is disconnected (0 disables) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (set if mesh enabled) | OTLP traces export — typically `http://10.9.0.2:4317` over awg0 |
