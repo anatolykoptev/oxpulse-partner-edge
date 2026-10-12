@@ -98,8 +98,10 @@ denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 # denied-peer-ip 10.0.0.0/8 block above to its own relay address, and same-edge
 # relaying fails ("channel bind: error 403 Forbidden IP") — two relay-forced
 # clients on one edge, and client -> co-located SFU via TURN (the peer is mapped to
-# the relay address). Never any other address: a second allowed-peer-ip is SSRF
-# into the VPC, which the nft guard (local addresses only) does not cover.
+# the relay address). Never any other address: nothing relays from a secondary
+# local IP, and a non-local one would be SSRF to that host, which the nft guard
+# (local addresses only) does not cover. The address must be LOCAL: the guard's conf
+# migration and `status` refuse a stale (non-local) one.
 # What coturn may then SEND to its own address is decided by the host nft table
 # coturn_self_relay_guard (oxpulse-partner-edge-coturn-guard, keyed on this
 # container's fixed uid): the SFU media port and the relay range, nothing else —

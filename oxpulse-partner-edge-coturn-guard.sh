@@ -73,7 +73,7 @@
 # range, and no foreign UDP socket inside the relay range.
 #
 # Env (tests / operator overrides): SFU_UDP_PORT, ETC_DIR, SYSCTL_DIR, NFT,
-# SYSCTL_BIN, SS_BIN, COMPOSE_FILE, COTURN_CONF, PROC_DIR, RESERVED_PORTS_FILE, PGREP_BIN, DOCKER_BIN,
+# SYSCTL_BIN, SS_BIN, IP_BIN, COMPOSE_FILE, COTURN_CONF, PROC_DIR, RESERVED_PORTS_FILE, PGREP_BIN, DOCKER_BIN,
 # FIREWALL_CMD, UFW_BIN, NFT_INSTALL=0 (do not try to install nftables).
 set -euo pipefail
 
@@ -108,6 +108,7 @@ PROC_DIR="${PROC_DIR:-/proc}"
 RESERVED_PORTS_FILE="${RESERVED_PORTS_FILE:-/proc/sys/net/ipv4/ip_local_reserved_ports}"
 PGREP_BIN="${PGREP_BIN:-pgrep}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
+IP_BIN="${IP_BIN:-ip}"
 FIREWALL_CMD="${FIREWALL_CMD:-firewall-cmd}"
 UFW_BIN="${UFW_BIN:-ufw}"
 CONF_CHANGED=0
@@ -241,16 +242,38 @@ conf_own_addr() {
 		END { print (r != "" ? r : e) }' "$1" 2>/dev/null || true
 }
 
+# Is ADDR configured on a local interface right now? The "own relay address" comes
+# from the conf (or STATE), which can be stale (re-IP, a carried-over value, the wrong
+# NIC picked). Allowing coturn to relay to a NON-local address is not covered by the
+# nft guard (it only matches `fib daddr type local`): it would be SSRF to every UDP
+# port on that host, reported green. Fails closed: no `ip`, or no match -> not local.
+addr_is_local() {
+	command -v "$IP_BIN" >/dev/null 2>&1 || return 1
+	"$IP_BIN" -o addr show 2>/dev/null | awk -v a="$1" '
+		{ for (i = 1; i <= NF; i++) if ($i == "inet" || $i == "inet6") { x = $(i + 1); sub(/\/.*/, "", x); if (x == a) f = 1 } }
+		END { exit !f }'
+}
+
+# Candidate own addresses the conf declares: relay-ip= and the private half of
+# external-ip= (one per line). Every one of them must be a local address.
+conf_candidate_addrs() {
+	awk -F= '
+		$1 == "relay-ip" && $2 != "" { print $2 }
+		$1 == "external-ip" { if (split($2, a, "/") == 2 && a[2] != "") print a[2] }' "$1" 2>/dev/null || true
+}
+
 # Rewrite the LIVE coturn.conf to the guard's contract:
 #   * min-port/max-port = RELAY_MIN/RELAY_MAX (appended if absent — coturn's default
 #     is 49152-65535);
 #   * allowed-peer-ip: EXACTLY ONE line, this host's own relay address (conf_own_addr),
 #     kept in place if already there, else emitted after relay-ip=/external-ip=; every
-#     other allowed-peer-ip is dropped (a foreign VPC host there is SSRF the nft guard,
-#     which only covers local addresses, cannot stop). Deleting the own address too
+#     other allowed-peer-ip is dropped (a second local address such as a secondary
+#     private IP is not a relay address and is not needed; a non-local one would be
+#     SSRF the nft guard, which only covers local addresses, cannot stop). Deleting the own address too
 #     was the v0.16.29 regression: denied-peer-ip 10.0.0.0/8 then blocks coturn's own
 #     relay address and same-edge relaying fails with 403 Forbidden IP. No own address
-#     (public-NIC edge) -> none;
+#     (public-NIC edge) -> none; an own address that is NOT configured on a local
+#     interface is stale: no allowed-peer-ip at all, loudly (fail closed);
 #   * mode 0600 (the file carries static-auth-secret).
 # Every other line (static-auth-secret x1..2, cert paths, ...) passes through
 # untouched; no content is ever printed. Atomic (temp file in the same dir cloned
@@ -262,6 +285,10 @@ migrate_conf() {
 	[[ -f "$COTURN_CONF" ]] || return 0
 	local tmp own anchor haveown mode
 	own=$(conf_own_addr "$COTURN_CONF")
+	if [[ -n "$own" ]] && ! addr_is_local "$own"; then
+		warn "${COTURN_CONF}: relay address '${own}' is NOT a local address on this host (stale conf/STATE, re-IP?) - allowed-peer-ip dropped, same-edge relaying stays broken until the conf is corrected (guard status goes red)"
+		own=""
+	fi
 	anchor=external-ip
 	if awk -F= '$1 == "relay-ip" { f = 1 } END { exit !f }' "$COTURN_CONF"; then anchor=relay-ip; fi
 	haveown=0
@@ -410,9 +437,14 @@ cmd_status() {
 
 	# (b2) allowed-peer-ip must be exactly this host's own relay address when it has one
 	# (missing -> coturn's 10/8 deny blocks same-edge relaying, 403 Forbidden IP) and
-	# nothing else (a foreign VPC host is SSRF the nft guard does not cover).
+	# nothing else (any other address is an unneeded allowance; a non-local one is SSRF
+	# the nft guard does not cover), and that address must be LOCAL (a stale one is SSRF).
 	if [[ -f "$COTURN_CONF" ]]; then
-		local own allowed
+		local own allowed cand
+		for cand in $(conf_candidate_addrs "$COTURN_CONF"); do
+			addr_is_local "$cand" \
+				|| { echo "${COTURN_CONF}: relay address '${cand}' is not a local address on this host (stale conf/STATE?) - allowing it would be SSRF to that host" >&2; return 1; }
+		done
 		own=$(conf_own_addr "$COTURN_CONF")
 		allowed=$(awk '/^allowed-peer-ip=/' "$COTURN_CONF" 2>/dev/null || true)
 		if [[ -n "$own" ]]; then
