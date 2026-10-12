@@ -37,7 +37,7 @@ _plain_block() {
 	# the renderer (reused, not reimplemented): writes the CURRENT template's config
 	echo 're_render_xray(){ printf "%s\n" "$RENDER_OUTPUT" > "$XRAY_CFG"; echo render >> "'"$TC"'/order"; }'
 	echo 'resolve_pulled_digests(){ return 0; }'
-	echo 'recreate_changed_services(){ echo "recreate fp=$(grep -o "\"fingerprint\": *\"[a-z]*\"" "$XRAY_CFG" | head -1)" >> "'"$TC"'/order"; return "${RECREATE_RC:-0}"; }'
+	echo 'recreate_changed_services(){ echo "recreate fp=$(grep -o "\"fingerprint\": *\"[a-z]*\"" "$XRAY_CFG")" >> "'"$TC"'/order"; return "${RECREATE_RC:-0}"; }'
 	_extract_fn _prerender_xray_before_up
 	echo 'declare -A _before_digests=() _edge_svcs=()'
 	_plain_block
@@ -80,7 +80,7 @@ fi
 # T4 — the same guard on the --with-templates path (static ordering: same helper
 #      call immediately before its recreate)
 for pair in "_wt_before_digests _wt_after_digests" "_before_digests _after_digests"; do
-	call=$(grep -n "recreate_changed_services $pair" "$UPGRADE" | head -1 | cut -d: -f1)
+	call=$(awk -v p="recreate_changed_services $pair" 'index($0, p) { print NR; exit }' "$UPGRADE")
 	prev=$(sed -n "$((call - 1))p" "$UPGRADE" | tr -d '\t ')
 	if [[ "$prev" == "_prerender_xray_before_up" ]]; then
 		ok "T4: render precedes recreate_changed_services $pair"
