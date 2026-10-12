@@ -57,7 +57,7 @@
           "serverName": "www.samsung.com",
           "publicKey": "U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk",
           "shortId": "abcd1234",
-          "fingerprint": "randomized"
+          "fingerprint": "chrome"
         }
       }
     }
