@@ -401,6 +401,11 @@ _maybe_self_upgrade "$HB_CODE" "$HB_BODY"
 # (P-sec1, PR #371) this move carries over unmodified.
 refresh_cross_probe_token
 
+# Peer roster refresh — pulls the central's current peer_roster out of
+# node-config so revoked/new peers propagate without a re-register. Lives in
+# lib/xprb-refresh-lib.sh; fail-soft, preserves the file on any problem.
+refresh_peer_roster
+
 # channels_version check — independent of Reality key rotation.
 # Skip when keys fetch failed (NEW_CHANNELS_VERSION will be empty).
 # Re-renders all channel configs when operator updates channel settings.

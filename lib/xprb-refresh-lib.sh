@@ -251,3 +251,101 @@ refresh_cross_probe_token() {
     emit_xprb_failure "malformed_response"
     return 0
 }
+
+# emit_peer_roster_failure reason — counter for the roster refresh leg below.
+emit_peer_roster_failure() {
+    emit_metric "partner_edge_peer_roster_refresh_failure_total" \
+        "partner_id=\"${NODE_ID}\",reason=\"$1\"" "1"
+}
+
+# refresh_peer_roster — keep $PREFIX_LIB/peer-roster.json in step with the
+# central's fleet, so federation membership needs no manual pruning.
+#
+# Root cause 2026-10-11: the roster was written ONCE, from the register
+# response (install.sh / hydrate.sh). Nothing refreshed it, so a peer revoked
+# weeks ago stayed in every older edge's roster (the peer-probe loop got a 403
+# from it every cycle) and edges registered later never appeared in older
+# edges' rosters. The central's GET /api/partner/node-config now carries a
+# freshly built `peer_roster` (same query + SSRF guard as register); this leg
+# pulls it daily with the same service-token bearer as the token re-mint.
+#
+# PRESERVE-ON-ABSENT: the file is rewritten ONLY when the response carries a
+# well-formed `peer_roster` array. An older central (field absent), a failed or
+# non-200 fetch, a malformed array or a failed write all leave the existing
+# file untouched. An EMPTY array is a real answer ("no peers") and does replace
+# the file — the central omits the field, never sends [], when its own roster
+# query fails. The cross-probe token is not part of this response; it is
+# re-minted by refresh_cross_probe_token above.
+#
+# The roster is public data (TURNS endpoints), so the file keeps the 0644 mode
+# install.sh / hydrate.sh give it. NON-FATAL like its sibling: every branch
+# returns 0 so `set -euo pipefail` in the orchestrator is never tripped.
+refresh_peer_roster() {
+    local roster_file="$PREFIX_LIB/peer-roster.json"
+
+    local svc_token
+    svc_token=$(read_service_token 2>/dev/null || true)
+    if [[ -z "$svc_token" ]]; then
+        log "WARN peer roster refresh: no service token available — skipping (existing file, if any, preserved)"
+        emit_peer_roster_failure "no_service_token"
+        return 0
+    fi
+
+    local curl_rc=0 curl_out
+    curl_out=$(xprb_curl_get_with_retry \
+        "${BACKEND_URL}/api/partner/node-config" "${svc_token}") || curl_rc=$?
+    if [[ "$curl_rc" -ne 0 ]]; then
+        log "WARN peer roster fetch failed (curl exit=${curl_rc}; existing file, if any, preserved)"
+        emit_peer_roster_failure "fetch_failed"
+        return 0
+    fi
+
+    local code body
+    code=$(printf '%s' "$curl_out" | tail -n1)
+    body=$(printf '%s' "$curl_out" | sed '$d')
+    if [[ "$code" != "200" ]]; then
+        # Status only — node-config carries secrets, never log the body. A last
+        # line that is not a 3-digit status (no -w output) is not echoed either.
+        [[ "$code" =~ ^[0-9]{3}$ ]] || code="nostatus"
+        log "WARN peer roster refresh: HTTP ${code} (existing file, if any, preserved)"
+        emit_peer_roster_failure "http_${code}"
+        return 0
+    fi
+
+    # Field absent (older central) -> nothing to do, not an error.
+    local has_field
+    has_field=$(printf '%s' "$body" | jq -r 'has("peer_roster")' 2>/dev/null || true)
+    if [[ "$has_field" != "true" ]]; then
+        log "peer roster: node-config carries no peer_roster (older central?) — $roster_file untouched"
+        return 0
+    fi
+
+    # Accept only an array of {node_id, turns_host} objects; anything else is
+    # rejected whole rather than half-applied.
+    local roster
+    roster=$(printf '%s' "$body" | jq -ce '
+        .peer_roster
+        | select(type == "array"
+                 and all(.[]; type == "object"
+                              and (.node_id | type) == "string"
+                              and (.turns_host | type) == "string"))' 2>/dev/null || true)
+    if [[ -z "$roster" ]]; then
+        log "WARN peer roster refresh: peer_roster is not an array of {node_id,turns_host} (existing file, if any, preserved)"
+        emit_peer_roster_failure "malformed_response"
+        return 0
+    fi
+
+    if [[ -f "$roster_file" && "$(jq -c . "$roster_file" 2>/dev/null || true)" == "$roster" ]]; then
+        log "peer roster: unchanged ($(printf '%s' "$roster" | jq 'length') peer(s))"
+        return 0
+    fi
+
+    local write_err
+    if write_err=$(write_secret_atomic "$roster_file" "${roster}"$'\n' 0644 2>&1); then
+        log "peer roster refreshed → $roster_file ($(printf '%s' "$roster" | jq 'length') peer(s))"
+    else
+        log "WARN peer roster persist failed: $write_err (existing file, if any, preserved)"
+        emit_peer_roster_failure "write_failed"
+    fi
+    return 0
+}
