@@ -1,0 +1,5 @@
+# Committed test fixtures: JWTs minted by oxpulse-chat signaling with a throwaway
+# Ed25519 key (public half only is committed). 100-year TTL, no production secret.
+0813af6779f00aae9f277a06e344b967d5237591:crates/sfu/tests/fixtures/signaling_room_tokens/bound.jwt:jwt:1
+0813af6779f00aae9f277a06e344b967d5237591:crates/sfu/tests/fixtures/signaling_room_tokens/iss_only.jwt:jwt:1
+0813af6779f00aae9f277a06e344b967d5237591:crates/sfu/tests/fixtures/signaling_room_tokens/staging.jwt:jwt:1
