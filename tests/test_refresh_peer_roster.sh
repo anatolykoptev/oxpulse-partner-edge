@@ -178,14 +178,15 @@ run_refresh "$T" || fail "t10: refresh exited nonzero"
 [[ "$(wc -l < "$T/nc.calls")" -eq 1 ]] || fail "t10: roster fetch must make exactly 1 attempt on 5xx, made $(wc -l < "$T/nc.calls")"
 pass "t10: single attempt on 5xx"
 
+line_of() { local n; n=$(grep -n -m1 "$1" "$2" || true); printf '%s' "${n%%:*}"; }
 # ── 11: runs after the critical path ─────────────────────────────────────────
 T=$D/t11; mkdir -p "$T"; setup "$T" "$OLD_ROSTER"
 write_curl_stub "$T" "{\"peer_roster\":$NEW_ROSTER}" 200
 run_refresh "$T" || fail "t11: refresh exited nonzero"
-hb=$(grep -n 'heartbeat ok' "$T/out.txt" | head -1 | cut -d: -f1)
-tok=$(grep -n 'cross-probe token' "$T/out.txt" | head -1 | cut -d: -f1)
-ch=$(grep -n 'no rotation' "$T/out.txt" | head -1 | cut -d: -f1)
-ro=$(grep -n 'peer roster' "$T/out.txt" | head -1 | cut -d: -f1)
+hb=$(line_of 'heartbeat ok' "$T/out.txt")
+tok=$(line_of 'cross-probe token' "$T/out.txt")
+ch=$(line_of 'no rotation' "$T/out.txt")
+ro=$(line_of 'peer roster' "$T/out.txt")
 [[ -n "$hb" && -n "$tok" && -n "$ch" && -n "$ro" ]] || fail "t11: missing log markers: $(cat "$T/out.txt")"
 [[ "$ro" -gt "$ch" && "$ro" -gt "$hb" && "$ro" -gt "$tok" ]] || fail "t11: roster must run after heartbeat/token/channel steps (hb=$hb tok=$tok ch=$ch ro=$ro)"
 pass "t11: roster refresh runs last"
