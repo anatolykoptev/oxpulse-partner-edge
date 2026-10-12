@@ -192,10 +192,10 @@ STUB
 	[[ "$oargv" == "s_client -connect 203.0.113.10:443 -servername relay.example.org -verify_hostname relay.example.org -verify_return_error" ]] \
 		&& pass "openssl argv: SNI + hostname verification + fatal chain errors on 443" || fail "openssl argv: $oargv"
 	out="$(hb UCLIENT_FAIL=1)"
-	payloads "$out" | jq -e 'select(.channel_name=="coturn") | .channel_handshake_ok == false and .channel_probe_reason == "auth-486"' >/dev/null 2>&1 \
+	payloads "$out" | jq -e -s 'map(select(.channel_name=="coturn"))[0] | .channel_handshake_ok == false and .channel_probe_reason == "auth-486"' >/dev/null 2>&1 \
 		&& pass "heartbeat payload (failed allocate carries reason)" || fail "heartbeat payload (failed allocate carries reason): $out"
 	out="$(hb OPENSSL_FAIL=1)"
-	payloads "$out" | jq -e 'select(.channel_name=="coturn-tls") | .channel_handshake_ok == false and .channel_probe_reason == "cert-verify"' >/dev/null 2>&1 \
+	payloads "$out" | jq -e -s 'map(select(.channel_name=="coturn-tls"))[0] | .channel_handshake_ok == false and .channel_probe_reason == "cert-verify"' >/dev/null 2>&1 \
 		&& pass "heartbeat payload (failed TLS verify carries reason)" || fail "heartbeat payload (failed TLS verify carries reason): $out"
 	chmod 644 "$E/service-token"
 	if out="$(hb)"; then rc=0; else rc=$?; fi
