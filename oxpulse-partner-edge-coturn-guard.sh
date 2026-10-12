@@ -14,7 +14,9 @@
 # coturn.conf's denied-peer-ip does not stop it: coturn maps its own external IP
 # to the private one only when sending, after the deny check ran on the public
 # address. The pre-fix template additionally re-permitted the whole private IP
-# (allowed-peer-ip=PRIVATE_IP) on NAT'd edges.
+# (allowed-peer-ip=PRIVATE_IP) on NAT'd edges — which is the ONE allowance that must
+# stay (this host's OWN relay address, else coturn's own 10/8 deny blocks same-edge
+# relaying); the nft guard below is what makes it safe.
 #
 # THE GUARD. One nft table, `inet coturn_self_relay_guard`, OUTPUT hook, matching
 # the numeric uid the coturn container runs as (COTURN_UID, baked into
@@ -56,8 +58,8 @@
 #
 # `apply` is idempotent; the nft load is one atomic transaction (delete+create
 # preamble). Besides the table it:
-#   * migrates the LIVE coturn.conf (min-port/max-port -> the guard range, drops
-#     allowed-peer-ip), BEFORE the table loads, so a plain upgrade — which never
+#   * migrates the LIVE coturn.conf (min-port/max-port -> the guard range, allowed-peer-ip
+#     limited to this host's own relay address, mode 0600), BEFORE the table loads, so a plain upgrade — which never
 #     reaches reconcile_all — leaves no edge running the old 49152-65535 range or
 #     the old allowed-peer-ip under a guard that would drop its relays; coturn is
 #     restarted only if the file actually changed;
@@ -229,30 +231,65 @@ _ports_awk() {
 		  print (mode == "covers" ? (cov ? "yes" : "no") : out) }'
 }
 
-# Rewrite the LIVE coturn.conf to the guard's contract: min-port/max-port =
-# RELAY_MIN/RELAY_MAX (appended if absent — coturn's default is 49152-65535), every
-# allowed-peer-ip line dropped; every other line (static-auth-secret x1..2, cert
-# paths, ...) passes through untouched. Never prints file content. Atomic (temp file
-# in the same dir cloned with cp -p so owner and mode 0600 survive, then rename) and
-# idempotent (an unchanged result is not renamed in). Sets CONF_CHANGED=1 on change.
+# This host's OWN relay address as coturn.conf declares it: `relay-ip=` if set, else
+# the private half of `external-ip=PUBLIC/PRIVATE` (NAT'd edge). Empty on a
+# public-NIC edge. It is the ONE address coturn may be allowed to relay to.
+conf_own_addr() {
+	awk -F= '
+		$1 == "relay-ip" { r = $2 }
+		$1 == "external-ip" { if (split($2, a, "/") == 2) e = a[2] }
+		END { print (r != "" ? r : e) }' "$1" 2>/dev/null || true
+}
+
+# Rewrite the LIVE coturn.conf to the guard's contract:
+#   * min-port/max-port = RELAY_MIN/RELAY_MAX (appended if absent — coturn's default
+#     is 49152-65535);
+#   * allowed-peer-ip: EXACTLY ONE line, this host's own relay address (conf_own_addr),
+#     kept in place if already there, else emitted after relay-ip=/external-ip=; every
+#     other allowed-peer-ip is dropped (a foreign VPC host there is SSRF the nft guard,
+#     which only covers local addresses, cannot stop). Deleting the own address too
+#     was the v0.16.29 regression: denied-peer-ip 10.0.0.0/8 then blocks coturn's own
+#     relay address and same-edge relaying fails with 403 Forbidden IP. No own address
+#     (public-NIC edge) -> none;
+#   * mode 0600 (the file carries static-auth-secret).
+# Every other line (static-auth-secret x1..2, cert paths, ...) passes through
+# untouched; no content is ever printed. Atomic (temp file in the same dir cloned
+# with cp -p so ownership survives, then rename) and idempotent (an unchanged result
+# is not renamed in). Sets CONF_CHANGED=1 only on a CONTENT change (a mode fix alone
+# needs no coturn restart).
 migrate_conf() {
 	CONF_CHANGED=0
 	[[ -f "$COTURN_CONF" ]] || return 0
-	local tmp
+	local tmp own anchor haveown mode
+	own=$(conf_own_addr "$COTURN_CONF")
+	anchor=external-ip
+	if awk -F= '$1 == "relay-ip" { f = 1 } END { exit !f }' "$COTURN_CONF"; then anchor=relay-ip; fi
+	haveown=0
+	if [[ -n "$own" ]] && awk -v o="allowed-peer-ip=$own" '$0 == o { f = 1 } END { exit !f }' "$COTURN_CONF"; then haveown=1; fi
 	tmp=$(mktemp "${COTURN_CONF}.XXXXXX") || { warn "cannot create a temp file next to ${COTURN_CONF}; conf not migrated"; return 1; }
 	if ! cp -p "$COTURN_CONF" "$tmp" 2>/dev/null; then rm -f "$tmp"; warn "cannot clone ${COTURN_CONF} attributes; conf not migrated"; return 1; fi
-	if ! awk -v lo="$RELAY_MIN" -v hi="$RELAY_MAX" '
-		/^allowed-peer-ip=/ { next }
+	if ! awk -v lo="$RELAY_MIN" -v hi="$RELAY_MAX" -v own="$own" -v anchor="$anchor" -v haveown="$haveown" '
+		/^allowed-peer-ip=/ {
+			if (own != "" && !kept && $0 == "allowed-peer-ip=" own) { kept = 1; print }
+			next }
 		/^min-port=/ { if (!m) print "min-port=" lo; m = 1; next }
 		/^max-port=/ { if (!x) print "max-port=" hi; x = 1; next }
-		{ print }
-		END { if (!m) print "min-port=" lo; if (!x) print "max-port=" hi }' "$COTURN_CONF" > "$tmp"; then
+		{ print
+		  if (own != "" && !haveown && !emitted && index($0, anchor "=") == 1) { print "allowed-peer-ip=" own; emitted = 1 } }
+		END { if (!m) print "min-port=" lo; if (!x) print "max-port=" hi
+		      if (own != "" && !haveown && !emitted) print "allowed-peer-ip=" own }' "$COTURN_CONF" > "$tmp"; then
 		rm -f "$tmp"; warn "awk failed migrating ${COTURN_CONF}; conf not migrated"; return 1
 	fi
-	if cmp -s "$COTURN_CONF" "$tmp"; then rm -f "$tmp"; return 0; fi
+	mode=$(stat -c %a "$COTURN_CONF" 2>/dev/null || stat -f %Lp "$COTURN_CONF" 2>/dev/null || true)
+	if cmp -s "$COTURN_CONF" "$tmp"; then
+		rm -f "$tmp"
+		if [[ "$mode" != 600 ]]; then chmod 0600 "$COTURN_CONF" && log "set ${COTURN_CONF} mode 0600 (was ${mode:-unknown}; it carries static-auth-secret)"; fi
+		return 0
+	fi
+	chmod 0600 "$tmp"
 	mv -f "$tmp" "$COTURN_CONF" || { rm -f "$tmp"; warn "could not replace ${COTURN_CONF}"; return 1; }
 	CONF_CHANGED=1
-	log "migrated ${COTURN_CONF}: relay range ${RELAY_MIN}-${RELAY_MAX}, allowed-peer-ip removed (secrets untouched)"
+	log "migrated ${COTURN_CONF}: relay range ${RELAY_MIN}-${RELAY_MAX}, allowed-peer-ip limited to this host's own address${own:+ (${own})}, mode 0600 (secrets untouched)"
 }
 
 # The bind-mounted coturn.conf is a single-file mount: a rename gives it a new
@@ -369,6 +406,21 @@ cmd_status() {
 			[[ "$have" == "$want" ]] \
 				|| { echo "${COTURN_CONF}: ${f}-port='${have:-<default>}', the guard range needs ${want}" >&2; return 1; }
 		done
+	fi
+
+	# (b2) allowed-peer-ip must be exactly this host's own relay address when it has one
+	# (missing -> coturn's 10/8 deny blocks same-edge relaying, 403 Forbidden IP) and
+	# nothing else (a foreign VPC host is SSRF the nft guard does not cover).
+	if [[ -f "$COTURN_CONF" ]]; then
+		local own allowed
+		own=$(conf_own_addr "$COTURN_CONF")
+		allowed=$(awk '/^allowed-peer-ip=/' "$COTURN_CONF" 2>/dev/null || true)
+		if [[ -n "$own" ]]; then
+			[[ "$allowed" == "allowed-peer-ip=${own}" ]] \
+				|| { echo "${COTURN_CONF}: allowed-peer-ip must be exactly 'allowed-peer-ip=${own}' (this host's relay address); same-edge relaying is broken otherwise" >&2; return 1; }
+		else
+			[[ -z "$allowed" ]] || { echo "${COTURN_CONF}: allowed-peer-ip present but this edge has no private relay address" >&2; return 1; }
+		fi
 	fi
 
 	# (c) a foreign socket inside the relay range is reachable through the allow-range.

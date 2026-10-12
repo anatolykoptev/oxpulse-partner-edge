@@ -139,7 +139,7 @@ _run_hydrate() {
     # caller does, so the harness reproduces the production short-circuit.
     bash -c "source '$HYDRATE_PREAMBLE'; PUBLIC_IP=\"$1\"; PRIVATE_IP='$4'; resolve_external_ip '$1' '$2' '$3'; \
         echo \"PUBLIC_IP=\$PUBLIC_IP\"; echo \"PUBLIC_IP_SOURCE=\$PUBLIC_IP_SOURCE\"; \
-        echo \"EXTERNAL_IP_LINE=\$EXTERNAL_IP_LINE\"" 2>&1
+        echo \"EXTERNAL_IP_LINE=\$EXTERNAL_IP_LINE\"; echo \"ALLOWED_PEER_IP_LINE=\$ALLOWED_PEER_IP_LINE\"" 2>&1
 }
 
 # B1: this IS the live bug, falsified. Without the fix, PUBLIC_IP stays the
@@ -191,7 +191,7 @@ echo "$B4_OUT" | grep -F 'PUBLIC_IP=132.145.192.254' >/dev/null \
 echo "$B4_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \
     && pass "B4c: source labeled autodetect" || fail "B4c: $B4_OUT"
 
-# B5: EXTERNAL_IP_LINE is RECOMPUTED from the final
+# B5: EXTERNAL_IP_LINE / ALLOWED_PEER_IP_LINE are RECOMPUTED from the final
 # resolved PUBLIC_IP (not stale from the egress value) — this is the actual
 # value that lands in coturn.conf's external-ip and docker-compose.yml's
 # SFU_PUBLIC_IP; a regression that keeps the OCI-hairpin lines pinned to the
@@ -203,13 +203,9 @@ B5_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" \
 echo "$B5_OUT" | grep -F 'EXTERNAL_IP_LINE=129.159.103.86/10.0.0.5' >/dev/null \
     && pass "B5: EXTERNAL_IP_LINE recomputed from resolved DNS IP + PRIVATE_IP" \
     || fail "B5: EXTERNAL_IP_LINE not recomputed correctly, got: $B5_OUT"
-# B5b (was: ALLOWED_PEER_IP_LINE recomputed). allowed-peer-ip is gone: re-permitting
-# the whole private IP let any TURN-credential holder relay UDP to every listener
-# on the host (incident 2026-10-12). The resolved NAT'd IP pair must NOT surface
-# as a coturn peer allowance; the host nft guard decides what coturn may reach.
-echo "$B5_OUT" | grep -F 'allowed-peer-ip' >/dev/null \
-    && fail "B5b: resolve_external_ip still derives an allowed-peer-ip line: $B5_OUT" \
-    || pass "B5b: no allowed-peer-ip derived from the NAT'd private IP"
+echo "$B5_OUT" | grep -F 'ALLOWED_PEER_IP_LINE=allowed-peer-ip=10.0.0.5' >/dev/null \
+    && pass "B5b: ALLOWED_PEER_IP_LINE recomputed" \
+    || fail "B5b: ALLOWED_PEER_IP_LINE not recomputed, got: $B5_OUT"
 
 # ===========================================================================
 # Section C — functional: upgrade.sh resolve_public_ip precedence

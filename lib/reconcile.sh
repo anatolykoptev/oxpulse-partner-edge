@@ -1166,8 +1166,19 @@ _setup_coturn_render_env() {
         EXTERNAL_IP_LINE="${PUBLIC_IP:-}"
     fi
 
+    # ALLOWED_PEER_IP_LINE: when behind NAT (distinct private IP) exactly this
+    # host's OWN private address — the relay address external-ip maps to — so
+    # denied-peer-ip 10.0.0.0/8 does not block same-edge relaying (403 Forbidden IP).
+    # Never any other address. Empty on a public-NIC edge. Mirrors hydrate.sh/install.sh
+    # so the install and converge renders stay byte-identical.
+    if [[ -n "${PUBLIC_IP:-}" && -n "${PRIVATE_IP:-}" && "$PUBLIC_IP" != "$PRIVATE_IP" ]]; then
+        ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
+    else
+        ALLOWED_PEER_IP_LINE=""
+    fi
+
     export PARTNER_DOMAIN TURNS_SUBDOMAIN TURN_SECRET PUBLIC_IP PRIVATE_IP \
-        EXTERNAL_IP_LINE
+        EXTERNAL_IP_LINE ALLOWED_PEER_IP_LINE
 }
 
 # ---------------------------------------------------------------------------

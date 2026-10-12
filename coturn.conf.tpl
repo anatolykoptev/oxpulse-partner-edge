@@ -93,16 +93,20 @@ denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 
 # ─── Co-located SFU / host-local peers ──────────────────────────────────
-# No allowed-peer-ip. coturn checks denied-peer-ip against the address the
-# client names (the public IP; external-ip maps it to the private one only when
-# sending), so a relay to the co-located SFU's public address is accepted here
-# and delivered locally after the mapping. What it may reach once local is NOT
-# decided by this file: the host nft table coturn_self_relay_guard (installed by
-# oxpulse-partner-edge-coturn-guard, keyed on this container's fixed uid) lets
-# coturn send to local addresses only on the SFU media port and inside the relay
-# range below. Re-permitting the whole private IP here (the old
-# allowed-peer-ip=PRIVATE_IP) opened every UDP listener on the host to any
-# holder of a TURN credential (credentials are minted by a public endpoint).
+# EXACTLY ONE allowed-peer-ip, and only on a NAT'd edge: this host's OWN relay
+# address (the private half of external-ip). Without it coturn applies the
+# denied-peer-ip 10.0.0.0/8 block above to its own relay address, and same-edge
+# relaying fails ("channel bind: error 403 Forbidden IP") — two relay-forced
+# clients on one edge, and client -> co-located SFU via TURN (the peer is mapped to
+# the relay address). Never any other address: a second allowed-peer-ip is SSRF
+# into the VPC, which the nft guard (local addresses only) does not cover.
+# What coturn may then SEND to its own address is decided by the host nft table
+# coturn_self_relay_guard (oxpulse-partner-edge-coturn-guard, keyed on this
+# container's fixed uid): the SFU media port and the relay range, nothing else —
+# that is what makes allowing the host's own address safe.
+# Rendered empty on a public-NIC edge (no private address). `guard status` and the
+# guard's conf migration enforce "own address only".
+{{ALLOWED_PEER_IP_LINE}}
 
 # ─── Relay port range ───────────────────────────────────────────────────
 # MUST equal, everywhere: RELAY_MIN/RELAY_MAX in oxpulse-partner-edge-coturn-guard.sh

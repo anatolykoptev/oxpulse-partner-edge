@@ -7,7 +7,7 @@
 #   host nft : table inet coturn_self_relay_guard drops coturn->local UDP outside
 #              the SFU port and the relay range (keyed on that numeric uid)
 #   kernel   : the relay range is reserved from the ephemeral pool
-#   config   : coturn.conf renders no allowed-peer-ip; min/max-port = that range
+#   config   : coturn.conf allows ONLY this host's own relay address; min/max-port = that range
 #   firewall : ufw/firewalld open exactly that range
 #   delivery : install / plain upgrade / converge / hydrate all load the guard
 #   health   : healthcheck reports a missing guard
@@ -149,9 +149,14 @@ grep -q "sysctl -q -w net.ipv4.ip_local_reserved_ports=${g_min}-${g_max}" "$STUB
 	|| fail "apply never ran sysctl -w for the reservation"
 
 # --- config renderers: no allowed-peer-ip anywhere ------------------------------
-nocode "$TPL" 'allowed-peer-ip|ALLOWED_PEER_IP_LINE' "coturn.conf.tpl renders no allowed-peer-ip (placeholder or literal)"
+# coturn.conf.tpl: the placeholder, once, and no literal allowed-peer-ip= (a literal
+# would be rendered on every edge, public-NIC ones included).
+[[ $(grep -c '^{{ALLOWED_PEER_IP_LINE}}$' "$TPL") == 1 ]] && pass "coturn.conf.tpl has the {{ALLOWED_PEER_IP_LINE}} placeholder exactly once" || fail "coturn.conf.tpl must carry exactly one {{ALLOWED_PEER_IP_LINE}}"
+nocode "$TPL" '^allowed-peer-ip=' "coturn.conf.tpl has no literal allowed-peer-ip="
 for f in install.sh hydrate.sh lib/reconcile.sh; do
-	nocode "$f" 'ALLOWED_PEER_IP_LINE|allowed-peer-ip' "$f computes/exports no allowed-peer-ip"
+	# the line is derived from THIS host's PRIVATE_IP only, never from anything else
+	need "$f" 'ALLOWED_PEER_IP_LINE="allowed-peer-ip=\$\{PRIVATE_IP' "$f renders allowed-peer-ip from PRIVATE_IP (own address) only"
+	need "$f" 'ALLOWED_PEER_IP_LINE=""|ALLOWED_PEER_IP_LINE=$' "$f renders it empty when there is no private address"
 done
 
 # --- delivery: every path that can leave an edge without the guard -------------
@@ -245,7 +250,7 @@ allowed-peer-ip=10.0.1.44
 min-port=49152
 max-port=65535
 external-ip=203.0.113.5/10.0.1.44
-allowed-peer-ip=10.0.1.45
+allowed-peer-ip=10.0.1.160
 log-file=/var/log/turnserver/turn.log
 EOF
 	chmod 0600 "$1"
@@ -256,7 +261,9 @@ mig_out=$(COTURN_CONF="$MIG/coturn.conf" "$REPO_ROOT/$GUARD" migrate-conf 2>&1)
 [[ $(grep -c '^min-port=49152$' "$MIG/coturn.conf") == 1 && $(grep -c "^max-port=${g_max}$" "$MIG/coturn.conf") == 1 ]] \
 	&& pass "migration: min-port/max-port == guard range (${g_min}-${g_max}), once each" \
 	|| fail "migration: range not fixed: $(grep -a 'port=' "$MIG/coturn.conf" | tr '\n' ' ')"
-[[ $(grep -c 'allowed-peer-ip' "$MIG/coturn.conf" || true) == 0 ]] && pass "migration: every allowed-peer-ip line removed" || fail "migration: allowed-peer-ip survived"
+[[ $(grep -c '^allowed-peer-ip=' "$MIG/coturn.conf" || true) == 1 && $(grep -c '^allowed-peer-ip=10.0.1.44$' "$MIG/coturn.conf" || true) == 1 ]] \
+	&& pass "migration: exactly ONE allowed-peer-ip survives - this host's own (10.0.1.44); the foreign VPC host 10.0.1.160 is gone" \
+	|| fail "migration: allowed-peer-ip lines are $(grep -a '^allowed-peer-ip=' "$MIG/coturn.conf" | tr '\n' ' ')"
 [[ $(grep -a '^static-auth-secret=' "$MIG/coturn.conf") == "$sec_before" ]] && pass "migration: both static-auth-secret lines byte-identical" || fail "migration changed a static-auth-secret line"
 [[ $(grep -avE '^(min-port|max-port|allowed-peer-ip)=' "$MIG/orig") == $(grep -avE '^(min-port|max-port|allowed-peer-ip)=' "$MIG/coturn.conf") ]] \
 	&& pass "migration: every other line (incl. commented #min-port) byte-identical" || fail "migration touched an unrelated line"
@@ -273,6 +280,52 @@ COTURN_CONF="$MIG/bare.conf" "$REPO_ROOT/$GUARD" migrate-conf >/dev/null 2>&1
 [[ $(grep -c "^max-port=${g_max}$" "$MIG/bare.conf") == 1 && $(grep -c "^min-port=${g_min}$" "$MIG/bare.conf") == 1 ]] \
 	&& pass "migration: missing min/max-port are appended" || fail "bare conf not given an explicit range"
 
+# own-address rule (the v0.16.29 regression: deleting the own allowed-peer-ip broke
+# same-edge relaying with 403 Forbidden IP on a NAT edge)
+own_cases() { # own_cases NAME CONTENT-HEREDOC-ON-STDIN -> migrates, sets $OC to the file
+	OC="$MIG/own_$1.conf"; cat > "$OC"; chmod "${2:-600}" "$OC"
+	COTURN_CONF="$OC" "$REPO_ROOT/$GUARD" migrate-conf >/dev/null 2>&1
+}
+aip() { grep -a '^allowed-peer-ip=' "$OC" | tr '\n' ' '; }
+own_cases relayip 644 <<'EOF'
+listening-port=3478
+static-auth-secret=S1
+relay-ip=10.0.1.44
+external-ip=203.0.113.5
+allowed-peer-ip=10.0.1.44
+allowed-peer-ip=10.0.1.160
+min-port=49152
+max-port=65535
+EOF
+[[ $(aip) == "allowed-peer-ip=10.0.1.44 " ]] && pass "relay-ip + own and foreign allowed-peer-ip -> exactly the own one is kept" || fail "relay-ip case kept: $(aip)"
+[[ $(grep -a -n 'allowed-peer-ip=10.0.1.44' "$OC" | cut -d: -f1) -gt $(grep -a -n '^relay-ip=' "$OC" | cut -d: -f1) ]] && pass "existing own line stays where it was (after relay-ip)" || fail "own line moved"
+[[ $(fmode "$OC") == 600 ]] && pass "migration forces mode 0600 (was 0644 with static-auth-secret inside)" || fail "mode is $(fmode "$OC"), want 600"
+own_cases emit 600 <<'EOF'
+static-auth-secret=S1
+relay-ip=10.0.1.44
+allowed-peer-ip=10.0.1.160
+max-port=49999
+min-port=49152
+EOF
+[[ $(aip) == "allowed-peer-ip=10.0.1.44 " ]] && pass "own allowed-peer-ip is EMITTED when missing (foreign one dropped)" || fail "emit case: $(aip)"
+[[ $(grep -a -A1 '^relay-ip=' "$OC" | tail -n1) == "allowed-peer-ip=10.0.1.44" ]] && pass "emitted right after relay-ip=" || fail "emitted line not after relay-ip"
+own_cases natext 600 <<'EOF'
+static-auth-secret=S1
+external-ip=203.0.113.5/10.0.1.44
+min-port=49152
+max-port=49999
+EOF
+[[ $(aip) == "allowed-peer-ip=10.0.1.44 " ]] && pass "no relay-ip: own address = private half of external-ip, emitted" || fail "external-ip/private case: $(aip)"
+own_cases pubnic 600 <<'EOF'
+static-auth-secret=S1
+external-ip=203.0.113.5
+allowed-peer-ip=10.0.1.44
+min-port=49152
+max-port=65535
+EOF
+[[ -z $(aip) ]] && pass "public-NIC edge (no relay-ip, no private half): NO allowed-peer-ip" || fail "public-NIC kept: $(aip)"
+cp "$OC" "$OC.1"; COTURN_CONF="$OC" "$REPO_ROOT/$GUARD" migrate-conf >/dev/null 2>&1
+cmp -s "$OC" "$OC.1" && pass "own-address migration is idempotent" || fail "second migration changed the conf"
 # apply: conf migrated BEFORE the table loads; coturn restarted only on change
 mkconf "$MIG/coturn.conf"
 cat > "$TMP/bin/docker" <<'EOF'
@@ -301,6 +354,14 @@ grep -q 'docker restart oxpulse-partner-coturn' "$STUB_LOG" && pass "apply: cotu
 : > "$STUB_LOG"
 COTURN_CONF="$MIG/coturn.conf" DOCKER_BIN="$TMP/bin/docker" run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1
 grep -q 'docker restart' "$STUB_LOG" && fail "second apply restarted coturn (conf unchanged)" || pass "apply: unchanged conf -> coturn NOT restarted"
+
+# mode fix alone does not restart coturn
+printf 'static-auth-secret=S1\nrelay-ip=10.0.1.44\nallowed-peer-ip=10.0.1.44\nmin-port=49152\nmax-port=49999\n' > "$MIG/modeonly.conf"; chmod 0644 "$MIG/modeonly.conf"
+: > "$STUB_LOG"
+COTURN_CONF="$MIG/modeonly.conf" DOCKER_BIN="$TMP/bin/docker" run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1
+[[ $(fmode "$MIG/modeonly.conf") == 600 ]] && pass "apply fixes a 0644 conf in place" || fail "mode-only conf still $(fmode "$MIG/modeonly.conf")"
+grep -q 'docker restart' "$STUB_LOG" && fail "coturn restarted for a mode-only change" || pass "mode-only fix does not restart coturn"
+
 
 # --- (7) sysctl: merge, never clobber ----------------------------------------------
 mp() { "$REPO_ROOT/$GUARD" merge-ports "$1"; }
@@ -354,6 +415,14 @@ mkstatus rng2; printf 'min-port=%s\n' "$g_min" > "$SD/coturn.conf"
 status_rc && fail "status passed with no max-port (coturn default 65535)" || pass "status FAILS when the deployed conf has no max-port (coturn default is 49152-65535)"
 mkstatus rng3; printf 'min-port=1024\nmax-port=%s\n' "$g_max" > "$SD/coturn.conf"
 status_rc && fail "status passed with min-port=1024" || pass "status FAILS when the deployed conf's min-port differs"
+mkstatus aip1; printf 'min-port=%s\nmax-port=%s\nrelay-ip=10.0.1.44\nexternal-ip=203.0.113.5\n' "$g_min" "$g_max" > "$SD/coturn.conf"
+status_rc && fail "status passed with relay-ip set but NO allowed-peer-ip (same-edge relaying is broken: 403 Forbidden IP)" || pass "status FAILS when relay-ip is set but the matching allowed-peer-ip is missing"
+mkstatus aip2; printf 'min-port=%s\nmax-port=%s\nrelay-ip=10.0.1.44\nallowed-peer-ip=10.0.1.44\n' "$g_min" "$g_max" > "$SD/coturn.conf"
+status_rc && pass "status: relay-ip + exactly its own allowed-peer-ip is in force" || fail "status rejected the correct NAT conf: $(cat "$SD/out")"
+mkstatus aip3; printf 'min-port=%s\nmax-port=%s\nexternal-ip=203.0.113.5/10.0.1.44\nallowed-peer-ip=10.0.1.44\nallowed-peer-ip=10.0.1.160\n' "$g_min" "$g_max" > "$SD/coturn.conf"
+status_rc && fail "status passed with a FOREIGN allowed-peer-ip (SSRF into the VPC)" || pass "status FAILS on any allowed-peer-ip other than this host's own"
+mkstatus aip4; printf 'min-port=%s\nmax-port=%s\nexternal-ip=203.0.113.5\nallowed-peer-ip=10.0.1.44\n' "$g_min" "$g_max" > "$SD/coturn.conf"
+status_rc && fail "status passed with allowed-peer-ip on a public-NIC edge" || pass "status FAILS when a public-NIC edge carries an allowed-peer-ip"
 mkstatus stray; printf '%s\n' 'UNCONN 0 0 0.0.0.0:49500 0.0.0.0:* users:(("hysteria",pid=7,fd=3))' > "$SD/ssout"
 printf '#!/bin/bash\n[[ "$*" == *-uanp* ]] && cat "%s/ssout"\nexit 0\n' "$SD" > "$SD/bin/ss"
 status_rc && fail "status passed with a foreign UDP socket inside the relay range" || pass "status FAILS when a non-turnserver socket sits inside ${g_min}-${g_max}"
