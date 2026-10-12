@@ -1204,10 +1204,17 @@ else
 fi
 export EXTERNAL_IP_LINE
 
-# No allowed-peer-ip is rendered for the NAT'd coturn→SFU hairpin any more: coturn
-# checks denied-peer-ip against the public address the client names, so the
-# hairpin needs no coturn-side allowance, and what a local-destined relay may
-# reach is decided by the host nft guard (oxpulse-partner-edge-coturn-guard).
+# ALLOWED_PEER_IP_LINE for coturn: when behind NAT, allow coturn to relay to THIS
+# host's own private address (the relay address external-ip maps to) — without it
+# denied-peer-ip 10.0.0.0/8 blocks same-edge relaying (403 Forbidden IP). Exactly
+# this one address, never another; what coturn may then send to it is decided by
+# the host nft guard (oxpulse-partner-edge-coturn-guard). Empty otherwise.
+if [[ -n "${PRIVATE_IP:-}" ]]; then
+	ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
+else
+	ALLOWED_PEER_IP_LINE=""
+fi
+export ALLOWED_PEER_IP_LINE
 
 # ---------- Step 5: stage templates ----------
 log "[5/10] rendering templates"
@@ -1282,7 +1289,7 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        TURN_SECRET \
        REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
        REALITY_ENCRYPTION TURNS_SUBDOMAIN \
-       PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE \
+       PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE ALLOWED_PEER_IP_LINE \
        IMAGE_VERSION \
        SFU_UDP_PORT SFU_METRICS_PORT SFU_EDGE_ID \
        OTEL_EXPORTER_OTLP_ENDPOINT \

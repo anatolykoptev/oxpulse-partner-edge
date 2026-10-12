@@ -141,7 +141,7 @@ _run_hydrate() {
     # caller does, so the harness reproduces the production short-circuit.
     bash -c "source '$HYDRATE_PREAMBLE'; PUBLIC_IP=\"$1\"; PRIVATE_IP='$4'; resolve_external_ip '$1' '$2' '$3'; \
         echo \"PUBLIC_IP=\$PUBLIC_IP\"; echo \"PUBLIC_IP_SOURCE=\$PUBLIC_IP_SOURCE\"; \
-        echo \"EXTERNAL_IP_LINE=\$EXTERNAL_IP_LINE\"" 2>&1
+        echo \"EXTERNAL_IP_LINE=\$EXTERNAL_IP_LINE\"; echo \"ALLOWED_PEER_IP_LINE=\$ALLOWED_PEER_IP_LINE\"" 2>&1
 }
 
 MOTHERLY="192.9.243.148"

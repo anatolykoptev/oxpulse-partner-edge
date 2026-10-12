@@ -1096,6 +1096,14 @@ _reset_surface_flags() {
 # external-ip= and swap it live. The live network probe lives only on the
 # install/bootstrap path (lib/install-network.sh network_run), never here.
 # ---------------------------------------------------------------------------
+# 0 iff ADDR is configured on a local interface (fails closed without `ip`).
+_coturn_addr_is_local() {
+    command -v "${IP_BIN:-ip}" >/dev/null 2>&1 || return 1
+    "${IP_BIN:-ip}" -o addr show 2>/dev/null | awk -v a="$1" '
+        { for (i = 1; i <= NF; i++) if ($i == "inet" || $i == "inet6") { x = $(i + 1); sub(/\/.*/, "", x); if (x == a) f = 1 } }
+        END { exit !f }'
+}
+
 _setup_coturn_render_env() {
     local _prefix_etc="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
     local _compose="${COMPOSE_FILE:-${_prefix_etc}/docker-compose.yml}"
@@ -1166,8 +1174,28 @@ _setup_coturn_render_env() {
         EXTERNAL_IP_LINE="${PUBLIC_IP:-}"
     fi
 
+    # ALLOWED_PEER_IP_LINE: when behind NAT (distinct private IP) exactly this
+    # host's OWN private address — the relay address external-ip maps to — so
+    # denied-peer-ip 10.0.0.0/8 does not block same-edge relaying (403 Forbidden IP).
+    # Never any other address. Empty on a public-NIC edge. Mirrors hydrate.sh/install.sh
+    # so the install and converge renders stay byte-identical.
+    # PRIVATE_IP came from STATE / the installed conf, which can be stale (re-IP, a
+    # carried-over value): allowing coturn to relay to an address that is NOT local is
+    # SSRF the nft guard (local addresses only) cannot stop. Validate against the
+    # live interface addresses; fail closed (no line) and say so.
+    if [[ -n "${PUBLIC_IP:-}" && -n "${PRIVATE_IP:-}" && "$PUBLIC_IP" != "$PRIVATE_IP" ]]; then
+        if _coturn_addr_is_local "$PRIVATE_IP"; then
+            ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
+        else
+            warn "reconcile_coturn: PRIVATE_IP '${PRIVATE_IP}' is not configured on any local interface (stale STATE?) - NOT rendering allowed-peer-ip; same-edge relaying will fail until STATE is corrected"
+            ALLOWED_PEER_IP_LINE=""
+        fi
+    else
+        ALLOWED_PEER_IP_LINE=""
+    fi
+
     export PARTNER_DOMAIN TURNS_SUBDOMAIN TURN_SECRET PUBLIC_IP PRIVATE_IP \
-        EXTERNAL_IP_LINE
+        EXTERNAL_IP_LINE ALLOWED_PEER_IP_LINE
 }
 
 # ---------------------------------------------------------------------------
