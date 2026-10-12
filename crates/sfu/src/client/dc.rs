@@ -839,6 +839,114 @@ mod tests {
         );
     }
 
+    /// SEC-CR-011 call-site coverage: the DC `relay_source` path must apply the
+    /// issuer/audience policy, not just the unit-tested `room_auth` fns.
+    /// HS256-signed token with an unbound/foreign `iss` against a strict policy.
+    fn bound_token(room: &str, secret: &[u8], iss: Option<&str>, aud: Option<&str>) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut c = serde_json::json!({"sub": 42, "room": room, "iat": now, "exp": now + 3600});
+        if let Some(i) = iss {
+            c["iss"] = i.into();
+        }
+        if let Some(a) = aud {
+            c["aud"] = a.into();
+        }
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &c,
+            &jsonwebtoken::EncodingKey::from_secret(secret),
+        )
+        .unwrap()
+    }
+
+    fn relay_payload(token: &str) -> String {
+        format!(
+            r#"{{"type":"relay_source","upstreamUrl":"wss://us.oxpulse.chat/ws/sfu/room-abc","roomToken":"{token}"}}"#
+        )
+    }
+
+    #[test]
+    fn relay_source_strict_policy_rejects_foreign_issuer_and_accepts_bound() {
+        let secret = b"test-secret-32-bytes-long-enough!";
+        let policy = crate::room_auth::RoomTokenPolicy::new(
+            vec!["oxpulse-chat".into()],
+            "oxpulse-sfu",
+            true,
+        )
+        .unwrap();
+        crate::room_auth::with_test_policy(policy, || {
+            let call = |t: &str| {
+                handle_channel_data(
+                    ClientId(70),
+                    "any",
+                    relay_payload(t).as_bytes(),
+                    Some(secret),
+                    None,
+                    true,
+                )
+            };
+            let foreign = bound_token(
+                "room-abc",
+                secret,
+                Some("oxpulse-staging"),
+                Some("oxpulse-sfu"),
+            );
+            assert!(
+                matches!(call(&foreign), Propagated::Noop),
+                "foreign iss must be dropped"
+            );
+            let unbound = bound_token("room-abc", secret, None, None);
+            assert!(
+                matches!(call(&unbound), Propagated::Noop),
+                "unbound token must be dropped when binding required"
+            );
+            let good = bound_token(
+                "room-abc",
+                secret,
+                Some("oxpulse-chat"),
+                Some("oxpulse-sfu"),
+            );
+            assert!(
+                matches!(call(&good), Propagated::MarkRelaySource(..)),
+                "positive control: correctly bound token accepted"
+            );
+        });
+    }
+
+    #[test]
+    fn relay_source_strict_policy_applies_to_hs256_fallback_branch() {
+        // pubkey set + fallback on: an HS256 token reaches `verify_room_token`
+        // via the InvalidSignature fallback — that branch must be bound too.
+        let secret = b"test-secret-32-bytes-long-enough!";
+        let (_priv_pem, pub_pem) = generate_test_keypair_dc();
+        let policy = crate::room_auth::RoomTokenPolicy::new(
+            vec!["oxpulse-chat".into()],
+            "oxpulse-sfu",
+            true,
+        )
+        .unwrap();
+        crate::room_auth::with_test_policy(policy, || {
+            let foreign = bound_token(
+                "room-abc",
+                secret,
+                Some("oxpulse-staging"),
+                Some("oxpulse-sfu"),
+            );
+            let r = handle_channel_data(
+                ClientId(71),
+                "any",
+                relay_payload(&foreign).as_bytes(),
+                Some(secret),
+                Some(pub_pem.as_str()),
+                true,
+            );
+            assert!(matches!(r, Propagated::Noop), "got {r:?}");
+        });
+    }
+
     // ── Phase 2c: sfu-events DC browser-write guard ─────────────────────────
 
     #[test]
