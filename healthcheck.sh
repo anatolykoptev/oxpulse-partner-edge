@@ -151,7 +151,16 @@ check "check_07_xray_tunnel" "7. xray-client tunnel established" bash -c '
 	docker exec oxpulse-partner-xray sh -c "
 		(ss -tn state established 2>/dev/null || netstat -tn 2>/dev/null | grep ESTABLISHED) | head -1 | grep -q .
 	" || exit 1
-	n=$(docker logs --since 120s oxpulse-partner-xray 2>&1 | grep -c "REALITY: received real certificate" || true)
+	# Bound the window by the container uptime (as selfheal does): `docker logs`
+	# survives a restart, so without it the previous, wedged process would keep
+	# check 7 RED for up to 120s after the restart that fixed it.
+	since=120
+	started=$(docker inspect -f "{{.State.StartedAt}}" oxpulse-partner-xray 2>/dev/null || true)
+	if [[ -n "$started" ]] && started_ep=$(date -d "$started" +%s 2>/dev/null); then
+		age=$(( $(date +%s) - started_ep ))
+		(( age >= 1 && age < since )) && since=$age
+	fi
+	n=$(docker logs --since "${since}s" oxpulse-partner-xray 2>&1 | grep -c "REALITY: received real certificate" || true)
 	[[ "${n:-0}" -lt 5 ]]
 '
 

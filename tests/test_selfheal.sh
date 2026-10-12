@@ -120,9 +120,11 @@ case "$1" in
     [[ -n "${FAKE_DISK_AFTER_RMI:-}" ]] && echo "$FAKE_DISK_AFTER_RMI" > "$TMPDIR_DISK"
     ;;
   logs)
-    # docker logs --since <N>s <container>: record the bound, replay the fixture
+    # docker logs --since <N>s <container>: record the bound, replay only the
+    # fixture lines ("<epoch> <text>") inside the window, like the daemon does.
     echo "$3" >> "$LOGS_ARGS"
-    cat "$LOGS_DIR/$4" 2>/dev/null
+    win="${3%s}"; now=$(date +%s)
+    while read -r ts text; do (( ts >= now - win )) && echo "$text"; done < "$LOGS_DIR/$4" 2>/dev/null
     exit 0 ;;
   restart) echo "$2" >> "$RESTART_LOG"; exit "${DOCKER_RESTART_RC:-0}" ;;
   start)
@@ -713,10 +715,10 @@ teardown
 # A wedged xray keeps its TCP session to central ESTABLISHED and can still read
 # `healthy` from docker; the only evidence is the log signature.
 XRAY=oxpulse-partner-xray
-wedge_log() {   # container count
-	local i; : > "$LOGS_DIR/$1"
+wedge_log() {   # container count [age-secs, default 5]
+	local i ts=$(( $(date +%s) - ${3:-5} )); : > "$LOGS_DIR/$1"
 	for ((i = 0; i < $2; i++)); do
-		echo "2026/10/12 15:49:04 [Error] [1363187708] transport/internet/reality: REALITY: received real certificate (potential MITM or redirection)" >> "$LOGS_DIR/$1"
+		echo "$ts [Error] transport/internet/reality: REALITY: received real certificate (potential MITM or redirection)" >> "$LOGS_DIR/$1"
 	done
 }
 
@@ -728,8 +730,13 @@ setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 12; run_it
 teardown
 
 # 45 — a couple of stray errors (< REALITY_MIN) are not a wedge
-setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 2; run_it
-[[ "$(restarts)" == 0 ]] && pass "xray below the failure threshold -> left alone" || fail "restarted on 2 stray errors"
+setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 4; run_it
+[[ "$(restarts)" == 0 ]] && pass "threshold: 4 failures (< 5) -> left alone" || fail "restarted on 4 stray errors"
+teardown
+
+# 45b — exactly REALITY_MIN lines is a wedge
+setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 5; run_it
+[[ "$(restarts)" == 1 ]] && pass "threshold: 5 failures (= 5) -> restarted" || fail "5 failures did not trigger (restarts=$(restarts))"
 teardown
 
 # 46 — the wedge verdict still goes through the budget: exhausted -> no restart, one alert
@@ -743,14 +750,35 @@ run_it
 	|| fail "budget bypassed (restarts=$(restarts) alerts=$(alerts))"
 teardown
 
-# 47 — the log window is bounded by uptime: a restarted process must not be
-#      condemned by the PREVIOUS process's errors (docker logs survive restarts)
+# 47 — the log window is bounded by uptime: the bound passed to `docker logs`
 setup; fixture $XRAY healthy "$(( $(date +%s) - 30 ))"; wedge_log $XRAY 12; run_it
 since="$(head -1 "$LOGS_ARGS" | tr -d 's')"
 [[ -n "$since" && "$since" -le 31 ]] \
 	&& pass "log scan bounded by container uptime (since=${since}s)" \
 	|| fail "log scan not bounded by uptime (since='${since}')"
 [[ "$(restarts)" == 0 ]] && pass "young wedged xray is inside start grace -> not restarted" || fail "restarted inside start grace"
+teardown
+
+# 47b — verify-outcome path: a restart just happened (pending attempt, process
+#       30s old, docker says healthy); the log still holds the PREVIOUS
+#       process's 12 lines from 100s ago. It must resolve as healed, not read as
+#       still wedged. Without the uptime bound it stays pending forever.
+setup; fixture $XRAY healthy "$(( $(date +%s) - 30 ))"; wedge_log $XRAY 12 100
+mkdir -p "$OXPULSE_SELFHEAL_STATE_DIR"
+printf 'pending_since=%s\nattempts=1\nwin_start=%s\n' "$(( $(date +%s) - 30 ))" "$(( $(date +%s) - 30 ))" \
+  > "$OXPULSE_SELFHEAL_STATE_DIR/$XRAY.state"
+run_it
+[[ "$(state $XRAY pending_since)" == 0 && "$(restarts)" == 0 ]] \
+	&& pass "restarted xray: previous process's lines do not read as still wedged (healed)" \
+	|| fail "young process condemned by old lines (pending=$(state $XRAY pending_since) restarts=$(restarts))"
+teardown
+
+# 47c — the failure gauge exists in the confirmed-wedge state too (docker already
+#       says unhealthy), so a dashboard sees the signature exactly when it matters
+setup; fixture $XRAY unhealthy "$OLD"; wedge_log $XRAY 12; run_it
+grep -q 'partner_edge_xray_reality_auth_failures{container="oxpulse-partner-xray"} 12' "$TMP"/textfile/*.prom 2>/dev/null \
+	&& pass "auth-failure gauge emitted while docker status is already unhealthy" \
+	|| fail "gauge missing in the unhealthy state: $(cat "$TMP"/textfile/*.prom 2>/dev/null | tr '\n' ';')"
 teardown
 
 # 48 — only the xray client is judged by this signature

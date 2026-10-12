@@ -441,10 +441,15 @@ _evaluate_container() {   # container now
 	# by docker's health verdict: see _reality_auth_failures. It can only turn a
 	# non-unhealthy status into unhealthy, so the grace / budget / hold / verify
 	# machinery below applies unchanged (restarts stay inside the window budget).
-	if [[ "$c" == "${NAME_PREFIX}xray" && "$status" != unhealthy ]]; then
+	# Only a container that already has a docker healthcheck reaches this point
+	# (heal_containers skips the rest), so a node whose live compose predates the
+	# xray healthcheck is NOT covered by this signature check. The gauge is
+	# emitted in every state, including an already-`unhealthy` one, so the series
+	# exists exactly when a wedge is confirmed.
+	if [[ "$c" == "${NAME_PREFIX}xray" ]]; then
 		local rf; rf="$(_reality_auth_failures "$c" "$t")"
 		_gauge partner_edge_xray_reality_auth_failures "$lbl" "${rf:-0}"
-		if (( ${rf:-0} >= REALITY_MIN )); then
+		if [[ "$status" != unhealthy ]] && (( ${rf:-0} >= REALITY_MIN )); then
 			log "$c: docker says '$status' but ${rf} REALITY auth failures in the log (>= $REALITY_MIN) — treating as wedged"
 			status=unhealthy
 		fi
