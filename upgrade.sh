@@ -2216,10 +2216,10 @@ _settle_docker_baseline_capture() {
 }
 
 # _settle_baseline_was_healthy BASELINE_FILE NAME - exit 0 iff NAME was running and
-# `healthy` in the baseline. Absent from a valid baseline = not healthy (it did not
+# `healthy` (or still `starting` - not yet judged, so it stays accountable) in the baseline. Absent from a valid baseline = not healthy (it did not
 # exist or was down; the upgrade is not accountable for it).
 _settle_baseline_was_healthy() {
-	awk -v n="$2" '$1 == n { ok = ($2 == "running" && $3 == "healthy") } END { exit !ok }' "$1" 2>/dev/null
+	awk -v n="$2" '$1 == n { ok = ($2 == "running" && ($3 == "healthy" || $3 == "starting")) } END { exit !ok }' "$1" 2>/dev/null
 }
 
 _settle_docker_health_watch() {

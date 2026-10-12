@@ -394,14 +394,15 @@ conf_relay_range() {
 # verifiably in force. Returns 1 (loudly) when the end state is not WANT.
 fw_converge_firewalld() {
 	local want="$1" scope retired=0
-	if [[ "$want" != "$LEGACY_RELAY_RANGE" ]]; then
-		for scope in --permanent ""; do
-			if fw_has_exact "$scope" "$LEGACY_RELAY_RANGE"; then
-				fw_set "$scope" remove "$LEGACY_RELAY_RANGE"; retired=1
-			fi
-		done
-	fi
+	# Per scope, remove-legacy + add-want are ONE firewall-cmd call (options apply in
+	# order), so the window with no entry is as short as firewalld allows. Verified after
+	# BOTH scopes: a half-applied state (permanent ok, runtime not) is a failure too.
 	for scope in --permanent ""; do
+		if [[ "$want" != "$LEGACY_RELAY_RANGE" ]] && fw_has_exact "$scope" "$LEGACY_RELAY_RANGE"; then
+			retired=1
+			# shellcheck disable=SC2086
+			"$FIREWALL_CMD" $scope --zone=public "--remove-port=${LEGACY_RELAY_RANGE}/udp" "--add-port=${want}/udp" >/dev/null 2>&1 || true
+		fi
 		fw_range_in_force "$scope" "$want" || fw_set "$scope" add "$want"
 	done
 	if fw_range_in_force --permanent "$want" && fw_range_in_force "" "$want"; then
@@ -410,11 +411,19 @@ fw_converge_firewalld() {
 	fi
 	if [[ "$retired" = 1 ]]; then
 		for scope in --permanent ""; do fw_set "$scope" add "$LEGACY_RELAY_RANGE"; done
-		warn "firewalld: could not put ${want}/udp in force - legacy ${LEGACY_RELAY_RANGE}/udp RESTORED (too wide beats closed); fix the zone and re-run 'coturn-guard apply'"
+		warn "firewalld: could not put ${want}/udp in force in both scopes - legacy ${LEGACY_RELAY_RANGE}/udp RESTORED (too wide beats closed); fix the zone and re-run 'coturn-guard apply'"
 	else
 		warn "firewalld: ${want}/udp is NOT allowed in zone public (permanent or runtime) - inbound relay media is blocked"
 	fi
 	return 1
+}
+
+# ufw_active: ufw is installed AND enabled. An inactive ufw stores rules it does not
+# enforce and `ufw status` lists none, so there is nothing to converge or verify.
+ufw_active() {
+	command -v "$UFW_BIN" >/dev/null 2>&1 || return 1
+	local first; first=$("$UFW_BIN" status 2>/dev/null | head -n1 || true)
+	[[ "$first" == "Status: active"* ]]
 }
 
 # ufw does not coalesce (rules are textual), so the narrow rule is added first and
@@ -444,8 +453,10 @@ cmd_firewall_sync() {
 	if command -v "$FIREWALL_CMD" >/dev/null 2>&1 && "$FIREWALL_CMD" --state >/dev/null 2>&1; then
 		fw_converge_firewalld "$want" || rc=1
 	fi
-	if command -v "$UFW_BIN" >/dev/null 2>&1; then
+	if ufw_active; then
 		fw_converge_ufw "$want" || rc=1
+	elif command -v "$UFW_BIN" >/dev/null 2>&1; then
+		log "ufw is installed but inactive: no host firewall to manage for ${want}/udp"
 	fi
 	return "$rc"
 }
@@ -477,7 +488,10 @@ cmd_apply() {
 	"$SYSCTL_BIN" -q -w "net.netfilter.nf_conntrack_udp_timeout_stream=${CONNTRACK_UDP_STREAM_TIMEOUT}" \
 		|| warn "could not set nf_conntrack_udp_timeout_stream (nf_conntrack not loaded?); sysctl.d applies it at next boot"
 	warn_stray_sockets
-	cmd_firewall_sync || warn "relay firewall range not in force (see above); guard status will report it"
+	# The nft table above is already loaded: the guard's security function does not
+	# depend on the inbound firewall, so a firewall-sync failure never fails `apply`
+	# (it stays visible: warn above + `status` / check_22 (d) while the range is missing).
+	cmd_firewall_sync || warn "relay firewall range not in force (see above); guard status (check_22) reports it until fixed"
 	[[ "$CONF_CHANGED" = 1 ]] && restart_coturn
 	log "applied: table inet ${TABLE} (uid ${COTURN_UID}, sfu udp ${sfu_port}, relay ${RELAY_MIN}-${RELAY_MAX})"
 }
@@ -485,6 +499,22 @@ cmd_apply() {
 cmd_remove() {
 	"$NFT" delete table inet "${TABLE}" 2>/dev/null || true
 	log "removed table inet ${TABLE} (sysctl.d file left in place)"
+}
+
+# relay_firewall_in_force: exit 0 when the active firewall allows the conf's relay range
+# (or none is active); otherwise say what is missing on stderr and exit 1.
+relay_firewall_in_force() {
+	local want; want=$(conf_relay_range)
+	if command -v "$FIREWALL_CMD" >/dev/null 2>&1 && "$FIREWALL_CMD" --state >/dev/null 2>&1; then
+		fw_range_in_force --permanent "$want" || { echo "firewalld zone public: ${want}/udp not allowed (permanent) - inbound relay media is blocked" >&2; return 1; }
+		fw_range_in_force "" "$want" || { echo "firewalld zone public: ${want}/udp not allowed (runtime) - inbound relay media is blocked" >&2; return 1; }
+	fi
+	if ufw_active; then
+		local st; st=$("$UFW_BIN" status 2>/dev/null || true)
+		[[ "$st" == *"${want/-/:}/udp"* || "$st" == *"${LEGACY_RELAY_RANGE/-/:}/udp"* ]] \
+			|| { echo "ufw: ${want/-/:}/udp not allowed - inbound relay media is blocked" >&2; return 1; }
+	fi
+	return 0
 }
 
 # Exit 0 iff the guard is in force: table loaded with the drop rule for the
@@ -541,6 +571,11 @@ cmd_status() {
 			[[ -z "$allowed" ]] || { echo "${COTURN_CONF}: allowed-peer-ip present but this edge has no private relay address" >&2; return 1; }
 		fi
 	fi
+
+	# (d) the ACTIVE host firewall must let the conf's relay range in, or inbound relay
+	# media is dropped while everything else reads green (rvpn 2026-10-12). Skipped when
+	# neither firewalld nor ufw is active.
+	relay_firewall_in_force || return 1
 
 	# (c) a foreign socket inside the relay range is reachable through the allow-range.
 	local stray; stray=$(stray_sockets)

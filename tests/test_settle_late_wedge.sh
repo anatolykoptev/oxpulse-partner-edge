@@ -320,6 +320,14 @@ rc=$(bash -c "source '$PRE'
     settle_healthcheck_with_retry baseline '$TC/hc_baseline' '' '$TC/base'; echo rc=\$?" 2>/dev/null | sed -n 's/^rc=//p')
 [[ "$rc" == "0" ]] && ok "T16: gate with a baseline does not roll back on a pre-broken hy2" \
                    || bad "T16: gate rolled back on a pre-broken hy2 (rc=$rc) - baseline not threaded through settle_healthcheck_with_retry"
+# T18 - a container still `starting` in the baseline has not been judged yet: it stays accountable.
+_reset
+printf 'oxpulse-partner-xray\n' > "$TC/names"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-xray"
+printf 'oxpulse-partner-xray running starting\n' | _mkbase
+rc=$(_watchb "$TC/base")
+[[ "$rc" != "0" ]] && ok "T18: baseline 'starting' is still watched (rc=$rc)" || bad "T18: a starting container was ignored"
+
 # T17 - wiring: every settle_healthcheck_with_retry CALL SITE passes a container baseline
 # captured before the change (plain, --with-templates, render gate). A site that does not
 # silently reverts to the strict watch and re-opens the hy2 false-positive rollback.
