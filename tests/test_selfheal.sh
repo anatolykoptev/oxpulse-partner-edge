@@ -119,6 +119,11 @@ case "$1" in
     grep -v " $2\$" "$IMAGE_LIST" > "$IMAGE_LIST.t" 2>/dev/null && mv -f "$IMAGE_LIST.t" "$IMAGE_LIST"
     [[ -n "${FAKE_DISK_AFTER_RMI:-}" ]] && echo "$FAKE_DISK_AFTER_RMI" > "$TMPDIR_DISK"
     ;;
+  logs)
+    # docker logs --since <N>s <container>: record the bound, replay the fixture
+    echo "$3" >> "$LOGS_ARGS"
+    cat "$LOGS_DIR/$4" 2>/dev/null
+    exit 0 ;;
   restart) echo "$2" >> "$RESTART_LOG"; exit "${DOCKER_RESTART_RC:-0}" ;;
   start)
     echo "$2" >> "$START_LOG"
@@ -189,7 +194,8 @@ TG
 	# The REAL metric sink, so the gauge assertions exercise the shipped writer.
 	cp "$REPO_ROOT/lib/metric-sink-lib.sh" "$TMP/metric-sink-lib.sh"
 
-	mkdir -p "$TMP/cimg"
+	mkdir -p "$TMP/cimg" "$TMP/logs"
+	export LOGS_DIR="$TMP/logs" LOGS_ARGS="$TMP/logs.args"; : > "$LOGS_ARGS"
 	export IMAGE_LIST="$TMP/images" CONTAINER_IMAGE="$TMP/cimg" RMI_LOG="$TMP/rmi"
 	: > "$IMAGE_LIST"; : > "$RMI_LOG"
 	export FIXTURES="$TMP/fixtures" FX_UNITS="$TMP/units"
@@ -701,6 +707,55 @@ teardown
 setup; guard_setup missing; run_it
 [[ "$(cat "$TMP/out")" == *"restart did not bring the guard into force"* ]] \
 	&& pass "a restart that does not restore the guard is reported failed" || fail "false heal / silent: $(cat "$TMP/out")"
+teardown
+
+# --- xray REALITY auth-failure wedge (randomized-fingerprint incident 2026-10-12) ---
+# A wedged xray keeps its TCP session to central ESTABLISHED and can still read
+# `healthy` from docker; the only evidence is the log signature.
+XRAY=oxpulse-partner-xray
+wedge_log() {   # container count
+	local i; : > "$LOGS_DIR/$1"
+	for ((i = 0; i < $2; i++)); do
+		echo "2026/10/12 15:49:04 [Error] [1363187708] transport/internet/reality: REALITY: received real certificate (potential MITM or redirection)" >> "$LOGS_DIR/$1"
+	done
+}
+
+# 44 — docker says healthy, log shows the wedge -> restarted
+setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 12; run_it
+[[ "$(restarts)" == 1 && "$(cat "$RESTART_LOG")" == "$XRAY" ]] \
+	&& pass "xray 'healthy' but REALITY auth failing in the log -> restarted" \
+	|| fail "wedged xray not restarted (restarts=$(restarts); out: $(cat "$TMP/out"))"
+teardown
+
+# 45 — a couple of stray errors (< REALITY_MIN) are not a wedge
+setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 2; run_it
+[[ "$(restarts)" == 0 ]] && pass "xray below the failure threshold -> left alone" || fail "restarted on 2 stray errors"
+teardown
+
+# 46 — the wedge verdict still goes through the budget: exhausted -> no restart, one alert
+setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 12
+mkdir -p "$OXPULSE_SELFHEAL_STATE_DIR"
+printf 'win_start=%s\nattempts=3\nlast_attempt=%s\npending_since=0\n' \
+  "$(( $(date +%s) - 100 ))" "$(( $(date +%s) - 999 ))" > "$OXPULSE_SELFHEAL_STATE_DIR/$XRAY.state"
+run_it
+[[ "$(restarts)" == 0 && "$(alerts)" == 1 ]] \
+	&& pass "wedge verdict respects the restart budget (gives up + alerts once)" \
+	|| fail "budget bypassed (restarts=$(restarts) alerts=$(alerts))"
+teardown
+
+# 47 — the log window is bounded by uptime: a restarted process must not be
+#      condemned by the PREVIOUS process's errors (docker logs survive restarts)
+setup; fixture $XRAY healthy "$(( $(date +%s) - 30 ))"; wedge_log $XRAY 12; run_it
+since="$(head -1 "$LOGS_ARGS" | tr -d 's')"
+[[ -n "$since" && "$since" -le 31 ]] \
+	&& pass "log scan bounded by container uptime (since=${since}s)" \
+	|| fail "log scan not bounded by uptime (since='${since}')"
+[[ "$(restarts)" == 0 ]] && pass "young wedged xray is inside start grace -> not restarted" || fail "restarted inside start grace"
+teardown
+
+# 48 — only the xray client is judged by this signature
+setup; fixture oxpulse-partner-c1 healthy "$OLD"; wedge_log oxpulse-partner-c1 12; run_it
+[[ "$(restarts)" == 0 ]] && pass "non-xray container with the signature is untouched" || fail "restarted a non-xray container"
 teardown
 
 echo ""

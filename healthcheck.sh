@@ -142,10 +142,17 @@ check "check_05_udp3478" "5. UDP 3478 listening (coturn)" bash -c 'ss -lun | gre
 check "check_06_tcp5349" "6. TCP 5349 listening (coturn TURNS)" bash -c 'ss -ltn | grep -q ":5349 "'
 
 # --- 7. xray-client has an outbound ESTABLISHED connection ---
+# An ESTABLISHED socket is NOT proof of a working tunnel: when the central
+# REALITY server rejects our ClientHello it forwards the TCP session to its dest,
+# so the socket stays ESTABLISHED while every connection ends in "REALITY:
+# received real certificate" (xray process wedge, 2026-10-12). Fail on that
+# signature too; >= 5 hits in the last 2 minutes is a wedge, not noise.
 check "check_07_xray_tunnel" "7. xray-client tunnel established" bash -c '
 	docker exec oxpulse-partner-xray sh -c "
 		(ss -tn state established 2>/dev/null || netstat -tn 2>/dev/null | grep ESTABLISHED) | head -1 | grep -q .
-	"
+	" || exit 1
+	n=$(docker logs --since 120s oxpulse-partner-xray 2>&1 | grep -c "REALITY: received real certificate" || true)
+	[[ "${n:-0}" -lt 5 ]]
 '
 
 # --- 8. Coturn shared-secret matches rendered config ---

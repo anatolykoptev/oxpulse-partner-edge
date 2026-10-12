@@ -13,9 +13,20 @@
 #   1. upgrade.sh post-up sleep raised from 5s to 10s (this test guards that).
 #   2. Both the post-upgrade sleep and the rollback sleep are updated.
 #
-# Note on fingerprint: "randomized" is intentional (CVE-2026-27017 mitigation,
-#   PR #79). Do NOT add a test that enforces "chrome" — that would reverse the
-#   security fix. The template fingerprint is NOT tested here.
+# Fingerprint (section 2b below pins it): "chrome", NOT "randomized"/"randomizednoalpn".
+#   History: PR #79 moved chrome -> randomized citing CVE-2026-27017. That CVE is
+#   a uTLS 1.6.0-1.8.0 bug (Chrome-parrot GREASE-ECH picks an AES outer suite with
+#   a ChaCha20 ECH suite, a pairing real Chrome never emits), fixed in uTLS 1.8.1.
+#   xray 26.5.9 builds against uTLS 1.8.3-pre, so it is already fixed; "randomized"
+#   was never the mitigation.
+#   Why randomized is unsafe: xray draws ONE PRNG seed per process (tls.go init())
+#   and uTLS generateRandomizedSpec() flips KeyShare_Append_RandomGroups (0.5) to
+#   decide whether X25519MLKEM768 is offered. XTLS/REALITY 2026-09-08 (xray
+#   26.9.x) rejects a ClientHello that has no X25519MLKEM768 share ahead of
+#   X25519, so ~50% of processes get the dest's REAL certificate on every
+#   connection ("REALITY: received real certificate") for the life of the
+#   process. Reproduced: client 26.5.9 -> server 26.9.30, randomized 15/24
+#   wedged, randomizednoalpn 8/16, chrome 0/12, firefox 0/8.
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 TPL="$REPO_ROOT/xray-client.json.tpl"
@@ -60,6 +71,21 @@ for ob in d.get('outbounds', []):
 print('FAIL: no realitySettings block found in outbounds')
 sys.exit(1)
 " || exit 1
+
+# 2b. Fingerprint pin. "randomized" and "randomizednoalpn" make a per-process coin
+#    flip on whether the ClientHello is REALITY-compatible (see header); only a
+#    parrot that always carries X25519MLKEM768 + X25519 is acceptable.
+fp=$(echo "$rendered" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for ob in d.get('outbounds', []):
+    rs = ob.get('streamSettings', {}).get('realitySettings', {})
+    if rs:
+        print(rs.get('fingerprint', ''))
+        break
+")
+[[ "$fp" == "chrome" ]] \
+    || { echo "FAIL: realitySettings.fingerprint must be 'chrome', got '$fp' (randomized* wedges ~50% of xray processes against REALITY >= 2026-09-08)"; exit 1; }
 
 # 3. Cold-start settle margin before the post-upgrade healthcheck gate.
 #    xray with a randomized fingerprint takes up to 8s to establish the Reality

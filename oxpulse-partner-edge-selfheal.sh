@@ -107,6 +107,8 @@
 #   OXPULSE_SELFHEAL_KEEP_RELEASES default 2   releases' images kept when pruning
 #   OXPULSE_SELFHEAL_ACTS_PER_TICK default 2   max unit actions in one tick
 #   OXPULSE_SELFHEAL_DRY_RUN     default 0     log the action, do not perform it
+#   OXPULSE_SELFHEAL_REALITY_WINDOW default 120 seconds of xray log scanned for REALITY auth failures
+#   OXPULSE_SELFHEAL_REALITY_MIN    default 5   failures in that window that mark xray wedged
 #   OXPULSE_SELFHEAL_PROJECT     default oxpulse-partner-edge  compose project
 #   OXPULSE_SELFHEAL_NAME_PREFIX default oxpulse-partner-      container prefix
 set -uo pipefail
@@ -128,6 +130,8 @@ DISK_GAP="${OXPULSE_SELFHEAL_DISK_GAP:-3600}"
 KEEP_RELEASES="${OXPULSE_SELFHEAL_KEEP_RELEASES:-2}"
 ACTS_PER_TICK="${OXPULSE_SELFHEAL_ACTS_PER_TICK:-2}"
 DRY_RUN="${OXPULSE_SELFHEAL_DRY_RUN:-0}"
+REALITY_WINDOW="${OXPULSE_SELFHEAL_REALITY_WINDOW:-120}"
+REALITY_MIN="${OXPULSE_SELFHEAL_REALITY_MIN:-5}"
 PROJECT="${OXPULSE_SELFHEAL_PROJECT:-oxpulse-partner-edge}"
 NAME_PREFIX="${OXPULSE_SELFHEAL_NAME_PREFIX:-oxpulse-partner-}"
 DOCKER_ROOT="${OXPULSE_SELFHEAL_DOCKER_ROOT:-/var/lib/docker}"
@@ -313,6 +317,25 @@ _started_epoch()   { date -d "$(docker inspect -f '{{.State.StartedAt}}' "$1" 2>
 _finished_epoch()  { date -d "$(docker inspect -f '{{.State.FinishedAt}}' "$1" 2>/dev/null)" +%s 2>/dev/null || echo 0; }
 _oneoff()          { [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.oneoff"}}' "$1" 2>/dev/null)" == True ]]; }
 
+# REALITY auth failures in the xray client's own log, since the process started
+# (capped at REALITY_WINDOW). The signature is what xray logs when the central
+# server did NOT authenticate our ClientHello and forwarded us to its dest, so
+# we got the dest's real certificate. A process whose uTLS ClientHello is
+# rejected does this on EVERY connection for its whole life (the randomized
+# fingerprint wedge, 2026-10-12), while the TCP session to central is still
+# ESTABLISHED and the docker healthcheck can lag or be absent from an older
+# rendered compose. A restart draws a new PRNG seed, so it is the right heal.
+# `--since` is bounded by uptime because `docker logs` survives a restart:
+# without the bound the previous process's errors would condemn the new one.
+_reality_auth_failures() {   # container now
+	local c="$1" t="$2" started since
+	started="$(_started_epoch "$c")"
+	since="$REALITY_WINDOW"
+	(( started > 0 && t - started < since )) && since=$(( t - started ))
+	(( since < 1 )) && since=1
+	docker logs --since "${since}s" "$c" 2>&1 | grep -c 'REALITY: received real certificate' || true
+}
+
 # ==============================================================================
 main() {
 	mkdir -p "$STATE_DIR"
@@ -413,6 +436,19 @@ _evaluate_container() {   # container now
 	local c="$1" t="$2"
 	local status; status="$(_health "$c")"
 	local lbl="container=\"$c\""
+
+	# The xray client is also judged by its own REALITY auth failures, not only
+	# by docker's health verdict: see _reality_auth_failures. It can only turn a
+	# non-unhealthy status into unhealthy, so the grace / budget / hold / verify
+	# machinery below applies unchanged (restarts stay inside the window budget).
+	if [[ "$c" == "${NAME_PREFIX}xray" && "$status" != unhealthy ]]; then
+		local rf; rf="$(_reality_auth_failures "$c" "$t")"
+		_gauge partner_edge_xray_reality_auth_failures "$lbl" "${rf:-0}"
+		if (( ${rf:-0} >= REALITY_MIN )); then
+			log "$c: docker says '$status' but ${rf} REALITY auth failures in the log (>= $REALITY_MIN) — treating as wedged"
+			status=unhealthy
+		fi
+	fi
 
 	_gauge partner_edge_container_unhealthy "$lbl" "$([[ "$status" == unhealthy ]] && echo 1 || echo 0)"
 	_gauge partner_edge_container_stopped "$lbl" 0
