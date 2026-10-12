@@ -226,10 +226,16 @@ else pass "every host-side docker exec into coturn uses -u 0"; fi
 need healthcheck.sh 'check "check_22_coturn_self_relay_guard" .* "\$_COTURN_GUARD_BIN" status' "healthcheck reports a missing guard (check_22)"
 
 # --- real nft syntax check when the host has nft (CI runner / operator box) -----
+# `nft -c` still opens a netlink socket, so it needs CAP_NET_ADMIN: run it directly
+# with the capability, else via passwordless sudo (GitHub runners have it). Only a
+# pure capability error with no sudo available is a SKIP; anything else is a FAIL.
 if command -v nft >/dev/null 2>&1; then
 	"$REPO_ROOT/$GUARD" render > "$TMP/real.nft" 2>/dev/null
-	if nft -c -f "$TMP/real.nft" 2>"$TMP/nft.err"; then pass "nft -c accepts the generated ruleset"
-	elif grep -qiE 'operation not permitted|permission denied' "$TMP/nft.err"; then echo "SKIP: nft -c needs privileges here"
+	nft_cmd=(nft)
+	if [[ $(id -u) -ne 0 ]] && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then nft_cmd=(sudo -n nft); fi
+	if "${nft_cmd[@]}" -c -f "$TMP/real.nft" >"$TMP/nft.err" 2>&1; then pass "nft -c accepts the generated ruleset"
+	elif [[ ${nft_cmd[0]} == nft ]] && grep -qiE 'operation not permitted|permission denied|cache initialization' "$TMP/nft.err"; then
+		echo "SKIP: nft -c needs CAP_NET_ADMIN and no root/sudo here"
 	else fail "nft rejects the generated ruleset: $(cat "$TMP/nft.err")"; fi
 else echo "SKIP: nft not installed — syntax checked by the live acceptance probe"; fi
 
