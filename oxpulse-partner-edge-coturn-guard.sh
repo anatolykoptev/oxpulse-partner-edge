@@ -65,8 +65,10 @@
 #     restarted only if the file actually changed;
 #   * reserves the relay range (merged into whatever is already reserved) and
 #     writes the sysctl.d file (our range only);
-#   * removes the legacy 49152-65535/udp firewall allowance (firewalld / ufw), after
-#     the narrower range is in place.
+#   * makes the firewall (firewalld / ufw) allow exactly the conf's relay range and
+#     retires the legacy 49152-65535/udp allowance - removing it FIRST under firewalld
+#     (which coalesces, see fw_converge_firewalld) and restoring it if the narrow
+#     range does not end up in force. `firewall-sync` runs just this step.
 #
 # `status` is the single definition of "in force" (healthcheck + selfheal): the
 # rule set, the reservation, the RUNNING turnserver's uid, the deployed conf's
@@ -339,28 +341,113 @@ tmo() { # tmo SECONDS CMD... — timeout(1) where it exists (absent on macOS tes
 	if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi
 }
 
-# Retire the legacy 49152-65535/udp allowance. The narrower range is added FIRST so
-# there is no moment where live relay traffic has no inbound allow. Silent when
-# the tool is absent/inactive or the legacy rule is not there (every clean node).
-legacy_firewall_cleanup() {
-	local zone=public new="${RELAY_MIN}-${RELAY_MAX}"
+# --- firewall: relay range must equal the conf, always ----------------------------
+# firewalld 1.x COALESCES: add-port of a range already covered by an existing entry is
+# a no-op (WARNING ALREADY_ENABLED, nothing added) and remove-port removes only an
+# EXACT entry. So "add the narrow range first, then remove 49152-65535" - the order
+# this function used to have - adds nothing and then deletes the only entry: the box
+# is left with NO relay range, exit 0, and a log line that claims the opposite
+# (rvpn, 2026-10-12 09:30:48 UTC). Therefore: remove the legacy entry FIRST, add the
+# narrow one, VERIFY it is in force in BOTH scopes, and put the legacy entry back if
+# it is not. A relay range that is too wide beats one that is absent.
+
+# fw_ports SCOPE - allowed port entries of zone public, one per line. SCOPE is
+# "--permanent" or "" (runtime).
+fw_ports() { # shellcheck disable=SC2086
+	"$FIREWALL_CMD" $1 --zone=public --list-ports 2>/dev/null | tr ' ' '\n' | awk 'NF'
+}
+
+# fw_range_in_force SCOPE LO-HI - yes if some udp entry in SCOPE covers LO-HI.
+fw_range_in_force() {
+	fw_ports "$1" | awk -v want="$2" '
+		BEGIN { split(want, w, "-"); wl = w[1] + 0; wh = w[2] + 0 }
+		$0 ~ /\/udp$/ { e = $0; sub(/\/udp$/, "", e)
+			if (split(e, r, "-") == 2) { l = r[1] + 0; h = r[2] + 0 } else { l = e + 0; h = l }
+			if (l <= wl && h >= wh) f = 1 }
+		END { exit !f }'
+}
+
+# fw_has_exact SCOPE LO-HI - the entry itself (not just coverage) exists.
+fw_has_exact() { fw_ports "$1" | grep -qx -- "$2/udp"; }
+
+# fw_set SCOPE ACTION LO-HI - ACTION is add|remove. Failures are not fatal here
+# (an absent/ALREADY_ENABLED entry is normal); the caller verifies the END STATE.
+fw_set() { # shellcheck disable=SC2086
+	"$FIREWALL_CMD" $1 --zone=public "--$2-port=$3/udp" >/dev/null 2>&1 || true
+}
+
+# The relay range coturn.conf declares (what coturn will actually bind). No conf on
+# this host -> the guard's own range; a conf WITHOUT the directive -> coturn's own
+# default (the legacy range), which is what it will really use.
+conf_relay_range() {
+	local lo="" hi=""
+	[[ -f "$COTURN_CONF" ]] || { printf '%s-%s' "$RELAY_MIN" "$RELAY_MAX"; return 0; }
+	lo=$(awk -F= '$1 == "min-port" {v = $2} END {print v}' "$COTURN_CONF" 2>/dev/null || true)
+	hi=$(awk -F= '$1 == "max-port" {v = $2} END {print v}' "$COTURN_CONF" 2>/dev/null || true)
+	[[ "$lo" =~ ^[0-9]+$ ]] || lo=${LEGACY_RELAY_RANGE%-*}
+	[[ "$hi" =~ ^[0-9]+$ ]] || hi=${LEGACY_RELAY_RANGE#*-}
+	printf '%s-%s' "$lo" "$hi"
+}
+
+# firewalld: make WANT (LO-HI) allowed in both scopes. When WANT is narrower than the
+# legacy range, the legacy entry is retired - and only kept retired if WANT is then
+# verifiably in force. Returns 1 (loudly) when the end state is not WANT.
+fw_converge_firewalld() {
+	local want="$1" scope retired=0
+	if [[ "$want" != "$LEGACY_RELAY_RANGE" ]]; then
+		for scope in --permanent ""; do
+			if fw_has_exact "$scope" "$LEGACY_RELAY_RANGE"; then
+				fw_set "$scope" remove "$LEGACY_RELAY_RANGE"; retired=1
+			fi
+		done
+	fi
+	for scope in --permanent ""; do
+		fw_range_in_force "$scope" "$want" || fw_set "$scope" add "$want"
+	done
+	if fw_range_in_force --permanent "$want" && fw_range_in_force "" "$want"; then
+		[[ "$retired" = 1 ]] && log "firewalld: legacy ${LEGACY_RELAY_RANGE}/udp retired, ${want}/udp in force (permanent + runtime)"
+		return 0
+	fi
+	if [[ "$retired" = 1 ]]; then
+		for scope in --permanent ""; do fw_set "$scope" add "$LEGACY_RELAY_RANGE"; done
+		warn "firewalld: could not put ${want}/udp in force - legacy ${LEGACY_RELAY_RANGE}/udp RESTORED (too wide beats closed); fix the zone and re-run 'coturn-guard apply'"
+	else
+		warn "firewalld: ${want}/udp is NOT allowed in zone public (permanent or runtime) - inbound relay media is blocked"
+	fi
+	return 1
+}
+
+# ufw does not coalesce (rules are textual), so the narrow rule is added first and
+# the legacy one is deleted only once the narrow one is listed.
+fw_converge_ufw() {
+	local want="$1" ufw_want="${1/-/:}" ufw_legacy="${LEGACY_RELAY_RANGE/-/:}" st
+	st=$("$UFW_BIN" status 2>/dev/null || true)
+	if [[ "$st" != *"${ufw_want}/udp"* ]]; then
+		"$UFW_BIN" allow "${ufw_want}/udp" >/dev/null 2>&1 || true
+		st=$("$UFW_BIN" status 2>/dev/null || true)
+	fi
+	[[ "$st" == *"${ufw_want}/udp"* ]] \
+		|| { warn "ufw: ${ufw_want}/udp is NOT allowed - inbound relay media is blocked"; return 1; }
+	if [[ "$want" != "$LEGACY_RELAY_RANGE" && "$st" == *"${ufw_legacy}/udp"* ]]; then
+		"$UFW_BIN" --force delete allow "${ufw_legacy}/udp" >/dev/null 2>&1 \
+			&& log "ufw: legacy ${ufw_legacy}/udp removed, ${ufw_want}/udp allowed"
+	fi
+	return 0
+}
+
+# firewall-sync: the firewall's relay range = the range coturn.conf declares.
+# Idempotent; silent on a node with no active firewall. Run by `apply` (after the
+# conf migration) and by upgrade.sh after ANY rollback, because a rollback leaves the
+# migrated conf in place and restores an older guard that may not do this itself.
+cmd_firewall_sync() {
+	local want rc=0; want=$(conf_relay_range)
 	if command -v "$FIREWALL_CMD" >/dev/null 2>&1 && "$FIREWALL_CMD" --state >/dev/null 2>&1; then
-		if "$FIREWALL_CMD" --permanent --zone=$zone --query-port="${LEGACY_RELAY_RANGE}/udp" >/dev/null 2>&1; then
-			"$FIREWALL_CMD" --permanent --zone=$zone --add-port="${new}/udp" >/dev/null 2>&1 || true
-			"$FIREWALL_CMD" --zone=$zone --add-port="${new}/udp" >/dev/null 2>&1 || true
-			"$FIREWALL_CMD" --permanent --zone=$zone --remove-port="${LEGACY_RELAY_RANGE}/udp" >/dev/null 2>&1 \
-				&& log "firewalld: legacy ${LEGACY_RELAY_RANGE}/udp removed (permanent), ${new}/udp allowed"
-			"$FIREWALL_CMD" --zone=$zone --remove-port="${LEGACY_RELAY_RANGE}/udp" >/dev/null 2>&1 || true
-		fi
+		fw_converge_firewalld "$want" || rc=1
 	fi
 	if command -v "$UFW_BIN" >/dev/null 2>&1; then
-		local st; st=$("$UFW_BIN" status 2>/dev/null || true)
-		if [[ "$st" == *"${LEGACY_RELAY_RANGE/-/:}/udp"* ]]; then
-			"$UFW_BIN" allow "${RELAY_MIN}:${RELAY_MAX}/udp" >/dev/null 2>&1 || true
-			"$UFW_BIN" --force delete allow "${LEGACY_RELAY_RANGE/-/:}/udp" >/dev/null 2>&1 \
-				&& log "ufw: legacy ${LEGACY_RELAY_RANGE/-/:}/udp removed, ${RELAY_MIN}:${RELAY_MAX}/udp allowed"
-		fi
+		fw_converge_ufw "$want" || rc=1
 	fi
+	return "$rc"
 }
 
 cmd_apply() {
@@ -390,7 +477,7 @@ cmd_apply() {
 	"$SYSCTL_BIN" -q -w "net.netfilter.nf_conntrack_udp_timeout_stream=${CONNTRACK_UDP_STREAM_TIMEOUT}" \
 		|| warn "could not set nf_conntrack_udp_timeout_stream (nf_conntrack not loaded?); sysctl.d applies it at next boot"
 	warn_stray_sockets
-	legacy_firewall_cleanup
+	cmd_firewall_sync || warn "relay firewall range not in force (see above); guard status will report it"
 	[[ "$CONF_CHANGED" = 1 ]] && restart_coturn
 	log "applied: table inet ${TABLE} (uid ${COTURN_UID}, sfu udp ${sfu_port}, relay ${RELAY_MIN}-${RELAY_MAX})"
 }
@@ -464,8 +551,9 @@ case "${1:-apply}" in
 	apply)  cmd_apply ;;
 	remove) cmd_remove ;;
 	status) cmd_status ;;
+	firewall-sync) cmd_firewall_sync ;;
 	migrate-conf) migrate_conf ;;                     # test seam: conf migration only
 	merge-ports) merge_ports "${2:-}" ;;                # test seam: pure
 	render) render_ruleset "$(resolve_sfu_port)" ;;   # test / review seam: no side effects
-	*) echo "usage: ${0##*/} [apply|remove|status|render|migrate-conf|merge-ports LIST]" >&2; exit 2 ;;
+	*) echo "usage: ${0##*/} [apply|remove|status|render|firewall-sync|migrate-conf|merge-ports LIST]" >&2; exit 2 ;;
 esac

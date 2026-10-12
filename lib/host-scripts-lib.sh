@@ -278,9 +278,57 @@ snapshot_host_scripts() {
 }
 
 # restore_host_scripts — restore sbin files, units, and drop-ins from snapshot.
+# _rollback_relay_firewall_sync GUARD_COPY - after ANY rollback, make the firewall's
+# relay range equal the live coturn.conf's (`coturn-guard firewall-sync`).
+#
+# Why here: the guard's `apply` runs during sync_host_scripts, BEFORE the settle gate,
+# and rewrites coturn.conf + the firewall. A rollback restores images, compose and
+# host scripts but NOT coturn.conf, so the migrated conf (49152-49999) stays while the
+# firewall may not match it (rvpn 2026-10-12: no relay range for ~26 min). Every
+# rollback branch funnels through restore_host_scripts, so this is the one place.
+# ROLLBACK POLICY (decided 2026-10-12): a rollback does NOT revert coturn.conf, the nft
+# guard table or the sysctl reservation. They are compatible with the previous image
+# (narrower relay range, a single allowed-peer-ip, a reserved range - all of which an old
+# coturn honours), and reverting them would re-widen the relay range and the firewall on
+# a box whose operator just saw an upgrade fail. What they do NOT do on the old image is
+# protect: the old coturn runs as root, so the table keyed on uid 58731 matches nothing;
+# `guard status` / check_22 then reports RED ("turnserver runs as uid 0") - an honest
+# red, not a bug. Safety of that state = v0.16.28 posture or better (root coturn, but
+# the narrowed range and allowed-peer-ip restriction stay in force); the missing piece
+# is only the nft backstop for relays to the host's OWN addresses. The one thing that
+# MUST follow the conf is the firewall range, hence this function.
+# GUARD_COPY is the guard as it was installed BEFORE the restore overwrote it (the
+# restored one can be an older guard that has no firewall-sync). Best effort: a rollback
+# must never abort on this, but a failure is loud.
+_rollback_relay_firewall_sync() {
+	local copy="$1" installed="${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-partner-edge-coturn-guard" g rc
+	for g in "$copy" "$installed"; do
+		[[ -n "$g" && -x "$g" ]] || continue
+		rc=0; "$g" firewall-sync || rc=$?
+		[[ "$rc" -eq 2 ]] && continue   # usage error: this guard predates firewall-sync
+		if [[ "$rc" -ne 0 ]]; then
+			warn "rollback: relay firewall range does not match coturn.conf (guard firewall-sync rc=$rc) - check 'firewall-cmd --zone=public --list-ports'"
+		else
+			log "rollback: relay firewall range matches coturn.conf"
+		fi
+		return 0
+	done
+	return 0
+}
+
 restore_host_scripts() {
 	local snap_dir="$PREV_HOST_SCRIPTS_DIR"
-	[[ -d "$snap_dir/sbin" ]] || { warn "no host-script snapshot to restore"; return 0; }
+	local _guard_copy="" _guard_inst="${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-partner-edge-coturn-guard"
+	if [[ -x "$_guard_inst" ]]; then
+		_guard_copy=$(mktemp) && cp -p "$_guard_inst" "$_guard_copy" || _guard_copy=""
+	fi
+	# shellcheck disable=SC2064
+	trap "rm -f '$_guard_copy'" RETURN
+	if [[ ! -d "$snap_dir/sbin" ]]; then
+		warn "no host-script snapshot to restore"
+		_rollback_relay_firewall_sync "$_guard_copy"
+		return 0
+	fi
 
 	local f restored=0 install_dir
 	for f in "${_HOST_SCRIPT_SBIN_FILES[@]}"; do
@@ -357,6 +405,7 @@ restore_host_scripts() {
 		"$SYSTEMCTL_BIN" daemon-reload 2>/dev/null || true
 		log "host-scripts restored from snapshot"
 	fi
+	_rollback_relay_firewall_sync "$_guard_copy"
 }
 
 # sync_host_scripts TAG — download, verify, and install host-scripts for TAG.
