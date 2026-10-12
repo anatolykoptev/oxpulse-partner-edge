@@ -10,6 +10,14 @@ Production-ready co-brand mirror node for the OxPulse network. One command insta
 
 OxPulse is encrypted real-time communication built to work under network-level filtering. The partner-edge bundle in this repository is the open-source component that operators self-host to extend the OxPulse mesh. Every byte that passes through a partner-edge node is end-to-end encrypted between participants — operators see only ciphertext and minimal forwarding metadata. Run by individual sysadmins, civic-tech communities, and university labs in jurisdictions that respect privacy.
 
+## Relay-only node
+
+A TURN-only profile for hosts that must hold no registration material: coturn, a
+host firewall, the self-relay guard and a liveness heartbeat, installed by
+`relay/install-relay.sh` with a per-node secret instead of the register path.
+See [docs/relay-only-node.md](docs/relay-only-node.md). Never run `install.sh`
+or `/api/partner/register` on such a host.
+
 ## What's inside
 
 | Component | Purpose | Network mode |

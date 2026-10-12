@@ -1,0 +1,32 @@
+# Origin: krolik-server deploy/host-config/coturn-self-relay-guard/coturn-self-relay-guard.nft
+# (private fleet repo), relay range widened from 49152-49999 to 49152-65535.
+# Installed to /etc/oxpulse-partner-edge/coturn-self-relay-guard.nft by install-relay.sh.
+#
+# coturn relays a TURN client's UDP to any peer address the client names. The
+# peer deny list refuses private ranges, but coturn treats its own external IP
+# as itself, so a credential holder could still send UDP from the relay to
+# every UDP listener on this host. Local delivery leaves via `-i lo ACCEPT`,
+# so INPUT allowlists never see it.
+#
+# Rule: a packet from the coturn user to any address that is local to this host
+# must be aimed at the relay range. That range is reserved from the ephemeral
+# pool (99-coturn-relay-ports.conf), so the only sockets there are coturn's own
+# relay sockets: the legitimate relay-to-relay path. Relays to external peers
+# and replies to remote clients are not local-destined and are untouched.
+#
+# Unsupported while this guard is on: a TURN client on this host itself over
+# UDP (coturn's replies go to a local ephemeral port outside the relay range
+# and are dropped). The health probe therefore talks TCP.
+#
+# Hook: output at priority raw (-300), ahead of conntrack and any nat OUTPUT
+# chain, so the destination is what coturn wrote. Keyed on the coturn user by
+# name: nft resolves it at load time and an unknown user fails the load loudly.
+# Nothing here may carry a `flush ruleset`: that would wipe other tables.
+table inet coturn_self_relay_guard
+delete table inet coturn_self_relay_guard
+table inet coturn_self_relay_guard {
+  chain output {
+    type filter hook output priority raw; policy accept;
+    meta skuid "turnserver" fib daddr type local meta l4proto udp udp dport != 49152-65535 counter drop comment "coturn-no-udp-to-local-services"
+  }
+}

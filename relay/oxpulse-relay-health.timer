@@ -1,0 +1,10 @@
+[Unit]
+Description=OxPulse relay-only node: coturn health report every 60s
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

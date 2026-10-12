@@ -1,0 +1,26 @@
+[Unit]
+Description=OxPulse relay-only node: coturn
+After=network-online.target coturn-self-relay-guard.service
+Wants=network-online.target
+# No secret, no cert, no rendered config: stay down instead of running open or half-configured.
+ConditionPathExists=/etc/oxpulse-partner-edge/node-secret
+ConditionPathExists=/etc/oxpulse-partner-edge/coturn.conf
+ConditionPathExists=/etc/oxpulse-partner-edge/relay-certs/fullchain.pem
+
+[Service]
+User=turnserver
+Group=turnserver
+# "+" = run as root: the secret is 0600 root, coturn runs as turnserver.
+ExecStartPre=+/usr/bin/opec check-node-secret --file /etc/oxpulse-partner-edge/node-secret
+ExecStart=/usr/bin/turnserver -c /etc/oxpulse-partner-edge/coturn.conf
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

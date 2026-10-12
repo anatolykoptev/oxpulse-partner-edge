@@ -1,0 +1,7 @@
+[Unit]
+Description=OxPulse relay-only node: report coturn health to the backend
+After=network-online.target oxpulse-relay-coturn.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/oxpulse-relay-health-report.sh
