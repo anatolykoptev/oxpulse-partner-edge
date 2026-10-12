@@ -124,13 +124,13 @@ relay_firewall_apply() {
 
 # relay_assert_relay_range_clean — after the sysctl reservation, long-running
 # daemons that already hold a port in the relay range (chrony, resolved) are
-# restarted, then any non-turnserver socket still in 49152-65535 fails the
-# install: the guard's "inside the range means a relay" argument needs it empty.
+# restarted, then any non-turnserver UDP listener still in 49152-65535 fails the
+# install (the guard only concerns UDP; a TCP daemon such as sshd on 50022 is fine): the guard's "inside the range means a relay" argument needs it empty.
 relay_assert_relay_range_clean() {
 	local stray
 	systemctl try-restart chrony.service systemd-resolved.service >/dev/null 2>&1 || true
 	stray="$(
-		{ "${SS:-ss}" -H -ulnp; "${SS:-ss}" -H -tlnp; } 2>/dev/null \
+		"${SS:-ss}" -H -ulnp 2>/dev/null \
 			| awk '{n=split($4,a,":"); p=a[n]+0; if (p>=49152 && p<=65535 && $0 !~ /"turnserver"/) print}'
 	)"
 	if [[ -n "$stray" ]]; then

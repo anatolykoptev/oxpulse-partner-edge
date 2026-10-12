@@ -110,8 +110,15 @@ printf '#!/bin/bash\necho "UNCONN 0 0 0.0.0.0:50123 0.0.0.0:* users:((\\"chronyd
 printf '#!/bin/bash\necho "UNCONN 0 0 0.0.0.0:50123 0.0.0.0:* users:((\\"turnserver\\",pid=1,fd=5))"\n' > "$T/bin/ss-clean"
 chmod +x "$T/bin/ss-dirty" "$T/bin/ss-clean"
 range_check() { PATH="$T/bin:$PATH" SS="$1" bash -c 'log(){ :; }; die(){ echo "$*" >&2; exit 1; }; systemctl(){ :; }; . "$1"; relay_assert_relay_range_clean' _ "$R/relay-lib.sh"; }
-refuses "range check: a non-turnserver socket in 49152-65535 fails" range_check "$T/bin/ss-dirty"
+refuses "range check: a non-turnserver UDP socket in 49152-65535 fails" range_check "$T/bin/ss-dirty"
 check "range check: turnserver-owned sockets are fine" range_check "$T/bin/ss-clean"
+# a TCP listener (sshd on 50022) must not abort the install: only -ulnp may report
+cat > "$T/bin/ss-tcp" <<'STUB'
+#!/bin/bash
+case "$*" in *-tlnp*) echo 'LISTEN 0 128 0.0.0.0:50022 0.0.0.0:* users:(("sshd",pid=1,fd=3))' ;; esac
+STUB
+chmod +x "$T/bin/ss-tcp"
+check "range check: a TCP listener (sshd:50022) does not abort" range_check "$T/bin/ss-tcp"
 
 # --- range agreement: template, guard, sysctl, firewall ---
 min="$(sed -nE 's/^min-port=([0-9]+)$/\1/p' "$R/coturn-relay.conf.tpl")"
@@ -257,6 +264,54 @@ if [[ "$rc" -eq 0 && -n "$m" && -n "$a" && -n "$f" && -n "$g" && -n "$gs" && "$m
 else fail "relay_main order: mask($m) apt($a) ufw($f) sysctl($g) guard($gs) rc=$rc: $(tail -5 "$M/out") LOG: $(tr "\n" "|" < "$LOG")"; fi
 [[ -f "$ETC/relay.env" && -f "$ETC/node-id" ]] && pass "relay_main writes relay.env and node-id" || fail "relay_main writes relay.env and node-id"
 grep -q 'api/partner' "$LOG" && fail "relay_main makes no backend call" || pass "relay_main makes no backend call"
+
+
+# --- relay_main with a dirty UDP range aborts (call site gated) ---
+newenv
+run_main SS="$T/bin/ss-dirty" && rc=0 || rc=$?
+if [[ "$rc" -ne 0 && "$(<"$M/out")" == *"relay range"* ]]; then pass "relay_main aborts when a non-turnserver socket sits in the relay range"; else fail "relay_main aborts when a non-turnserver socket sits in the relay range (rc=$rc)"; fi
+
+# --- prestart: behavioural (stubbed NFT/OPEC), ALLOW_NONROOT=1 ---
+PS="$T/ps"; mkdir -p "$PS"
+PSLOG="$PS/calls.log"
+printf '#!/bin/bash\necho "nft $*" >> "%s"\n[[ -n "${NFT_FAIL:-}" ]] && exit 1\nexit 0\n' "$PSLOG" > "$PS/nft"
+cat > "$PS/opec" <<STUB
+#!/bin/bash
+echo "opec \$*" >> "$PSLOG"
+if [[ "\$1" == check-node-secret ]]; then [[ -n "\${OPEC_CHECK_FAIL:-}" ]] && exit 1; exit 0; fi
+if [[ "\$1" == render ]]; then while [[ \$# -gt 0 ]]; do [[ "\$1" == --out ]] && : > "\$2"; shift; done; fi
+exit 0
+STUB
+chmod +x "$PS/nft" "$PS/opec"
+run_prestart() { # extra env...; uses a fresh prefix in $PSETC
+	: > "$PSLOG"
+	env "$@" ALLOW_NONROOT=1 PREFIX_ETC="$PSETC" PREFIX_LIB="$T/no-such-lib" RELAY_LIB_DIR="$R" NFT="$PS/nft" OPEC="$PS/opec" \
+		RELAY_HOSTNAME=relay.example.org EXTERNAL_IP=203.0.113.10 bash "$R/oxpulse-relay-prestart.sh" >"$PS/out" 2>&1
+}
+PSETC="$(mktemp -d "$T/ps-etc.XXXXXX")"
+run_prestart && rc=0 || rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q '^opec render coturn ' "$PSLOG" && grep -q -- '--secret-file' "$PSLOG" && [[ -f "$PSETC/coturn.conf" ]]; then pass "prestart: all gates pass -> render runs"; else fail "prestart: all gates pass -> render runs (rc=$rc): $(cat "$PS/out")"; fi
+PSETC="$(mktemp -d "$T/ps-etc.XXXXXX")"
+run_prestart NFT_FAIL=1 && rc=0 || rc=$?
+if [[ "$rc" -ne 0 ]] && ! grep -q '^opec render' "$PSLOG" && [[ ! -e "$PSETC/coturn.conf" ]]; then pass "prestart: missing guard table -> fails, no render"; else fail "prestart: missing guard table -> fails, no render (rc=$rc)"; fi
+PSETC="$(mktemp -d "$T/ps-etc.XXXXXX")"; echo '{}' > "$PSETC/node-config.json"
+run_prestart && rc=0 || rc=$?
+if [[ "$rc" -ne 0 ]] && ! grep -q '^opec render' "$PSLOG" && [[ ! -e "$PSETC/coturn.conf" ]]; then pass "prestart: forbidden file -> fails, no render"; else fail "prestart: forbidden file -> fails, no render (rc=$rc)"; fi
+PSETC="$(mktemp -d "$T/ps-etc.XXXXXX")"
+run_prestart OPEC_CHECK_FAIL=1 && rc=0 || rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q '^opec check-node-secret' "$PSLOG" && ! grep -q '^opec render' "$PSLOG" && [[ ! -e "$PSETC/coturn.conf" ]]; then pass "prestart: invalid node-secret -> fails, no render"; else fail "prestart: invalid node-secret -> fails, no render (rc=$rc)"; fi
+
+# --- apply: reset-failed precedes restart; gate and secret check precede both ---
+AP="$T/ap"; mkdir -p "$AP"; APLOG="$AP/calls.log"
+for c in systemctl sleep; do printf '#!/bin/bash\necho "%s $*" >> "%s"\nexit 0\n' "$c" "$APLOG" > "$AP/$c"; chmod +x "$AP/$c"; done
+printf '#!/bin/bash\necho "opec $*" >> "%s"\nexit 0\n' "$APLOG" > "$AP/opec"; chmod +x "$AP/opec"
+printf '%s\n' "$S1" > "$AP/node-secret"; chmod 600 "$AP/node-secret"
+: > "$APLOG"
+PATH="$AP:$PATH" ALLOW_NONROOT=1 PREFIX_ETC="$AP" PREFIX_LIB="$T/no-such-lib" RELAY_LIB_DIR="$R" OPEC="$AP/opec" bash "$R/oxpulse-relay-apply.sh" >"$AP/out" 2>&1 && rc=0 || rc=$?
+rf=$(grep -n 'reset-failed oxpulse-relay-coturn' "$APLOG" | head -1 | cut -d: -f1); rs=$(grep -n 'systemctl restart oxpulse-relay-coturn' "$APLOG" | head -1 | cut -d: -f1)
+ck=$(grep -n '^opec check-node-secret' "$APLOG" | head -1 | cut -d: -f1)
+if [[ "$rc" -eq 0 && -n "$rf" && -n "$rs" && -n "$ck" && "$ck" -lt "$rf" && "$rf" -lt "$rs" ]]; then pass "apply: check-node-secret -> reset-failed -> restart"; else fail "apply order (rc=$rc ck=$ck rf=$rf rs=$rs): $(cat "$AP/out")"; fi
+[[ "$(<"$AP/out")" != *"$S1"* ]] && pass "apply never prints the secret" || fail "apply never prints the secret"
 
 # --- reverse guard: the full-edge scripts refuse on a relay node ---
 mkdir -p "$T/rev"; : > "$T/rev/relay.env"

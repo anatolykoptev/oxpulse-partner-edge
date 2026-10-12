@@ -25,6 +25,8 @@ relay_assert_no_registration_material
 relay_secret_fingerprints "${PREFIX_ETC}/node-secret"
 
 [[ "${NO_RESTART:-0}" = 1 ]] && { log "coturn NOT restarted (NO_RESTART=1)"; exit 0; }
+# StartLimitBurst would otherwise refuse the operator's recovery attempt.
+systemctl reset-failed oxpulse-relay-coturn.service || true
 systemctl restart oxpulse-relay-coturn.service
 sleep 2
 systemctl is-active --quiet oxpulse-relay-coturn.service \
