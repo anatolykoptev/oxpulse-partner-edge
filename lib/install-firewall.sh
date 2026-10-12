@@ -239,6 +239,11 @@ _firewall_apply_firewalld() {
 		firewall-cmd --permanent --zone=$zone --add-port="${p}/udp" >/dev/null
 	done
 	local r fr
+	# Retire the pre-fix relay range before adding the narrower one: every edge installed before the
+	# coturn self-relay fix has 49152-65535/udp in its permanent zone config, which
+	# overlaps the kernel ephemeral range and stays open until someone removes it
+	# (add-port alone never does). `|| true`: absent on a clean node.
+	firewall-cmd --permanent --zone=$zone --remove-port=49152-65535/udp >/dev/null 2>&1 || true
 	for r in "${_PE_FW_PUB_UDP_RANGES[@]}"; do
 		# firewalld wants dashes; our array uses ufw-style colons.
 		fr="${r/:/-}"

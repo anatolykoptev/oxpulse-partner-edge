@@ -116,15 +116,37 @@ _systemd_install_helper_scripts() {
 		curl -fsSL "$REPO_RAW/oxpulse-partner-edge-selfheal.sh" -o "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-selfheal"
 	fi
+}
 
-	# coturn self-relay guard: nft OUTPUT table + relay-port sysctl reservation,
-	# applied by oxpulse-coturn-self-relay-guard.service before docker starts.
+# coturn self-relay guard: the nft OUTPUT table + relay-port reservation + live
+# coturn.conf migration (script) and its oneshot unit. Its own function because
+# install.sh must have the guard LOADED before the first coturn container starts
+# (Step 6 `docker compose up`), which is earlier than systemd_run (Step 8).
+_systemd_install_coturn_guard() {
+	local unit=oxpulse-coturn-self-relay-guard.service
 	if [[ -n "$src_dir" && -f "$src_dir/oxpulse-partner-edge-coturn-guard.sh" ]]; then
 		install -m 0755 "$src_dir/oxpulse-partner-edge-coturn-guard.sh" "$PREFIX_SBIN/oxpulse-partner-edge-coturn-guard"
 	else
 		curl -fsSL "$REPO_RAW/oxpulse-partner-edge-coturn-guard.sh" -o "$PREFIX_SBIN/oxpulse-partner-edge-coturn-guard"
 		chmod 0755 "$PREFIX_SBIN/oxpulse-partner-edge-coturn-guard"
 	fi
+	if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
+		install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
+	else
+		curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
+	fi
+}
+
+# Called by install.sh BEFORE `docker compose up` (Step 6): install + load the guard
+# so coturn never runs, even for a moment, without it. A guard that cannot load is
+# fatal here — a fresh node must not come up exposed. Idempotent; systemd_run
+# installs and enables the same files again later.
+systemd_guard_early() {
+	[[ $DRY_RUN -eq 0 ]] || { warn "  [dry-run] skipping coturn self-relay guard install"; return 0; }
+	_systemd_install_coturn_guard
+	systemctl daemon-reload
+	systemctl enable --now oxpulse-coturn-self-relay-guard.service \
+		|| die "coturn self-relay guard failed to load — refusing to start coturn without it (journalctl -u oxpulse-coturn-self-relay-guard)"
 }
 
 # Install channel-render-lib.sh, ghcr-auth-lib.sh, oxpulse-token-lib.sh
@@ -472,15 +494,6 @@ _systemd_install_units() {
 		fi
 	done
 
-	# coturn self-relay guard unit (script placed in PREFIX_SBIN by
-	# _systemd_install_helper_scripts)
-	unit=oxpulse-coturn-self-relay-guard.service
-	if [[ -n "$src_dir" && -f "$src_dir/systemd/${unit}" ]]; then
-		install -m 0644 "$src_dir/systemd/${unit}" "$SYSTEMD_DIR/${unit}"
-	else
-		curl -fsSL "$REPO_RAW/systemd/${unit}" -o "$SYSTEMD_DIR/${unit}"
-	fi
-
 	_systemd_render_channel_health_dropin
 }
 
@@ -630,6 +643,7 @@ systemd_run() {
 		_systemd_install_lib_scripts
 		_systemd_install_helper_scripts
 		_systemd_install_units
+		_systemd_install_coturn_guard
 		_systemd_install_cert_watch_units
 		_systemd_install_xray_update_script
 		_systemd_enable_units

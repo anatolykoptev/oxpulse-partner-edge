@@ -27,7 +27,7 @@
 #   OXPULSE_CROSS_PROBE_TOKEN / _CROSS_PROBE_TOKEN_FILE   — token override / file path
 #   _PEER_ROSTER_FILE     — roster path override
 #   OXPULSE_PEER_PROBE_OFFSET                             — offset override (tests)
-#   OXPULSE_TURN_SECRET   — shared TURN secret override (else docker exec read)
+#   OXPULSE_TURN_SECRET   — shared TURN secret override (else read from the host's rendered coturn.conf)
 #   OXPULSE_PEER_PROBE_MAX / OXPULSE_PEER_PROBE_REJECT_HEADROOM
 #   OXPULSE_PEER_PROBE_TIMEOUT / OXPULSE_PEER_PROBE_POST_TIMEOUT
 #   OXPULSE_PEER_UDP_STUN_TIMEOUT / OXPULSE_COTURN_STUN_PORT
@@ -328,9 +328,10 @@ _probe_peer_udp_stun() {
     # (5s probe + 8s POST) on top of the existing TLS leg, giving a worst-case
     # per-peer total of 32s (was 19s) and a full cycle cap=2 worst case of:
     #   32×2 + 3×2 + 10 = 80s ≤ TimeoutStartSec=90.
-    # The bounding timeout runs INSIDE the container: an outer
-    # `timeout N docker exec …` kills only the docker CLIENT, and the exec'd
-    # process keeps running in the container forever. turnutils_stunclient
+    # The bounding timeout runs INSIDE the container (_coturn_probe_run's
+    # entrypoint): an outer `timeout N docker …` kills only the docker CLIENT, and
+    # the client process could keep running in its container (as it did when this
+    # was a `docker exec` into coturn). turnutils_stunclient
     # waits indefinitely when the Binding gets no answer, so every timed-out
     # probe leaked one process — 120 leaked stunclients (oldest 2.8 days,
     # each squatting a UDP port in coturn's 49152-65535 relay range) found on
@@ -352,9 +353,7 @@ _probe_peer_udp_stun() {
         warn "peer-probe udp: OXPULSE_PEER_UDP_STUN_TIMEOUT='$stun_timeout' is not a positive integer — using 5s"
         stun_timeout=5
     fi
-    stun_out=$(timeout "$stun_timeout" \
-        docker exec -u 0 oxpulse-partner-coturn \
-        timeout "$stun_timeout" \
+    stun_out=$(_coturn_probe_run "$stun_timeout" \
         turnutils_stunclient "$dial_ip" -p "$stun_port" \
         2>&1)
     exit_code=$?
@@ -513,9 +512,7 @@ _run_peer_probe_loop() {
     if [[ -n "${OXPULSE_TURN_SECRET:-}" ]]; then
         turn_secret="$OXPULSE_TURN_SECRET"
     else
-        turn_secret=$(timeout 10 docker exec -u 0 oxpulse-partner-coturn \
-            sed -n 's/^static-auth-secret=//p' \
-            /etc/coturn/turnserver.conf 2>/dev/null || true)
+        turn_secret=$(_coturn_conf_value static-auth-secret)
     fi
     if [[ -z "$turn_secret" ]]; then
         warn "peer-probe: TURN secret unavailable — cannot mint cross-probe creds; skipping"
@@ -534,7 +531,7 @@ _run_peer_probe_loop() {
     #     worst_per_peer           = 32s
     #
     # Plus a one-time pre-loop reserve before the first peer:
-    #     TURN-secret read     timeout 10s   (docker exec sed, above)
+    #     TURN-secret read     timeout 10s   (coturn.conf read, above)
     #   = self_loop_reserve ≈ 10s  (the per-CHANNEL self-probe loop in main()
     #     runs BEFORE this function and is bounded by its OWN timeouts; it is not
     #     part of THIS function's wall-time, but we keep headroom for it.)

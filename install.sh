@@ -1756,6 +1756,8 @@ fi
 
 # ---------- Step 6: start ----------
 log "[6/10] starting services"
+# coturn self-relay guard loaded BEFORE the first coturn container starts.
+systemd_guard_early
 if [[ $DRY_RUN -eq 0 ]]; then
 	# Pass extra profiles (ch3, ch5) when bypass channels were provisioned.
 	# Persist to $PREFIX_ETC/.env so subsequent compose ops (upgrade.sh, refresh.sh)

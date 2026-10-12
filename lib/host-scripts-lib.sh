@@ -819,7 +819,7 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	# when inactive and re-asserts the (atomic, idempotent) nft table when active.
 	# Runs every sync, changed or not: it is also what heals a table wiped by a
 	# firewalld reload or `nftables.service`. Fail-soft — a node whose guard cannot
-	# load (no nft) must still upgrade; healthcheck check_15 reports the gap.
+	# load (no nft) must still upgrade; healthcheck check_22 reports the gap.
 	# ------------------------------------------------------------------
 	if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
 		local _au

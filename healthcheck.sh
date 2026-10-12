@@ -152,8 +152,13 @@ check "check_07_xray_tunnel" "7. xray-client tunnel established" bash -c '
 check "check_08_coturn_secret" "8. coturn secret matches config" bash -c '
 	expected=$(awk -F= "/^static-auth-secret=/ {print \$2; exit}" "'"$CONF_DIR"'/coturn.conf" || true)
 	[[ -z "$expected" ]] && exit 1
-	# Verify the running container loaded the same file (compare by size + head).
-	running=$(docker exec -u 0 oxpulse-partner-coturn awk -F= "/^static-auth-secret=/ {print \$2; exit}" /etc/coturn/turnserver.conf 2>/dev/null || true)
+	# Verify the running container sees the same file (a renamed-in conf leaves a
+	# running container on the old inode). Read it through the host pid namespace —
+	# /proc/<turnserver pid>/root is the container filesystem — instead of a root
+	# `docker exec` into coturn: no exec channel into the container.
+	pid=$(pgrep -x turnserver 2>/dev/null | head -n1 || true)
+	[[ -n "$pid" ]] || exit 1
+	running=$(awk -F= "/^static-auth-secret=/ {print \$2; exit}" "/proc/$pid/root/etc/coturn/turnserver.conf" 2>/dev/null || true)
 	[[ -n "$running" && "$running" = "$expected" ]]
 '
 

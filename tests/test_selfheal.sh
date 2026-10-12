@@ -152,6 +152,8 @@ case "$1" in
     if [[ -r "$U/enabled.$unit" ]]; then cat "$U/enabled.$unit"; else echo enabled; fi ;;
   restart)
     unit="${!#}"; echo "restart $unit" >> "$UNIT_LOG"
+    # the coturn self-relay guard unit: a restart reloads the table (guard-heals)
+    [[ "$unit" == oxpulse-coturn-self-relay-guard.service && -e "$U/guard-heals" ]] && : > "$U/guard.ok"
     if grep -qxF "$unit" "$U/heals" 2>/dev/null; then
         grep -vxF "$unit" "$failed_file" > "$failed_file.t" 2>/dev/null; mv -f "$failed_file.t" "$failed_file"
     fi ;;
@@ -655,6 +657,50 @@ _att="$(state disk attempts)"
 [[ -z "$_att" || "$_att" == 0 ]] \
 	&& pass "--collect-images spends no disk budget (attempts=${_att:-unset})" \
 	|| fail "it charged the disk budget: attempts=$_att — the give-up alert would fire on a healthy node"
+teardown
+
+# 40-43 — the coturn self-relay guard. The table can vanish (firewalld reload,
+# nftables.service) without any unit failing, so neither heal_units nor
+# heal_enable_drift sees it; the healer asks the guard's own `status`.
+guard_setup() {   # state: ok|missing  [heals]
+	cat > "$TMP/guard" <<'GUARD'
+#!/bin/bash
+[[ "$1" == status ]] || exit 2
+[[ -e "$FX_UNITS/guard.ok" ]]
+GUARD
+	chmod +x "$TMP/guard"
+	export OXPULSE_SELFHEAL_GUARD_BIN="$TMP/guard"
+	[[ "$1" == ok ]] && : > "$FX_UNITS/guard.ok"
+	[[ "${2:-}" == heals ]] && : > "$FX_UNITS/guard-heals"
+	return 0
+}
+GUARD_UNIT=oxpulse-coturn-self-relay-guard.service
+
+# 40 — guard missing, restart brings it back: restarted once, recorded healed
+setup; guard_setup missing heals; run_it
+[[ "$(grep -c "^restart $GUARD_UNIT$" "$UNIT_LOG")" == 1 ]] \
+	&& pass "guard missing -> its unit is restarted once" \
+	|| fail "guard missing but unit restart count = $(grep -c "^restart $GUARD_UNIT$" "$UNIT_LOG") (log: $(tr '\n' ';' <"$UNIT_LOG"))"
+[[ "$(cat "$TMP/out")" == *"guard back in force"* ]] \
+	&& pass "guard heal is logged as healed" || fail "no 'guard back in force' in: $(cat "$TMP/out")"
+teardown
+
+# 41 — guard in force: nothing is touched
+setup; guard_setup ok; run_it
+[[ "$(grep -c "^restart $GUARD_UNIT$" "$UNIT_LOG")" == 0 ]] \
+	&& pass "guard in force -> not restarted" || fail "restarted a healthy guard"
+teardown
+
+# 42 — a node without the guard script (pre-guard release) is not the healer's job
+setup; export OXPULSE_SELFHEAL_GUARD_BIN="$TMP/does-not-exist"; run_it
+[[ "$(grep -c "^restart $GUARD_UNIT$" "$UNIT_LOG")" == 0 ]] \
+	&& pass "no guard script on the node -> healer stays out" || fail "restarted a unit for a guard that was never delivered"
+teardown
+
+# 43 — restart does not help (cause is not the table): logged as failed, not "healed"
+setup; guard_setup missing; run_it
+[[ "$(cat "$TMP/out")" == *"restart did not bring the guard into force"* ]] \
+	&& pass "a restart that does not restore the guard is reported failed" || fail "false heal / silent: $(cat "$TMP/out")"
 teardown
 
 echo ""

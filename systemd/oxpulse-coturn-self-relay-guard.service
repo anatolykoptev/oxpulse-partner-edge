@@ -6,8 +6,12 @@ Documentation=https://github.com/anatolykoptev/oxpulse-partner-edge
 # can come up without the edge unit ever running. Ordering is the only coupling —
 # deliberately NO Requires=/BindsTo= either way (a hard dependency breaks coturn
 # restarts and rollback); a missing table is surfaced by healthcheck.sh
-# (check_15_coturn_self_relay_guard) instead.
+# (check_22_coturn_self_relay_guard) instead.
 Before=docker.service oxpulse-partner-edge.service
+# After the firewall managers: `firewall-cmd --reload` / nftables.service (`flush
+# ruleset`) wipe foreign nft tables, so starting after them keeps the boot-time load
+# from being undone by their own start (soft: neither unit need exist).
+After=firewalld.service nftables.service
 
 [Service]
 Type=oneshot

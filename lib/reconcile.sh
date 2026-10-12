@@ -1739,7 +1739,7 @@ reconcile_firewall_surface() {
 # relay-port reservation) by `systemctl reload-or-restart` on its unit — a start
 # when inactive, an atomic table swap (ExecReload) when active. Idempotent, safe
 # every converge. Fail-soft by design (warn, never die): a node whose guard cannot
-# load must still converge; healthcheck check_15_coturn_self_relay_guard reports it.
+# load must still converge; healthcheck check_22_coturn_self_relay_guard reports it.
 # ---------------------------------------------------------------------------
 reconcile_coturn_guard_surface() {
     local _unit="oxpulse-coturn-self-relay-guard.service"
