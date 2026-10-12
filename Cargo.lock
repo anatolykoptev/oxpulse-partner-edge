@@ -1747,6 +1747,7 @@ dependencies = [
  "assert_cmd",
  "base64",
  "clap",
+ "libc",
  "mockito",
  "once_cell",
  "predicates",

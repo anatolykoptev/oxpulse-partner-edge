@@ -1,0 +1,20 @@
+[Unit]
+Description=Stop coturn relaying UDP to this host's own services (nft inet output hook)
+# Origin: krolik-server deploy/host-config/coturn-self-relay-guard/coturn-self-relay-guard.service.
+# Ordered Before the relay coturn unit, deliberately NOT Requires=/BindsTo=: a
+# coupling either way breaks coturn restarts and rollback.
+Before=oxpulse-relay-coturn.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Validate first so a bad file fails the unit without touching a loaded table.
+ExecStartPre=/usr/sbin/nft -c -f /etc/oxpulse-partner-edge/coturn-self-relay-guard.nft
+ExecStart=/usr/sbin/nft -f /etc/oxpulse-partner-edge/coturn-self-relay-guard.nft
+# One nft -f file is one transaction, so a reload replaces the table atomically.
+ExecReload=/usr/sbin/nft -c -f /etc/oxpulse-partner-edge/coturn-self-relay-guard.nft
+ExecReload=/usr/sbin/nft -f /etc/oxpulse-partner-edge/coturn-self-relay-guard.nft
+ExecStop=-/usr/sbin/nft delete table inet coturn_self_relay_guard
+
+[Install]
+WantedBy=multi-user.target

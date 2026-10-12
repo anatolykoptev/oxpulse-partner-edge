@@ -28,6 +28,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
 rand = "0.8"
 serde_norway = "0.9.42"
+libc = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"
