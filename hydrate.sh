@@ -123,8 +123,8 @@ for ip_url in "https://ifconfig.me" "https://api.ipify.org"; do
 done
 [[ -n "$PUBLIC_IP" ]] || die "could not detect public IP (tried ifconfig.me and api.ipify.org)"
 
-# Detect private/NAT IP (optional). EXTERNAL_IP_LINE / ALLOWED_PEER_IP_LINE
-# (coturn's external-ip, the OCI-hairpin allowed-peer-ip) are derived from
+# Detect private/NAT IP (optional). EXTERNAL_IP_LINE
+# (coturn's external-ip) is derived from
 # this further down in resolve_external_ip (step 3c) — deferred until after
 # registration because tier 2 of that resolution needs TURNS_SUBDOMAIN,
 # which the backend only assigns in its response (step 3). The PUBLIC_IP
@@ -328,8 +328,8 @@ _persist_state_ip() {
 # ---------- Step 3c: resolve authoritative external IP ----------
 # resolve_external_ip EGRESS_IP TURNS_SUBDOMAIN PARTNER_DOMAIN — resolve the
 # AUTHORITATIVE external/public IP and (re)derive the coturn/SFU-facing
-# EXTERNAL_IP_LINE + ALLOWED_PEER_IP_LINE from it. Mutates globals PUBLIC_IP,
-# PUBLIC_IP_SOURCE, PRIVATE_IP, EXTERNAL_IP_LINE, ALLOWED_PEER_IP_LINE
+# EXTERNAL_IP_LINE from it. Mutates globals PUBLIC_IP,
+# PUBLIC_IP_SOURCE, PRIVATE_IP, EXTERNAL_IP_LINE
 # (PRIVATE_IP must already be set — empty string if there is none).
 #
 # The resolved PUBLIC_IP is the SINGLE source of truth for BOTH coturn's
@@ -477,8 +477,6 @@ resolve_external_ip() {
     fi
     EXTERNAL_IP_LINE="${PUBLIC_IP}"
     [[ -n "${PRIVATE_IP:-}" ]] && EXTERNAL_IP_LINE="${PUBLIC_IP}/${PRIVATE_IP}"
-    ALLOWED_PEER_IP_LINE=""
-    [[ -n "${PRIVATE_IP:-}" ]] && ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
 }
 
 log "[3c/7] resolving authoritative external IP"
@@ -590,7 +588,7 @@ export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
        TURN_SECRET \
        REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
        REALITY_ENCRYPTION TURNS_SUBDOMAIN \
-       PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE ALLOWED_PEER_IP_LINE \
+       PUBLIC_IP PRIVATE_IP EXTERNAL_IP_LINE \
        IMAGE_VERSION \
        RELAY_JWT_SECRET \
        HYSTERIA2_SERVER HYSTERIA2_PORT \
@@ -664,6 +662,12 @@ log "  DNS OK: $TURNS_FQDN → $PUBLIC_IP"
 
 # ---------- Step 6: start containers ----------
 log "[6/7] starting containers"
+# coturn self-relay guard BEFORE coturn starts. The unit is enabled in the baked
+# image and ran at boot with the default SFU port; (re)apply now that the rendered
+# compose pins the real one. Hard failure: a clone must not come up with a coturn
+# that can relay to the host's own services.
+systemctl reload-or-restart oxpulse-coturn-self-relay-guard.service \
+    || die "coturn self-relay guard failed to load — refusing to start coturn without it (journalctl -u oxpulse-coturn-self-relay-guard)"
 docker compose -f "$PREFIX_ETC/docker-compose.yml" up -d
 log "  containers started"
 

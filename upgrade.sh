@@ -1194,6 +1194,9 @@ _HOST_SCRIPT_SBIN_FILES=(
 	oxpulse-partner-edge-sni-rotate
 	oxpulse-channels-health-report
 	oxpulse-partner-edge-selfheal
+	# coturn self-relay guard (nft OUTPUT table + relay-port reservation). Run by
+	# oxpulse-coturn-self-relay-guard.service; see _HOST_SCRIPT_APPLY_UNITS.
+	oxpulse-partner-edge-coturn-guard
 	oxpulse-geoip-refresh
 	oxpulse-xray-update.sh
 	channel-render-lib.sh
@@ -1288,6 +1291,7 @@ _host_script_remote_name() {
 		oxpulse-partner-edge-sni-rotate) echo "oxpulse-partner-edge-sni-rotate.sh" ;;
 		oxpulse-channels-health-report)  echo "oxpulse-channels-health-report.sh" ;;
 		oxpulse-partner-edge-selfheal)   echo "oxpulse-partner-edge-selfheal.sh" ;;
+		oxpulse-partner-edge-coturn-guard) echo "oxpulse-partner-edge-coturn-guard.sh" ;;
 		oxpulse-geoip-refresh)           echo "scripts/oxpulse-geoip-refresh.sh" ;;
 		oxpulse-xray-update.sh)          echo "scripts/oxpulse-xray-update.sh" ;;
 		channel-render-lib.sh)           echo "channel-render-lib.sh" ;;
@@ -1367,6 +1371,7 @@ _HOST_SCRIPT_SYSTEMD_FILES=(
 	oxpulse-channels-health-report.timer
 	oxpulse-partner-edge-selfheal.service
 	oxpulse-partner-edge-selfheal.timer
+	oxpulse-coturn-self-relay-guard.service
 	# Split-routing (PR #280).
 	oxpulse-partner-edge-split-routing.service
 	oxpulse-partner-edge-ru-subnets-update.service
@@ -1418,6 +1423,19 @@ _HOST_SCRIPT_ENABLE_UNITS=(
 	oxpulse-geoip-refresh.timer
 	oxpulse-channels-health-report.timer
 	oxpulse-partner-edge-selfheal.timer
+	oxpulse-coturn-self-relay-guard.service
+)
+
+# Units sync_host_scripts (re)APPLIES on every run — `reload-or-restart`, which
+# starts an inactive unit and re-runs ExecReload on an active one. Not covered by
+# the Step 5c enable policy above (a .service is enable-only there) nor by Step 7
+# (restarts only already-active units): a guard that is installed and enabled but
+# never started would leave an edge unprotected until its next reboot, and a plain
+# `oxpulse-partner-edge-upgrade` never reaches reconcile_all. Applying is
+# idempotent (one atomic nft transaction) and independent of the image tag, so it
+# is safe before the image pull and under rollback.
+_HOST_SCRIPT_APPLY_UNITS=(
+	oxpulse-coturn-self-relay-guard.service
 )
 
 # snapshot_host_scripts / restore_host_scripts / sync_host_scripts — thin

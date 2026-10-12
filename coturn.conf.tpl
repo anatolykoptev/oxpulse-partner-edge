@@ -40,16 +40,16 @@ stale-nonce=600
 # Allocation lifetime cap: prevents leaked allocations from wedging user-quota.
 # When the coturn probe (channel-health-lib.sh) times out on a dead relay, the
 # turnutils_uclient process is killed (exit 124) without sending TURN Refresh(0)
-# (graceful dealloc). Coturn holds 2 dangling allocations per probe tick until
-# the default expiry (600s). At 60s tick rate this is ~10 leaked allocations at
-# steady state; with user-quota=16, the probe username wedges into 486 Allocation
-# Quota Reached after ~8 minutes of continuous failure. Capping at 120s halves
-# the wedge window. Root cause fix: OXPULSE_COTURN_PROBE_TARGET (avoid hairpin).
+# (graceful dealloc), so coturn holds 2 dangling allocations per probe tick until
+# they expire. max-allocate-lifetime caps a Refresh to 120s. (The default
+# allocation lifetime, 600s, is fixed in coturn 4.6.x — there is no
+# allocation-default-timeout option; a line setting it is silently ignored.)
+# Root cause fix: OXPULSE_COTURN_PROBE_TARGET (avoid hairpin).
 max-allocate-lifetime=120
-allocation-default-timeout=120
 
 # ─── Peer policy ────────────────────────────────────────────────────────
-no-loopback-peers
+# Loopback peers are refused by coturn 4.6.x by default and by denied-peer-ip
+# 127.0.0.0/8 below (there is no `no-loopback-peers` option in 4.6.x).
 no-multicast-peers
 no-tcp-relay
 # R1 Layer 2: suppress STUN NAT-behavior-discovery response to active probers.
@@ -92,15 +92,29 @@ denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255
 denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 
-# ─── Allow relaying to the co-located SFU's PRIVATE IP (OCI-hairpin fix) ──
-# Overrides the RFC1918 block above for the ONE private IP the SFU advertises
-# as a host candidate (SFU_LOCAL_IP), so relay-forced group calls complete on
-# private addressing where the public candidate would hairpin. Behind-NAT only.
-{{ALLOWED_PEER_IP_LINE}}
+# ─── Co-located SFU / host-local peers ──────────────────────────────────
+# No allowed-peer-ip. coturn checks denied-peer-ip against the address the
+# client names (the public IP; external-ip maps it to the private one only when
+# sending), so a relay to the co-located SFU's public address is accepted here
+# and delivered locally after the mapping. What it may reach once local is NOT
+# decided by this file: the host nft table coturn_self_relay_guard (installed by
+# oxpulse-partner-edge-coturn-guard, keyed on this container's fixed uid) lets
+# coturn send to local addresses only on the SFU media port and inside the relay
+# range below. Re-permitting the whole private IP here (the old
+# allowed-peer-ip=PRIVATE_IP) opened every UDP listener on the host to any
+# holder of a TURN credential (credentials are minted by a public endpoint).
 
-# ─── Relay port range (must match firewall rules in install.sh) ─────────
+# ─── Relay port range ───────────────────────────────────────────────────
+# MUST equal, everywhere: RELAY_MIN/RELAY_MAX in oxpulse-partner-edge-coturn-guard.sh
+# (which reserves the range from the kernel ephemeral pool via
+# net.ipv4.ip_local_reserved_ports and lets the nft guard treat "local + inside
+# this range" as a coturn relay socket) and _PE_FW_PUB_UDP_RANGES in
+# lib/firewall-lib.sh (+ its frozen twin lib/install-firewall.sh).
+# tests/test_coturn_guard.sh fails if any of them drifts.
+# 49152-49999 = 848 ports; one allocation holds one port (no-rfc5780, no RTP/RTCP
+# pairing), and total-quota=250 caps concurrent allocations — ample headroom.
 min-port=49152
-max-port=65535
+max-port=49999
 
 external-ip={{EXTERNAL_IP_LINE}}
 

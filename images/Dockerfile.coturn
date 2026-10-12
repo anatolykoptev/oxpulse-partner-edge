@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # Partner-agnostic coturn image. turnserver.conf is bind-mounted.
 # Runs in host network mode so it sees the real public IP and can allocate
-# relay ports in 49152-65535/udp.
+# relay ports in 49152-49999/udp (the range host sysctl reserves from the
+# ephemeral pool — see oxpulse-partner-edge-coturn-guard.sh).
 FROM coturn/coturn:4.6-alpine
 
 ARG VERSION=dev
@@ -12,11 +13,44 @@ LABEL org.opencontainers.image.version="${VERSION}"
 LABEL oxpulse.component="partner-edge-coturn"
 LABEL oxpulse.version="${VERSION}"
 
-# Log + pid dirs owned by the coturn user baked into upstream image.
+# turnserver runs as a dedicated unprivileged user with a FIXED numeric uid.
+# The host-side nft guard (coturn_self_relay_guard) matches coturn's sockets by
+# `meta skuid 58731` — numeric, because the host has no `coturn` user, so a name
+# could not resolve there. The value is mirrored in
+# oxpulse-partner-edge-coturn-guard.sh (COTURN_UID); tests/test_coturn_guard.sh
+# fails if the two drift. 58731 sits above the distro auto-allocation ceiling
+# (useradd UID_MAX 60000 starts at 1000 and is never near it on an edge), below
+# systemd's homed/dynamic-user ranges (60001+), and outside the container
+# user-namespace ranges, so no host account shares it.
+ARG COTURN_UID=58731
+
+# Log + pid dirs owned by that user. libcap-utils is a build-time tool only.
+#
+# cap_dac_override on the binary (file capability, effective+permitted):
+#   * Caddy's ACME storage keeps the TURNS private key 0600 owned by Caddy's
+#     uid, mounted read-only at /data; an unprivileged uid cannot open it, and
+#     TURNS on 443 (relay-only clients) depends on it. Same for a bind-mounted
+#     0600 coturn.conf, and for the pre-existing coturn-log named volume whose
+#     ownership belongs to the old uid (Docker copies image ownership into a
+#     volume only at first creation, so live edges keep the old owner).
+#   * Docker's default capability bounding set contains CAP_DAC_OVERRIDE, so the
+#     file capability takes effect without any compose change — compose files on
+#     live edges are not rewritten by an upgrade, the image is.
+#   * It confers nothing on the HOST: the container sees only its own rootfs and
+#     the mounts listed in docker-compose.yml.tpl, and the guard keys on uid, not
+#     on capabilities. cap_net_bind_service is NOT needed: coturn binds
+#     3478/3479/5349 only (443 is caddy-l4's, proxied to 127.0.0.1:5349).
 USER root
-RUN mkdir -p /var/log/turnserver /var/run/turnserver \
- && chown -R nobody:nogroup /var/log/turnserver /var/run/turnserver \
- && chmod 0750 /var/log/turnserver /var/run/turnserver
+RUN apk add --no-cache libcap-utils \
+ && addgroup -g "${COTURN_UID}" -S coturn \
+ && adduser -u "${COTURN_UID}" -G coturn -S -H -s /sbin/nologin coturn \
+ && mkdir -p /var/log/turnserver /var/run/turnserver \
+ && chown -R coturn:coturn /var/log/turnserver /var/run/turnserver \
+ && chmod 0750 /var/log/turnserver /var/run/turnserver \
+ && setcap cap_dac_override+ep /usr/bin/turnserver \
+ && getcap /usr/bin/turnserver | grep -q cap_dac_override \
+ && apk del libcap-utils
+USER 58731:58731
 
 EXPOSE 3478/udp 3478/tcp 3479/udp 5349/tcp 5349/udp
 

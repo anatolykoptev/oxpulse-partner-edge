@@ -811,6 +811,31 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	done
 
 	# ------------------------------------------------------------------
+	# Step 5c.2: APPLY convergence (_HOST_SCRIPT_APPLY_UNITS).
+	#
+	# Enable-only (5c) never starts a .service and Step 7 restarts only units
+	# that are already active, so the coturn self-relay guard would sit installed
+	# and enabled but unloaded after a plain upgrade. reload-or-restart starts it
+	# when inactive and re-asserts the (atomic, idempotent) nft table when active.
+	# Runs every sync, changed or not: it is also what heals a table wiped by a
+	# firewalld reload or `nftables.service`. Fail-soft — a node whose guard cannot
+	# load (no nft) must still upgrade; healthcheck check_22 reports the gap.
+	# ------------------------------------------------------------------
+	if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+		local _au
+		for _au in "${_HOST_SCRIPT_APPLY_UNITS[@]}"; do
+			[[ -f "$SYSTEMD_DIR/$_au" ]] || { warn "unit-apply: $_au is not installed at $SYSTEMD_DIR — cannot apply"; continue; }
+			"$SYSTEMCTL_BIN" reload-or-restart "$_au" >/dev/null 2>&1 \
+				|| warn "unit-apply: systemctl reload-or-restart $_au returned non-zero — see: journalctl -u $_au"
+			if "$SYSTEMCTL_BIN" is-active --quiet "$_au" 2>/dev/null; then
+				log "  unit-apply: $_au active"
+			else
+				warn "unit-apply: $_au is NOT active after reload-or-restart — the coturn self-relay guard is not in force on this node"
+			fi
+		done
+	fi
+
+	# ------------------------------------------------------------------
 	# Step 5d: release-asset binaries (_HOST_SCRIPT_ASSET_FILES) — the third
 	# delivery surface beside scripts (Step 2, from REPO_RAW) and units
 	# (Step 5): compiled per-arch binaries that exist ONLY as release assets.

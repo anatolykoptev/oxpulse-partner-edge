@@ -22,6 +22,9 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SCRIPT="$REPO_ROOT/oxpulse-channels-health-report.sh"
+# The coturn probes run turnutils in a fresh container of the configured coturn
+# image (no docker exec into coturn); the stub docker never resolves it.
+export OXPULSE_COTURN_PROBE_IMAGE=test-coturn-image
 
 [[ -f "$SCRIPT" ]] || { echo "FAIL: reporter script not found at $SCRIPT"; exit 1; }
 
@@ -1115,7 +1118,7 @@ set -e
 STUN_ARGV18=$(grep -a -m1 'turnutils_stunclient' "$T18/docker-argv.log" 2>/dev/null || true)
 if [[ -z "$STUN_ARGV18" ]]; then
     fail "test18: docker stub never saw turnutils_stunclient; argv log: $(cat "$T18/docker-argv.log" 2>/dev/null)"
-elif [[ "$STUN_ARGV18" =~ exec\ oxpulse-partner-coturn\ timeout\ [1-9][0-9]*\ turnutils_stunclient ]]; then
+elif [[ "$STUN_ARGV18" =~ run\ .*--entrypoint\ timeout\ [^\ ]+\ [1-9][0-9]*\ turnutils_stunclient ]]; then
     ok "test18: stunclient probe is bounded INSIDE the container (timeout precedes turnutils_stunclient)"
 else
     fail "test18: no in-container timeout before turnutils_stunclient — the timed-out probe leaks in the container; argv: $STUN_ARGV18"

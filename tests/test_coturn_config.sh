@@ -36,4 +36,9 @@ echo "PASS: coturn.conf.tpl hardening checks"
 
 # Allocation lifetime cap (prevents probe allocation leak from wedging user-quota)
 grep -qE ^max-allocate-lifetime=120 "$TPL" || { echo "FAIL: max-allocate-lifetime=120 missing"; exit 1; }
-grep -qE ^allocation-default-timeout=120 "$TPL" || { echo "FAIL: allocation-default-timeout=120 missing"; exit 1; }
+# allocation-default-timeout and no-loopback-peers are not options in coturn 4.6.x
+# (absent from `turnserver --help`; the former is silently ignored, so it only
+# looked like a control). Asserting their absence stops them creeping back.
+grep -qE '^(allocation-default-timeout|no-loopback-peers)\b' "$TPL" \
+    && { echo "FAIL: allocation-default-timeout / no-loopback-peers are not coturn 4.6.x options"; exit 1; }
+echo "PASS: no phantom coturn directives"

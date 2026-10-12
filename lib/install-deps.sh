@@ -24,6 +24,19 @@ deps_install() {
 			fi
 		done
 		unset _pkg
+		# nftables (binary `nft`, package `nftables`) — the coturn self-relay guard
+		# (oxpulse-partner-edge-coturn-guard) is an nft table. Binary and package
+		# names differ, so it cannot ride the loop above.
+		if ! command -v nft >/dev/null 2>&1; then
+			log "  installing missing runtime dep: nftables"
+			if [[ $OS_FAMILY == rhel ]]; then
+				dnf install -y nftables >/dev/null 2>&1 \
+					|| die "dnf install nftables failed — install manually then re-run"
+			else
+				apt-get install -y -q nftables >/dev/null 2>&1 \
+					|| die "apt-get install nftables failed"
+			fi
+		fi
 		# PyYAML (python3 yaml module) — required by compose-strip logic (Phase 5.5
 		# BLOCKER 1 fix). Checked via import, not command -v, since it is a module.
 		if ! python3 -c "import yaml" 2>/dev/null; then

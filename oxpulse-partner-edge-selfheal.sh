@@ -150,6 +150,7 @@ ENABLE_UNITS=(
 	oxpulse-xray-update.timer
 	oxpulse-geoip-refresh.timer
 	oxpulse-channels-health-report.timer
+	oxpulse-coturn-self-relay-guard.service
 )
 
 # Per-tick cap on systemd actions. A unit restart BLOCKS (a Type=oneshot runs to
@@ -373,6 +374,7 @@ main() {
 	heal_containers "$t"
 	heal_units "$t"
 	heal_enable_drift "$t"
+	heal_coturn_guard "$t"
 	heal_disk "$t"
 
 	_gauge partner_edge_selfheal_last_run_timestamp_seconds "" "$t"
@@ -617,6 +619,47 @@ heal_enable_drift() {   # now
 			_count partner_edge_selfheal_attempts_total "$lbl,outcome=\"failed\"" 1
 		fi
 	done
+}
+
+# --- 4b: coturn self-relay guard ------------------------------------------------
+# The guard is a separate nft table that a firewalld reload, `nftables.service`
+# (`flush ruleset`) or an operator can wipe without any unit failing — heal_units
+# and heal_enable_drift cannot see that. `status` is the one definition of "in
+# force" (healthcheck check_22 uses it too). Same budget rules as the other unit
+# healers: a guard that keeps going missing alerts instead of being fought forever.
+GUARD_BIN="${OXPULSE_SELFHEAL_GUARD_BIN:-/usr/local/sbin/oxpulse-partner-edge-coturn-guard}"
+GUARD_UNIT="oxpulse-coturn-self-relay-guard.service"
+heal_coturn_guard() {   # now
+	local t="$1"
+	[[ -x "$GUARD_BIN" ]] || return 0   # node predates the guard: delivery's job, not the healer's
+	local lbl="unit=\"$GUARD_UNIT\""
+	if "$GUARD_BIN" status >/dev/null 2>&1; then
+		_gauge partner_edge_coturn_guard_missing "" 0
+		return 0
+	fi
+	_gauge partner_edge_coturn_guard_missing "" 1
+	local s="guard:$GUARD_UNIT"
+	_held "$GUARD_UNIT" "$s" && { log "$GUARD_UNIT: guard not in force, but a hold file is present — not acting"; return 0; }
+	(( ACTS_TAKEN >= ACTS_PER_TICK )) && { log "$GUARD_UNIT: guard not in force, but this tick's action budget is spent"; return 0; }
+	_budget_gate "$s" "$UNIT_MAX" "$WINDOW" "$UNIT_GAP" "$t" "$lbl" \
+		"partner-edge $(hostname): GAVE UP re-loading the coturn self-relay guard ('$GUARD_BIN status' keeps failing). Until this is fixed coturn can relay UDP to this host's own services." \
+		|| return 0
+	log "$GUARD_UNIT: guard not in force — restarting"
+	_budget_spend "$s" "$t"
+	ACTS_TAKEN=$((ACTS_TAKEN + 1))
+	if [[ "$DRY_RUN" == 1 ]]; then
+		log "$GUARD_UNIT: [dry-run] systemctl restart $GUARD_UNIT"
+		return 0
+	fi
+	timeout 60 systemctl restart "$GUARD_UNIT" >/dev/null 2>&1
+	if "$GUARD_BIN" status >/dev/null 2>&1; then
+		log "$GUARD_UNIT: guard back in force"
+		_count partner_edge_selfheal_attempts_total "$lbl,outcome=\"healed\"" 1
+		_gauge partner_edge_coturn_guard_missing "" 0
+	else
+		log "$GUARD_UNIT: restart did not bring the guard into force (see: $GUARD_BIN status)"
+		_count partner_edge_selfheal_attempts_total "$lbl,outcome=\"failed\"" 1
+	fi
 }
 
 # --- 5: disk pressure ---------------------------------------------------------

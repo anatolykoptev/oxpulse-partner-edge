@@ -97,6 +97,12 @@ services:
     container_name: oxpulse-partner-coturn
     restart: unless-stopped
     network_mode: host        # TURN needs real public IP + UDP relay ports
+    # Unprivileged, fixed numeric uid (== COTURN_UID in
+    # oxpulse-partner-edge-coturn-guard.sh and images/Dockerfile.coturn). The host
+    # nft guard matches coturn's sockets by this uid; also baked into the image as
+    # USER, which is what reaches live edges (an upgrade patches image tags only,
+    # it does not rewrite this file). tests/test_coturn_guard.sh pins all three.
+    user: "58731:58731"
     environment:
       TURN_SECRET: "{{TURN_SECRET}}"
       REALM: "{{PARTNER_DOMAIN}}"
@@ -213,9 +219,10 @@ services:
       # (Oracle Cloud has no NAT hairpin → relay-forced group calls fail ICE).
       # Empty when the node is not behind NAT — the SFU treats "" as unset and
       # advertises only the public candidate (see config.rs::parse_local_ip_env).
-      # Rendered RAW (no !=PUBLIC_IP guard, unlike coturn's ALLOWED_PEER_IP_LINE):
-      # safe because SfuConfig::additional_host_candidates dedups local_ip==public.
-      # Pairs with coturn `allowed-peer-ip={{PRIVATE_IP}}`.
+      # Rendered RAW (no !=PUBLIC_IP guard): safe because
+      # SfuConfig::additional_host_candidates dedups local_ip==public. The host nft
+      # guard (oxpulse-partner-edge-coturn-guard) lets coturn deliver relayed
+      # media to the SFU port on this address.
       SFU_LOCAL_IP: "{{PRIVATE_IP}}"
     # 2026-05-06 post-mortem: probe all three planes (metrics, client_ws,
     # relay API). Previously only /metrics on {{SFU_METRICS_PORT}} was

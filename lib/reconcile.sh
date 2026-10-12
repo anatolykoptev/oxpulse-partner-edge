@@ -1166,21 +1166,8 @@ _setup_coturn_render_env() {
         EXTERNAL_IP_LINE="${PUBLIC_IP:-}"
     fi
 
-    # ALLOWED_PEER_IP_LINE: OCI-hairpin fix (2026-07-11) — permit coturn to relay
-    # to the co-located SFU's private IP (advertised as a host candidate via
-    # SFU_LOCAL_IP), overriding the RFC1918 denied-peer-ip block. Rendered only
-    # when behind NAT (distinct private IP); empty otherwise so the coturn.conf
-    # `{{ALLOWED_PEER_IP_LINE}}` placeholder becomes a no-op line rather than an
-    # invalid `allowed-peer-ip=`. Mirrors hydrate.sh so the install and converge
-    # renders stay byte-identical.
-    if [[ -n "${PUBLIC_IP:-}" && -n "${PRIVATE_IP:-}" && "$PUBLIC_IP" != "$PRIVATE_IP" ]]; then
-        ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
-    else
-        ALLOWED_PEER_IP_LINE=""
-    fi
-
     export PARTNER_DOMAIN TURNS_SUBDOMAIN TURN_SECRET PUBLIC_IP PRIVATE_IP \
-        EXTERNAL_IP_LINE ALLOWED_PEER_IP_LINE
+        EXTERNAL_IP_LINE
 }
 
 # ---------------------------------------------------------------------------
@@ -1737,6 +1724,36 @@ reconcile_firewall_surface() {
         _reconcile_firewall_emit_gauge 1
         # Do NOT set _RECONCILE_FIREWALL_APPLIED=1 — reflect the true state.
     fi
+
+    # The coturn self-relay guard is a separate nft table that firewall_apply does
+    # not own, but `firewall-cmd --reload` / `flush ruleset` on a RHEL-family edge
+    # wipes foreign nft tables — so re-assert it right AFTER every firewall_apply,
+    # whether that succeeded or not.
+    reconcile_coturn_guard_surface
+}
+
+# ---------------------------------------------------------------------------
+# reconcile_coturn_guard_surface
+#
+# Re-asserts the coturn self-relay guard (nft table inet coturn_self_relay_guard +
+# relay-port reservation) by `systemctl reload-or-restart` on its unit — a start
+# when inactive, an atomic table swap (ExecReload) when active. Idempotent, safe
+# every converge. Fail-soft by design (warn, never die): a node whose guard cannot
+# load must still converge; healthcheck check_22_coturn_self_relay_guard reports it.
+# ---------------------------------------------------------------------------
+reconcile_coturn_guard_surface() {
+    local _unit="oxpulse-coturn-self-relay-guard.service"
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        log "[dry-run] reconcile_coturn_guard: would reload-or-restart $_unit"
+        return 0
+    fi
+    if ! command -v systemctl >/dev/null 2>&1; then
+        warn "reconcile_coturn_guard: systemctl not available — guard NOT re-asserted"
+        return 0
+    fi
+    log "reconcile_coturn_guard: re-asserting coturn self-relay guard ($_unit)"
+    systemctl reload-or-restart "$_unit" \
+        || warn "reconcile_coturn_guard: systemctl reload-or-restart $_unit failed — coturn self-relay guard NOT in force (journalctl -u $_unit)"
 }
 
 # ---------------------------------------------------------------------------
