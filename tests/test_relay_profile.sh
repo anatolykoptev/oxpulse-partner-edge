@@ -308,8 +308,8 @@ printf '#!/bin/bash\necho "opec $*" >> "%s"\nexit 0\n' "$APLOG" > "$AP/opec"; ch
 printf '%s\n' "$S1" > "$AP/node-secret"; chmod 600 "$AP/node-secret"
 : > "$APLOG"
 PATH="$AP:$PATH" ALLOW_NONROOT=1 PREFIX_ETC="$AP" PREFIX_LIB="$T/no-such-lib" RELAY_LIB_DIR="$R" OPEC="$AP/opec" bash "$R/oxpulse-relay-apply.sh" >"$AP/out" 2>&1 && rc=0 || rc=$?
-rf=$(grep -n 'reset-failed oxpulse-relay-coturn' "$APLOG" | head -1 | cut -d: -f1); rs=$(grep -n 'systemctl restart oxpulse-relay-coturn' "$APLOG" | head -1 | cut -d: -f1)
-ck=$(grep -n '^opec check-node-secret' "$APLOG" | head -1 | cut -d: -f1)
+rf=$(grep -n -m1 'reset-failed oxpulse-relay-coturn' "$APLOG" | cut -d: -f1); rs=$(grep -n -m1 'systemctl restart oxpulse-relay-coturn' "$APLOG" | cut -d: -f1)
+ck=$(grep -n -m1 '^opec check-node-secret' "$APLOG" | cut -d: -f1)
 if [[ "$rc" -eq 0 && -n "$rf" && -n "$rs" && -n "$ck" && "$ck" -lt "$rf" && "$rf" -lt "$rs" ]]; then pass "apply: check-node-secret -> reset-failed -> restart"; else fail "apply order (rc=$rc ck=$ck rf=$rf rs=$rs): $(cat "$AP/out")"; fi
 [[ "$(<"$AP/out")" != *"$S1"* ]] && pass "apply never prints the secret" || fail "apply never prints the secret"
 
