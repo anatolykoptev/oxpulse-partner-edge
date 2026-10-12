@@ -144,12 +144,43 @@ cacert_flag=()
 tmp_resp=$(mktemp)
 trap 'rm -f "$tmp_resp"' EXIT
 
+# hydrate_register_body — JSON body for POST /api/partner/register.
+#
+# The central refuses a register without a per-node reality_uuid (oxpulse-chat
+# #3369, HTTP 409), and it later serves that UUID back through node-config.
+# install.sh gets one from `opec secrets reality-keygen` (reality.uuid, reused
+# on re-run, so a re-hydrate keeps the node's identity); do exactly the same
+# here instead of minting a second, divergent UUID source.
+#
+# Only reality_uuid is sent, NOT reality_public_key: with a per-edge pubkey the
+# register response echoes it back as the Reality server key, and hydrate uses
+# the response's key for its client config. A UUID alone is what the central
+# requires. The body is built with jq so no variable is ever spliced into JSON.
+hydrate_register_body() {
+    command -v opec >/dev/null 2>&1 \
+        || { warn "opec not found in PATH — cannot generate reality_uuid"; return 1; }
+    opec secrets reality-keygen --out-dir "$PREFIX_ETC" >&2 \
+        || { warn "opec secrets reality-keygen failed"; return 1; }
+    local uuid
+    uuid=$(tr -d '[:space:]' < "$PREFIX_ETC/reality.uuid") \
+        || { warn "cannot read $PREFIX_ETC/reality.uuid"; return 1; }
+    [[ -n "$uuid" ]] || { warn "$PREFIX_ETC/reality.uuid is empty"; return 1; }
+    jq -cn --arg partner_id "$PARTNER_ID" --arg domain "$PARTNER_DOMAIN" \
+        --arg token "$REGISTRATION_TOKEN" --arg public_ip "$PUBLIC_IP" \
+        --arg reality_uuid "$uuid" \
+        '{partner_id: $partner_id, domain: $domain, token: $token,
+          public_ip: $public_ip, reality_uuid: $reality_uuid}'
+}
+
+register_body=$(hydrate_register_body) \
+    || die "could not build registration body (reality_uuid generation failed)"
+
 if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 30 \
     "${cacert_flag[@]}" \
     -X POST "$BACKEND_URL/api/partner/register" \
     -H 'Content-Type: application/json' \
     -H "X-Installer-Version: ${IMAGE_VERSION}" \
-    -d "{\"partner_id\":\"$PARTNER_ID\",\"domain\":\"$PARTNER_DOMAIN\",\"token\":\"$REGISTRATION_TOKEN\",\"public_ip\":\"$PUBLIC_IP\"}" \
+    -d "$register_body" \
     -o "$tmp_resp"; then
     die "registration POST failed — check $BACKEND_URL is reachable and token is valid"
 fi
