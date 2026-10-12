@@ -217,7 +217,7 @@ run_refresh() {
         PARTNER_EDGE_PREFIX_ETC="$dir/etc" \
         PARTNER_EDGE_PREFIX_LIB="$dir/var" \
         PARTNER_EDGE_TEXTFILE_DIR="$dir/textfile" \
-        OXPULSE_BACKEND_URL="http://stub.invalid" \
+        OXPULSE_BACKEND_URL="https://stub.invalid" \
         OXPULSE_SERVICE_TOKEN="$svc_token" \
         bash "$SCRIPT" >"$dir/out.txt" 2>&1
 }

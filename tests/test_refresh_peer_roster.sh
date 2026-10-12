@@ -54,6 +54,7 @@ for arg in "\$@"; do
     fi
     if [[ "\$arg" == *partner/node-config* ]]; then
         printf '%s\n' "\$@" > "$argv_log"
+        printf 'call\n' >> "$dir/nc.calls"
         cat "$dir/nodecfg.body"; echo; echo '$code'; exit 0
     fi
 done
@@ -77,9 +78,9 @@ setup() {
 
 run_refresh() {
     local dir="$1"
-    PATH="$dir" LOG_FILE="$dir/refresh.log" \
+    env ${EXTRA_ENV:-} PATH="$dir" LOG_FILE="$dir/refresh.log" \
         PARTNER_EDGE_PREFIX_ETC="$dir/etc" PARTNER_EDGE_PREFIX_LIB="$dir/var" \
-        PARTNER_EDGE_TEXTFILE_DIR="$dir/textfile" OXPULSE_BACKEND_URL="http://stub.invalid" \
+        PARTNER_EDGE_TEXTFILE_DIR="$dir/textfile" OXPULSE_BACKEND_URL="${STUB_URL:-https://stub.invalid}" \
         OXPULSE_SERVICE_TOKEN="stkn_roster_test" \
         bash "$SCRIPT" >"$dir/out.txt" 2>&1
 }
@@ -145,5 +146,66 @@ run_refresh "$T" || fail "t7: refresh exited nonzero"
 [[ -s "$T/argv.log" ]] || fail "t7: node-config was never fetched"
 grep -q 'stkn_roster_test' "$T/argv.log" && fail "t7: service token leaked onto curl argv (CWE-214)"
 pass "t7: bearer stays off argv"
+
+# ── 8: truncated JSON is malformed, NOT "older central" ─────────────────────
+T=$D/t8; mkdir -p "$T"; setup "$T" "$OLD_ROSTER"; cp "$T/var/peer-roster.json" "$T/before"
+write_curl_stub "$T" '{"node_id":"x","peer_roster":[{"node_id":"a","turns_ho' 200
+run_refresh "$T" || fail "t8: refresh exited nonzero"
+cmp -s "$T/before" "$T/var/peer-roster.json" || fail "t8: truncated body must not touch the file"
+grep -q 'reason="malformed_response"' "$T/textfile/partner_edge.prom" || fail "t8: malformed counter missing"
+grep -q 'peer_roster_field_absent_total' "$T/textfile/partner_edge.prom" && fail "t8: truncated JSON must not count as field-absent"
+pass "t8: truncated JSON counted malformed_response, file kept"
+
+# ── 9: field absent is counted; success gauge on a real refresh ──────────────
+T=$D/t9; mkdir -p "$T"; setup "$T" "$OLD_ROSTER"
+write_curl_stub "$T" '{"node_id":"x","channels":[]}' 200
+run_refresh "$T" || fail "t9: refresh exited nonzero"
+grep -q 'partner_edge_peer_roster_field_absent_total' "$T/textfile/partner_edge.prom" || fail "t9: field-absent counter missing"
+[[ -e "$T/textfile/partner_edge_peer_roster_refresh_success_timestamp.prom" ]] && fail "t9: success gauge must not be set when nothing was applied"
+T=$D/t9b; mkdir -p "$T"; setup "$T" "$OLD_ROSTER"
+write_curl_stub "$T" "{\"peer_roster\":$NEW_ROSTER}" 200
+run_refresh "$T" || fail "t9b: refresh exited nonzero"
+grep -Eq '^partner_edge_peer_roster_refresh_success_timestamp [0-9]{10}' "$T/textfile/partner_edge_peer_roster_refresh_success_timestamp.prom" \
+    || fail "t9b: success timestamp gauge missing: $(cat "$T"/textfile/*timestamp.prom 2>&1)"
+pass "t9: field-absent counted; success timestamp gauge set only on success"
+
+# ── 10: deadline budget — ONE attempt, no 5xx retry loop ─────────────────────
+# TimeoutStartSec=120; the token leg already has a ~52s retry budget, so the
+# roster fetch must not add another. Restoring 3 attempts makes this RED.
+T=$D/t10; mkdir -p "$T"; setup "$T" "$OLD_ROSTER"
+write_curl_stub "$T" '{"error":"overloaded"}' 503
+run_refresh "$T" || fail "t10: refresh exited nonzero"
+[[ "$(wc -l < "$T/nc.calls")" -eq 1 ]] || fail "t10: roster fetch must make exactly 1 attempt on 5xx, made $(wc -l < "$T/nc.calls")"
+pass "t10: single attempt on 5xx"
+
+# ── 11: runs after the critical path ─────────────────────────────────────────
+T=$D/t11; mkdir -p "$T"; setup "$T" "$OLD_ROSTER"
+write_curl_stub "$T" "{\"peer_roster\":$NEW_ROSTER}" 200
+run_refresh "$T" || fail "t11: refresh exited nonzero"
+hb=$(grep -n 'heartbeat ok' "$T/out.txt" | head -1 | cut -d: -f1)
+tok=$(grep -n 'cross-probe token' "$T/out.txt" | head -1 | cut -d: -f1)
+ch=$(grep -n 'no rotation' "$T/out.txt" | head -1 | cut -d: -f1)
+ro=$(grep -n 'peer roster' "$T/out.txt" | head -1 | cut -d: -f1)
+[[ -n "$hb" && -n "$tok" && -n "$ch" && -n "$ro" ]] || fail "t11: missing log markers: $(cat "$T/out.txt")"
+[[ "$ro" -gt "$ch" && "$ro" -gt "$hb" && "$ro" -gt "$tok" ]] || fail "t11: roster must run after heartbeat/token/channel steps (hb=$hb tok=$tok ch=$ch ro=$ro)"
+pass "t11: roster refresh runs last"
+
+# ── 12: deadline guard skips the fetch entirely ──────────────────────────────
+T=$D/t12; mkdir -p "$T"; setup "$T" "$OLD_ROSTER"; cp "$T/var/peer-roster.json" "$T/before"
+write_curl_stub "$T" "{\"peer_roster\":$NEW_ROSTER}" 200
+EXTRA_ENV="ROSTER_START_DEADLINE_SECS=-1" run_refresh "$T" || fail "t12: refresh exited nonzero"
+[[ ! -e "$T/nc.calls" ]] || fail "t12: node-config must not be fetched past the deadline guard"
+cmp -s "$T/before" "$T/var/peer-roster.json" || fail "t12: file must be untouched"
+grep -q 'reason="deadline_skipped"' "$T/textfile/partner_edge.prom" || fail "t12: deadline_skipped counter missing"
+pass "t12: deadline guard skips the roster fetch"
+
+# ── 13: bearer only over https ───────────────────────────────────────────────
+T=$D/t13; mkdir -p "$T"; setup "$T" "$OLD_ROSTER"; cp "$T/var/peer-roster.json" "$T/before"
+write_curl_stub "$T" "{\"peer_roster\":$NEW_ROSTER}" 200
+STUB_URL="http://stub.invalid" run_refresh "$T" || fail "t13: refresh exited nonzero"
+[[ ! -e "$T/nc.calls" ]] || fail "t13: token must not be sent over http"
+cmp -s "$T/before" "$T/var/peer-roster.json" || fail "t13: file must be untouched"
+grep -q 'reason="fetch_failed"' "$T/textfile/partner_edge.prom" || fail "t13: counted failure missing"
+pass "t13: non-https BACKEND_URL refused and counted"
 
 echo "PASS: test_refresh_peer_roster"

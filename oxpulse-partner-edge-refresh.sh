@@ -133,6 +133,19 @@ else
 fi
 unset _XRL_LOCAL _XRL_SBIN
 
+# Seconds of the unit's TimeoutStartSec (120) that must remain for the roster
+# refresh (single attempt, --max-time 8) to be allowed to start.
+ROSTER_START_DEADLINE_SECS="${ROSTER_START_DEADLINE_SECS:-90}"
+refresh_peer_roster_tail() {
+    if [[ "$SECONDS" -gt "$ROSTER_START_DEADLINE_SECS" ]]; then
+        log "WARN peer roster refresh skipped: ${SECONDS}s elapsed > ${ROSTER_START_DEADLINE_SECS}s (service deadline guard)"
+        emit_metric "partner_edge_peer_roster_refresh_failure_total" \
+            "partner_id=\"${NODE_ID}\",reason=\"deadline_skipped\"" "1"
+        return 0
+    fi
+    refresh_peer_roster
+}
+
 # OS-aware install hint: returns the appropriate install command for the host PM.
 suggest_install() {
     local pkg="$1"
@@ -401,10 +414,9 @@ _maybe_self_upgrade "$HB_CODE" "$HB_BODY"
 # (P-sec1, PR #371) this move carries over unmodified.
 refresh_cross_probe_token
 
-# Peer roster refresh — pulls the central's current peer_roster out of
-# node-config so revoked/new peers propagate without a re-register. Lives in
-# lib/xprb-refresh-lib.sh; fail-soft, preserves the file on any problem.
-refresh_peer_roster
+# Peer roster refresh runs LAST (see refresh_peer_roster_tail below): it is
+# best-effort and must never push keys/heartbeat/channel updates past the
+# service's TimeoutStartSec.
 
 # channels_version check — independent of Reality key rotation.
 # Skip when keys fetch failed (NEW_CHANNELS_VERSION will be empty).
@@ -853,11 +865,13 @@ fi
 
 if [[ "$KEYS_OK" -eq 0 ]]; then
     log "keys fetch failed — skipping rotation check, exiting 0"
+    refresh_peer_roster_tail
     exit 0
 fi
 
 if [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
     log "no rotation: version=$NEW_VERSION"
+    refresh_peer_roster_tail
     exit 0
 fi
 
@@ -1103,3 +1117,9 @@ if systemctl list-unit-files "$_sr_svc" --no-legend 2>/dev/null | grep -q "$_sr_
 else
     log "split-routing: $_sr_svc not installed — skipping re-assert"
 fi
+
+# Peer roster refresh — pulls the central's current peer_roster out of
+# node-config so revoked/new peers propagate without a re-register. Last step,
+# single bounded attempt (lib/xprb-refresh-lib.sh), skipped when the unit is
+# already close to its deadline. Fail-soft.
+refresh_peer_roster_tail
