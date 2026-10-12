@@ -277,14 +277,10 @@ probe_ch3() {
 # PROBE TARGET (anti-SSRF-vs-loopback-self-test collision — see below):
 # the `-y` self-test relays between two allocations via a peer reached at the
 # server-address argument.  When that argument is 127.0.0.1 the relayed peer is
-# a loopback address, which TWO independent guards in the production config DENY
-# at CreatePermission:
-#   1. `denied-peer-ip=127.0.0.0-127.255.255.255` (coturn.conf.tpl) — explicit
-#      RFC-defined loopback SSRF block.
-#   2. `no-loopback-peers` (coturn.conf.tpl:42) — coturn's built-in flag that
-#      independently denies any peer address that is a loopback address, even if
-#      denied-peer-ip were removed.
-# Either guard alone is sufficient to deny the self-test peer; both are present.
+# a loopback address, which coturn denies at CreatePermission:
+#   `denied-peer-ip=127.0.0.0-127.255.255.255` (coturn.conf.tpl) — explicit
+#   RFC-defined loopback SSRF block (coturn 4.6.x also refuses loopback peers by
+#   default; its former `no-loopback-peers` flag no longer exists).
 # The data round-trip never completes, `timeout` kills the
 # client (exit 124), handshake_ok is reported false on a perfectly healthy
 # coturn, AND the killed client leaks its two allocations every tick (no
@@ -301,6 +297,60 @@ probe_ch3() {
 # FOLLOWUPS.md 'ch4 coturn probe — hairpin/NAT caveat' for the full analysis.
 # We do NOT loosen denied-peer-ip to make loopback work: that would re-open the
 # SSRF hole the guard exists to close.
+
+# ---------- coturn probe plumbing: NO exec channel into the coturn container ----------
+# coturn runs as an unprivileged uid with a 0600 rendered conf, and a root
+# `docker exec` into it was a standing root-in-container channel for every probe
+# tick. Instead: secret + external-ip are read from the HOST copy of the rendered
+# conf (the file coturn is bind-mounted from; same first-line semantics as before),
+# and the turnutils clients run in a FRESH, locked-down container of the very image
+# coturn is configured with — read-only rootfs, no capabilities, uid 65534, host
+# network (the probe must reach coturn's real public/relay addresses). The live
+# container's writable layer is never touched.
+_coturn_conf_file() {
+    if [[ -n "${OXPULSE_COTURN_CONF:-}" ]]; then
+        printf '%s' "$OXPULSE_COTURN_CONF"
+    elif [[ -n "${_NODE_CONFIG:-}" ]]; then
+        printf '%s/coturn.conf' "${_NODE_CONFIG%/*}"
+    else
+        printf '%s' /etc/oxpulse-partner-edge/coturn.conf
+    fi
+}
+
+# First KEY=VALUE line's value (may itself contain '='); empty when unreadable.
+_coturn_conf_value() {
+    local f
+    f=$(_coturn_conf_file)
+    [[ -r "$f" ]] || return 0
+    awk -v k="$1" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' "$f" 2>/dev/null || true
+}
+
+# The coturn image as currently configured. `docker inspect` reads metadata only.
+_coturn_probe_image() {
+    if [[ -n "${OXPULSE_COTURN_PROBE_IMAGE:-}" ]]; then
+        printf '%s' "$OXPULSE_COTURN_PROBE_IMAGE"
+        return 0
+    fi
+    local img
+    img=$(timeout 10 docker inspect --format '{{.Config.Image}}' oxpulse-partner-coturn 2>/dev/null || true)
+    [[ -n "$img" ]] || return 1
+    printf '%s' "$img"
+}
+
+# _coturn_probe_run SECONDS TOOL ARGS... — run one turnutils client, bounded TWICE:
+# the in-container `timeout` (entrypoint) reaps a hung client itself, the outer one
+# bounds the docker CLI. 124/143 from either layer classify as a timeout upstream.
+# --init is load-bearing: with `--entrypoint timeout` as PID 1 the kernel ignores the
+# SIGTERM `timeout` sends the client (PID 1 gets no default signal action), so a hung
+# turnutils client would outlive its bound and keep the container running forever —
+# the very leak the in-container timeout exists to prevent (verified on the image).
+_coturn_probe_run() {
+    local secs="$1" tool="$2" img
+    shift 2
+    img=$(_coturn_probe_image) || { echo "coturn probe: cannot resolve the coturn image (is oxpulse-partner-coturn present?)" >&2; return 125; }
+    timeout "$secs" docker run --rm --init --pull never --network host --read-only --cap-drop ALL \
+        --user 65534:65534 --entrypoint timeout "$img" "$secs" "$tool" "$@"
+}
 
 # ---------- helper: resolve the coturn probe target (public relay IP) ----------
 # Resolution order:
@@ -324,9 +374,7 @@ _resolve_coturn_probe_target() {
     # the value; the public part is everything before the first '/' (NAT form
     # "public/private"); no '/' → the whole value is public.
     local ext_line
-    ext_line=$(timeout 10 docker exec oxpulse-partner-coturn \
-        sed -n 's/^external-ip=//p' \
-        /etc/coturn/turnserver.conf 2>/dev/null | head -n1 || true)
+    ext_line=$(_coturn_conf_value external-ip)
     if [[ -n "$ext_line" ]]; then
         target="${ext_line%%/*}"
         if [[ -n "$target" ]]; then
@@ -388,9 +436,7 @@ probe_ch4() {
     if [[ -n "${OXPULSE_TURN_SECRET:-}" ]]; then
         turn_secret="$OXPULSE_TURN_SECRET"
     else
-        turn_secret=$(timeout 10 docker exec oxpulse-partner-coturn \
-            sed -n 's/^static-auth-secret=//p' \
-            /etc/coturn/turnserver.conf 2>/dev/null || true)
+        turn_secret=$(_coturn_conf_value static-auth-secret)
     fi
 
     if [[ -n "$turn_secret" ]]; then
@@ -449,8 +495,7 @@ probe_ch4() {
         # cross-probe-lib.sh _probe_peer_udp_stun). Outer keeps the SAME 10s:
         # the in-container process is reaped by its own bound regardless of
         # which layer fires first, and the service-budget model stays true.
-        uclient_out=$(timeout 10 docker exec oxpulse-partner-coturn \
-            timeout 10 turnutils_uclient \
+        uclient_out=$(_coturn_probe_run 10 turnutils_uclient \
                 -u "$turn_username" \
                 -w "$turn_password" \
                 -y -n 1 \
@@ -496,8 +541,7 @@ probe_ch4() {
         t0="${EPOCHREALTIME}"
         # Inner timeout — stunclient waits forever with no Binding answer;
         # same in-container-leak guard as the Allocate probe above.
-        uclient_out=$(timeout 10 docker exec oxpulse-partner-coturn \
-            timeout 10 turnutils_stunclient "$probe_target" -p "$turn_port" \
+        uclient_out=$(_coturn_probe_run 10 turnutils_stunclient "$probe_target" -p "$turn_port" \
             2>&1)
         exit_code=$?
         t1="${EPOCHREALTIME}"

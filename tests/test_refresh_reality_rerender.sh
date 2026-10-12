@@ -89,7 +89,7 @@ cat > "$PREFIX_ETC/xray-client.json" <<JSON
       "tag": "vless-tunnel",
       "streamSettings": {
         "security": "reality",
-        "realitySettings": { "publicKey": "$PUBKEY_A", "serverName": "www.samsung.com", "shortId": "abcd", "fingerprint": "randomized" }
+        "realitySettings": { "publicKey": "$PUBKEY_A", "serverName": "www.samsung.com", "shortId": "abcd", "fingerprint": "chrome" }
       }
     }
   ]

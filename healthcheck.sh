@@ -142,18 +142,39 @@ check "check_05_udp3478" "5. UDP 3478 listening (coturn)" bash -c 'ss -lun | gre
 check "check_06_tcp5349" "6. TCP 5349 listening (coturn TURNS)" bash -c 'ss -ltn | grep -q ":5349 "'
 
 # --- 7. xray-client has an outbound ESTABLISHED connection ---
+# An ESTABLISHED socket is NOT proof of a working tunnel: when the central
+# REALITY server rejects our ClientHello it forwards the TCP session to its dest,
+# so the socket stays ESTABLISHED while every connection ends in "REALITY:
+# received real certificate" (xray process wedge, 2026-10-12). Fail on that
+# signature too; >= 5 hits in the last 2 minutes is a wedge, not noise.
 check "check_07_xray_tunnel" "7. xray-client tunnel established" bash -c '
 	docker exec oxpulse-partner-xray sh -c "
 		(ss -tn state established 2>/dev/null || netstat -tn 2>/dev/null | grep ESTABLISHED) | head -1 | grep -q .
-	"
+	" || exit 1
+	# Bound the window by the container uptime (as selfheal does): `docker logs`
+	# survives a restart, so without it the previous, wedged process would keep
+	# check 7 RED for up to 120s after the restart that fixed it.
+	since=120
+	started=$(docker inspect -f "{{.State.StartedAt}}" oxpulse-partner-xray 2>/dev/null || true)
+	if [[ -n "$started" ]] && started_ep=$(date -d "$started" +%s 2>/dev/null); then
+		age=$(( $(date +%s) - started_ep ))
+		(( age >= 1 && age < since )) && since=$age
+	fi
+	n=$(docker logs --since "${since}s" oxpulse-partner-xray 2>&1 | grep -c "REALITY: received real certificate" || true)
+	[[ "${n:-0}" -lt 5 ]]
 '
 
 # --- 8. Coturn shared-secret matches rendered config ---
 check "check_08_coturn_secret" "8. coturn secret matches config" bash -c '
 	expected=$(awk -F= "/^static-auth-secret=/ {print \$2; exit}" "'"$CONF_DIR"'/coturn.conf" || true)
 	[[ -z "$expected" ]] && exit 1
-	# Verify the running container loaded the same file (compare by size + head).
-	running=$(docker exec oxpulse-partner-coturn awk -F= "/^static-auth-secret=/ {print \$2; exit}" /etc/coturn/turnserver.conf 2>/dev/null || true)
+	# Verify the running container sees the same file (a renamed-in conf leaves a
+	# running container on the old inode). Read it through the host pid namespace —
+	# /proc/<turnserver pid>/root is the container filesystem — instead of a root
+	# `docker exec` into coturn: no exec channel into the container.
+	pid=$(pgrep -x turnserver 2>/dev/null | head -n1 || true)
+	[[ -n "$pid" ]] || exit 1
+	running=$(awk -F= "/^static-auth-secret=/ {print \$2; exit}" "/proc/$pid/root/etc/coturn/turnserver.conf" 2>/dev/null || true)
 	[[ -n "$running" && "$running" = "$expected" ]]
 '
 
@@ -437,6 +458,18 @@ else
 	unset _ch_active_count _ch_failed_count _ch_total _ch_name _ch_status
 fi
 unset _chs_file
+
+# --- 22. coturn self-relay guard in force ---
+# coturn (network_mode: host, public credentials) must not be able to relay UDP to
+# the host's own services: nft table inet coturn_self_relay_guard + the reserved
+# relay-port range. RED when the table is absent (flushed by a firewalld reload /
+# nftables.service, nft missing) or the reservation is gone. `status` is the single
+# definition of "in force" (oxpulse-partner-edge-coturn-guard.sh).
+# check 21 ends without a newline; start this row on its own line.
+if [[ "$SNAPSHOT_MODE" -eq 0 ]]; then echo; fi
+_COTURN_GUARD_BIN="${OXPULSE_COTURN_GUARD_BIN:-${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-partner-edge-coturn-guard}"
+check "check_22_coturn_self_relay_guard" "22. coturn self-relay guard loaded" "$_COTURN_GUARD_BIN" status
+unset _COTURN_GUARD_BIN
 
 # In snapshot mode: always exit 0 (output is for diffing, not pass/fail signal).
 if [[ "$SNAPSHOT_MODE" -eq 1 ]]; then

@@ -116,6 +116,7 @@ for _unit in \
 	oxpulse-xray-update.timer \
 	oxpulse-geoip-refresh.service \
 	oxpulse-geoip-refresh.timer \
+	oxpulse-coturn-self-relay-guard.service \
 	oxpulse-channels-health-report.service \
 	oxpulse-channels-health-report.timer \
 	awg-quick@awg0.service; do
@@ -228,6 +229,7 @@ for _sbin in \
 	oxpulse-partner-edge-sni-rotate \
 	oxpulse-channels-health-report \
 	oxpulse-geoip-refresh \
+	oxpulse-partner-edge-coturn-guard \
 	oxpulse-xray-update.sh \
 	ghcr-auth-lib.sh \
 	channel-render-lib.sh \
@@ -255,6 +257,8 @@ for _unit_file in \
 	[[ -f "$_unit_file" ]] && rm -f "$_unit_file" 2>/dev/null || true
 done
 unset _unit_file
+# coturn self-relay guard's relay-port reservation (the nft table went with its unit's ExecStop)
+rm -f "${OXPULSE_SYSCTL_DIR:-/etc/sysctl.d}/99-oxpulse-coturn-relay-ports.conf" 2>/dev/null || true
 systemctl daemon-reload 2>/dev/null || warn "systemctl daemon-reload failed"
 
 # ---------- Step 5b: Remove amneziawg build artifacts (--purge-packages) ----------

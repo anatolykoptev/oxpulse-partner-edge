@@ -119,6 +119,13 @@ case "$1" in
     grep -v " $2\$" "$IMAGE_LIST" > "$IMAGE_LIST.t" 2>/dev/null && mv -f "$IMAGE_LIST.t" "$IMAGE_LIST"
     [[ -n "${FAKE_DISK_AFTER_RMI:-}" ]] && echo "$FAKE_DISK_AFTER_RMI" > "$TMPDIR_DISK"
     ;;
+  logs)
+    # docker logs --since <N>s <container>: record the bound, replay only the
+    # fixture lines ("<epoch> <text>") inside the window, like the daemon does.
+    echo "$3" >> "$LOGS_ARGS"
+    win="${3%s}"; now=$(date +%s)
+    while read -r ts text; do (( ts >= now - win )) && echo "$text"; done < "$LOGS_DIR/$4" 2>/dev/null
+    exit 0 ;;
   restart) echo "$2" >> "$RESTART_LOG"; exit "${DOCKER_RESTART_RC:-0}" ;;
   start)
     echo "$2" >> "$START_LOG"
@@ -152,6 +159,8 @@ case "$1" in
     if [[ -r "$U/enabled.$unit" ]]; then cat "$U/enabled.$unit"; else echo enabled; fi ;;
   restart)
     unit="${!#}"; echo "restart $unit" >> "$UNIT_LOG"
+    # the coturn self-relay guard unit: a restart reloads the table (guard-heals)
+    [[ "$unit" == oxpulse-coturn-self-relay-guard.service && -e "$U/guard-heals" ]] && : > "$U/guard.ok"
     if grep -qxF "$unit" "$U/heals" 2>/dev/null; then
         grep -vxF "$unit" "$failed_file" > "$failed_file.t" 2>/dev/null; mv -f "$failed_file.t" "$failed_file"
     fi ;;
@@ -187,7 +196,8 @@ TG
 	# The REAL metric sink, so the gauge assertions exercise the shipped writer.
 	cp "$REPO_ROOT/lib/metric-sink-lib.sh" "$TMP/metric-sink-lib.sh"
 
-	mkdir -p "$TMP/cimg"
+	mkdir -p "$TMP/cimg" "$TMP/logs"
+	export LOGS_DIR="$TMP/logs" LOGS_ARGS="$TMP/logs.args"; : > "$LOGS_ARGS"
 	export IMAGE_LIST="$TMP/images" CONTAINER_IMAGE="$TMP/cimg" RMI_LOG="$TMP/rmi"
 	: > "$IMAGE_LIST"; : > "$RMI_LOG"
 	export FIXTURES="$TMP/fixtures" FX_UNITS="$TMP/units"
@@ -655,6 +665,125 @@ _att="$(state disk attempts)"
 [[ -z "$_att" || "$_att" == 0 ]] \
 	&& pass "--collect-images spends no disk budget (attempts=${_att:-unset})" \
 	|| fail "it charged the disk budget: attempts=$_att — the give-up alert would fire on a healthy node"
+teardown
+
+# 40-43 — the coturn self-relay guard. The table can vanish (firewalld reload,
+# nftables.service) without any unit failing, so neither heal_units nor
+# heal_enable_drift sees it; the healer asks the guard's own `status`.
+guard_setup() {   # state: ok|missing  [heals]
+	cat > "$TMP/guard" <<'GUARD'
+#!/bin/bash
+[[ "$1" == status ]] || exit 2
+[[ -e "$FX_UNITS/guard.ok" ]]
+GUARD
+	chmod +x "$TMP/guard"
+	export OXPULSE_SELFHEAL_GUARD_BIN="$TMP/guard"
+	[[ "$1" == ok ]] && : > "$FX_UNITS/guard.ok"
+	[[ "${2:-}" == heals ]] && : > "$FX_UNITS/guard-heals"
+	return 0
+}
+GUARD_UNIT=oxpulse-coturn-self-relay-guard.service
+
+# 40 — guard missing, restart brings it back: restarted once, recorded healed
+setup; guard_setup missing heals; run_it
+[[ "$(grep -c "^restart $GUARD_UNIT$" "$UNIT_LOG")" == 1 ]] \
+	&& pass "guard missing -> its unit is restarted once" \
+	|| fail "guard missing but unit restart count = $(grep -c "^restart $GUARD_UNIT$" "$UNIT_LOG") (log: $(tr '\n' ';' <"$UNIT_LOG"))"
+[[ "$(cat "$TMP/out")" == *"guard back in force"* ]] \
+	&& pass "guard heal is logged as healed" || fail "no 'guard back in force' in: $(cat "$TMP/out")"
+teardown
+
+# 41 — guard in force: nothing is touched
+setup; guard_setup ok; run_it
+[[ "$(grep -c "^restart $GUARD_UNIT$" "$UNIT_LOG")" == 0 ]] \
+	&& pass "guard in force -> not restarted" || fail "restarted a healthy guard"
+teardown
+
+# 42 — a node without the guard script (pre-guard release) is not the healer's job
+setup; export OXPULSE_SELFHEAL_GUARD_BIN="$TMP/does-not-exist"; run_it
+[[ "$(grep -c "^restart $GUARD_UNIT$" "$UNIT_LOG")" == 0 ]] \
+	&& pass "no guard script on the node -> healer stays out" || fail "restarted a unit for a guard that was never delivered"
+teardown
+
+# 43 — restart does not help (cause is not the table): logged as failed, not "healed"
+setup; guard_setup missing; run_it
+[[ "$(cat "$TMP/out")" == *"restart did not bring the guard into force"* ]] \
+	&& pass "a restart that does not restore the guard is reported failed" || fail "false heal / silent: $(cat "$TMP/out")"
+teardown
+
+# --- xray REALITY auth-failure wedge (randomized-fingerprint incident 2026-10-12) ---
+# A wedged xray keeps its TCP session to central ESTABLISHED and can still read
+# `healthy` from docker; the only evidence is the log signature.
+XRAY=oxpulse-partner-xray
+wedge_log() {   # container count [age-secs, default 5]
+	local i ts=$(( $(date +%s) - ${3:-5} )); : > "$LOGS_DIR/$1"
+	for ((i = 0; i < $2; i++)); do
+		echo "$ts [Error] transport/internet/reality: REALITY: received real certificate (potential MITM or redirection)" >> "$LOGS_DIR/$1"
+	done
+}
+
+# 44 — docker says healthy, log shows the wedge -> restarted
+setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 12; run_it
+[[ "$(restarts)" == 1 && "$(cat "$RESTART_LOG")" == "$XRAY" ]] \
+	&& pass "xray 'healthy' but REALITY auth failing in the log -> restarted" \
+	|| fail "wedged xray not restarted (restarts=$(restarts); out: $(cat "$TMP/out"))"
+teardown
+
+# 45 — a couple of stray errors (< REALITY_MIN) are not a wedge
+setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 4; run_it
+[[ "$(restarts)" == 0 ]] && pass "threshold: 4 failures (< 5) -> left alone" || fail "restarted on 4 stray errors"
+teardown
+
+# 45b — exactly REALITY_MIN lines is a wedge
+setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 5; run_it
+[[ "$(restarts)" == 1 ]] && pass "threshold: 5 failures (= 5) -> restarted" || fail "5 failures did not trigger (restarts=$(restarts))"
+teardown
+
+# 46 — the wedge verdict still goes through the budget: exhausted -> no restart, one alert
+setup; fixture $XRAY healthy "$OLD"; wedge_log $XRAY 12
+mkdir -p "$OXPULSE_SELFHEAL_STATE_DIR"
+printf 'win_start=%s\nattempts=3\nlast_attempt=%s\npending_since=0\n' \
+  "$(( $(date +%s) - 100 ))" "$(( $(date +%s) - 999 ))" > "$OXPULSE_SELFHEAL_STATE_DIR/$XRAY.state"
+run_it
+[[ "$(restarts)" == 0 && "$(alerts)" == 1 ]] \
+	&& pass "wedge verdict respects the restart budget (gives up + alerts once)" \
+	|| fail "budget bypassed (restarts=$(restarts) alerts=$(alerts))"
+teardown
+
+# 47 — the log window is bounded by uptime: the bound passed to `docker logs`
+setup; fixture $XRAY healthy "$(( $(date +%s) - 30 ))"; wedge_log $XRAY 12; run_it
+since="$(head -1 "$LOGS_ARGS" | tr -d 's')"
+[[ -n "$since" && "$since" -le 31 ]] \
+	&& pass "log scan bounded by container uptime (since=${since}s)" \
+	|| fail "log scan not bounded by uptime (since='${since}')"
+[[ "$(restarts)" == 0 ]] && pass "young wedged xray is inside start grace -> not restarted" || fail "restarted inside start grace"
+teardown
+
+# 47b — verify-outcome path: a restart just happened (pending attempt, process
+#       30s old, docker says healthy); the log still holds the PREVIOUS
+#       process's 12 lines from 100s ago. It must resolve as healed, not read as
+#       still wedged. Without the uptime bound it stays pending forever.
+setup; fixture $XRAY healthy "$(( $(date +%s) - 30 ))"; wedge_log $XRAY 12 100
+mkdir -p "$OXPULSE_SELFHEAL_STATE_DIR"
+printf 'pending_since=%s\nattempts=1\nwin_start=%s\n' "$(( $(date +%s) - 30 ))" "$(( $(date +%s) - 30 ))" \
+  > "$OXPULSE_SELFHEAL_STATE_DIR/$XRAY.state"
+run_it
+[[ "$(state $XRAY pending_since)" == 0 && "$(restarts)" == 0 ]] \
+	&& pass "restarted xray: previous process's lines do not read as still wedged (healed)" \
+	|| fail "young process condemned by old lines (pending=$(state $XRAY pending_since) restarts=$(restarts))"
+teardown
+
+# 47c — the failure gauge exists in the confirmed-wedge state too (docker already
+#       says unhealthy), so a dashboard sees the signature exactly when it matters
+setup; fixture $XRAY unhealthy "$OLD"; wedge_log $XRAY 12; run_it
+grep -q 'partner_edge_xray_reality_auth_failures{container="oxpulse-partner-xray"} 12' "$TMP"/textfile/*.prom 2>/dev/null \
+	&& pass "auth-failure gauge emitted while docker status is already unhealthy" \
+	|| fail "gauge missing in the unhealthy state: $(cat "$TMP"/textfile/*.prom 2>/dev/null | tr '\n' ';')"
+teardown
+
+# 48 — only the xray client is judged by this signature
+setup; fixture oxpulse-partner-c1 healthy "$OLD"; wedge_log oxpulse-partner-c1 12; run_it
+[[ "$(restarts)" == 0 ]] && pass "non-xray container with the signature is untouched" || fail "restarted a non-xray container"
 teardown
 
 echo ""

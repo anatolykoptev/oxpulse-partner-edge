@@ -124,7 +124,7 @@ done
 [[ -n "$PUBLIC_IP" ]] || die "could not detect public IP (tried ifconfig.me and api.ipify.org)"
 
 # Detect private/NAT IP (optional). EXTERNAL_IP_LINE / ALLOWED_PEER_IP_LINE
-# (coturn's external-ip, the OCI-hairpin allowed-peer-ip) are derived from
+# (coturn's external-ip and the host's own allowed-peer-ip) are derived from
 # this further down in resolve_external_ip (step 3c) — deferred until after
 # registration because tier 2 of that resolution needs TURNS_SUBDOMAIN,
 # which the backend only assigns in its response (step 3). The PUBLIC_IP
@@ -477,6 +477,7 @@ resolve_external_ip() {
     fi
     EXTERNAL_IP_LINE="${PUBLIC_IP}"
     [[ -n "${PRIVATE_IP:-}" ]] && EXTERNAL_IP_LINE="${PUBLIC_IP}/${PRIVATE_IP}"
+    # Exactly this host's OWN private address (see coturn.conf.tpl), never another.
     ALLOWED_PEER_IP_LINE=""
     [[ -n "${PRIVATE_IP:-}" ]] && ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
 }
@@ -664,6 +665,12 @@ log "  DNS OK: $TURNS_FQDN → $PUBLIC_IP"
 
 # ---------- Step 6: start containers ----------
 log "[6/7] starting containers"
+# coturn self-relay guard BEFORE coturn starts. The unit is enabled in the baked
+# image and ran at boot with the default SFU port; (re)apply now that the rendered
+# compose pins the real one. Hard failure: a clone must not come up with a coturn
+# that can relay to the host's own services.
+systemctl reload-or-restart oxpulse-coturn-self-relay-guard.service \
+    || die "coturn self-relay guard failed to load — refusing to start coturn without it (journalctl -u oxpulse-coturn-self-relay-guard)"
 docker compose -f "$PREFIX_ETC/docker-compose.yml" up -d
 log "  containers started"
 

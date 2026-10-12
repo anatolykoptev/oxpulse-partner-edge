@@ -1096,6 +1096,14 @@ _reset_surface_flags() {
 # external-ip= and swap it live. The live network probe lives only on the
 # install/bootstrap path (lib/install-network.sh network_run), never here.
 # ---------------------------------------------------------------------------
+# 0 iff ADDR is configured on a local interface (fails closed without `ip`).
+_coturn_addr_is_local() {
+    command -v "${IP_BIN:-ip}" >/dev/null 2>&1 || return 1
+    "${IP_BIN:-ip}" -o addr show 2>/dev/null | awk -v a="$1" '
+        { for (i = 1; i <= NF; i++) if ($i == "inet" || $i == "inet6") { x = $(i + 1); sub(/\/.*/, "", x); if (x == a) f = 1 } }
+        END { exit !f }'
+}
+
 _setup_coturn_render_env() {
     local _prefix_etc="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
     local _compose="${COMPOSE_FILE:-${_prefix_etc}/docker-compose.yml}"
@@ -1166,15 +1174,22 @@ _setup_coturn_render_env() {
         EXTERNAL_IP_LINE="${PUBLIC_IP:-}"
     fi
 
-    # ALLOWED_PEER_IP_LINE: OCI-hairpin fix (2026-07-11) — permit coturn to relay
-    # to the co-located SFU's private IP (advertised as a host candidate via
-    # SFU_LOCAL_IP), overriding the RFC1918 denied-peer-ip block. Rendered only
-    # when behind NAT (distinct private IP); empty otherwise so the coturn.conf
-    # `{{ALLOWED_PEER_IP_LINE}}` placeholder becomes a no-op line rather than an
-    # invalid `allowed-peer-ip=`. Mirrors hydrate.sh so the install and converge
-    # renders stay byte-identical.
+    # ALLOWED_PEER_IP_LINE: when behind NAT (distinct private IP) exactly this
+    # host's OWN private address — the relay address external-ip maps to — so
+    # denied-peer-ip 10.0.0.0/8 does not block same-edge relaying (403 Forbidden IP).
+    # Never any other address. Empty on a public-NIC edge. Mirrors hydrate.sh/install.sh
+    # so the install and converge renders stay byte-identical.
+    # PRIVATE_IP came from STATE / the installed conf, which can be stale (re-IP, a
+    # carried-over value): allowing coturn to relay to an address that is NOT local is
+    # SSRF the nft guard (local addresses only) cannot stop. Validate against the
+    # live interface addresses; fail closed (no line) and say so.
     if [[ -n "${PUBLIC_IP:-}" && -n "${PRIVATE_IP:-}" && "$PUBLIC_IP" != "$PRIVATE_IP" ]]; then
-        ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
+        if _coturn_addr_is_local "$PRIVATE_IP"; then
+            ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
+        else
+            warn "reconcile_coturn: PRIVATE_IP '${PRIVATE_IP}' is not configured on any local interface (stale STATE?) - NOT rendering allowed-peer-ip; same-edge relaying will fail until STATE is corrected"
+            ALLOWED_PEER_IP_LINE=""
+        fi
     else
         ALLOWED_PEER_IP_LINE=""
     fi
@@ -1737,6 +1752,36 @@ reconcile_firewall_surface() {
         _reconcile_firewall_emit_gauge 1
         # Do NOT set _RECONCILE_FIREWALL_APPLIED=1 — reflect the true state.
     fi
+
+    # The coturn self-relay guard is a separate nft table that firewall_apply does
+    # not own, but `firewall-cmd --reload` / `flush ruleset` on a RHEL-family edge
+    # wipes foreign nft tables — so re-assert it right AFTER every firewall_apply,
+    # whether that succeeded or not.
+    reconcile_coturn_guard_surface
+}
+
+# ---------------------------------------------------------------------------
+# reconcile_coturn_guard_surface
+#
+# Re-asserts the coturn self-relay guard (nft table inet coturn_self_relay_guard +
+# relay-port reservation) by `systemctl reload-or-restart` on its unit — a start
+# when inactive, an atomic table swap (ExecReload) when active. Idempotent, safe
+# every converge. Fail-soft by design (warn, never die): a node whose guard cannot
+# load must still converge; healthcheck check_22_coturn_self_relay_guard reports it.
+# ---------------------------------------------------------------------------
+reconcile_coturn_guard_surface() {
+    local _unit="oxpulse-coturn-self-relay-guard.service"
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        log "[dry-run] reconcile_coturn_guard: would reload-or-restart $_unit"
+        return 0
+    fi
+    if ! command -v systemctl >/dev/null 2>&1; then
+        warn "reconcile_coturn_guard: systemctl not available — guard NOT re-asserted"
+        return 0
+    fi
+    log "reconcile_coturn_guard: re-asserting coturn self-relay guard ($_unit)"
+    systemctl reload-or-restart "$_unit" \
+        || warn "reconcile_coturn_guard: systemctl reload-or-restart $_unit failed — coturn self-relay guard NOT in force (journalctl -u $_unit)"
 }
 
 # ---------------------------------------------------------------------------

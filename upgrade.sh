@@ -1194,6 +1194,9 @@ _HOST_SCRIPT_SBIN_FILES=(
 	oxpulse-partner-edge-sni-rotate
 	oxpulse-channels-health-report
 	oxpulse-partner-edge-selfheal
+	# coturn self-relay guard (nft OUTPUT table + relay-port reservation). Run by
+	# oxpulse-coturn-self-relay-guard.service; see _HOST_SCRIPT_APPLY_UNITS.
+	oxpulse-partner-edge-coturn-guard
 	oxpulse-geoip-refresh
 	oxpulse-xray-update.sh
 	channel-render-lib.sh
@@ -1288,6 +1291,7 @@ _host_script_remote_name() {
 		oxpulse-partner-edge-sni-rotate) echo "oxpulse-partner-edge-sni-rotate.sh" ;;
 		oxpulse-channels-health-report)  echo "oxpulse-channels-health-report.sh" ;;
 		oxpulse-partner-edge-selfheal)   echo "oxpulse-partner-edge-selfheal.sh" ;;
+		oxpulse-partner-edge-coturn-guard) echo "oxpulse-partner-edge-coturn-guard.sh" ;;
 		oxpulse-geoip-refresh)           echo "scripts/oxpulse-geoip-refresh.sh" ;;
 		oxpulse-xray-update.sh)          echo "scripts/oxpulse-xray-update.sh" ;;
 		channel-render-lib.sh)           echo "channel-render-lib.sh" ;;
@@ -1367,6 +1371,7 @@ _HOST_SCRIPT_SYSTEMD_FILES=(
 	oxpulse-channels-health-report.timer
 	oxpulse-partner-edge-selfheal.service
 	oxpulse-partner-edge-selfheal.timer
+	oxpulse-coturn-self-relay-guard.service
 	# Split-routing (PR #280).
 	oxpulse-partner-edge-split-routing.service
 	oxpulse-partner-edge-ru-subnets-update.service
@@ -1418,6 +1423,19 @@ _HOST_SCRIPT_ENABLE_UNITS=(
 	oxpulse-geoip-refresh.timer
 	oxpulse-channels-health-report.timer
 	oxpulse-partner-edge-selfheal.timer
+	oxpulse-coturn-self-relay-guard.service
+)
+
+# Units sync_host_scripts (re)APPLIES on every run — `reload-or-restart`, which
+# starts an inactive unit and re-runs ExecReload on an active one. Not covered by
+# the Step 5c enable policy above (a .service is enable-only there) nor by Step 7
+# (restarts only already-active units): a guard that is installed and enabled but
+# never started would leave an edge unprotected until its next reboot, and a plain
+# `oxpulse-partner-edge-upgrade` never reaches reconcile_all. Applying is
+# idempotent (one atomic nft transaction) and independent of the image tag, so it
+# is safe before the image pull and under rollback.
+_HOST_SCRIPT_APPLY_UNITS=(
+	oxpulse-coturn-self-relay-guard.service
 )
 
 # snapshot_host_scripts / restore_host_scripts / sync_host_scripts — thin
@@ -2228,6 +2246,33 @@ _settle_docker_health_watch() {
 }
 
 # ---------------------------------------------------------------------------
+# _prerender_xray_before_up — converge a stale uTLS fingerprint BEFORE compose up.
+#
+# The compose up that recreates xray reads the xray-client.json ALREADY on disk;
+# _render_gate only renders AFTER the main settle gate. An edge still carrying
+# `randomized` (pre-chrome release) would therefore be recreated on it, and that
+# process wedges ~50% of the time against a REALITY >= 2026-09-08 server
+# ("received real certificate" on every connection, see
+# tests/test_xray_template_fingerprint.sh). check 7 now sees that wedge, so the
+# main gate would roll the upgrade back (single-homed box) or alert (multi-homed)
+# on a coin flip. Rendering first means the recreated process starts on chrome.
+#
+# Same renderer as _render_gate (re_render_xray) — no second one. Scoped to the
+# stale-fingerprint case so a steady-state upgrade pays no extra render/restart,
+# and soft: any failure here only warns, the post-gate _render_gate still runs.
+# The main gate's rollback does not restore xray-client.json, which is right: a
+# chrome config is valid on the old image too.
+_prerender_xray_before_up() {
+	local _cfg="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
+	[[ -f "$_cfg" ]] || return 0
+	grep -qE '"fingerprint"[[:space:]]*:[[:space:]]*"randomized' "$_cfg" 2>/dev/null || return 0
+	log "xray-client.json carries a randomized uTLS fingerprint — rendering the current template BEFORE recreating xray"
+	if ! ( _ensure_channel_render_lib && refetch_node_config && re_render_xray ); then
+		warn "pre-recreate xray render failed — continuing; the post-gate render will retry (xray may start on the stale fingerprint)"
+	fi
+	return 0
+}
+
 # _render_gate LABEL — run refetch + re-render UNDER a health gate (#514).
 #
 # re_render_xray does not merely write a file that something might later read:
@@ -3943,6 +3988,7 @@ if [[ "$MODE" == with_templates ]]; then
 		restore_host_scripts
 		die "post-pull compose config resolution failed — rolled back to previous state"
 	fi
+	_prerender_xray_before_up
 	if ! recreate_changed_services _wt_before_digests _wt_after_digests; then
 		warn "compose up failed — rolling back"
 		do_rollback_templates
@@ -4168,6 +4214,7 @@ if ! resolve_pulled_digests _edge_svcs _after_digests; then
 	die "post-pull compose config resolution failed — previous config and host-scripts restored"
 fi
 
+_prerender_xray_before_up
 if ! recreate_changed_services _before_digests _after_digests; then
 	warn "up failed — rolling back to $CURRENT"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"

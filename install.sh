@@ -1204,11 +1204,11 @@ else
 fi
 export EXTERNAL_IP_LINE
 
-# ALLOWED_PEER_IP_LINE for coturn — OCI-hairpin fix (2026-07-11). When behind
-# NAT, permit coturn to relay to the co-located SFU's private IP (advertised as
-# a host candidate via SFU_LOCAL_IP={{PRIVATE_IP}}), overriding the RFC1918
-# denied-peer-ip block. Empty otherwise → the {{ALLOWED_PEER_IP_LINE}}
-# placeholder renders to nothing rather than an invalid `allowed-peer-ip=`.
+# ALLOWED_PEER_IP_LINE for coturn: when behind NAT, allow coturn to relay to THIS
+# host's own private address (the relay address external-ip maps to) — without it
+# denied-peer-ip 10.0.0.0/8 blocks same-edge relaying (403 Forbidden IP). Exactly
+# this one address, never another; what coturn may then send to it is decided by
+# the host nft guard (oxpulse-partner-edge-coturn-guard). Empty otherwise.
 if [[ -n "${PRIVATE_IP:-}" ]]; then
 	ALLOWED_PEER_IP_LINE="allowed-peer-ip=${PRIVATE_IP}"
 else
@@ -1763,6 +1763,8 @@ fi
 
 # ---------- Step 6: start ----------
 log "[6/10] starting services"
+# coturn self-relay guard loaded BEFORE the first coturn container starts.
+systemd_guard_early
 if [[ $DRY_RUN -eq 0 ]]; then
 	# Pass extra profiles (ch3, ch5) when bypass channels were provisioned.
 	# Persist to $PREFIX_ETC/.env so subsequent compose ops (upgrade.sh, refresh.sh)

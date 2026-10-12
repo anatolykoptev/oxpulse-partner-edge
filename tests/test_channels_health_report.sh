@@ -48,6 +48,16 @@ STUB
 }
 
 # ---------- helper: minimal node-config.json ----------
+# coturn.conf as rendered on the HOST: the probes read the secret / external-ip
+# from it (no docker exec into coturn). write_coturn_conf DIR SECRET [EXTERNAL_IP]
+write_coturn_conf() {
+    : > "$1/coturn.conf"
+    [[ -z "${2:-}" ]] || printf 'static-auth-secret=%s\n' "$2" >> "$1/coturn.conf"
+    [[ -z "${3:-}" ]] || printf 'external-ip=%s\n' "$3" >> "$1/coturn.conf"
+}
+# The probes run turnutils in a fresh container of the configured coturn image;
+# the stub docker never resolves it, so pin it here.
+export OXPULSE_COTURN_PROBE_IMAGE=test-coturn-image
 write_node_config() {
     local dir="$1"; shift
     local channels="${1:-}"
@@ -72,6 +82,7 @@ make_bin "$T1"
 mkdir -p "$T1/etc" "$T1/var"
 write_node_config "$T1/etc" \
     '{"id":"ch1"},{"id":"ch2"},{"id":"ch3"},{"id":"ch4"},{"id":"ch5"},{"id":"ch6"}'
+write_coturn_conf "$T1/etc" "test-secret" ""
 
 # docker stub: handles ch1 (ss -ltn :3080) and ch4 (turnutils_uclient / sed secret)
 cat > "$T1/docker" <<'STUB'
@@ -523,6 +534,7 @@ trap 'rm -rf "$T8"' EXIT
 make_bin "$T8"
 mkdir -p "$T8/etc"
 write_node_config "$T8/etc" '{"id":"ch4"}'
+write_coturn_conf "$T8/etc" "probe-test-secret" ""
 
 # docker stub: sed returns secret; turnutils_uclient succeeds (Allocate OK).
 # Stub validates -y or -e is present; exits 255 if peerless (matches real coturn
@@ -569,6 +581,7 @@ trap 'rm -rf "$T9"' EXIT
 make_bin "$T9"
 mkdir -p "$T9/etc"
 write_node_config "$T9/etc" '{"id":"ch4"}'
+write_coturn_conf "$T9/etc" "probe-test-secret" ""
 
 # docker stub: sed returns secret; turnutils_uclient fails (e.g. 486/timeout).
 # Validates -y/-e present even in the failure path (argv shape still must be correct).
@@ -613,6 +626,7 @@ trap 'rm -rf "$T10"' EXIT
 make_bin "$T10"
 mkdir -p "$T10/etc"
 write_node_config "$T10/etc" '{"id":"ch4"}'
+write_coturn_conf "$T10/etc" "" ""
 
 # docker stub: awk returns empty (no secret); turnutils_stunclient succeeds
 cat > "$T10/docker" <<'STUB'
@@ -662,6 +676,7 @@ write_node_config "$T11/etc" '{"id":"ch4"}'
 
 # A high-entropy secret marker that would be unmistakable if it leaked to argv.
 LEAK_MARKER="SECRETLEAKMARKER_d41d8cd98f00b204e9800998"
+write_coturn_conf "$T11/etc" "$LEAK_MARKER" ""
 ARGV_LOG="$T11/hmac_argv.log"
 REAL_PYTHON3=$(command -v python3)
 
@@ -754,6 +769,7 @@ trap 'rm -rf "$T12"' EXIT
 make_bin "$T12"
 mkdir -p "$T12/etc"
 write_node_config "$T12/etc" '{"id":"ch4"}'
+write_coturn_conf "$T12/etc" "probe-test-secret" "203.0.113.77"
 
 UCLIENT_ARGV_LOG="$T12/uclient_argv.log"
 
@@ -804,6 +820,7 @@ trap 'rm -rf "$T13"' EXIT
 make_bin "$T13"
 mkdir -p "$T13/etc"
 write_node_config "$T13/etc" '{"id":"ch4"}'
+write_coturn_conf "$T13/etc" "probe-test-secret" "203.0.113.77"
 
 UCLIENT_ARGV_LOG13="$T13/uclient_argv.log"
 cat > "$T13/docker" <<STUB
@@ -847,6 +864,7 @@ trap 'rm -rf "$T14"' EXIT
 make_bin "$T14"
 mkdir -p "$T14/etc"
 write_node_config "$T14/etc" '{"id":"ch4"}'
+write_coturn_conf "$T14/etc" "probe-test-secret" "203.0.113.77/10.0.0.5"
 
 UCLIENT_ARGV_LOG14="$T14/uclient_argv.log"
 cat > "$T14/docker" <<STUB
@@ -892,6 +910,7 @@ trap 'rm -rf "$T15"' EXIT
 make_bin "$T15"
 mkdir -p "$T15/etc"
 write_node_config "$T15/etc" '{"id":"ch4"}'
+write_coturn_conf "$T15/etc" "probe-test-secret" "203.0.113.77"
 
 # docker stub: secret + external-ip OK; uclient simulates a timeout-kill (124).
 cat > "$T15/docker" <<'STUB'
@@ -942,6 +961,7 @@ mkdir -p "$T16/etc" "$T16/var/lib/oxpulse-partner-edge"
 
 # node-config: only id, NO public_ip field.
 printf '{"node_id":"test-node","channels":[{"id":"ch4"}]}\n' > "$T16/etc/node-config.json"
+write_coturn_conf "$T16/etc" "probe-test-secret"
 
 # docker stub: no external-ip line (sed returns empty); secret OK;
 # uclient exits 124 (simulated timeout — the loopback target would be
@@ -1251,6 +1271,7 @@ trap 'rm -rf "$T22"' EXIT
 make_bin "$T22"
 mkdir -p "$T22/etc"
 write_node_config "$T22/etc" '{"id":"ch4"}'
+write_coturn_conf "$T22/etc" "probe-test-secret" ""
 cat > "$T22/docker" <<STUB
 #!/bin/bash
 printf '%s\n' "\$*" >> "$T22/docker-argv.log"
@@ -1274,10 +1295,22 @@ set -e
 UCLIENT_ARGV22=$(grep -a -m1 'turnutils_uclient' "$T22/docker-argv.log" 2>/dev/null || true)
 if [[ -z "$UCLIENT_ARGV22" ]]; then
     fail "test22: docker stub never saw turnutils_uclient; argv log: $(cat "$T22/docker-argv.log" 2>/dev/null)"
-elif [[ "$UCLIENT_ARGV22" =~ exec\ oxpulse-partner-coturn\ timeout\ [1-9][0-9]*\ turnutils_uclient ]]; then
+elif [[ "$UCLIENT_ARGV22" =~ run\ .*--entrypoint\ timeout\ [^\ ]+\ [1-9][0-9]*\ turnutils_uclient ]]; then
     ok "test22: uclient probe is bounded INSIDE the container (timeout precedes turnutils_uclient)"
 else
     fail "test22: no in-container timeout before turnutils_uclient — a timed-out Allocate probe leaks in the container; argv: $UCLIENT_ARGV22"
+fi
+# The probe must not use a root exec channel into the live coturn container: every
+# docker invocation it makes is `inspect` (metadata) or a fresh `run --rm`.
+if grep -aqE '^exec( |$)' "$T22/docker-argv.log" 2>/dev/null; then
+    fail "test22: the probe issued a docker exec into coturn; argv log: $(cat "$T22/docker-argv.log")"
+else
+    ok "test22: no docker exec into coturn (fresh locked-down container only)"
+fi
+if [[ "$UCLIENT_ARGV22" == run\ --rm\ --init* && "$UCLIENT_ARGV22" == *"--read-only --cap-drop ALL --user 65534:65534"* ]]; then
+    ok "test22: probe container is read-only, cap-drop ALL, uid 65534"
+else
+    fail "test22: probe container not locked down; argv: $UCLIENT_ARGV22"
 fi
 trap - EXIT
 rm -rf "$T22"
