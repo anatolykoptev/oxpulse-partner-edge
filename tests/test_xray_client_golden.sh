@@ -240,7 +240,7 @@ echo "==> Test 5: realitySettings block present in both renders"
 for out in "$OUT1" "$OUT2"; do
     FINGERPRINT=$(jq -r '.outbounds[0].streamSettings.realitySettings.fingerprint' "$out")
     PUBKEY=$(jq -r '.outbounds[0].streamSettings.realitySettings.publicKey' "$out")
-    [[ "$FINGERPRINT" == "randomized" ]] || { echo "FAIL: realitySettings.fingerprint must be 'randomized', got $FINGERPRINT"; FAIL=1; }
+    [[ "$FINGERPRINT" == "chrome" ]] || { echo "FAIL: realitySettings.fingerprint must be 'chrome' (randomized* wedges a random ~50% of xray processes against REALITY >= 2026-09-08; see tests/test_xray_template_fingerprint.sh), got $FINGERPRINT"; FAIL=1; }
     [[ -n "$PUBKEY" && "$PUBKEY" != "null" ]] || { echo "FAIL: realitySettings.publicKey must be present"; FAIL=1; }
 done
 [[ $FAIL -eq 0 ]] && echo "  OK: realitySettings present in both renders"
