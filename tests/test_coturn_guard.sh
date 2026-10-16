@@ -514,21 +514,117 @@ for fwf in lib/firewall-lib.sh lib/install-firewall.sh; do
 		|| fail "$fwf firewalld calls lack remove(legacy)=${rm_ln:-none} / add(new)=${add_ln:-none}"
 done
 
-# guard-side cleanup (plain upgrade never runs firewall_apply): firewalld + ufw stubs
+# guard-side firewall convergence (plain upgrade never runs firewall_apply).
+# The stub models REAL firewalld 1.3 semantics, verified in rockylinux:9 on 2026-10-12
+# (firewall-offline-cmd): add-port of a range COVERED by an existing entry is a no-op
+# (WARNING ALREADY_ENABLED), remove-port removes only an EXACT entry, --list-ports
+# prints the entries. State = $FWS/perm and $FWS/run (one entry per line).
+# FW_ADD_NOOP=<LO-HI>: add-port of that range silently does nothing (a failed add).
 FW="$TMP/fwg"; mkdir -p "$FW"
-printf '#!/bin/bash\necho "firewall-cmd $*" >> "%s/calls"\n[[ "$*" == *--state* ]] && exit 0\n[[ "$*" == *--query-port=49152-65535/udp* ]] && exit "${LEGACY_RC:-0}"\nexit 0\n' "$FW" > "$FW/firewall-cmd"
-printf '#!/bin/bash\necho "ufw $*" >> "%s/calls"\n[[ "$1" == status ]] && echo "49152:65535/udp ALLOW Anywhere"\nexit 0\n' "$FW" > "$FW/ufw"
-chmod +x "$FW/firewall-cmd" "$FW/ufw"; : > "$FW/calls"
-FIREWALL_CMD="$FW/firewall-cmd" UFW_BIN="$FW/ufw" COTURN_CONF=/nonexistent run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1
-fc=$(cat "$FW/calls")
-a1=$(grep -n -m1 -e "firewall-cmd --permanent --zone=public --add-port=${g_min}-${g_max}/udp" <<<"$fc" || true); a1=${a1%%:*}
-r1=$(grep -n -m1 -e 'firewall-cmd --permanent --zone=public --remove-port=49152-65535/udp' <<<"$fc" || true); r1=${r1%%:*}
-[[ -n $a1 && -n $r1 && $a1 -lt $r1 ]] && pass "apply (plain-upgrade path): firewalld legacy range removed AFTER the narrow range is added" || fail "firewalld cleanup missing/misordered: $fc"
-ua=$(grep -n -m1 -e "ufw allow ${g_min}:${g_max}/udp" <<<"$fc" || true); ua=${ua%%:*}
-ud=$(grep -n -m1 -e 'ufw --force delete allow 49152:65535/udp' <<<"$fc" || true); ud=${ud%%:*}
-[[ -n $ua && -n $ud && $ua -lt $ud ]] && pass "apply: ufw legacy range removed AFTER the narrow range is allowed" || fail "ufw cleanup missing/misordered: $fc"
-: > "$FW/calls"; LEGACY_RC=1 FIREWALL_CMD="$FW/firewall-cmd" UFW_BIN=/nonexistent COTURN_CONF=/nonexistent run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1
-grep -q -e '--remove-port\|--add-port' "$FW/calls" && fail "clean firewalld node was touched" || pass "apply: clean node (no legacy rule) -> firewalld untouched"
+install -m 0755 "$REPO_ROOT/tests/fixtures/stateful-firewall-cmd.sh" "$FW/firewall-cmd"
+cat > "$FW/ufw" <<'UFWEOF'
+#!/bin/bash
+echo "ufw $*" >> "$FWS/calls"; touch "$FWS/ufw.state"
+case "$1" in
+	status) echo "Status: ${UFW_STATUS:-active}"; cat "$FWS/ufw.state" ;;
+	allow) echo "$2 ALLOW Anywhere" >> "$FWS/ufw.state" ;;
+	--force) grep -vF "${4} " "$FWS/ufw.state" > "$FWS/ufw.n" || true; mv "$FWS/ufw.n" "$FWS/ufw.state" ;;
+esac
+exit 0
+UFWEOF
+chmod +x "$FW/firewall-cmd" "$FW/ufw"
+export FWS="$FW"
+fwreset() { rm -f "$FW/perm" "$FW/run" "$FW/ufw.state" "$FW/calls"; touch "$FW/calls"; }
+fwset() { printf '%s\n' "$@" > "$FW/perm"; printf '%s\n' "$@" > "$FW/run"; } # same entries both scopes
+fwstate() { echo "perm=[$(tr '\n' ' ' < "$FW/perm")] run=[$(tr '\n' ' ' < "$FW/run")]"; }
+fwgrd() { FIREWALL_CMD="$FW/firewall-cmd" UFW_BIN="${UFW:-/nonexistent}" COTURN_CONF="${CONF:-/nonexistent}" run_guard "$REPO_ROOT/$GUARD" "$@" >/dev/null 2>"$FW/err"; }
+
+# F1: THE rvpn incident. Legacy range present, narrow range covered by it -> after apply the
+# zone must hold exactly the narrow range in BOTH scopes (it used to hold nothing).
+fwreset; fwset 49152-65535/udp 3478/udp
+fwgrd apply
+want="perm=[3478/udp ${g_min}-${g_max}/udp ] run=[3478/udp ${g_min}-${g_max}/udp ]"
+[[ $(fwstate) == "$want" ]] && pass "apply: legacy 49152-65535 retired and ${g_min}-${g_max}/udp in force (permanent + runtime)" \
+	|| fail "apply left the wrong zone state (the rvpn no-relay-range bug): $(fwstate)"
+
+# F2: the narrow add silently fails -> the legacy range must be RESTORED, never left with no range.
+fwreset; fwset 49152-65535/udp
+FW_ADD_NOOP="${g_min}-${g_max}" fwgrd apply
+[[ $(fwstate) == "perm=[49152-65535/udp ] run=[49152-65535/udp ]" ]] && pass "apply: narrow add failed -> legacy range restored (wide beats closed)" \
+	|| fail "apply failed to restore the legacy range after a failed narrow add: $(fwstate)"
+grep -q 'RESTORED' "$FW/err" && pass "apply: the restore is loud (warn)" || fail "apply restored the legacy range silently"
+
+# F3: clean node (no legacy entry, narrow range present) -> no add/remove calls at all.
+fwreset; fwset "${g_min}-${g_max}/udp"
+fwgrd apply
+grep -qE -e '--(add|remove)-port' "$FW/calls" && fail "clean firewalld node was mutated: $(cat "$FW/calls")" || pass "apply: clean node -> firewalld untouched (idempotent)"
+
+# F4: post-rollback shape: migrated conf (49152-49999), firewall lost its range -> firewall-sync restores it.
+printf 'min-port=%s\nmax-port=%s\n' "$g_min" "$g_max" > "$TMP/fwconf"
+fwreset; fwset 3478/udp
+CONF="$TMP/fwconf" fwgrd firewall-sync
+[[ $(fwstate) == "perm=[3478/udp ${g_min}-${g_max}/udp ] run=[3478/udp ${g_min}-${g_max}/udp ]" ]] && pass "firewall-sync: zone range follows coturn.conf min/max after a rollback" \
+	|| fail "firewall-sync did not restore the conf range: $(fwstate)"
+
+# F5: runtime-only loss (permanent kept it) is repaired too.
+fwreset; fwset "${g_min}-${g_max}/udp"; : > "$FW/run"
+CONF="$TMP/fwconf" fwgrd firewall-sync
+fw_run=$(tr '\n' ' ' < "$FW/run"); [[ $fw_run == "${g_min}-${g_max}/udp " ]] && pass "firewall-sync: runtime scope repaired independently of permanent" || fail "runtime scope not repaired: $fw_run"
+
+# F6: UNMIGRATED conf (no directives = coturn default 49152-65535): the legacy range is what coturn
+# binds, so sync must KEEP/ensure it, not retire it under a still-old conf.
+printf 'realm=x\n' > "$TMP/fwconf_old"
+fwreset; fwset 49152-65535/udp
+CONF="$TMP/fwconf_old" fwgrd firewall-sync
+[[ $(fwstate) == "perm=[49152-65535/udp ] run=[49152-65535/udp ]" ]] && pass "firewall-sync: unmigrated conf keeps the legacy range (firewall == conf)" || fail "sync retired the range an unmigrated conf still uses: $(fwstate)"
+
+# F7: ufw: narrow rule added, legacy deleted only once the narrow one is listed; and kept if not.
+fwreset; printf '49152:65535/udp ALLOW Anywhere\n' > "$FW/ufw.state"
+UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent COTURN_CONF=/nonexistent run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1
+st=$(cat "$FW/ufw.state"); { grep -q "${g_min}:${g_max}/udp" <<<"$st" && ! grep -q '49152:65535' <<<"$st"; } \
+	&& pass "apply: ufw legacy range replaced by ${g_min}:${g_max}/udp" || fail "ufw state wrong: $st"
+printf '#!/bin/bash\necho "ufw $*" >> "%s/calls"\n[[ "$1" == status ]] && { echo "Status: active"; echo "49152:65535/udp ALLOW Anywhere"; }\nexit 0\n' "$FW" > "$FW/ufw_noop"; chmod +x "$FW/ufw_noop"; : > "$FW/calls"
+UFW_BIN="$FW/ufw_noop" FIREWALL_CMD=/nonexistent COTURN_CONF=/nonexistent run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1
+grep -q 'delete allow' "$FW/calls" && fail "ufw legacy rule deleted although the narrow rule never appeared" || pass "apply: ufw legacy rule kept when the narrow rule is not in force"
+
+# F8: ufw installed but INACTIVE (pillow): nothing to manage - rc 0, no rule writes, no false alarm.
+fwreset; printf '49152:65535/udp ALLOW Anywhere\n' > "$FW/ufw.state"
+UFW_STATUS=inactive UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent COTURN_CONF="$TMP/fwconf" run_guard "$REPO_ROOT/$GUARD" firewall-sync >/dev/null 2>"$FW/err8"; rc8=$?
+{ [[ $rc8 -eq 0 ]] && ! grep -qE 'ufw (allow|--force)' "$FW/calls" && ! grep -q 'blocked' "$FW/err8"; } \
+	&& pass "firewall-sync: inactive ufw -> rc 0, no rule writes, no 'blocked' warning" \
+	|| fail "inactive ufw mishandled (rc=$rc8): $(cat "$FW/calls" "$FW/err8")"
+fwreset; : > "$FW/ufw.state"
+UFW_STATUS=inactive UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent COTURN_CONF=/nonexistent run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1 \
+	&& pass "apply: inactive ufw + no firewalld -> apply succeeds" || fail "apply failed on inactive ufw"
+
+# F9: per-scope verification. Permanent add works, RUNTIME add silently no-ops -> not "done":
+# legacy must come back in both scopes, loudly. (Dropping the runtime check reports success
+# with the runtime zone empty.)
+fwreset; fwset 49152-65535/udp
+FW_ADD_NOOP="${g_min}-${g_max}" FW_ADD_NOOP_SCOPE=run CONF="$TMP/fwconf" fwgrd firewall-sync || true
+{ grep -qx '49152-65535/udp' "$FW/perm" && grep -qx '49152-65535/udp' "$FW/run"; } && pass "firewall-sync: runtime add no-op -> legacy restored in both scopes" \
+	|| fail "runtime-scope failure not caught: $(fwstate)"
+grep -q 'RESTORED' "$FW/err" && pass "firewall-sync: runtime-scope failure is reported" || fail "runtime-scope failure silent"
+
+# F10: a firewall-sync failure never fails apply or unloads the nft table.
+: > "$STUB_RULES"; fwreset; : > "$FW/perm"; : > "$FW/run"
+FW_ADD_NOOP="${g_min}-${g_max}" FIREWALL_CMD="$FW/firewall-cmd" UFW_BIN=/nonexistent COTURN_CONF=/nonexistent run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1; rc10=$?
+{ [[ $rc10 -eq 0 ]] && grep -q 'table inet coturn_self_relay_guard {' "$STUB_RULES"; } \
+	&& pass "apply: firewall range cannot be applied -> apply still rc 0 with the nft table loaded" \
+	|| fail "firewall failure took the guard down (rc=$rc10)"
+
+# F11: status (check_22) sees the incident state: relay range missing from the ACTIVE firewall.
+mkstatus fw1; fwreset; fwset 3478/udp
+FIREWALL_CMD="$FW/firewall-cmd" status_rc && fail "status passed with no relay range in firewalld" || pass "status FAILS when the active firewalld lacks the relay range"
+grep -q 'not allowed' "$SD/out" && pass "status names the missing firewalld range" || fail "status message unclear: $(cat "$SD/out")"
+mkstatus fw2; fwreset; fwset 3478/udp "${g_min}-${g_max}/udp"; : > "$FW/run"
+FIREWALL_CMD="$FW/firewall-cmd" status_rc && fail "status passed with the runtime scope empty" || pass "status FAILS when only the runtime scope lacks the range"
+mkstatus fw3; fwreset; fwset "${g_min}-${g_max}/udp"
+FIREWALL_CMD="$FW/firewall-cmd" status_rc && pass "status: relay range in force in both firewalld scopes" || fail "status rejected a correct firewalld: $(cat "$SD/out")"
+mkstatus fw4; fwreset
+UFW_STATUS=inactive UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent status_rc && pass "status: inactive ufw + no firewalld -> skipped (pillow)" || fail "status failed on inactive ufw: $(cat "$SD/out")"
+mkstatus fw5; fwreset; : > "$FW/ufw.state"
+UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent status_rc && fail "status passed with active ufw lacking the range" || pass "status FAILS when active ufw lacks the relay range"
 
 # --- (4) no exec channel into coturn: probes use a fresh locked-down container ------
 PR="$TMP/probe"; mkdir -p "$PR/bin" "$PR/etc"
