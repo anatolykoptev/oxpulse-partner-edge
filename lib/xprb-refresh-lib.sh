@@ -95,9 +95,15 @@ emit_xprb_failure() {
 # 4xx here burn the retry budget instead of failing fast — see upgrade.sh's
 # RETRY_OPTS header comment for the full 3-way rationale.
 xprb_curl_get_with_retry() {
-    local url="$1" bearer="$2"
+    local url="$1" bearer="$2" max_attempts="${3:-3}" max_time="${4:-15}"
     local attempt out rc code delays=(2 5)
-    for attempt in 1 2 3; do
+    # The bearer is a long-lived credential: https only, including redirects.
+    # Refuse up front (no retry loop) so the caller counts one failure.
+    if [[ "$url" != https://* ]]; then
+        echo "refusing to send a bearer token over non-https URL" >&2
+        return 1
+    fi
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
         rc=0
         # CWE-214 hardening (2026-07-08 P-sec1, PR #371, mirrors the same fix
         # already applied to _post_channel/_post_cross_probe in lib/*.sh,
@@ -106,12 +112,13 @@ xprb_curl_get_with_retry() {
         # own argv) instead of `-H "Authorization: Bearer $bearer"`, which was
         # ps/proc-visible to any local user on the relay host for curl's
         # whole lifetime.
-        out=$(curl -sS --max-time 15 -L \
+        out=$(curl -sS --max-time "$max_time" -L \
+            --proto '=https' --proto-redir '=https' \
             -K - \
             "$url" -w '\n%{http_code}' 2>&1 <<< "header = \"Authorization: Bearer ${bearer}\"") || rc=$?
 
         if [[ "$rc" -ne 0 ]]; then
-            if [[ "$attempt" -lt 3 ]]; then
+            if [[ "$attempt" -lt "$max_attempts" ]]; then
                 sleep "${delays[$((attempt - 1))]}"
                 continue
             fi
@@ -120,7 +127,7 @@ xprb_curl_get_with_retry() {
         fi
 
         code=$(printf '%s' "$out" | tail -n1)
-        if [[ "$code" =~ ^5[0-9][0-9]$ && "$attempt" -lt 3 ]]; then
+        if [[ "$code" =~ ^5[0-9][0-9]$ && "$attempt" -lt "$max_attempts" ]]; then
             sleep "${delays[$((attempt - 1))]}"
             continue
         fi
@@ -249,5 +256,118 @@ refresh_cross_probe_token() {
     body_sha=$(printf '%s' "$body" | sha256sum 2>/dev/null | cut -c1-16)
     log "WARN cross-probe token refresh: missing/malformed cross_probe_token in response (body sha256=${body_sha:-unknown}...; existing file, if any, preserved)"
     emit_xprb_failure "malformed_response"
+    return 0
+}
+
+# emit_peer_roster_failure reason — counter for the roster refresh leg below.
+emit_peer_roster_failure() {
+    emit_metric "partner_edge_peer_roster_refresh_failure_total" \
+        "partner_id=\"${NODE_ID}\",reason=\"$1\"" "1"
+}
+
+# refresh_peer_roster — keep $PREFIX_LIB/peer-roster.json in step with the
+# central's fleet, so federation membership needs no manual pruning.
+#
+# Root cause 2026-10-11: the roster was written ONCE, from the register
+# response (install.sh / hydrate.sh). Nothing refreshed it, so a peer revoked
+# weeks ago stayed in every older edge's roster (the peer-probe loop got a 403
+# from it every cycle) and edges registered later never appeared in older
+# edges' rosters. The central's GET /api/partner/node-config now carries a
+# freshly built `peer_roster` (same query + SSRF guard as register); this leg
+# pulls it daily with the same service-token bearer as the token re-mint.
+#
+# PRESERVE-ON-ABSENT: the file is rewritten ONLY when the response carries a
+# well-formed `peer_roster` array. An older central (field absent), a failed or
+# non-200 fetch, a malformed array or a failed write all leave the existing
+# file untouched. An EMPTY array is a real answer ("no peers") and does replace
+# the file — the central omits the field, never sends [], when its own roster
+# query fails. The cross-probe token is not part of this response; it is
+# re-minted by refresh_cross_probe_token above.
+#
+# The roster is public data (TURNS endpoints), so the file keeps the 0644 mode
+# install.sh / hydrate.sh give it. NON-FATAL like its sibling: every branch
+# returns 0 so `set -euo pipefail` in the orchestrator is never tripped.
+# Roster fetch budget: ONE attempt, 8s. The unit has TimeoutStartSec=120 and the
+# critical steps (keys, heartbeat, token re-mint, channel updates) come first;
+# a retry loop here (2s+5s backoff + 3x15s) would eat the margin. Tomorrow's
+# daily tick is the retry.
+ROSTER_FETCH_ATTEMPTS=1
+ROSTER_FETCH_MAX_TIME=8
+
+refresh_peer_roster() {
+    local roster_file="$PREFIX_LIB/peer-roster.json"
+
+    local svc_token
+    svc_token=$(read_service_token 2>/dev/null || true)
+    if [[ -z "$svc_token" ]]; then
+        log "WARN peer roster refresh: no service token available — skipping (existing file, if any, preserved)"
+        emit_peer_roster_failure "no_service_token"
+        return 0
+    fi
+
+    local curl_rc=0 curl_out
+    curl_out=$(xprb_curl_get_with_retry \
+        "${BACKEND_URL}/api/partner/node-config" "${svc_token}" \
+        "$ROSTER_FETCH_ATTEMPTS" "$ROSTER_FETCH_MAX_TIME") || curl_rc=$?
+    if [[ "$curl_rc" -ne 0 ]]; then
+        log "WARN peer roster fetch failed (curl exit=${curl_rc}; existing file, if any, preserved)"
+        emit_peer_roster_failure "fetch_failed"
+        return 0
+    fi
+
+    local code body
+    code=$(printf '%s' "$curl_out" | tail -n1)
+    body=$(printf '%s' "$curl_out" | sed '$d')
+    if [[ "$code" != "200" ]]; then
+        # Status only — node-config carries secrets, never log the body. A last
+        # line that is not a 3-digit status (no -w output) is not echoed either.
+        [[ "$code" =~ ^[0-9]{3}$ ]] || code="nostatus"
+        log "WARN peer roster refresh: HTTP ${code} (existing file, if any, preserved)"
+        emit_peer_roster_failure "http_${code}"
+        return 0
+    fi
+
+    # Not a JSON object at all (truncated / proxy error page): malformed, NOT
+    # "older central". Only a valid object without the field means absent.
+    if ! printf '%s' "$body" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        log "WARN peer roster refresh: node-config body is not a JSON object (existing file, if any, preserved)"
+        emit_peer_roster_failure "malformed_response"
+        return 0
+    fi
+    if [[ "$(printf '%s' "$body" | jq -r 'has("peer_roster")')" != "true" ]]; then
+        log "peer roster: node-config carries no peer_roster (older central?) — $roster_file untouched"
+        emit_metric "partner_edge_peer_roster_field_absent_total" "partner_id=\"${NODE_ID}\"" "1"
+        return 0
+    fi
+
+    # Accept only an array of {node_id, turns_host} objects; anything else is
+    # rejected whole rather than half-applied.
+    local roster
+    roster=$(printf '%s' "$body" | jq -ce '
+        .peer_roster
+        | select(type == "array"
+                 and all(.[]; type == "object"
+                              and (.node_id | type) == "string"
+                              and (.turns_host | type) == "string"))' 2>/dev/null || true)
+    if [[ -z "$roster" ]]; then
+        log "WARN peer roster refresh: peer_roster is not an array of {node_id,turns_host} (existing file, if any, preserved)"
+        emit_peer_roster_failure "malformed_response"
+        return 0
+    fi
+
+    if [[ -f "$roster_file" && "$(jq -c . "$roster_file" 2>/dev/null || true)" == "$roster" ]]; then
+        log "peer roster: unchanged ($(printf '%s' "$roster" | jq 'length') peer(s))"
+        emit_gauge "partner_edge_peer_roster_refresh_success_timestamp" "" "$(date +%s)"
+        return 0
+    fi
+
+    local write_err
+    if write_err=$(write_secret_atomic "$roster_file" "${roster}"$'\n' 0644 2>&1); then
+        log "peer roster refreshed → $roster_file ($(printf '%s' "$roster" | jq 'length') peer(s))"
+        emit_gauge "partner_edge_peer_roster_refresh_success_timestamp" "" "$(date +%s)"
+    else
+        log "WARN peer roster persist failed: $write_err (existing file, if any, preserved)"
+        emit_peer_roster_failure "write_failed"
+    fi
     return 0
 }
