@@ -5,6 +5,15 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.32](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.31...v0.16.32) (2026-10-30)
+
+
+### Bug Fixes
+
+* **probe:** stop coturn probe containers leaking in state Created ([#674](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/674)) ([97fb250](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/97fb250c6a93cb4fd37c473a210e4fb6f1652b9d))
+* **relay:** drop denied-peer-ip=:: which denies every peer on coturn 4.6.1 ([#672](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/672)) ([043000c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/043000cb78d59f79a5f08bc2059c1fdfa2f4d575))
+* **sfu:** enforce room-token iss/aud binding (SEC-CR-011) ([#659](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/659)) ([e548580](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e548580391221a73cb2eaad09d01f352a2ec1065))
+
 ## [0.16.31](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.30...v0.16.31) (2026-10-12)
 
 
