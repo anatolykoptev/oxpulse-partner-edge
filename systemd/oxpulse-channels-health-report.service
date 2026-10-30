@@ -8,15 +8,17 @@ ExecStart=/usr/local/sbin/oxpulse-channels-health-report
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
-# TimeoutStartSec=90 (raised from 45) — the P3b peer-probe loop is serial and
-# each DIALLED peer costs worst-case getent 3s + TLS-Allocate probe 8s + POST 8s
-# = 19s; with the default cap of 2 peers that is 19×2 = 38s. The loop ALSO scans
-# up to reject-headroom extra slots (getent-only, 3s each) before the cap is met,
-# = 3×2 = 6s, plus a ~10s pre-loop TURN-secret read = 38 + 6 + 10 = 54s peer-side
-# (matches the authoritative budget block in oxpulse-channels-health-report.sh),
-# on top of the per-channel self-probe loop + upstream transition check. 90s
-# contains the whole oneshot with headroom (54s ≪ 90s). The old 45s counted only
-# the probe timeout and ignored the serial getent+POST, so a full cycle could
-# overrun and systemd SIGTERM'd the oneshot mid-loop. If an operator raises
-# OXPULSE_PEER_PROBE_MAX, raise this too: 19s×cap + 3s×reject_headroom + 10s ≤ this.
-TimeoutStartSec=90
+# TimeoutStartSec=180 (raised 45 -> 90 -> 180). The P3b peer-probe loop is serial;
+# each DIALLED peer costs worst-case getent 3s + TLS probe 8s + POST 8s + UDP STUN
+# 5s + POST 8s = 32s; cap 2 peers = 64s, plus up to 3s x 2 reject-headroom getent
+# scans and a ~10s pre-loop TURN-secret read = 80s with a healthy docker (the 90s
+# this unit carried until now). The coturn probes run through _coturn_probe_run,
+# which with docker wedged adds up to 26s per probe (stale-container reaper 11s +
+# docker-CLI headroom 10s + post-failure `docker rm -f` 5s; derivation at
+# _COTURN_PROBE_CLIENT_HEADROOM in lib/channel-health-lib.sh): peer pass
+# (32+26)x2 + 6 + 10 = 132s, plus the ch4 self-probe before it (10+26 = 36s) =
+# 168s. 180s contains the whole oneshot with 12s for the remaining local probes;
+# at 90s systemd would SIGTERM the unit exactly when the node is loaded and peer
+# coverage would be lost. If an operator raises OXPULSE_PEER_PROBE_MAX, raise this
+# too: (32+26)s x cap + 3s x reject_headroom + 10s + 36s <= this.
+TimeoutStartSec=180
