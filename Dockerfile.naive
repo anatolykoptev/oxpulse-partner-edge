@@ -4,21 +4,27 @@
 # Multi-stage: fetcher pulls + verifies binary, runtime is distroless cc.
 # Image target ~30MB (naive binary ~10MB + distroless base).
 #
-# NAIVE_VERSION: v148.0.7778.96-5 (latest stable as of 2026-05-18).
+# NAIVE_VERSION: v154.0.8037.49-5 (latest stable as of 2026-10-30, published 2026-10-22).
+# Upstream deletes assets of superseded releases (v148.0.7778.96-5 now has none -> 404),
+# so bump this regularly. Upstream publishes no checksum file; the per-arch sha256 below
+# were computed from the release tarballs when bumping. Update them WITH the version.
 # Release page: https://github.com/klzgrad/naiveproxy/releases
 
 FROM alpine:3.21 AS fetcher
-ARG NAIVE_VERSION=v148.0.7778.96-5
+ARG NAIVE_VERSION=v154.0.8037.49-5
+ARG NAIVE_SHA256_X64=80214dfea1767f6ecf63a3a79dc9f48b203460f51abc609357fff48dd5844c7d
+ARG NAIVE_SHA256_ARM64=8f4d917fa39a5d8cf1c17fc12ffd99ba84c015b62b43461d09cc074ca4114d8d
 ARG TARGETARCH
 RUN apk add --no-cache curl xz tar ca-certificates \
     && case "${TARGETARCH}" in \
-        amd64) arch=x64 ;; \
-        arm64) arch=arm64 ;; \
+        amd64) arch=x64; sha="${NAIVE_SHA256_X64}" ;; \
+        arm64) arch=arm64; sha="${NAIVE_SHA256_ARM64}" ;; \
         *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac \
     && mkdir -p /tmp/naive-extract /opt/naive \
     && curl -fsSL -o /tmp/naive.tar.xz \
         "https://github.com/klzgrad/naiveproxy/releases/download/${NAIVE_VERSION}/naiveproxy-${NAIVE_VERSION}-linux-${arch}.tar.xz" \
+    && echo "${sha}  /tmp/naive.tar.xz" | sha256sum -c - \
     && tar -xJf /tmp/naive.tar.xz -C /tmp/naive-extract \
     && naive_bin=$(find /tmp/naive-extract -type f -name naive | head -1) \
     && [ -n "$naive_bin" ] || { echo "naive binary not found in tarball" >&2; find /tmp/naive-extract; exit 1; } \
