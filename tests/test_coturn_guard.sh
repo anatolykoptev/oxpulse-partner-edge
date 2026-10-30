@@ -552,8 +552,9 @@ probe_out=$(
 	echo "SECRET=$(_coturn_conf_value static-auth-secret)"
 	echo "EXT=$(_coturn_conf_value external-ip)"
 )
-want="run --rm --init --pull never --network host --read-only --cap-drop ALL --user 65534:65534 --entrypoint timeout ghcr.io/anatolykoptev/partner-edge-coturn:v9.9.9 7 turnutils_uclient -u user -w pw -y -n 1 -p 3478 203.0.113.9"
-[[ $(grep -a '^run ' "$PROBE_LOG") == "$want" ]] && pass "probe helper: docker run --rm --init, host net, read-only, cap-drop ALL, uid 65534, in-container timeout, configured image" \
+want="run --rm --init --pull never --network host --read-only --cap-drop ALL --user 65534:65534 --name oxpulse-probe-NAME --label oxpulse.probe=coturn --entrypoint timeout ghcr.io/anatolykoptev/partner-edge-coturn:v9.9.9 7 turnutils_uclient -u user -w pw -y -n 1 -p 3478 203.0.113.9"
+got=$(grep -a '^run ' "$PROBE_LOG" | sed -E 's/--name oxpulse-probe-turnutils_uclient-[0-9]+-[0-9]+/--name oxpulse-probe-NAME/')
+[[ $got == "$want" ]] && pass "probe helper: docker run --rm --init, host net, read-only, cap-drop ALL, uid 65534, in-container timeout, configured image" \
 	|| fail "probe argv wrong: $(cat "$PROBE_LOG")"
 [[ -z $(grep -aE '^exec |[[:space:]]exec[[:space:]]' "$PROBE_LOG" || true) ]] && pass "probe helper never issues docker exec" || fail "docker exec issued: $(cat "$PROBE_LOG")"
 [[ $probe_out == *"SECRET=first=sec/ret+"* && $probe_out != *second* ]] && pass "secret = FIRST static-auth-secret line of the host conf ('=' preserved)" || fail "secret read wrong: $probe_out"

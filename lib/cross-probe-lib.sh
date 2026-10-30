@@ -339,10 +339,11 @@ _probe_peer_udp_stun() {
     # BusyBox 1.37 timeout): SIGTERM reaps a hanging stunclient, rc=143, no
     # survivors — and 124|143 both classify as timeout below.
     #
-    # The outer timeout keeps the SAME value: the in-container timeout is not
-    # a child of the docker client, so whichever layer fires first, the
-    # in-container process is still reaped by its own bound. An equal outer
-    # keeps the service-budget model at :512-552 true (5s per UDP probe).
+    # The outer (docker-CLI) timeout is secs + 15, NOT the same value: with equal
+    # bounds the CLI was killed while create/start was still in flight, leaving a
+    # container in state `Created` that `--rm` never removes (130 leaked on pillow,
+    # 2026-10-30). See _coturn_probe_run. The in-container timeout still bounds the
+    # tool, so the per-probe budget above holds whenever docker itself is healthy.
     #
     # The env override is validated to a positive integer because it now
     # feeds arithmetic-free but busybox-`timeout`-parsed positions in BOTH
