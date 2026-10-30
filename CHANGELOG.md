@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.33](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.32...v0.16.33) (2026-10-30)
+
+
+### Bug Fixes
+
+* **naive:** bump naiveproxy to v154.0.8037.49-5 and pin tarball sha256 ([#676](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/676)) ([3d275df](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3d275df9e5bf5b47a8e06b425bb5b784536f51c1))
+
 ## [0.16.32](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.31...v0.16.32) (2026-10-30)
 
 
