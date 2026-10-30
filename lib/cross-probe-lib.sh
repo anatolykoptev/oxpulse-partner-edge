@@ -327,7 +327,8 @@ _probe_peer_udp_stun() {
     # under transient loss.  This keeps the per-peer budget increase to 13s
     # (5s probe + 8s POST) on top of the existing TLS leg, giving a worst-case
     # per-peer total of 32s (was 19s) and a full cycle cap=2 worst case of:
-    #   32×2 + 3×2 + 10 = 80s ≤ TimeoutStartSec=90.
+    #   32×2 + 3×2 + 10 = 80s healthy, 132s with wedged docker (see the BUDGET
+    #   block in _run_peer_probe_loop) ≤ TimeoutStartSec=180.
     # The bounding timeout runs INSIDE the container (_coturn_probe_run's
     # entrypoint): an outer `timeout N docker …` kills only the docker CLIENT, and
     # the client process could keep running in its container (as it did when this
@@ -474,7 +475,7 @@ _read_peer_probe_offset() {
 # ---------- peer-probe loop (P3b) ----------
 # Reads roster + token; skips cleanly (debug-log) if either is empty/absent.
 # For each peer (capped at OXPULSE_PEER_PROBE_MAX): SSRF dial-recheck → pin →
-# TLS handshake + UDP STUN → POST. Bounded for the TimeoutStartSec=90 budget (see
+# TLS handshake + UDP STUN → POST. Bounded for the TimeoutStartSec=180 budget (see
 # the BUDGET block below). Rotates the probed slice per cycle (MINOR 5) and writes
 # a SIGTERM-safe marker (MAJOR 1).
 #
@@ -553,14 +554,24 @@ _run_peer_probe_loop() {
     #   + secret_read_reserve                          (pre-loop)
     #   ≤  TimeoutStartSec
     #
-    # With cap = 2, scan_cap = 4:
+    # With cap = 2, scan_cap = 4, healthy docker:
     #     32×2 + 3×2 + 10 = 64 + 6 + 10 = 80s.
-    # The systemd unit sets TimeoutStartSec=90 so the WHOLE oneshot — self-channel
-    # loop + secret read + this peer pass + upstream-transition check — still fits
-    # with 10s headroom (80s ≪ 90s). The UDP leg adds 13s/peer (5s STUN + 8s POST)
-    # on top of the prior 19s; overall cap=2 worst case moved 54s → 80s.
+    # DEGRADED docker (the state the Created-container leak fix targets): the UDP
+    # STUN leg runs through _coturn_probe_run, which adds up to 26s on top of its
+    # 5s in-container bound when docker is wedged and every call sits at its own
+    # bound (reaper 11 + CLI headroom 10 + post-failure rm 5; see the budget block
+    # at _COTURN_PROBE_CLIENT_HEADROOM in channel-health-lib.sh):
+    #     worst_per_peer = 32 + 26 = 58s
+    #     58×2 + 3×2 + 10 = 116 + 6 + 10 = 132s.
+    # The self-channel loop runs BEFORE this pass in the same oneshot; its ch4
+    # coturn probe is a docker probe too (10s + 26s = 36s degraded). 132 + 36 = 168s
+    # of docker-bound work, so the unit sets TimeoutStartSec=180 (12s for the other
+    # channel probes and the upstream-transition check, which are local connects
+    # bounded by their own few-second timeouts). The old 90s only fits healthy
+    # docker (80s peer pass). The UDP leg added 13s/peer (5s STUN + 8s POST) to the
+    # prior 19s; overall cap=2 healthy worst case moved 54s → 80s.
     # Operators on a large mesh raise OXPULSE_PEER_PROBE_MAX knowingly AND must
-    # raise TimeoutStartSec to match: worst_per_peer(32) × cap + 3×cap + 10 ≤ TSSec.
+    # raise TimeoutStartSec to match: (32+26) × cap + 3×cap + 10 + 36 ≤ TSSec.
     local cap="${OXPULSE_PEER_PROBE_MAX:-2}"
     local scan_cap=$(( cap + ${OXPULSE_PEER_PROBE_REJECT_HEADROOM:-$cap} ))
 

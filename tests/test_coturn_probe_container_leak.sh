@@ -19,6 +19,9 @@
 #   3  CLI killed mid-start anyway -> the labelled container is force-removed by name
 #   4  reaper removes stale labelled + legacy-signature Created probes, nothing else
 #   5  the probe container carries the label and a unique name
+#   6  removals (not candidates) are capped: 55 newer unrelated Created containers
+#      do not starve an old leak
+#   7  the worst-case wall time fits TimeoutStartSec of the health-report unit
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -58,7 +61,8 @@ rm)
     shift; [[ "\$1" == -f ]] && shift
     for n in "\$@"; do rm -f "$d/state/\$n"; done
     ;;
-ps)   # status=created listing for the reaper (rows file, optional)
+ps)   # status=created listing for the reaper (rows file, optional; filters ignored,
+      # so the label and image queries both return every row — the reaper must dedupe)
     [[ -f "$d/rows" ]] && while IFS='|' read -r id _; do echo "\$id"; done < "$d/rows"
     ;;
 inspect)
@@ -152,6 +156,41 @@ rc=0; probe "$D" 1 || rc=$?
 [[ -z $(grep -a -E '^rm -f [a-f0-9]+( |$)' "$D/docker.log" || true) && "$rc" -eq 0 ]] \
     && ok "no Created containers -> reaper removes nothing and the probe still runs" \
     || fail "unexpected reap with empty Created set: $(cat "$D/docker.log")"
+
+# ---- 6: removal cap, not candidate cap ------------------------------------------
+E="$TMP/e"; mk_stubs "$E" 0
+{
+    for i in $(seq 1 55); do echo "young$i|$young|nginx||-g daemon off;"; done
+    echo "oldleak|$old|timeout||5 turnutils_stunclient 203.0.113.9 -p 3478"
+} > "$E/rows"
+rc=0; probe "$E" 1 || rc=$?
+if [[ -n $(grep -a '^rm -f oldleak$' "$E/docker.log" || true) ]]; then
+    ok "old leak behind 55 newer unrelated Created containers is still reaped"
+else
+    fail "old leak starved by unrelated candidates: $(grep -a '^rm ' "$E/docker.log" || true)"
+fi
+G="$TMP/g"; mk_stubs "$G" 0
+for i in $(seq 1 70); do echo "leak$i|$old|timeout|coturn|5 turnutils_stunclient 203.0.113.9 -p 3478"; done > "$G/rows"
+rc=0; probe "$G" 1 || rc=$?
+n_rm=$(awk '/^rm -f leak/ { print NF - 2; exit }' "$G/docker.log")
+[[ "$n_rm" == 50 ]] && ok "removals capped at 50 per call (70 stale -> 50)" || fail "removal cap wrong: removed '$n_rm'"
+
+# ---- 7: budget pin --------------------------------------------------------------
+# Worst case with docker wedged and every call at its bound. 32s/peer = 3 getent +
+# 8 TLS + 8 POST + 5 STUN + 8 POST (cross-probe-lib.sh BUDGET block); cap 2,
+# 2 reject scans x 3s, 10s secret read; the ch4 uclient probe (10s) runs before.
+overhead=$(
+    . "$LIB" 2>/dev/null
+    echo $(( _COTURN_PROBE_CLIENT_HEADROOM + _COTURN_PROBE_RM_TIMEOUT \
+        + 2 * _COTURN_PROBE_REAP_PS_TIMEOUT + _COTURN_PROBE_REAP_INSPECT_TIMEOUT + _COTURN_PROBE_REAP_RM_TIMEOUT ))
+)
+unit_tss=$(sed -n 's/^TimeoutStartSec=\([0-9][0-9]*\)$/\1/p' "$REPO_ROOT/systemd/oxpulse-channels-health-report.service")
+worst=$(( (32 + overhead) * 2 + 3 * 2 + 10 + (10 + overhead) ))
+if [[ -n "$unit_tss" && "$worst" -le "$unit_tss" ]]; then
+    ok "worst case ${worst}s (probe overhead ${overhead}s) fits TimeoutStartSec=${unit_tss}"
+else
+    fail "worst case ${worst}s (probe overhead ${overhead}s) exceeds TimeoutStartSec='${unit_tss}' — systemd would SIGTERM the oneshot under load"
+fi
 
 echo
 echo "coturn probe leak: PASS=$PASS FAIL=$FAIL"

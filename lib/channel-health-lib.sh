@@ -345,37 +345,62 @@ _coturn_probe_image() {
 # start and the container stays in state `Created` — `--rm` (AutoRemove) fires on
 # the exit of a STARTED container only, so nothing ever removes it. Measured on
 # relay node pillow 2026-10-30: 130 such containers (5-10/day since 2026-10-12).
-_COTURN_PROBE_CLIENT_HEADROOM=15
-# Stale-probe reaper bounds: age before a Created probe is reaped (a probe still
-# inside its create window is younger than the longest probe bound + headroom),
-# and how many are removed per call (a backlog drains over a few probe runs).
+#
+# WALL-TIME BUDGET. Every docker call below has its own bound, so the worst case
+# a probe can add on top of its in-container `secs` (docker wedged, every call
+# sitting at its bound) is:
+#     reaper    2 (ps label) + 2 (ps image) + 3 (inspect) + 4 (rm)  = 11s
+#   + headroom  _COTURN_PROBE_CLIENT_HEADROOM                      = 10s
+#   + cleanup   _COTURN_PROBE_RM_TIMEOUT (only when rc != 0)       =  5s
+#                                                            total = 26s per probe
+# cross-probe-lib.sh and systemd/oxpulse-channels-health-report.service derive
+# their budgets from this figure; tests/test_coturn_probe_container_leak.sh pins
+# the sum against TimeoutStartSec. Healthy docker costs one ~20ms `docker ps` pair.
+_COTURN_PROBE_CLIENT_HEADROOM=10
+_COTURN_PROBE_RM_TIMEOUT=5
+_COTURN_PROBE_REAP_PS_TIMEOUT=2
+_COTURN_PROBE_REAP_INSPECT_TIMEOUT=3
+_COTURN_PROBE_REAP_RM_TIMEOUT=4
+# Age before a Created probe is reaped (a probe still inside its create window is
+# far younger), and the cap on REMOVALS per call (candidates are not capped, so
+# newer unrelated Created containers cannot starve old leaks; a backlog drains over
+# a few probe runs).
 _COTURN_PROBE_REAP_AGE=300
 _COTURN_PROBE_REAP_MAX=50
 
-# _coturn_probe_reap_stale — remove probe containers stuck in `Created`, so nodes
-# that already carry the leak self-clean and any future escape is bounded. Scope:
-# state Created (never started — nothing running to hurt) AND older than
-# _COTURN_PROBE_REAP_AGE AND (labelled oxpulse.probe=coturn OR the pre-label
-# signature of the leaked containers: entrypoint `timeout`, cmd `<N> turnutils_*`).
-# Any other container is never touched. Best-effort: never fails the probe.
-# Normal-path cost: one `docker ps` that returns nothing.
+# _coturn_probe_reap_stale IMAGE — remove probe containers stuck in `Created`, so
+# nodes that already carry the leak self-clean and any future escape is bounded.
+# Candidates are narrowed first: `Created` AND (labelled oxpulse.probe=coturn OR
+# created from the configured coturn image). Of those only the ones that are
+# older than _COTURN_PROBE_REAP_AGE AND (labelled OR carry the pre-label signature
+# of the leaked containers: entrypoint `timeout`, cmd `<N> turnutils_*`) are
+# removed — a never-started container has nothing running to hurt. Any other
+# container is never touched. Leaks of an OLDER coturn image tag are not found by
+# the image query (ancestor= resolves one tag) unless they carry the label.
+# Best-effort: never fails the probe.
 _coturn_probe_reap_stale() {
-    local ids out now ts cid created path label args
+    local img="${1:-}" ids="" more out now ts cid created path label args
     local -a cand=() stale=()
-    ids=$(timeout 10 docker ps -aq --filter status=created 2>/dev/null) || return 0
-    [[ -n "$ids" ]] || return 0
-    mapfile -t cand <<<"$ids"
-    if (( ${#cand[@]} > _COTURN_PROBE_REAP_MAX )); then
-        cand=("${cand[@]:0:_COTURN_PROBE_REAP_MAX}")
+    ids=$(timeout "$_COTURN_PROBE_REAP_PS_TIMEOUT" docker ps -aq --filter status=created \
+        --filter label=oxpulse.probe=coturn 2>/dev/null) || ids=""
+    if [[ -n "$img" ]]; then
+        more=$(timeout "$_COTURN_PROBE_REAP_PS_TIMEOUT" docker ps -aq --filter status=created \
+            --filter "ancestor=$img" 2>/dev/null) || more=""
+        ids+=$'\n'"$more"
     fi
+    mapfile -t cand < <(printf '%s\n' "$ids" | awk 'NF && !seen[$0]++')
+    (( ${#cand[@]} > 0 )) || return 0
     # `.Args` is read only to match the probe signature below; it carries the TURN
     # credentials of a uclient probe and is never printed or logged.
-    out=$(timeout 10 docker inspect \
+    out=$(timeout "$_COTURN_PROBE_REAP_INSPECT_TIMEOUT" docker inspect \
         --format '{{.Id}}|{{.Created}}|{{.Path}}|{{index .Config.Labels "oxpulse.probe"}}|{{join .Args " "}}' \
         "${cand[@]}" 2>/dev/null) || true
     now=$(date +%s)
     while IFS='|' read -r cid created path label args; do
         [[ -n "$cid" ]] || continue
+        if (( ${#stale[@]} >= _COTURN_PROBE_REAP_MAX )); then
+            break
+        fi
         if [[ "$label" == coturn ]] \
             || [[ "$path" == timeout && "$args" =~ ^[0-9]+\ turnutils_(uclient|stunclient)(\ |$) ]]; then
             ts=$(date -d "$created" +%s 2>/dev/null) || continue
@@ -385,14 +410,14 @@ _coturn_probe_reap_stale() {
         fi
     done <<<"$out"
     if (( ${#stale[@]} > 0 )); then
-        timeout 20 docker rm -f "${stale[@]}" >/dev/null 2>&1 || true
+        timeout "$_COTURN_PROBE_REAP_RM_TIMEOUT" docker rm -f "${stale[@]}" >/dev/null 2>&1 || true
     fi
     return 0
 }
 
 # _coturn_probe_run SECONDS TOOL ARGS... — run one turnutils client, bounded TWICE:
 # the in-container `timeout` (entrypoint) reaps a hung client itself, the outer one
-# bounds the docker CLI at SECONDS + _COTURN_PROBE_CLIENT_HEADROOM (see above for
+# bounds the docker CLI at SECONDS + _COTURN_PROBE_CLIENT_HEADROOM (10s) (see above for
 # why it must not equal the inner bound). 124/143 from either layer classify as a
 # timeout upstream.
 # --init is load-bearing: with `--entrypoint timeout` as PID 1 the kernel ignores the
@@ -406,12 +431,16 @@ _coturn_probe_run() {
     local secs="$1" tool="$2" img name rc
     shift 2
     img=$(_coturn_probe_image) || { echo "coturn probe: cannot resolve the coturn image (is oxpulse-partner-coturn present?)" >&2; return 125; }
-    _coturn_probe_reap_stale
+    _coturn_probe_reap_stale "$img"
     name="oxpulse-probe-${tool}-$$-${RANDOM}${RANDOM}"
     timeout "$((secs + _COTURN_PROBE_CLIENT_HEADROOM))" docker run --rm --init --pull never --network host --read-only --cap-drop ALL \
         --user 65534:65534 --name "$name" --label oxpulse.probe=coturn \
         --entrypoint timeout "$img" "$secs" "$tool" "$@" && rc=0 || rc=$?
-    timeout 10 docker rm -f "$name" >/dev/null 2>&1 || true
+    # rc 0 = the container ran to completion and AutoRemove owns it; any other rc
+    # may be a CLI killed between create and start, which leaves it in `Created`.
+    if (( rc != 0 )); then
+        timeout "$_COTURN_PROBE_RM_TIMEOUT" docker rm -f "$name" >/dev/null 2>&1 || true
+    fi
     return "$rc"
 }
 
