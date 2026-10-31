@@ -381,12 +381,31 @@ _maybe_self_upgrade() {
     emit_metric "partner_edge_self_upgrade_applied_total" "tag=\"$_desired\"" "1"
     local _upg_bin
     _upg_bin=$(command -v oxpulse-partner-edge-upgrade 2>/dev/null || echo /usr/local/sbin/oxpulse-partner-edge-upgrade)
-    # timeout: a DPI-blocked docker pull must not block this refresh (and the
-    # cross-probe-token re-mint after it) indefinitely. Fail-soft either way.
-    if timeout 900 "$_upg_bin" "v${_desired}" >/dev/null 2>&1; then
-        log "self-upgrade: applied v$_desired"
+    # Run the upgrade as its OWN transient unit, never inside this one. This
+    # unit has TimeoutStartSec=120 + KillMode=control-group, and a real upgrade
+    # (pull, recreate, healthcheck, >=130s settle late-wedge watch) takes far
+    # longer: when it ran synchronously here systemd SIGTERMed every central-driven
+    # upgrade mid-run (2026-10-31, pillow 0.16.31 -> 0.16.33), and mid-pull the
+    # rollback path never runs. --no-block returns at once; the outcome lives in
+    # `journalctl -u oxpulse-partner-edge-self-upgrade` and the upgrade log.
+    # upgrade.sh keeps its own flock; the ActiveState probe is a cheap pre-check so
+    # a second refresh tick during a long upgrade does not even try.
+    # timeout 900: a DPI-blocked docker pull must not run forever. Fail-soft.
+    local _unit="oxpulse-partner-edge-self-upgrade" _st
+    _st=$(systemctl show -p ActiveState --value "$_unit.service" 2>/dev/null || true)
+    case "$_st" in
+        active|activating|deactivating|reloading)
+            log "self-upgrade: $_unit.service already $_st — not starting another"
+            return 0 ;;
+    esac
+    if systemd-run --quiet --no-block --collect --unit="$_unit" \
+        --description="OxPulse partner-edge self-upgrade to v$_desired" \
+        --property=Type=oneshot --property=TimeoutStartSec=1000 \
+        --property="EnvironmentFile=-$PREFIX_LIB/install.env" \
+        timeout 900 "$_upg_bin" "v${_desired}" >/dev/null 2>&1; then
+        log "self-upgrade: v$_desired started detached as $_unit.service (journalctl -u $_unit)"
     else
-        log "self-upgrade: $_upg_bin v$_desired FAILED/timed-out (non-fatal; retry next refresh)"
+        log "self-upgrade: could not start $_unit.service for v$_desired (non-fatal; retry next refresh)"
         emit_metric "partner_edge_self_upgrade_failure_total" "" "1"
     fi
 }
