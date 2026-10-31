@@ -194,8 +194,8 @@ SDRUN_RC=1 run_d "$TMPD/cg_refresh"
 [ -f "$TMPD/after" ] \
     && pass "D6: systemd-run failure → falls back to inline (legacy behaviour)" || fail "D6: no fallback when systemd-run fails"
 # wiring: the call sits BEFORE the flock (the transient unit does not inherit fd 9)
-_dl=$(grep -n '^	_maybe_detach_from_refresh_unit "\$@"' "$UPGRADE" | head -1 | cut -d: -f1)
-_ll=$(grep -n '^	exec 9>"\$LOCK_FILE"' "$UPGRADE" | head -1 | cut -d: -f1)
+_dl=$(grep -n '^	_maybe_detach_from_refresh_unit "\$@"' "$UPGRADE" -m1 | cut -d: -f1)
+_ll=$(grep -n '^	exec 9>"\$LOCK_FILE"' "$UPGRADE" -m1 | cut -d: -f1)
 [ -n "$_dl" ] && [ -n "$_ll" ] && [ "$_dl" -lt "$_ll" ] \
     && pass "D7: detach is wired before the upgrade.lock flock" || fail "D7: detach missing or after the flock"
 
