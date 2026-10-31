@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.34](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.33...v0.16.34) (2026-10-31)
+
+
+### Bug Fixes
+
+* **self-upgrade:** run central-driven upgrade as a detached unit, not inside refresh ([#678](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/678)) ([3a51bc1](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3a51bc1643a6b887ae79dac2db004f93d220b4f4))
+
 ## [0.16.33](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.32...v0.16.33) (2026-10-30)
 
 
