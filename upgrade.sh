@@ -2203,7 +2203,8 @@ _settle_derive_recheck_window() {
 # Format: a `#baseline-v2` header line (so an empty/failed capture is distinguishable
 # from "nothing was running"), then `NAME STATUS HEALTH RESTARTS` per container, STATUS
 # from State.Status (running|restarting|exited|...), HEALTH from State.Health.Status or
-# `none` when the image declares no HEALTHCHECK, RESTARTS = RestartCount. Includes
+# `none` when the image declares no HEALTHCHECK, RESTARTS = RestartCount, then an optional
+# AGE (seconds since State.StartedAt; absent = unknown). Includes
 # stopped containers (ps -a). v1 (no RESTARTS column) is still read; RESTARTS = 0 there.
 # RESTARTS exists because a crash-looper flaps through `running starting` between
 # `restarting unhealthy` samples (rvpn 2026-11-03: 2 of 20 samples), so status+health
@@ -2216,15 +2217,25 @@ _settle_derive_recheck_window() {
 # it), the watch saw it `unhealthy`, and a clean upgrade was rolled back on a
 # false positive.
 _settle_docker_baseline_capture() {
-	local _out="$1" _docker="${DOCKER_BIN:-docker}" _names _n _line
+	local _out="$1" _docker="${DOCKER_BIN:-docker}" _names _n _line _st _hl _rc _started _ep _age
 	: > "$_out"
 	_names=$("$_docker" ps -a --filter name=oxpulse-partner- --format '{{.Names}}' 2>/dev/null) || return 1
 	printf '#baseline-v2\n' > "$_out"
 	while IFS= read -r _n; do
 		[[ -z "$_n" ]] && continue
-		_line=$("$_docker" inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}' "$_n" 2>/dev/null || true)
-		[[ -z "$_line" ]] && _line="unknown unknown 0"
-		printf '%s %s\n' "$_n" "$_line" >> "$_out"
+		_line=$("$_docker" inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}} {{.State.StartedAt}}' "$_n" 2>/dev/null || true)
+		# An inspect that failed (container removed/recreated between `ps` and here) writes
+		# NO line: an absent name is watched strictly. A fabricated `unknown unknown 0`
+		# line used to make it pre-broken, i.e. silently ignored by the late-wedge watch.
+		[[ -z "$_line" ]] && continue
+		read -r _st _hl _rc _started <<< "$_line"
+		# 5th column: seconds since the container last started. It lets the flapper rule
+		# require RECENT restarts; absent (date can't parse it) = legacy count-only rule.
+		_age=""
+		if [[ -n "$_started" ]] && _ep=$(date -d "$_started" +%s 2>/dev/null); then
+			_age=$(( $(date +%s) - _ep )); [[ "$_age" -lt 0 ]] && _age=0
+		fi
+		printf '%s %s %s %s%s\n' "$_n" "$_st" "$_hl" "$_rc" "${_age:+ $_age}" >> "$_out"
 	done <<< "$_names"
 	return 0
 }
@@ -2232,6 +2243,12 @@ _settle_docker_baseline_capture() {
 # A container recorded `starting` with at least this many restarts is a crash-looper
 # caught between crashes, not one that is genuinely starting fresh.
 _SETTLE_BASELINE_FLAP_RESTARTS=3
+# ... and only when it last started within this many seconds. RestartCount is a LIFETIME
+# counter: a container that restarted 3+ times weeks ago and is stable now (coturn after a
+# guard restart, say) must not be classed pre-broken, or a wedge the upgrade causes in it
+# would be ignored. Docker's restart backoff caps at ~60 s, so a live crash-looper's
+# StartedAt is always well inside this window.
+_SETTLE_BASELINE_FLAP_RECENT_SECS=300
 
 # _settle_baseline_prebroken BASELINE_FILE NAME - exit 0 iff NAME is PRESENT in the
 # baseline AND was already broken: not running, not healthy/starting, or `starting`
@@ -2241,9 +2258,10 @@ _SETTLE_BASELINE_FLAP_RESTARTS=3
 # down, `docker ps -a` listed nothing) degrades to the strict watch by itself.
 # A v1 line has no RESTARTS (= 0).
 _settle_baseline_prebroken() {
-	awk -v n="$2" -v flap="${_SETTLE_BASELINE_FLAP_RESTARTS:-3}" '
+	awk -v n="$2" -v flap="${_SETTLE_BASELINE_FLAP_RESTARTS:-3}" -v recent="${_SETTLE_BASELINE_FLAP_RECENT_SECS:-300}" '
 		$1 == n { seen = 1; r = ($4 == "" ? 0 : $4 + 0)
-			ok = ($2 == "running" && ($3 == "healthy" || ($3 == "starting" && r < flap))) }
+			fresh = ($5 == "" || $5 + 0 < recent)
+			ok = ($2 == "running" && ($3 == "healthy" || ($3 == "starting" && (r < flap || !fresh)))) }
 		END { exit !(seen && !ok) }' "$1" 2>/dev/null
 }
 
