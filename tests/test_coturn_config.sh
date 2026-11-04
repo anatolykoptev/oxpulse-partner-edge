@@ -10,8 +10,6 @@ grep -qE '^tls-listening-port=5349' "$TPL" || { echo "FAIL: no tls-listening-por
 grep -q '^cert=/data/caddy/certificates/' "$TPL" || { echo "FAIL: cert= path wrong or missing"; exit 1; }
 grep -q '^pkey=/data/caddy/certificates/' "$TPL" || { echo "FAIL: pkey= path wrong or missing"; exit 1; }
 grep -qE '^cipher-list=' "$TPL" || { echo "FAIL: cipher-list missing"; exit 1; }
-grep -qE '^no-tlsv1\b' "$TPL" || { echo "FAIL: no-tlsv1 missing"; exit 1; }
-grep -qE '^no-tlsv1_1' "$TPL" || { echo "FAIL: no-tlsv1_1 missing"; exit 1; }
 
 # Active-probing hardening (R1 L2)
 grep -qE '^no-rfc5780' "$TPL" || { echo "FAIL: no-rfc5780 missing"; exit 1; }
@@ -39,6 +37,29 @@ grep -qE ^max-allocate-lifetime=120 "$TPL" || { echo "FAIL: max-allocate-lifetim
 # allocation-default-timeout and no-loopback-peers are not options in coturn 4.6.x
 # (absent from `turnserver --help`; the former is silently ignored, so it only
 # looked like a control). Asserting their absence stops them creeping back.
-grep -qE '^(allocation-default-timeout|no-loopback-peers)\b' "$TPL" \
-    && { echo "FAIL: allocation-default-timeout / no-loopback-peers are not coturn 4.6.x options"; exit 1; }
-echo "PASS: no phantom coturn directives"
+# (Now: not options in ANY coturn version.)
+# The edge image is coturn 4.18 (images/Dockerfile.coturn). There no-dtls /
+# no-tlsv1 / no-tlsv1_1 no longer exist either (DTLS starts only with --dtls;
+# TLS 1.0/1.1 are off by default) and an unknown key logs "Bad configuration
+# format". They stay valid ONLY in relay/coturn-relay.conf.tpl (Ubuntu 4.6.1).
+# Assert on the RENDERED conf, so a placeholder-driven line cannot slip past.
+RENDERED="$(mktemp)"
+trap 'rm -f "$RENDERED"' EXIT
+sed -e 's/{{TURN_SECRET}}/throwaway-secret/g' -e 's/{{PARTNER_DOMAIN}}/example.test/g' \
+    -e 's/{{TURNS_SUBDOMAIN}}/turns/g' -e 's/{{PUBLIC_IP}}/192.0.2.10/g' \
+    -e 's#{{EXTERNAL_IP_LINE}}#192.0.2.10/10.0.0.5#g' \
+    -e 's#{{ALLOWED_PEER_IP_LINE}}#allowed-peer-ip=10.0.0.5#g' "$TPL" > "$RENDERED"
+! grep -q '{{' "$RENDERED" || { echo "FAIL: unrendered placeholder in test render"; exit 1; }
+for key in allocation-default-timeout no-loopback-peers allow-loopback-peers no-dtls no-tlsv1 no-tlsv1_1; do
+    if grep -qE "^${key}([=[:space:]]|$)" "$RENDERED"; then
+        echo "FAIL: '${key}' rendered — not a coturn 4.18 option (or, for allow-loopback-peers, a loopback SSRF opening)"
+        exit 1
+    fi
+done
+echo "PASS: no phantom / removed coturn directives"
+# NAT64 well-known prefix (GHSA-2x4g) and the IPv4-mapped range (GHSA-w4hf / GHSA-j8mm)
+grep -qxF 'denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff' "$RENDERED" \
+    || { echo "FAIL: NAT64 denied-peer-ip (64:ff9b::/96) missing"; exit 1; }
+grep -qxF 'denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255' "$RENDERED" \
+    || { echo "FAIL: IPv4-mapped denied-peer-ip range missing"; exit 1; }
+echo "PASS: NAT64 + IPv4-mapped peer denies present"

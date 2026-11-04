@@ -3,7 +3,11 @@
 # Runs in host network mode so it sees the real public IP and can allocate
 # relay ports in 49152-49999/udp (the range host sysctl reserves from the
 # ephemeral pool — see oxpulse-partner-edge-coturn-guard.sh).
-FROM coturn/coturn:4.6-alpine
+# Pinned by the multi-arch INDEX digest (amd64 + arm64 + arm/v6/v7) of tag
+# 4.18.0-r0-alpine, so an edge never floats onto an unreviewed image. 4.6.x
+# (the previous floating `4.6-alpine`) crashes on arm64 from one unauthenticated
+# UDP packet (GHSA-j662-9wcj-mf36, fixed in 4.10.0). Renovate bumps tag+digest.
+FROM coturn/coturn:4.18.0-r0-alpine@sha256:c29135c08565810d37053f384584392b7c24b69570fc81a721b878d6fe63e04e
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.source="https://github.com/anatolykoptev/oxpulse-partner-edge"
