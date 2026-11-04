@@ -16,6 +16,13 @@
       "matchUpdateTypes": ["major"],
       "automerge": false,
       "addLabels": ["dep-major-review"]
+    },
+    {
+      "description": "coturn is the public TURN relay and CI never runs the container: a bump needs the empirical gate by hand (build the image, render conf with opec, run turnserver, check no 'Bad configuration' lines, the 5349 TLS listener, turnutils_uclient Allocate+data with REST creds, 403 for 127.0.0.1 and ::ffff:127.0.0.1, relay ports in range). Reviewed by hand, never automerged; this rule is LAST in packageRules, so it overrides the generic automerge rules above (Renovate: later rules win).",
+      "matchManagers": ["dockerfile"],
+      "matchPackageNames": ["coturn/coturn"],
+      "automerge": false,
+      "addLabels": ["coturn-empirical-gate"]
     }
   ],
   "vulnerabilityAlerts": {
