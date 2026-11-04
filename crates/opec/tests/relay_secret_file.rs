@@ -234,6 +234,34 @@ fn secret_file_flag_is_coturn_only() {
 }
 
 #[test]
+fn render_denies_only_explicit_peer_ip_ranges() {
+    // coturn 4.6.1 (add_ip_list_range, userdb.c): a peer-ip value with no '-'
+    // becomes the range [addr, addr] — EXCEPT the all-zero 'any' address:
+    // addr_any() then holds for both endpoints and ioa_addr_in_range()
+    // matches EVERY peer, IPv4 included ('8.8.8.8 denied in the range: ::',
+    // observed live on msk1). The only bare single-address form proven safe
+    // is the IPv6 loopback '::1'.
+    const SINGLE_ADDR_ALLOWLIST: &[&str] = &["::1"];
+    let d = tempfile::tempdir().unwrap();
+    let sec = write_secret(d.path(), &format!("{S1}\n"), 0o600);
+    let out = d.path().join("coturn.conf");
+    render(&sec, &out).success();
+    let conf = fs::read_to_string(&out).unwrap();
+    for line in conf.lines() {
+        let Some(v) = line
+            .strip_prefix("denied-peer-ip=")
+            .or_else(|| line.strip_prefix("allowed-peer-ip="))
+        else {
+            continue;
+        };
+        assert!(
+            v.contains('-') || SINGLE_ADDR_ALLOWLIST.contains(&v),
+            "peer-ip directive without an explicit - range end: {line}"
+        );
+    }
+}
+
+#[test]
 fn relay_template_denies_every_range_the_full_edge_template_denies() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let denied = |p: PathBuf| -> Vec<String> {

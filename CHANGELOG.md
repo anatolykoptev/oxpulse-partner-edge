@@ -5,6 +5,29 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.34](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.33...v0.16.34) (2026-10-31)
+
+
+### Bug Fixes
+
+* **self-upgrade:** run central-driven upgrade as a detached unit, not inside refresh ([#678](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/678)) ([3a51bc1](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3a51bc1643a6b887ae79dac2db004f93d220b4f4))
+
+## [0.16.33](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.32...v0.16.33) (2026-10-30)
+
+
+### Bug Fixes
+
+* **naive:** bump naiveproxy to v154.0.8037.49-5 and pin tarball sha256 ([#676](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/676)) ([3d275df](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3d275df9e5bf5b47a8e06b425bb5b784536f51c1))
+
+## [0.16.32](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.31...v0.16.32) (2026-10-30)
+
+
+### Bug Fixes
+
+* **probe:** stop coturn probe containers leaking in state Created ([#674](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/674)) ([97fb250](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/97fb250c6a93cb4fd37c473a210e4fb6f1652b9d))
+* **relay:** drop denied-peer-ip=:: which denies every peer on coturn 4.6.1 ([#672](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/672)) ([043000c](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/043000cb78d59f79a5f08bc2059c1fdfa2f4d575))
+* **sfu:** enforce room-token iss/aud binding (SEC-CR-011) ([#659](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/659)) ([e548580](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/e548580391221a73cb2eaad09d01f352a2ec1065))
+
 ## [0.16.31](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.30...v0.16.31) (2026-10-12)
 
 

@@ -51,8 +51,11 @@ denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255
 denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 denied-peer-ip=ff00::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
-# Unspecified, NAT64 and 6to4: reach v4 space through a translator.
-denied-peer-ip=::
+# NAT64 and 6to4: reach v4 space through a translator.
+# ('::' must NOT be denied here: on coturn 4.6.x a bare all-zero address parses
+# to the [any,any] range — addr_any() holds for both ends — and ioa_addr_in_range()
+# then matches EVERY peer, IPv4 included. A zero-address peer is refused anyway
+# by ioa_addr_is_zero() in ns_turn_server.c.)
 denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff
 denied-peer-ip=2002::-2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 

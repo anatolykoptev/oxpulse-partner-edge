@@ -1082,8 +1082,52 @@ normalize_target() {
 # Alias kept for callers that still use the old name (host-scripts-only path etc.)
 derive_release_tag() { normalize_target; }
 
+# Survive being started INSIDE oxpulse-partner-edge-refresh.service (a node whose
+# refresh predates the detached self-upgrade runner). That unit has
+# TimeoutStartSec=120 and KillMode=control-group, but a full upgrade — pull,
+# recreate, healthcheck, the >=130s settle late-wedge watch — takes far longer, so
+# systemd SIGTERMed every central-driven upgrade mid-run (2026-10-31, pillow
+# 0.16.31 -> 0.16.33; mid-pull the rollback path never runs). A new
+# process cannot be saved from a SIGTERM, so it is moved out of the unit instead:
+# re-run this script as its own transient unit and let the refresh return.
+#
+# MUST run before the flock below: the transient unit is a fresh process and does
+# not inherit fd 9, so a lock taken here would make its own `flock -n` fail.
+# Re-runs "$PREFIX_SBIN/oxpulse-partner-edge-upgrade" (NOT "$0": after the
+# self-update re-exec "$0" is a temp copy this process deletes on exit); the
+# sbin copy then re-execs into the target release exactly as it would inline.
+_SELF_UPGRADE_UNIT="oxpulse-partner-edge-self-upgrade"
+_maybe_detach_from_refresh_unit() {
+	[[ "${_OXPULSE_UPGRADE_DETACHED:-0}" == 1 ]] && return 0   # already the detached copy
+	grep -q oxpulse-partner-edge-refresh\.service "${OXPULSE_UPGRADE_CGROUP_FILE:-/proc/self/cgroup}" 2>/dev/null || return 0
+	if ! command -v systemd-run >/dev/null 2>&1; then
+		warn "running inside oxpulse-partner-edge-refresh.service but systemd-run is missing — continuing inline (may be killed at the unit timeout)"
+		return 0
+	fi
+	local _st
+	_st=$(systemctl show -p ActiveState --value "$_SELF_UPGRADE_UNIT.service" 2>/dev/null || true)
+	case "$_st" in
+		active|activating|deactivating|reloading)
+			log "self-upgrade unit $_SELF_UPGRADE_UNIT.service is already $_st — not starting a second upgrade"
+			exit 0 ;;
+	esac
+	local _self="$PREFIX_SBIN/oxpulse-partner-edge-upgrade"
+	[[ -x "$_self" ]] || _self="$(readlink -f "$0")"
+	if systemd-run --quiet --no-block --collect --unit="$_SELF_UPGRADE_UNIT" \
+		--description="OxPulse partner-edge self-upgrade (detached from refresh)" \
+		--property=Type=oneshot --property=TimeoutStartSec=1000 \
+		--property="EnvironmentFile=-$PREFIX_LIB/install.env" \
+		--setenv=_OXPULSE_UPGRADE_DETACHED=1 \
+		"$_self" "$@"; then
+		log "started inside oxpulse-partner-edge-refresh.service — re-running detached as $_SELF_UPGRADE_UNIT.service (journalctl -u $_SELF_UPGRADE_UNIT)"
+		exit 0
+	fi
+	warn "systemd-run failed — continuing inline (may be killed at the refresh unit timeout)"
+}
+
 # Skip for read-only modes: --dry-run and --check never mutate state.
 if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
+	_maybe_detach_from_refresh_unit "$@"
 	LOCK_FILE="$PREFIX_LIB/upgrade.lock"
 	exec 9>"$LOCK_FILE"
 	flock -n 9 || die "another upgrade.sh is running (lock: $LOCK_FILE). If stuck, check the pid and remove the lock file."
