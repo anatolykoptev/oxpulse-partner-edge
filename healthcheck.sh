@@ -327,11 +327,17 @@ else
 		# local user could read it from /proc/<pid>/cmdline. No `-f`: with it a 4xx
 		# makes curl exit non-zero AFTER printing the code, and the old `|| echo 000`
 		# then glued "000" on ("401000"). Default the code only if curl printed none.
+		# A control character (newline!) would let the token inject curl config
+		# lines: such a token is rejected without ever being sent.
 		_tok_cfg=${_svc_token//\\/\\\\}; _tok_cfg=${_tok_cfg//\"/\\\"}
+		if [[ "$_svc_token" =~ [[:cntrl:]] ]]; then
+			_http_code=000
+		else
 		_http_code=$(printf 'header = "Authorization: Bearer %s"\n' "$_tok_cfg" | curl -sS --max-time 8 --config - \
 			${_probe_nid:+-H "X-Node-Id: $_probe_nid"} \
 			"${_backend%/}/api/partner/node-config" \
 			-o /dev/null -w "%{http_code}" 2>/dev/null) || true
+		fi
 		[[ "$_http_code" =~ ^[0-9]{3}$ ]] || _http_code=000
 		unset _probe_nid _tok_cfg
 		if [[ "$_http_code" == "200" ]]; then

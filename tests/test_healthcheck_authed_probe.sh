@@ -171,3 +171,13 @@ _run_hc() {
     _run_hc
     [[ "$output" == *"(HTTP 401 "* ]] || { echo "code not clean: $output"; false; }
 }
+
+@test "probe_rejects_control_char_token: embedded newline is never sent to curl" {
+    printf 'stkn_ok\nurl = "http://evil.example/"' > "$CONF_DIR/token"
+    chmod 600 "$CONF_DIR/token"
+    _stub_curl 200
+    _run_hc
+    ! grep -q 'node-config' "$TMPD/curl.args" 2>/dev/null || { echo "node-config probe sent for a control-char token: $(cat "$TMPD/curl.args")"; false; }
+    [ ! -s "$TMPD/curl.stdin" ] || { echo "token config reached curl stdin: $(cat "$TMPD/curl.stdin")"; false; }
+    [[ "$output" == *"(HTTP 000 "* ]] || { echo "expected check 19 FAIL, got: $output"; false; }
+}

@@ -2912,6 +2912,7 @@ _retire_ch3_best_effort() {
 		warn "CH3 teardown skipped: $_crl not readable — refresh will retry"
 		return 0
 	fi
+	# shellcheck source=/dev/null  # installed on the node by sync_host_scripts
 	if ! ( . "$_crl" && declare -F retire_hysteria2_ch3 >/dev/null && retire_hysteria2_ch3 ); then
 		warn "CH3 teardown did not complete — refresh will retry"
 	fi
