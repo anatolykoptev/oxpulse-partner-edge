@@ -104,8 +104,6 @@ _caddyfile_presub_sha() {
 #   PARTNER_DOMAIN    — from caller (must already be set; validated here)
 #   TURNS_SUBDOMAIN   — from caller (must already be set; validated here)
 #   AWG_MOTHERLY_IP   — from env → defaults.conf → hardcoded 10.9.0.2
-#   HY2_FALLBACK_HOST — from env → defaults.conf → hardcoded host.docker.internal
-#   HY2_FALLBACK_PORT — from env → defaults.conf → hardcoded 18443
 #   NAIVE_SOCKS_PORT  — 4-tier: env → STATE_FILE → docker inspect → die
 #
 # TPL_FILE is used only by the NAIVE_SOCKS_PORT die-guard (die iff the
@@ -117,27 +115,17 @@ _setup_caddy_render_env() {
     [[ -n "${PARTNER_DOMAIN:-}" ]]  || die "PARTNER_DOMAIN missing — cannot render Caddyfile"
     [[ -n "${TURNS_SUBDOMAIN:-}" ]] || die "TURNS_SUBDOMAIN missing — cannot render Caddyfile"
 
-    # AWG_MOTHERLY_IP / HY2_FALLBACK_HOST / HY2_FALLBACK_PORT: env → defaults.conf → hardcoded.
+    # AWG_MOTHERLY_IP: env → defaults.conf → hardcoded.
     local _defaults_conf="${PREFIX_SHARE:-/usr/local/share}/oxpulse-partner-edge/config/defaults.conf"
-    if [[ -z "${AWG_MOTHERLY_IP:-}" ]] || \
-       [[ -z "${HY2_FALLBACK_HOST:-}" ]] || \
-       [[ -z "${HY2_FALLBACK_PORT:-}" ]]; then
+    if [[ -z "${AWG_MOTHERLY_IP:-}" ]]; then
         if [[ -r "$_defaults_conf" ]]; then
-            local _awg_d _hy2h_d _hy2p_d
+            local _awg_d
             _awg_d=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"' \
                 _ "$_defaults_conf" || echo '10.9.0.2')
-            _hy2h_d=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"' \
-                _ "$_defaults_conf" || echo 'host.docker.internal')
-            _hy2p_d=$(bash -c '. "$1" 2>/dev/null; printf "%s" "${OXPULSE_HY2_FALLBACK_PORT:-18443}"' \
-                _ "$_defaults_conf" || echo '18443')
-            [[ -z "${AWG_MOTHERLY_IP:-}"   ]] && AWG_MOTHERLY_IP="$_awg_d"
-            [[ -z "${HY2_FALLBACK_HOST:-}" ]] && HY2_FALLBACK_HOST="$_hy2h_d"
-            [[ -z "${HY2_FALLBACK_PORT:-}" ]] && HY2_FALLBACK_PORT="$_hy2p_d"
+            AWG_MOTHERLY_IP="$_awg_d"
         fi
     fi
     AWG_MOTHERLY_IP="${AWG_MOTHERLY_IP:-10.9.0.2}"
-    HY2_FALLBACK_HOST="${HY2_FALLBACK_HOST:-host.docker.internal}"
-    HY2_FALLBACK_PORT="${HY2_FALLBACK_PORT:-18443}"
 
     # NAIVE_SOCKS_PORT: 4-tier resolution.
     if [[ -z "${NAIVE_SOCKS_PORT:-}" ]]; then
@@ -165,7 +153,7 @@ _setup_caddy_render_env() {
     fi
 
     export PARTNER_DOMAIN TURNS_SUBDOMAIN \
-           AWG_MOTHERLY_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
+           AWG_MOTHERLY_IP \
            NAIVE_SOCKS_PORT
 }
 
@@ -173,7 +161,7 @@ _setup_caddy_render_env() {
 # reconcile_caddy_surface CANDIDATE_DIR
 #
 # Per the converge pseudocode (ADR-001):
-#   1. Set up ambient env (export all 6 placeholder vars).
+#   1. Set up ambient env (export all 4 placeholder vars).
 #   2. `opec render caddy --tpl Caddyfile.tpl --out candidate`.
 #   3. assert_no_unresolved_placeholders (fail-closed).
 #   4. Compute sha256 BEFORE __CADDYFILE_SHA__ substitution (pre-sub hash).
@@ -205,7 +193,7 @@ reconcile_caddy_surface() {
     command -v opec >/dev/null 2>&1 \
         || die "reconcile_caddy: opec not on PATH — required for Caddyfile render"
 
-    # Set up all 6 placeholder env vars (NAIVE_SOCKS_PORT resolution included).
+    # Set up all 4 placeholder env vars (NAIVE_SOCKS_PORT resolution included).
     _setup_caddy_render_env "$_tpl_path"
 
     # Render via opec (single render authority — Decision 2).

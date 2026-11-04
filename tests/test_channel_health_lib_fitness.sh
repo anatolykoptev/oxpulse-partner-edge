@@ -37,7 +37,6 @@ setup() {
 	FUNCS=(
 		probe_ch1
 		probe_ch2
-		probe_ch3
 		probe_ch4
 		_resolve_coturn_probe_target
 		_elapsed_ms

@@ -134,12 +134,12 @@ OUTPUT=$(PATH="$T1:/usr/bin:/bin" \
 EXIT1=$?
 set -e
 
-# Verify we got at least 4 lines of JSON (ch1/ch2/ch3/ch4 — ch5/ch6 skipped)
+# Verify we got at least 3 lines of JSON (ch1/ch2/ch4 — ch3 is retired, ch5/ch6 skipped)
 LINE_COUNT=$(printf '%s\n' "$OUTPUT" | grep -c '"channel_name"' 2>/dev/null || echo 0)
-if [[ "$LINE_COUNT" -ge 4 ]]; then
+if [[ "$LINE_COUNT" -ge 3 ]]; then
     ok "test1: --dry-run emits $LINE_COUNT channel JSON lines"
 else
-    fail "test1: expected >=4 channel lines, got $LINE_COUNT; output: $OUTPUT"
+    fail "test1: expected >=3 channel lines, got $LINE_COUNT; output: $OUTPUT"
 fi
 
 # Validate all JSON objects in the output (output may be pretty-printed multi-line).
@@ -255,15 +255,10 @@ fi
 trap - EXIT
 rm -rf "$T2B"
 
-# ── Test 3: ch3 real end-to-end tunnel unreachable → handshake_ok=false ──────
-# Regression guard + the core new deliverable: probe_ch3 no longer does a bare
-# `nc -z` port check (which only proves the LOCAL hysteria2-client forwarder
-# is listening, never that a byte reaches the backend) and, critically, it
-# NEVER emitted channel_handshake_ok at all before this rewrite — the
-# backend's ch1/ch2/ch3 OR'd signaling-health logic (health_poller.rs) had
-# zero visibility into ch3. It now curls the local forwarder
-# (127.0.0.1:$PORT/api/health, forwarded over the QUIC tunnel) and reports a
-# real handshake_ok.
+# ── Test 3: ch3 (hysteria2) is retired — no probe, no payload ────────────────
+# CH3 was removed from the edge. If central still lists an id "ch3" in
+# channels[] the reporter must skip it like any unknown channel: no payload and,
+# above all, no request to the (gone) hysteria2 forwarder on :18443.
 T3=$(mktemp -d)
 trap 'rm -rf "$T3"' EXIT
 
@@ -271,15 +266,10 @@ make_bin "$T3"
 mkdir -p "$T3/etc"
 write_node_config "$T3/etc" '{"id":"ch3"}'
 
-# curl stub: local hy2 forwarder unreachable — connection refused (curl's own
-# "000" convention for a failed dial, matching _post_channel's own idiom).
-cat > "$T3/curl" <<'STUB'
+ARGV_LOG3="$T3/curl_argv.log"
+cat > "$T3/curl" <<STUB
 #!/bin/bash
-for a in "$@"; do
-    case "$a" in
-        *:18443/api/health*) printf '000'; exit 0 ;;
-    esac
-done
+printf '%s\n' "\$*" >> "$ARGV_LOG3"
 printf '200'
 exit 0
 STUB
@@ -293,70 +283,27 @@ OUTPUT3=$(PATH="$T3:/usr/bin:/bin" \
     bash "$SCRIPT" --dry-run 2>/dev/null)
 set -e
 
-if printf '%s\n' "$OUTPUT3" | jq -e 'select(.channel_name=="ch3" and .channel_handshake_ok==false)' >/dev/null 2>&1; then
-    ok "test3: ch3 unreachable real tunnel → channel_handshake_ok=false (NEW field, was never emitted before)"
+if ! grep -q '"channel_name"' <<< "$OUTPUT3"; then
+    ok "test3: retired ch3 produces no channel payload"
 else
-    fail "test3: expected ch3 channel_handshake_ok=false for unreachable tunnel; got: $OUTPUT3"
+    fail "test3: ch3 is retired but a payload was emitted: $OUTPUT3"
 fi
-
-# channel_rtt_ms must still be present and non-negative (real elapsed time,
-# not a hardcoded magic 0 — the pre-rewrite contract).
-GOT_RTT3=$(printf '%s\n' "$OUTPUT3" | jq -r 'select(.channel_name=="ch3") | .channel_rtt_ms' 2>/dev/null)
-if [[ "$GOT_RTT3" =~ ^[0-9]+$ ]]; then
-    ok "test3: ch3 channel_rtt_ms is a non-negative integer ($GOT_RTT3)"
+if ! grep -q ':18443' "$ARGV_LOG3" 2>/dev/null; then
+    ok "test3: retired ch3 is never probed (no request to the hysteria2 forwarder port)"
 else
-    fail "test3: ch3 channel_rtt_ms should be a non-negative integer; got: $GOT_RTT3"
+    fail "test3: a request went to :18443 for a retired channel: $(cat "$ARGV_LOG3")"
 fi
 
 trap - EXIT
 rm -rf "$T3"
 
-# ── Test 3b: ch3 real end-to-end tunnel reachable → handshake_ok=true ────────
-# THE core new deliverable for ch3: it must start emitting handshake_ok at
-# all. Positive-path complement to Test 3.
-T3B=$(mktemp -d)
-trap 'rm -rf "$T3B"' EXIT
-
-make_bin "$T3B"
-mkdir -p "$T3B/etc"
-write_node_config "$T3B/etc" '{"id":"ch3"}'
-
-cat > "$T3B/curl" <<'STUB'
-#!/bin/bash
-for a in "$@"; do
-    case "$a" in
-        *:18443/api/health*) printf '200'; exit 0 ;;
-    esac
-done
-printf '200'
-exit 0
-STUB
-chmod +x "$T3B/curl"
-
-set +e
-OUTPUT3B=$(PATH="$T3B:/usr/bin:/bin" \
-    _NODE_CONFIG="$T3B/etc/node-config.json" \
-    _TOKEN_LIB=/nonexistent \
-    OXPULSE_SERVICE_TOKEN="stkn_test" \
-    bash "$SCRIPT" --dry-run 2>/dev/null)
-set -e
-
-if printf '%s\n' "$OUTPUT3B" | jq -e 'select(.channel_name=="ch3" and .channel_handshake_ok==true)' >/dev/null 2>&1; then
-    ok "test3b: ch3 real tunnel reachable → channel_handshake_ok=true (first time ch3 ever emits this field)"
-else
-    fail "test3b: expected ch3 channel_handshake_ok=true for reachable tunnel; got: $OUTPUT3B"
-fi
-
-trap - EXIT
-rm -rf "$T3B"
-
-# ── Test 4: only ch1+ch2+ch3 provisioned; ch5/ch6 not in output ──────────────
+# ── Test 4: ch1+ch2 (+ retired ch3) provisioned; ch3/ch5/ch6 not in output ──────────────
 T4=$(mktemp -d)
 trap 'rm -rf "$T4"' EXIT
 
 make_bin "$T4"
 mkdir -p "$T4/etc"
-# Only ch1, ch2, ch3 in node-config
+# ch1, ch2 and the retired ch3 in node-config
 write_node_config "$T4/etc" '{"id":"ch1"},{"id":"ch2"},{"id":"ch3"}'
 
 cat > "$T4/docker" <<'STUB'
@@ -386,12 +333,12 @@ OUTPUT4=$(PATH="$T4:/usr/bin:/bin" \
     bash "$SCRIPT" --dry-run 2>/dev/null)
 set -e
 
-# Should have exactly 3 channel lines (ch4 not provisioned, ch5/ch6 skipped)
+# Should have exactly 2 channel lines (ch3 retired, ch4 not provisioned, ch5/ch6 skipped)
 COUNT4=$(printf '%s\n' "$OUTPUT4" | grep -c '"channel_name"' 2>/dev/null || echo 0)
-if [[ "$COUNT4" -eq 3 ]]; then
-    ok "test4: exactly 3 channel entries (ch1/ch2/ch3), ch5-ch6 absent"
+if [[ "$COUNT4" -eq 2 ]]; then
+    ok "test4: exactly 2 channel entries (ch1/ch2), retired ch3 and ch5-ch6 absent"
 else
-    fail "test4: expected 3 channels, got $COUNT4; output: $OUTPUT4"
+    fail "test4: expected 2 channels, got $COUNT4; output: $OUTPUT4"
 fi
 
 # ch5/ch6 must not appear (ch4 is now wired — only ch5/ch6 are skipped)
@@ -1159,13 +1106,13 @@ fi
 trap - EXIT
 rm -rf "$T19"
 
-# ── Test 20: ch1/ch2/ch3 all pass --max-time, honouring OXPULSE_CHANNEL_PROBE_TIMEOUT
+# ── Test 20: ch1/ch2 both pass --max-time, honouring OXPULSE_CHANNEL_PROBE_TIMEOUT
 T20=$(mktemp -d)
 trap 'rm -rf "$T20"' EXIT
 
 make_bin "$T20"
 mkdir -p "$T20/etc"
-write_node_config "$T20/etc" '{"id":"ch1"},{"id":"ch2"},{"id":"ch3"}'
+write_node_config "$T20/etc" '{"id":"ch1"},{"id":"ch2"}'
 
 ARGV_LOG20="$T20/curl_argv.log"
 cat > "$T20/curl" <<STUB
@@ -1185,38 +1132,38 @@ PATH="$T20:/usr/bin:/bin" \
     bash "$SCRIPT" --dry-run >/dev/null 2>&1
 set -e
 
-# All three probe curl invocations must carry --max-time 7 (OXPULSE_CHANNEL_PROBE_TIMEOUT, their hard timeout).
+# Both probe curl invocations must carry --max-time 7 (OXPULSE_CHANNEL_PROBE_TIMEOUT, their hard timeout).
 MAXTIME_COUNT=$(grep -c -- '--max-time 7' "$ARGV_LOG20" 2>/dev/null || true)
 [[ -n "$MAXTIME_COUNT" ]] || MAXTIME_COUNT=0
-if [[ "$MAXTIME_COUNT" -eq 3 ]]; then
-    ok "test20: ch1/ch2/ch3 all pass --max-time 7 (OXPULSE_CHANNEL_PROBE_TIMEOUT honoured, exactly 3 calls)"
+if [[ "$MAXTIME_COUNT" -eq 2 ]]; then
+    ok "test20: ch1/ch2 both pass --max-time 7 (OXPULSE_CHANNEL_PROBE_TIMEOUT honoured, exactly 2 calls)"
 else
-    fail "test20: expected exactly 3 curl calls with --max-time 7, got $MAXTIME_COUNT; argv: $(cat "$ARGV_LOG20" 2>/dev/null)"
+    fail "test20: expected exactly 2 curl calls with --max-time 7, got $MAXTIME_COUNT; argv: $(cat "$ARGV_LOG20" 2>/dev/null)"
 fi
 
 trap - EXIT
 rm -rf "$T20"
 
-# ── Test 21: ch1/ch2/ch3 run CONCURRENTLY -- total wall time bounded by the
-#    SLOWEST probe, not the SUM of all three (the core "run concurrently"
-#    requirement). Each probe's curl call sleeps 2s before responding; a
-#    serial implementation would take ~6s+, a concurrent one ~2s.
+# ── Test 21: ch1/ch2 run CONCURRENTLY -- total wall time bounded by the
+#    SLOWEST probe, not the SUM (the core "run concurrently" requirement).
+#    Each probe's curl call sleeps 3s before responding; a serial
+#    implementation would take ~6s+, a concurrent one ~3s.
 T21=$(mktemp -d)
 trap 'rm -rf "$T21"' EXIT
 
 make_bin "$T21"
 mkdir -p "$T21/etc"
-write_node_config "$T21/etc" '{"id":"ch1"},{"id":"ch2"},{"id":"ch3"}'
+write_node_config "$T21/etc" '{"id":"ch1"},{"id":"ch2"}'
 
-# curl stub: sleep 2s ONLY for the three probe URLs (canary/tunnel,
-# :8907/api/health, :18443/api/health) -- NOT for the POST endpoint, so the
+# curl stub: sleep 3s ONLY for the probe URLs (canary/tunnel,
+# :8907/api/health) -- NOT for the POST endpoint, so the
 # measurement isolates the PROBE phase specifically.
 cat > "$T21/curl" <<'STUB'
 #!/bin/bash
 for a in "$@"; do
     case "$a" in
-        *canary/tunnel*|*:8907/api/health*|*:18443/api/health*)
-            sleep 2
+        *canary/tunnel*|*:8907/api/health*)
+            sleep 3
             ;;
     esac
 done
@@ -1236,20 +1183,20 @@ set -e
 END21=$(date +%s)
 ELAPSED21=$((END21 - START21))
 
-# Concurrent: ~2s (all three sleep in parallel). Serial would be ~6s+.
+# Concurrent: ~3s (both sleep in parallel). Serial would be ~6s+.
 if [[ "$ELAPSED21" -le 5 ]]; then
-    ok "test21: ch1/ch2/ch3 probed CONCURRENTLY -- total wall time ${ELAPSED21}s (bounded by slowest probe, not the sum)"
+    ok "test21: ch1/ch2 probed CONCURRENTLY -- total wall time ${ELAPSED21}s (bounded by slowest probe, not the sum)"
 else
-    fail "test21: REGRESSION -- probes ran serially (took ${ELAPSED21}s, expected <=5s for 3 concurrent 2s probes)"
+    fail "test21: REGRESSION -- probes ran serially (took ${ELAPSED21}s, expected <=5s for 2 concurrent 3s probes)"
 fi
 
-# Correctness: all three channels still present despite each being individually slow.
+# Correctness: both channels still present despite each being individually slow.
 COUNT21=$(printf '%s\n' "$OUTPUT21" | grep -c '"channel_name"' 2>/dev/null || true)
 [[ -n "$COUNT21" ]] || COUNT21=0
-if [[ "$COUNT21" -eq 3 ]]; then
-    ok "test21: all 3 channels still reported despite each probe being individually slow"
+if [[ "$COUNT21" -eq 2 ]]; then
+    ok "test21: both channels still reported despite each probe being individually slow"
 else
-    fail "test21: expected 3 channel entries, got $COUNT21; output: $OUTPUT21"
+    fail "test21: expected 2 channel entries, got $COUNT21; output: $OUTPUT21"
 fi
 
 trap - EXIT

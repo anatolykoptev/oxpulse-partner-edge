@@ -33,7 +33,7 @@ _in_array() { local needle=$1; shift; local el; for el in "$@"; do [[ "$el" == "
 # is evaluated even if an early return path skips the render block.
 CHANNELS_FAILED=()
 
-# Phase 5.5 — fail-soft render for bypass channels (xray, naive, hysteria2).
+# Phase 5.5 — fail-soft render for bypass channels (xray, naive).
 # Chassis renders (compose, caddy, coturn) stay strict via render_with_opec.
 # On failure: logs a warning, appends channel name to CHANNELS_FAILED array,
 # returns non-zero. Callers must NOT die on non-zero — install continues and

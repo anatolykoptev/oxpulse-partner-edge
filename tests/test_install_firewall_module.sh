@@ -65,8 +65,8 @@ grep -q "ufw allow 443/tcp"                                                     
 grep -q "ufw allow 443/udp"                                                      "$TMP/calls.log" || { echo "FAIL test1: 443/udp (quic)"; exit 1; }
 grep -q "ufw allow 7878/udp"                                                     "$TMP/calls.log" || { echo "FAIL test1: 7878/udp"; exit 1; }
 grep -q "ufw allow 49152:49999/udp"                                              "$TMP/calls.log" || { echo "FAIL test1: relay range 49152:49999/udp"; exit 1; }
-grep -q "ufw allow 18443/tcp"                                                    "$TMP/calls.log" || { echo "FAIL test1: 18443/tcp"; exit 1; }
-grep -q "ufw allow 18443/udp"                                                    "$TMP/calls.log" || { echo "FAIL test1: 18443/udp"; exit 1; }
+# 18443 was the hysteria2 (CH3) forwarder, retired: it must no longer be opened.
+grep -q "18443" "$TMP/calls.log" && { echo "FAIL test1: 18443 must not be allowed (CH3 retired)"; cat "$TMP/calls.log"; exit 1; }
 grep -q "ufw allow 44321/udp"                                                    "$TMP/calls.log" || { echo "FAIL test1: AWG port"; exit 1; }
 grep -q "ufw allow from 10.9.0.0/24 to any port 9317 proto tcp"                  "$TMP/calls.log" || { echo "FAIL test1: mesh 9317"; exit 1; }
 grep -q "ufw allow from 10.9.0.0/24 to any port 8912 proto tcp"                  "$TMP/calls.log" || { echo "FAIL test1: mesh 8912"; exit 1; }
@@ -99,6 +99,42 @@ grep -q "firewall-cmd --permanent --zone=public --add-rich-rule rule family=ipv4
 grep -q "firewall-cmd --permanent --zone=public --add-port=8920/tcp"             "$TMP/calls.log" && { echo "FAIL test2: 8920 must NOT be a public add-port"; cat "$TMP/calls.log"; exit 1; }
 grep -q "firewall-cmd --reload"                                                  "$TMP/calls.log" || { echo "FAIL test2: reload"; exit 1; }
 echo "[ok] test2: firewalld whitelist applied with awg=44322 (8920 local-bridge only)"
+
+# ── Test 2b: firewalld node that still has the retired :18443 ───────────────
+# Older releases opened 18443 tcp+udp; add-port never removes, so the converge
+# must. Stateful stub: --permanent and runtime state in separate files.
+FWS="$TMP/fws"; mkdir -p "$FWS"
+printf '%s\n' 18443/tcp 18443/udp 9999/tcp 443/tcp > "$FWS/perm"
+cp "$FWS/perm" "$FWS/run"
+cat >"$TMP/mocks/firewall-cmd" <<EOF
+#!/usr/bin/env bash
+scope=run; for a in "\$@"; do [[ "\$a" == --permanent ]] && scope=perm; done
+f="$FWS/\$scope"; touch "\$f"
+for a in "\$@"; do case "\$a" in
+  --add-port=*)    p=\${a#*=}; grep -qxF "\$p" "\$f" || echo "\$p" >> "\$f" ;;
+  --remove-port=*) p=\${a#*=}; grep -vxF "\$p" "\$f" > "\$f.n" || true; mv "\$f.n" "\$f" ;;
+esac; done
+exit 0
+EOF
+chmod +x "$TMP/mocks/firewall-cmd"
+: >"$TMP/calls.log"
+AWG_LISTEN_PORT=44322 firewall_apply >"$TMP/fw.out" 2>&1
+for sc in perm run; do
+	if [ "$sc" = perm ]; then
+		grep -q '18443' "$FWS/perm" && { echo "FAIL test2b: 18443 still in permanent config"; cat "$FWS/perm"; exit 1; }
+	fi
+done
+grep -q '18443' "$FWS/run" && { echo "FAIL test2b: 18443 still in runtime config"; cat "$FWS/run"; exit 1; }
+grep -qxF 9999/tcp "$FWS/perm" && grep -qxF 9999/tcp "$FWS/run" || { echo "FAIL test2b: unrelated port 9999/tcp was touched"; exit 1; }
+for want in 443/tcp 3478/tcp 5349/udp 7878/udp; do
+	grep -qxF "$want" "$FWS/perm" || { echo "FAIL test2b: expected $want in permanent config"; cat "$FWS/perm"; exit 1; }
+done
+# idempotent + silent: a second converge on the now-clean node prints nothing.
+AWG_LISTEN_PORT=44322 firewall_apply >"$TMP/fw.out" 2>&1
+grep -q '18443' "$TMP/fw.out" && { echo "FAIL test2b: second run mentions 18443"; exit 1; }
+echo "[ok] test2b: firewalld converge removes retired 18443 (permanent+runtime), leaves other ports"
+# restore the call-logging mock for later tests
+make_mock firewall-cmd "$TMP/calls.log"
 
 # ── Test 3: no firewall tool → warn + FAIL-LOUD (distinct rc=2), no commands ──
 # t14 fail-loud contract (lib/install-firewall.sh none|*) branch): this path

@@ -512,7 +512,7 @@ if [[ -f "$PREFIX_LIB/install.env" && -z "$MANUAL_CONFIG" ]]; then
 		# The installed healthcheck binary runs with no --local flag (full external
 		# probe) — appropriate here because DNS/certs should already be live on a
 		# top-up.  healthcheck.sh exits non-zero only when a non-skip check fails;
-		# skipped optional channels (hy2 not deployed, naive absent, legacy token)
+		# skipped optional channels (naive absent, legacy token)
 		# emit GREEN and never reach this path.  So a non-zero exit = a core check
 		# failed — the same classification as the fresh-install gate, derived from
 		# healthcheck.sh's FAIL counter rather than a hand-written list.
@@ -901,12 +901,9 @@ fi
 # Backend-assigned TURNS subdomain (format api-<6-hex>). Falls back to "turns"
 # only if the backend did not return one (pre-v0.2 deployments).
 REGISTER_TURNS_SUBDOMAIN=$(json_get turns_subdomain "$tmp_cfg")
-# CH3/CH5 fallback channel vars — optional; empty if backend does not provision them.
-export HYSTERIA2_SERVER HYSTERIA2_PORT HYSTERIA2_AUTH HYSTERIA2_OBFS
-[[ -z "${HYSTERIA2_SERVER:-}" ]] && HYSTERIA2_SERVER=$(json_get hysteria2_server "$tmp_cfg")
-[[ -z "${HYSTERIA2_PORT:-}" ]]   && HYSTERIA2_PORT=$(json_get hysteria2_port "$tmp_cfg")
-[[ -z "${HYSTERIA2_AUTH:-}" ]]   && HYSTERIA2_AUTH=$(json_get hysteria2_auth "$tmp_cfg")
-[[ -z "${HYSTERIA2_OBFS:-}" ]]   && HYSTERIA2_OBFS=$(json_get hysteria2_obfs "$tmp_cfg")
+# CH5 fallback channel vars — optional; empty if backend does not provision them.
+# (The hysteria2 channel (CH3) is retired: central may still return hysteria2_*
+# fields and the edge ignores them. Teardown: channel-render-lib.sh.)
 export NAIVE_SERVER NAIVE_PORT NAIVE_USER NAIVE_PASS NAIVE_SOCKS_PORT
 # Env vars (e.g. from --naive-server CLI flag or manual testing) take precedence
 # over node-config values. Only fall back to config when env is not set.
@@ -1000,7 +997,6 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	# caused partner_node_channel_heartbeat_total{channel_name=ch1} to appear.
 	# Mapping (canonical, matches probe_ch* function dispatch):
 	#   vless-reality → ch1   (probe_ch1 = xray dokodemo-door)
-	#   hysteria2     → ch3   (probe_ch3 = Hysteria2)
 	#   other/unknown → ch0   (preserved; no probe — future-proof)
 	# Note: naive protocol removed from map; probe for it does not exist in
 	# oxpulse-channels-health-report.sh (ch5*/ch6* dispatcher logs
@@ -1011,7 +1007,6 @@ import json, sys
 
 PROTOCOL_ID_MAP = {
     "vless-reality": "ch1",
-    "hysteria2":     "ch3",
 }
 
 cfg = json.load(open(sys.argv[1]))
@@ -1241,9 +1236,8 @@ fetch_tpl docker-compose.yml.tpl "$stage/compose.tpl"
 fetch_tpl Caddyfile.tpl          "$stage/caddy.tpl"
 fetch_tpl xray-client.json.tpl   "$stage/xray.tpl"
 fetch_tpl coturn.conf.tpl        "$stage/coturn.tpl"
-# CH3/CH5 templates — fetched unconditionally so nodes have them ready.
-# Rendering is skipped unless HYSTERIA2_SERVER / NAIVE_SERVER are set.
-fetch_tpl hysteria2-client.yaml.tpl "$stage/hysteria2-client.yaml.tpl"
+# CH5 template — fetched unconditionally so nodes have it ready.
+# Rendering is skipped unless NAIVE_SERVER is set.
 fetch_tpl naive-client.json.tpl     "$stage/naive.tpl"
 
 # Static assets bundle. cover/ is bind-mounted by docker-compose (./cover:/srv/cover:ro)
@@ -1282,10 +1276,8 @@ PARTNER_DOMAIN="$DOMAIN"
 # DRIFT HAZARD: if defaults.conf changes these lines must change too (single truth
 # is defaults.conf; these are a fall-through guard only).
 AWG_MOTHERLY_IP="${OXPULSE_AWG_MOTHERLY_IP:-10.9.0.2}"
-HY2_FALLBACK_HOST="${OXPULSE_HY2_FALLBACK_HOST:-host.docker.internal}"
-HY2_FALLBACK_PORT="${OXPULSE_HY2_FALLBACK_PORT:-18443}"
 export PARTNER_ID PARTNER_DOMAIN BACKEND_ENDPOINT BACKEND_HOST BACKEND_PORT \
-       AWG_MOTHERLY_IP AWG_ALLOCATED_IP AWG_HOST_IP HY2_FALLBACK_HOST HY2_FALLBACK_PORT \
+       AWG_MOTHERLY_IP AWG_ALLOCATED_IP AWG_HOST_IP \
        TURN_SECRET \
        REALITY_UUID REALITY_PUBLIC_KEY REALITY_SHORT_ID REALITY_SERVER_NAME \
        REALITY_ENCRYPTION TURNS_SUBDOMAIN \
@@ -1470,70 +1462,10 @@ elif [[ -z "${AWG_ALLOCATED_IP:-}" ]]; then
 fi
 mkdir -p "$cover_out_dir"
 install -m 0644 "$stage/cover/cover.html" "$cover_out_dir/cover.html"
-# Render CH3 / CH5 if the backend provided the required vars.
+# Render CH5 if the backend provided the required vars.
 # When rendered, activate the corresponding docker compose profile so the
-# service starts alongside the core stack (docker compose --profile ch3 up).
+# service starts alongside the core stack (docker compose --profile ch5 up).
 COMPOSE_PROFILES_EXTRA=""
-# Phase 1.7 — fetch shared hy2 credentials + render hysteria2-client.yaml.
-# For Phase 1 these are fleet-shared (per-edge identity = Phase 7).
-# Source: GET /api/partner/hy2-credentials returns JSON {auth_pass, obfs_pass}
-# Falls back to env if API not yet deployed (HTTP 404 / connection refused).
-# channel-render-lib.sh (including re_render_hysteria2) is already in scope —
-# sourced unconditionally with die-on-missing at L766-776 (T2/T3 NIT: redundant
-# source block removed from here).
-#
-# MAJOR 3 fix: _hy2_status is determined here (not via post-hoc sed patch) and
-# written atomically to channels-status.env below.
-# BLOCKER 2 fix: hysteria2 is counted in _CHANNELS_TOTAL when HYSTERIA2_SERVER
-# is set, so an xray+naive fail does not kill an install where hy2 succeeds.
-_hy2_status="skipped"
-if [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
-	# Mark as attempted so it counts toward _CHANNELS_TOTAL.
-	_hy2_status="failed_at_start"
-fi
-if [[ -n "${HYSTERIA2_SERVER:-}" ]] && declare -f re_render_hysteria2 >/dev/null 2>&1; then
-	log "fetching hy2 credentials"
-	_hy2_creds_url="${BACKEND_API}/api/partner/hy2-credentials"
-	_hy2_creds_json=$(curl -fsS --max-time 10 \
-		-H "Authorization: Bearer $(read_service_token || echo '')" \
-		"$_hy2_creds_url" 2>/dev/null || echo '{}')
-	HY2_AUTH_PASS=$(printf '%s' "$_hy2_creds_json" | jq -r '.auth_pass // empty' 2>/dev/null || true)
-	HY2_OBFS_PASS=$(printf '%s' "$_hy2_creds_json" | jq -r '.obfs_pass // empty' 2>/dev/null || true)
-	unset _hy2_creds_url _hy2_creds_json
-	# Fallback: env vars (for offline install / pre-API-deploy)
-	HY2_AUTH_PASS="${HY2_AUTH_PASS:-${OXPULSE_HY2_AUTH_PASS:-}}"
-	HY2_OBFS_PASS="${HY2_OBFS_PASS:-${OXPULSE_HY2_OBFS_PASS:-}}"
-	if [[ -n "$HY2_AUTH_PASS" && -n "$HY2_OBFS_PASS" ]]; then
-		export HY2_AUTH_PASS HY2_OBFS_PASS OXPULSE_REPO_DIR="$stage"
-		if re_render_hysteria2; then
-			COMPOSE_PROFILES_EXTRA="${COMPOSE_PROFILES_EXTRA:+$COMPOSE_PROFILES_EXTRA,}ch3"
-			log "hy2 channel provisioned"
-			_hy2_status="active"
-		else
-			warn "hy2 render failed — channel not provisioned (check HYSTERIA2_SERVER endpoint)"
-			# _hy2_status stays "failed_at_start" — render failure is a provisioning failure
-		fi
-	else
-		warn "hy2 credentials unavailable — installing awg-only mode (hy2 will provision on next upgrade)"
-		# _hy2_status stays "failed_at_start" — credentials missing is a provisioning failure
-	fi
-elif [[ -n "${HYSTERIA2_SERVER:-}" ]]; then
-	warn "hy2 channel: re_render_hysteria2 not available — channel failed"
-	# _hy2_status stays "failed_at_start"
-fi
-if [[ "${_hy2_status}" == "active" ]]; then
-	log "  hysteria2 CH3 profile enabled"
-	# Set restrictive perms on hysteria2-client.yaml (holds channel credentials).
-	# re_render_hysteria2() already writes with umask 077 (mode 0600); this chmod
-	# is an explicit belt-and-braces so a future renderer change can never loosen
-	# it. The hysteria2 container (tobyxdd/hysteria:v2.8.2) runs as root inside
-	# the container (no USER directive in upstream Dockerfile) and mounts the
-	# file :ro, so 0600 root:root suffices — root reads it, no gid needed.
-	# NOTE: 0640 was the previous mode; it was loosened to 0600 so every writer
-	# (install.sh, enable-hy2, hydrate.sh) agrees on the stricter mode and a
-	# re-render never relaxes perms on a secret-bearing file.
-	chmod 0600 "${PREFIX_ETC}/hysteria2-client.yaml"
-fi
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
 	# Phase 5.5: naive is a bypass channel -- render fail-soft.
 	if render_channel_soft naive "$stage/naive.tpl" "$PREFIX_ETC/naive-client.json"; then
@@ -1575,14 +1507,10 @@ fi
 rm -rf "$stage"
 
 # Phase 5.5: all-channels-failed guard.
-# BLOCKER 2 fix: count all three bypass channels when configured.
+# BLOCKER 2 fix: count the bypass channels when configured.
 # CHANNELS_FAILED tracks xray + naive render failures.
-# _hy2_status != active means hy2 failed when HYSTERIA2_SERVER was set.
 _CHANNELS_TOTAL=1  # xray always attempted
 [[ -n "${NAIVE_SERVER:-}" ]] && _CHANNELS_TOTAL=$((_CHANNELS_TOTAL + 1))
-[[ -n "${HYSTERIA2_SERVER:-}" ]] && _CHANNELS_TOTAL=$((_CHANNELS_TOTAL + 1))
-# Map hy2 failed_at_start into CHANNELS_FAILED so the count is unified.
-[[ "${_hy2_status}" == "failed_at_start" ]] && CHANNELS_FAILED+=("hysteria2")
 CHANNELS_FAILED_COUNT=${#CHANNELS_FAILED[@]}
 if [[ $CHANNELS_FAILED_COUNT -ge $_CHANNELS_TOTAL && $_CHANNELS_TOTAL -gt 0 ]]; then
 	die "all channels failed render: ${CHANNELS_FAILED[*]:-<none>} — no bypass channel is usable; check opec and node-config"
@@ -1606,7 +1534,6 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		else
 			printf 'xray=%s\n' "active"
 		fi
-		printf 'hysteria2=%s\n' "${_hy2_status}"
 		# Fix #3: granular naive status (skipped_no_server|skipped_fixture_host|
 		# failed_at_render|active) determined by _naive_status set above.
 		# Safety: 'pending' is transient; should never reach here (render block always
@@ -1620,7 +1547,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 	mv -f "$_chs_tmp" "$PREFIX_LIB/channels-status.env"
 	unset _chs_tmp
 fi
-unset _hy2_status _awg_status _naive_status
+unset _awg_status _naive_status
 
 # Secrets-containing files → 0600.
 chmod 0600 "$xray_out" "$coturn_out" || true
@@ -1628,7 +1555,7 @@ log "  rendered → $compose_out (+ Caddyfile, xray-client.json, coturn.conf, co
 
 # BLOCKER 1 fix — Phase 5.5: strip failed channels from rendered docker-compose.yml.
 # compose.tpl is rendered strictly (render_with_opec) and contains service blocks
-# for ALL channels (xray, hysteria2, naive). If a channel failed render its config
+# for ALL channels (xray, naive). If a channel failed render its config
 # file (e.g. xray-client.json) is missing, so `docker compose up` would fail on
 # the volume mount. Strip failed-channel service blocks + their depends_on refs now,
 # while CHANNELS_FAILED is finalised and compose_out is still on disk.
@@ -1766,7 +1693,7 @@ log "[6/10] starting services"
 # coturn self-relay guard loaded BEFORE the first coturn container starts.
 systemd_guard_early
 if [[ $DRY_RUN -eq 0 ]]; then
-	# Pass extra profiles (ch3, ch5) when bypass channels were provisioned.
+	# Pass extra profiles (ch5) when bypass channels were provisioned.
 	# Persist to $PREFIX_ETC/.env so subsequent compose ops (upgrade.sh, refresh.sh)
 	# also activate the correct profiles without explicit flags.
 	if [[ -n "${COMPOSE_PROFILES_EXTRA:-}" ]]; then
@@ -1892,7 +1819,7 @@ fi
 # OXPULSE_ALLOW_DEGRADED=1) restores exit 0 for non-interactive callers that
 # may intentionally proceed on a degraded-but-running node; no caller passes
 # it today (upgrade.sh has its own converge engine and does not invoke
-# install.sh).  Optional channels (naive/CH5 absent, hy2 skipped) never reach
+# install.sh).  Optional channels (naive/CH5 absent) never reach
 # this path — healthcheck.sh returns GREEN for skipped optional channels, so
 # HEALTHCHECK_CORE_FAILED stays 0.
 if [[ "${HEALTHCHECK_CORE_FAILED:-0}" -eq 1 && "${ALLOW_DEGRADED:-0}" -eq 0 ]]; then

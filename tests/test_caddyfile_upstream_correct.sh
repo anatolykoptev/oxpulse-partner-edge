@@ -1,12 +1,11 @@
 #!/usr/bin/env bats
 # Regression guard for tunnel-snippet reverse_proxy ordering.
 #
-# Current architecture (2026-05-21): the pool has 4 upstreams in lb_policy=first
-# order:
+# Current architecture: the pool has 3 upstreams in lb_policy=first order:
 #   1. {{AWG_MOTHERLY_IP}}:8907     CH2 — AWG-direct via socat bridge (fastest)
 #   2. xray-client:3080             CH1 — VLESS+Reality tunnel
-#   3. {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}}  CH3 — Hysteria2 QUIC fallback
-#   4. 127.0.0.1:{{NAIVE_SOCKS_PORT}}              CH5 — naive forward proxy (deferred)
+#   3. 127.0.0.1:{{NAIVE_SOCKS_PORT}}              CH5 — naive forward proxy (deferred)
+# CH3 (Hysteria2) was the third upstream until it was retired; it must not come back.
 #
 # Historical regression (PR #158, 571e4de): primary upstream was set to
 # {{AWG_MOTHERLY_IP}}:{{BACKEND_PORT}} which rendered as 10.9.0.2:5349 — the
@@ -25,8 +24,6 @@ render_tpl() {
     -e "s|{{TURNS_SUBDOMAIN}}|turns|g" \
     -e "s|{{AWG_MOTHERLY_IP}}|10.9.0.2|g" \
     -e "s|{{BACKEND_PORT}}|8907|g" \
-    -e "s|{{HY2_FALLBACK_HOST}}|host.docker.internal|g" \
-    -e "s|{{HY2_FALLBACK_PORT}}|18443|g" \
     "$TPL"
 }
 
@@ -67,17 +64,17 @@ render_tpl() {
   fi
 }
 
-@test "Caddyfile.tpl source: tunnel snippet pool order is CH2,CH1,CH3,CH5" {
+@test "Caddyfile.tpl source: tunnel snippet pool order is CH2,CH1,CH5 (no CH3)" {
   # Verifies the placeholder order in the template source matches the documented
-  # 4-channel waterfall. Reordering without intent breaks the lb_policy=first
+  # 3-channel waterfall. Reordering without intent breaks the lb_policy=first
   # fallback chain and is a regression.
-  if ! grep -qF 'reverse_proxy {args[0]} {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}}' "$TPL"; then
-    echo "FAIL: tunnel_upstream snippet pool order changed; expected CH2,CH1,CH3,CH5" >&2
+  if ! grep -qF 'reverse_proxy {args[0]} {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 127.0.0.1:{{NAIVE_SOCKS_PORT}}' "$TPL"; then
+    echo "FAIL: tunnel_upstream snippet pool order changed; expected CH2,CH1,CH5" >&2
     grep 'reverse_proxy' "$TPL" >&2
     return 1
   fi
-  if ! grep -qF 'reverse_proxy {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}}' "$TPL"; then
-    echo "FAIL: tunnel_upstream_default snippet pool order changed; expected CH2,CH1,CH3,CH5" >&2
+  if ! grep -qF 'reverse_proxy {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 127.0.0.1:{{NAIVE_SOCKS_PORT}}' "$TPL"; then
+    echo "FAIL: tunnel_upstream_default snippet pool order changed; expected CH2,CH1,CH5" >&2
     grep 'reverse_proxy' "$TPL" >&2
     return 1
   fi

@@ -271,23 +271,6 @@ else
 	fi
 fi
 
-# --- 16. hy2 container running + healthy (graceful on awg-only edges) ---
-# In Phase 1.7 partial rollout, edges without hy2 provisioned are awg-only.
-# Container absent = info (not fail). Container present but unhealthy = warn.
-if [[ "$SNAPSHOT_MODE" -eq 0 ]]; then echo -n "  16. hy2 container healthy:                        "; fi
-_hy2_health=$(docker inspect -f '{{.State.Health.Status}}' oxpulse-partner-hysteria2 2>/dev/null || true)
-_hy2_running=$(docker ps --filter name=oxpulse-partner-hysteria2 --format '{{.Names}}' 2>/dev/null | grep -c oxpulse-partner-hysteria2 || true)
-if [[ "$_hy2_health" == "healthy" ]]; then
-	snap_emit "check_16_hy2" 0 "$(printf '\033[32mOK\033[0m\n')"
-elif [[ "$_hy2_running" -gt 0 ]]; then
-	# Running but not healthy: in snapshot treat as RED (container is failing).
-	snap_emit "check_16_hy2" 1 "$(printf '\033[33mWARN\033[0m (running but health status not '"'"'healthy'"'"': %s — may be starting)\n' "${_hy2_health:-unknown}")"
-	FAIL=$((FAIL + 1))
-else
-	# Not deployed: skip (GREEN in snapshot — not a regression indicator).
-	snap_emit "check_16_hy2" 0 "INFO (hy2 container not deployed — awg-only mode, Phase 1.7 hy2 not provisioned)\n"
-fi
-
 # --- 17. Service token file: present and mode 0600 ---
 # Skip-on-legacy: nodes predating Follow-up #2 PR-B won't have the file yet.
 # Pass:          file present + mode 0600.
@@ -310,18 +293,6 @@ else
 	snap_emit "check_17_token_mode" 0 "SKIP (no token file — legacy node or fresh node not yet registered)\n"
 fi
 unset _tok_file _tok_env _tok_mode
-
-# --- 18. hy2 TCP forwarder listening on :18443 (only if container deployed) ---
-if [[ "$_hy2_running" -gt 0 ]]; then
-	check "check_18_hy2_tcp" "18. TCP 18443 listening (hy2 forwarder)" bash -c '
-		ss -ltnH 2>/dev/null | awk '"'"'{print $4}'"'"' | grep -qE ":18443$"
-	'
-else
-	# Not deployed: emit GREEN in snapshot (not applicable, not a regression).
-	if [[ "$SNAPSHOT_MODE" -eq 1 ]]; then
-		printf 'check_18_hy2_tcp=GREEN\n'
-	fi
-fi
 
 # --- 19. service-token authed probe → 2xx ---
 # Catches "token rot": file missing, malformed, or revoked server-side.
@@ -347,11 +318,29 @@ else
 		FAIL=$((FAIL + 1))
 	else
 		_backend="${OXPULSE_BACKEND_URL:-https://oxpulse.chat}"
-		_http_code=$(curl -fsS --max-time 8 \
-			-H "Authorization: Bearer $_svc_token" \
-			"${_backend%/}/api/partner/hy2-credentials" \
-			-o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
-		if [[ "$_http_code" == "200" || "$_http_code" == "503" ]]; then
+		# The endpoint this edge's own refetch_node_config authenticates against
+		# (same token file, same X-Node-Id) — it exists for as long as the edge
+		# does. The probe used to hit /api/partner/hy2-credentials, which is the
+		# CH3 credential endpoint and goes away with CH3.
+		_probe_nid=$(jq -r '.node_id // .partner_id // empty' "$CONF_DIR/node-config.json" 2>/dev/null || true)
+		# The bearer token travels on stdin (`--config -`), never in argv, where any
+		# local user could read it from /proc/<pid>/cmdline. No `-f`: with it a 4xx
+		# makes curl exit non-zero AFTER printing the code, and the old `|| echo 000`
+		# then glued "000" on ("401000"). Default the code only if curl printed none.
+		# A control character (newline!) would let the token inject curl config
+		# lines: such a token is rejected without ever being sent.
+		_tok_cfg=${_svc_token//\\/\\\\}; _tok_cfg=${_tok_cfg//\"/\\\"}
+		if [[ "$_svc_token" =~ [[:cntrl:]] ]]; then
+			_http_code=000
+		else
+		_http_code=$(printf 'header = "Authorization: Bearer %s"\n' "$_tok_cfg" | curl -sS --max-time 8 --config - \
+			${_probe_nid:+-H "X-Node-Id: $_probe_nid"} \
+			"${_backend%/}/api/partner/node-config" \
+			-o /dev/null -w "%{http_code}" 2>/dev/null) || true
+		fi
+		[[ "$_http_code" =~ ^[0-9]{3}$ ]] || _http_code=000
+		unset _probe_nid _tok_cfg
+		if [[ "$_http_code" == "200" ]]; then
 			snap_emit "check_19_token_probe" 0 "$(printf '\033[32mOK\033[0m (HTTP %s — auth accepted)\n' "$_http_code")"
 		else
 			snap_emit "check_19_token_probe" 1 "$(printf '\033[31mFAIL\033[0m (HTTP %s — token rejected or endpoint unreachable)\n' "$_http_code")"
@@ -434,6 +423,9 @@ else
 			# Treated as degraded (counts toward failed) but not a schema-drift unknown.
 			failed_at_render|failed_at_start|failed_at_setup) _ch_failed_count=$((_ch_failed_count + 1)) ;;
 			skipped)           ;;  # not attempted — does not count toward failure
+			# retired: CH3 (hysteria2) was deliberately removed by retire_hysteria2_ch3.
+			# Like skipped it counts toward neither active nor failed.
+			retired)           ;;
 			# Fix #3: granular skip reasons for naive channel (skipped_no_server when
 			# NAIVE_SERVER was empty, skipped_fixture_host when guard rejected a test
 			# placeholder like *.example.com / localhost / *.test).  Neither counts

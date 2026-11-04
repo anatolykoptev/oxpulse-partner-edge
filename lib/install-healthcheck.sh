@@ -141,7 +141,7 @@ healthcheck_run() {
 		fi
 		# Overall healthcheck poll: runs healthcheck.sh --local which covers
 		# containers, API, tunnel, TLS, ports.  healthcheck.sh already returns
-		# GREEN for skipped optional channels (hy2 not deployed, naive absent),
+		# GREEN for skipped optional channels (naive absent),
 		# so a non-zero poll means a CORE check failed.
 		if ! _healthcheck_poll; then
 			HEALTHCHECK_POLL_FAILED=1

@@ -41,7 +41,7 @@ echo "=== SFU signing-pubkey apply tests ==="
 [[ -f "$REFRESH" ]] || { fail "C0: $REFRESH missing"; exit 1; }
 
 # Isolate the sfu service block: from `  sfu:` up to the next top-level service.
-SFU_BLOCK=$(sed -n '/^  sfu:/,/^  hysteria2-client:/p' "$TPL")
+SFU_BLOCK=$(sed -n '/^  sfu:/,/^  naive:/p' "$TPL")
 
 # ---------------------------------------------------------------------------
 # C1: sfu service supplies the signing key via env_file (sfu-keys.env).

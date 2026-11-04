@@ -1,7 +1,7 @@
 # Relay-only node
 
 A relay-only node runs coturn and nothing else: no Caddy, no Xray, no
-Hysteria2/Naive, no SFU, no AmneziaWG, no Docker. It holds exactly one TURN
+Naive, no SFU, no AmneziaWG, no Docker. It holds exactly one TURN
 credential, its **own per-node secret**, and reports liveness with a service
 token. It never registers with the backend.
 

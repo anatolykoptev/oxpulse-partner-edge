@@ -47,7 +47,6 @@ else. No website, no mail server, no other VPN.
 |---|---|
 | oxpulse-partner-caddy     | 27 MiB |
 | oxpulse-partner-xray      | 23 MiB |
-| oxpulse-partner-hysteria2 | 22 MiB |
 | oxpulse-partner-coturn    | 9 MiB |
 | oxpulse-partner-sfu       | 4 MiB (idle) |
 | dockerd                   | 58 MiB |
@@ -61,7 +60,7 @@ current production workload across all 4 partners as of 2026-05-22).**
 **4 GiB is the comfortable choice** for:
 
 - larger rooms (more participants -> more str0m RTP buffers + decoder state)
-- bursty hysteria2 / Reality channels
+- bursty Reality channel
 - co-resident logs that accumulate between log rotations
 - headroom for the SFU under load spikes without paging
 
@@ -86,8 +85,8 @@ Ubuntu) **or** `firewalld` (RHEL / CentOS / Rocky / Alma). On other
 distros the installer warns and skips — the operator must apply the
 whitelist manually. Allowed ports:
 
-- Public TCP: `22, 80, 443, 18443, 3478, 5349`
-- Public UDP: `443, 18443, 3478, 5349, 7878, <AWG_PORT>`
+- Public TCP: `22, 80, 443, 3478, 5349`
+- Public UDP: `443, 3478, 5349, 7878, <AWG_PORT>`
 - Mesh-only (10.9.0.0/24): `9317/tcp, 8912/tcp`
 
 If you disable the firewall after install, re-expose this surface to

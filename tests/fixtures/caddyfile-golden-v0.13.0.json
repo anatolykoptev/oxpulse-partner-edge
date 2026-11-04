@@ -415,9 +415,6 @@
 																			"dial": "xray-client:3080"
 																		},
 																		{
-																			"dial": "host.docker.internal:18443"
-																		},
-																		{
 																			"dial": "127.0.0.1:1080"
 																		}
 																	]
@@ -550,9 +547,6 @@
 																			"dial": "xray-client:3080"
 																		},
 																		{
-																			"dial": "host.docker.internal:18443"
-																		},
-																		{
 																			"dial": "127.0.0.1:1080"
 																		}
 																	]
@@ -615,9 +609,6 @@
 																		},
 																		{
 																			"dial": "xray-client:3080"
-																		},
-																		{
-																			"dial": "host.docker.internal:18443"
 																		},
 																		{
 																			"dial": "127.0.0.1:1080"
@@ -684,9 +675,6 @@
 																			"dial": "xray-client:3080"
 																		},
 																		{
-																			"dial": "host.docker.internal:18443"
-																		},
-																		{
 																			"dial": "127.0.0.1:1080"
 																		}
 																	]
@@ -749,9 +737,6 @@
 																		},
 																		{
 																			"dial": "xray-client:3080"
-																		},
-																		{
-																			"dial": "host.docker.internal:18443"
 																		},
 																		{
 																			"dial": "127.0.0.1:1080"
@@ -973,7 +958,7 @@
 														{
 															"handle": [
 																{
-																	"body": "bf121c4e8438227b00df39a9d01230e992dd5883b16cade3d7234db0b5419c50",
+																	"body": "91a1babde16bc8a16cb84f76d11063ec4c1278d25350cbfeccc93e648c4c8b0d",
 																	"handler": "static_response",
 																	"status_code": 200
 																}

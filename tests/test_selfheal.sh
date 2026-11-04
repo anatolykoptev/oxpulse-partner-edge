@@ -46,6 +46,14 @@
 #    20. below threshold               → never prunes
 #    21. at threshold                  → prunes, verifies, records healed
 #
+#   crash loop (the guard rvpn lacked: StartedAt resets on every restart, so a
+#   container restarting every ~65 s was always inside the 180 s grace)
+#    49. RestartCount rose, container young → budget gate runs (restart)
+#    50. same, budget spent               → alerts once, no restart (given_up)
+#    51. RestartCount unchanged, young    → grace still applies
+#    52. first sight (no baseline)        → grace still applies
+#    53. restarts gauge emitted
+#
 #   metrics
 #    22. EVERY container gets a series in the gauge file, not just the last one
 #        (shipped-and-measured regression: a gauge textfile is truncated per
@@ -66,7 +74,8 @@ fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 #   "<health> <started> <has_health> <state> <finished> <oneoff>"
 setup() {
 	TMP="$(mktemp -d)"; BIN="$TMP/bin"
-	mkdir -p "$BIN" "$TMP/state" "$TMP/fixtures" "$TMP/units" "$TMP/textfile"
+	mkdir -p "$BIN" "$TMP/state" "$TMP/fixtures" "$TMP/units" "$TMP/textfile" "$TMP/rc"
+	export RC_DIR="$TMP/rc"
 
 	cat > "$BIN/docker" <<'DOCKER'
 #!/bin/bash
@@ -110,6 +119,8 @@ case "$1" in
       *State.StartedAt*)      date -d "@$started" -Is ;;
       *State.FinishedAt*)     date -d "@$finished" -Is ;;
       *compose.oneoff*)       echo "$oneoff" ;;
+      # RestartCount lives in its own dir: a file in $FX would read as a container.
+      *RestartCount*)         cat "$RC_DIR/$c" 2>/dev/null || echo 0 ;;
     esac ;;
   images)
     # --format '{{.ID}} {{.Repository}}:{{.Tag}}'
@@ -220,6 +231,10 @@ teardown() { rm -rf "$TMP"; }
 
 # name health started [hashc] [state] [finished] [oneoff]
 fixture() { echo "$2 $3 ${4:-y} ${5:-running} ${6:-0} ${7:-False}" > "$FIXTURES/$1"; }
+# container count -> what `docker inspect .RestartCount` reports
+restartcount() { echo "$2" > "$RC_DIR/$1"; }
+# container count -> the RestartCount the previous tick stored
+seed_rc() { mkdir -p "$OXPULSE_SELFHEAL_STATE_DIR"; echo "restart_count=$2" > "$OXPULSE_SELFHEAL_STATE_DIR/$1.state"; }
 # container -> the image ref it runs
 cimage()  { echo "$2" > "$CONTAINER_IMAGE/$1"; }
 # id repo:tag  — the local image store
@@ -784,6 +799,51 @@ teardown
 # 48 — only the xray client is judged by this signature
 setup; fixture oxpulse-partner-c1 healthy "$OLD"; wedge_log oxpulse-partner-c1 12; run_it
 [[ "$(restarts)" == 0 ]] && pass "non-xray container with the signature is untouched" || fail "restarted a non-xray container"
+teardown
+
+# 49 — crash loop: docker restarted the container since the last tick, so it is
+#      always seconds old. The grace must not hide it; the budget gate runs.
+setup; fixture oxpulse-partner-c1 unhealthy "$(( $(date +%s) - 15 ))"
+seed_rc oxpulse-partner-c1 5; restartcount oxpulse-partner-c1 6; run_it
+[[ "$(restarts)" == 1 ]] && pass "RestartCount rose + young + unhealthy → reaches the budget gate and restarts" \
+                         || fail "crash-looping container hidden by start grace (restarts=$(restarts)): $(tail -2 "$TMP/out")"
+[[ "$(state oxpulse-partner-c1 restart_count)" == 6 ]] && pass "new RestartCount stored as the next baseline" \
+                                                       || fail "baseline not advanced: $(state oxpulse-partner-c1 restart_count)"
+teardown
+
+# 50 — crash loop with the budget spent: it must alert once and stop, not restart forever
+setup; fixture oxpulse-partner-c1 unhealthy "$(( $(date +%s) - 15 ))"
+printf 'restart_count=5\nwin_start=%s\nattempts=3\nlast_attempt=%s\npending_since=0\n' \
+  "$(( $(date +%s) - 100 ))" "$(( $(date +%s) - 999 ))" > "$OXPULSE_SELFHEAL_STATE_DIR/oxpulse-partner-c1.state"
+restartcount oxpulse-partner-c1 6; run_it
+[[ "$(restarts)" == 0 ]] && pass "crash loop, budget spent → no further restart" || fail "restarted past the budget ($(restarts))"
+[[ "$(alerts)" == 1 && "$(state oxpulse-partner-c1 gave_up)" == 1 ]] && pass "crash loop, budget spent → GAVE UP alert once, gave_up=1" \
+                                                                      || fail "no given_up alert (alerts=$(alerts) gave_up=$(state oxpulse-partner-c1 gave_up))"
+restartcount oxpulse-partner-c1 7; run_it
+[[ "$(alerts)" == 1 ]] && pass "crash loop → the alert is not repeated every tick" || fail "re-alerted: $(alerts)"
+teardown
+
+# 51 — a genuinely fresh start (RestartCount unchanged) keeps the grace
+setup; fixture oxpulse-partner-c1 unhealthy "$(( $(date +%s) - 15 ))"
+seed_rc oxpulse-partner-c1 6; restartcount oxpulse-partner-c1 6; run_it
+[[ "$(restarts)" == 0 ]] && pass "RestartCount unchanged + young → still inside start grace" \
+                         || fail "grace lost for a fresh start (restarts=$(restarts))"
+teardown
+
+# 52 — first sight of a container is a baseline, not a rise (a high count on a
+#      node that never stored one must not be read as a restart this tick)
+setup; fixture oxpulse-partner-c1 unhealthy "$(( $(date +%s) - 15 ))"
+restartcount oxpulse-partner-c1 30440; run_it
+[[ "$(restarts)" == 0 && "$(state oxpulse-partner-c1 restart_count)" == 30440 ]] \
+	&& pass "no stored baseline → grace applies, baseline recorded" \
+	|| fail "first sight treated as a rise (restarts=$(restarts) stored=$(state oxpulse-partner-c1 restart_count))"
+teardown
+
+# 53 — the restarts gauge, next to container_unhealthy
+setup; fixture oxpulse-partner-c1 healthy "$OLD"; restartcount oxpulse-partner-c1 42; run_it
+grep -q 'partner_edge_container_restart_count{container="oxpulse-partner-c1"} 42' "$TMP"/textfile/*.prom 2>/dev/null \
+	&& pass "partner_edge_container_restart_count emitted" \
+	|| fail "restarts gauge missing: $(cat "$TMP"/textfile/*.prom 2>/dev/null | tr '\n' ';')"
 teardown
 
 echo ""

@@ -16,8 +16,8 @@
 #
 # Mapping (canonical):
 #   vless-reality → id: "ch1"   (probe_ch1 = xray dokodemo-door)
-#   hysteria2     → id: "ch3"   (probe_ch3 = Hysteria2)
-#   (other / unknown protocol → id: "ch0", preserved)
+#   (other / unknown protocol → id: "ch0", preserved — hysteria2 included: CH3
+#    is retired, probe_ch3 is gone, so it must NOT map to ch3)
 # Note: naive → ch5 mapping was removed; probe_ch5 does not exist in the
 # health-reporter (ch5*/ch6* arm logs "$_chan not yet wired on edge — skipping").
 #
@@ -46,19 +46,19 @@ echo "==> Case 1: channels[] merge python3 heredoc with PROTOCOL_ID_MAP is prese
 # This catches a silent revert of the map block even if cfg["channels"] logic survives.
 if grep -qE "cfg\[.channels.\]" "$INSTALL" \
    && grep -q '"vless-reality":' "$INSTALL" \
-   && grep -q '"hysteria2":' "$INSTALL"; then
-    echo "  OK: channels merge python3 block + PROTOCOL_ID_MAP dict literal found"
+   && ! grep -q '"hysteria2":' "$INSTALL"; then
+    echo "  OK: channels merge python3 block + PROTOCOL_ID_MAP dict literal found (no retired hysteria2 entry)"
 else
-    echo "  FAIL [case1]: channels merge block or PROTOCOL_ID_MAP (\"vless-reality\": / \"hysteria2\":) not found in install.sh"
+    echo "  FAIL [case1]: channels merge block or PROTOCOL_ID_MAP (\"vless-reality\": present, \"hysteria2\": absent) wrong in install.sh"
     FAIL=1
 fi
 
-# ── Case 2: id injection logic present — vless-reality/ch1 and hysteria2/ch3 ─
-echo "==> Case 2: id injection mapping (vless-reality/ch1, hysteria2/ch3) in merge"
+# ── Case 2: id injection logic present — vless-reality/ch1 ──────────────────
+echo "==> Case 2: id injection mapping (vless-reality/ch1) in merge; hysteria2/ch3 retired"
 
 # Only the two wired channels — naive was removed because probe_ch5 does not
 # exist (ch5*/ch6* dispatcher logs "$_chan not yet wired on edge — skipping").
-for pattern in "vless-reality.*ch1" "hysteria2.*ch3"; do
+for pattern in "vless-reality.*ch1"; do
     if grep -qE "$pattern" "$INSTALL"; then
         echo "  OK: mapping '$pattern' found"
     else
@@ -66,6 +66,13 @@ for pattern in "vless-reality.*ch1" "hysteria2.*ch3"; do
         FAIL=1
     fi
 done
+# Confirm the retired hysteria2→ch3 entry is absent (dead wiring guard).
+if grep -qE 'hysteria2.*ch3' "$INSTALL" 2>/dev/null; then
+    echo "  FAIL [case2]: hysteria2→ch3 mapping is present but CH3 is retired (probe_ch3 is gone); remove it"
+    FAIL=1
+else
+    echo "  OK: hysteria2→ch3 dead-wire absent"
+fi
 # Confirm naive→ch5 entry is absent (dead wiring guard).
 if grep -qE 'naive.*ch5' "$INSTALL" 2>/dev/null; then
     echo "  FAIL [case2]: naive→ch5 mapping is present but probe_ch5 does not exist; remove it"
@@ -75,7 +82,7 @@ else
 fi
 
 # ── Case 3: functional — id field appears in node-config.json after merge ────
-echo "==> Case 3: python3 merge sets id=ch1/ch3 for vless-reality/hysteria2; naive → ch0"
+echo "==> Case 3: python3 merge sets id=ch1 for vless-reality; hysteria2 (retired) and naive → ch0"
 
 # Simulate the node-config.json before channels merge
 NODE_CFG="$TMP/node-config.json"
@@ -98,7 +105,6 @@ import json, sys
 
 PROTOCOL_ID_MAP = {
     "vless-reality": "ch1",
-    "hysteria2":     "ch3",
 }
 
 cfg = json.load(open(sys.argv[1]))
@@ -118,10 +124,10 @@ CH3_ID=$(jq -r '.channels[] | select(.protocol=="hysteria2") | .id' "$NODE_CFG" 
 NAIVE_ID=$(jq -r '.channels[] | select(.protocol=="naive") | .id' "$NODE_CFG" 2>/dev/null || echo "")
 
 [[ "$CH1_ID" == "ch1" ]] || { echo "  FAIL [case3]: vless-reality id expected=ch1 got=$CH1_ID"; FAIL=1; }
-[[ "$CH3_ID" == "ch3" ]] || { echo "  FAIL [case3]: hysteria2 id expected=ch3 got=$CH3_ID"; FAIL=1; }
+[[ "$CH3_ID" == "ch0" ]] || { echo "  FAIL [case3]: hysteria2 id expected=ch0 (retired, no probe) got=$CH3_ID"; FAIL=1; }
 [[ "$NAIVE_ID" == "ch0" ]] || { echo "  FAIL [case3]: naive id expected=ch0 (no probe) got=$NAIVE_ID"; FAIL=1; }
 
-[[ $FAIL -eq 0 ]] && echo "  OK: vless-reality→ch1, hysteria2→ch3, naive→ch0 (no probe)"
+[[ $FAIL -eq 0 ]] && echo "  OK: vless-reality→ch1, hysteria2→ch0 (retired), naive→ch0 (no probe)"
 
 # ── Case 4: server already has id → preserve, don't overwrite ────────────────
 echo "==> Case 4: id from server is preserved when already set"
@@ -142,7 +148,6 @@ import json, sys
 
 PROTOCOL_ID_MAP = {
     "vless-reality": "ch1",
-    "hysteria2":     "ch3",
 }
 
 cfg = json.load(open(sys.argv[1]))
@@ -174,7 +179,6 @@ import json, sys
 
 PROTOCOL_ID_MAP = {
     "vless-reality": "ch1",
-    "hysteria2":     "ch3",
 }
 
 cfg = json.load(open(sys.argv[1]))

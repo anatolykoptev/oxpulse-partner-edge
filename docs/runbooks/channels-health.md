@@ -14,7 +14,7 @@ Channels are determined by `.channels[].id` in `/etc/oxpulse-partner-edge/node-c
 |---------|-------|-----------------|
 | `ch1` (Reality/VLESS) | `curl` to `http://127.0.0.1:9080/canary/tunnel` (Caddy → xray-client:3080 → tunnel → backend `/api/health/live`) | `channel_rtt_ms` (HTTP RTT), `channel_handshake_ok` |
 | `ch2` (AmneziaWG) | `ping -c 1 -W 2 ${OXPULSE_AWG_MOTHERLY_IP}` | `channel_handshake_ok` (no RTT — awg uses age-based freshness) |
-| `ch3` (Hysteria2) | `nc -z 127.0.0.1 ${hy2-port}` | `channel_rtt_ms` (connect time; no `channel_handshake_ok` — UDP tunnel has no handshake concept) |
+| `ch3` (Hysteria2) | **Retired** — not probed; an id `ch3` still listed in node-config is skipped as unknown | — |
 | `ch4/ch5/ch6` | Not wired — skipped with log message | — |
 
 ## Where to view reports on central
@@ -77,12 +77,9 @@ sudo oxpulse-channels-health-report --once
    sudo awg show   # check handshake age
    ```
 
-3. **ch3 down** — Hysteria2 TCP forwarder not listening:
-   ```bash
-   ss -ltnH | grep 18443
-   docker ps | grep oxpulse-partner-hy2
-   docker logs oxpulse-partner-hy2 --tail 50
-   ```
+3. **ch3** — retired. There is nothing to fix: a `oxpulse-partner-hysteria2`
+   container on a node is a leftover and is removed by the next upgrade or
+   refresh cycle (`retire_hysteria2_ch3`).
 
 4. **Auth error (HTTP 401/403)** — service token revoked or mismatched:
    ```bash

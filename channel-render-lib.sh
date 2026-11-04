@@ -387,76 +387,132 @@ except Exception:
     fi
 }
 
-# ── hysteria2 (Phase 1.7 CH3) ────────────────────────────────────────────
-#
-# Render the hysteria2-client.yaml from template via simple sed substitution.
-# Pattern mirrors _render_xray_to() at top of this file.
-
 # Escape sed replacement metacharacters (\, &, |, ") for sed replacement strings.
-# Single source used by all render functions in this module.
+# Single source used by the render functions in this module.
 _esc() { printf '%s' "$1" | sed -e 's/[\\&|"]/\\&/g'; }
 
-# Internal — render to a specific output path. Used by the test runner.
-_render_hysteria2_to() {
-    local tpl="$1" out="$2"
-    local server="$3" auth="$4" obfs="$5" listen="$6" backend="$7"
-    sed \
-        -e "s|{{HY2_SERVER}}|$(_esc "$server")|g" \
-        -e "s|{{HY2_AUTH_PASS}}|$(_esc "$auth")|g" \
-        -e "s|{{HY2_OBFS_PASS}}|$(_esc "$obfs")|g" \
-        -e "s|{{HY2_LOCAL_LISTEN}}|$(_esc "$listen")|g" \
-        -e "s|{{HY2_REMOTE_BACKEND}}|$(_esc "$backend")|g" \
-        "$tpl" > "$out"
-}
+# ── hysteria2 (CH3) — RETIRED ────────────────────────────────────────────
+#
+# CH3 was a control-plane-only fallback tunnel (QUIC to a hysteria2 server on
+# the central host). Its server was stopped on purpose on 2026-10-09 after a
+# secrets incident; the edges kept restarting a client that could not connect
+# (rvpn: 30,440 restarts). The edge now decides on its own that CH3 is gone, so
+# the presence or absence of `hysteria2_server` in node-config does not matter.
+#
+# retire_hysteria2_ch3 — idempotent teardown, called from upgrade.sh and from
+# every refresh cycle. It touches ONLY the hysteria2 client: its container, its
+# rendered config + sha, the `ch3` compose profile, the channels-status line and
+# the two CH3-only host scripts.
+# A node that never had CH3 is left byte-identical (no log line either).
+#
+# Never fails the caller (both run under `set -e`): a step that cannot complete
+# warns and the next cycle retries.
+#
+# Order is load-bearing: the config file is deleted only once the container is
+# verifiably gone. A leftover container whose bind-mount source has vanished is
+# restarted by docker, which creates a DIRECTORY at the missing path.
+retire_hysteria2_ch3() {
+    local etc="${PREFIX_ETC:-/etc/oxpulse-partner-edge}" lib="${PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
+    local docker="${DOCKER_BIN:-docker}" ctr="oxpulse-partner-hysteria2"
+    local env_file="$etc/.env" chs="$lib/channels-status.env"
+    local sbin="${PREFIX_SBIN:-/usr/local/sbin}"
+    local have_ctr=0 have_files=0 have_profile=0 f
 
-# Public — full render-and-install pipeline.
-# Sources hy2 credentials from $HY2_AUTH_PASS, $HY2_OBFS_PASS env vars
-# (populated by install.sh from /api/partner/hy2-credentials response).
-# Writes to /etc/oxpulse-partner-edge/hysteria2-client.yaml with mode 600.
-re_render_hysteria2() {
-    local tpl="${OXPULSE_REPO_DIR:-/usr/local/share/oxpulse-partner-edge}/hysteria2-client.yaml.tpl"
-    # HY2_OUTPUT_PATH: optional override for tests (default: /etc/oxpulse-partner-edge/hysteria2-client.yaml)
-    local out="${HY2_OUTPUT_PATH:-/etc/oxpulse-partner-edge/hysteria2-client.yaml}"
-    local backup
-    backup="${out}.bak.$(date +%s)"
-    # Resolution chain: HY2_SERVER (direct override) → HYSTERIA2_SERVER (what
-    # the backend returns and install.sh/hydrate.sh carry) → OXPULSE_HY2_SERVER
-    # (fleet default from config/defaults.conf) → hysteria2_server out of
-    # node-config.json. No fabricated fallback — a missing endpoint is a
-    # configuration error, not a silent TEST-NET address that routes nowhere.
-    #
-    # The node-config step is what makes upgrade.sh --templates-only work:
-    # HYSTERIA2_SERVER appears nowhere in that script, and refetch_node_config
-    # writes node-config.json to disk without exporting any of its fields, so
-    # without this the refresh path can only fail. Resolving it here rather than
-    # at each call site keeps one place that knows where the endpoint lives.
-    local server="${HY2_SERVER:-${HYSTERIA2_SERVER:-${OXPULSE_HY2_SERVER:-}}}"
-    if [[ -z "$server" && -r "${NODE_CFG:-}" ]]; then
-        server=$(jq -r '.hysteria2_server // empty' "$NODE_CFG" 2>/dev/null || true)
-    fi
-    local listen="${HY2_LOCAL_LISTEN:-${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}}"
-    local backend="${HY2_REMOTE_BACKEND:-${OXPULSE_HY2_REMOTE_BACKEND:-127.0.0.1:8907}}"
+    # 0 = present, 1 = absent, 2 = docker is installed but cannot answer (dockerd
+    # restarting). 2 must never read as "absent": the container may be alive, and
+    # deleting its bind-mount source under it makes docker create a directory there.
+    # Capture, then match: `docker ps | grep -q` under pipefail reports failure
+    # when grep exits on the first hit and docker takes SIGPIPE.
+    _ch3_ctr_present() {
+        local names rc=0
+        command -v "$docker" >/dev/null 2>&1 || return 1
+        names=$("$docker" ps -a --format '{{.Names}}' 2>/dev/null) || rc=$?
+        (( rc == 0 )) || return 2
+        grep -qx "$ctr" <<< "$names"
+    }
 
-    if [[ ! -f "$tpl" ]]; then
-        echo "ERR re_render_hysteria2: template not found: $tpl" >&2
-        return 1
+    local present=0
+    _ch3_ctr_present || present=$?
+    if (( present == 2 )); then
+        warn "retire_hysteria2_ch3: docker is not answering — touching nothing, will retry"
+        unset -f _ch3_ctr_present
+        return 0
     fi
-    if [[ -z "${HY2_AUTH_PASS:-}" || -z "${HY2_OBFS_PASS:-}" ]]; then
-        echo "ERR re_render_hysteria2: HY2_AUTH_PASS or HY2_OBFS_PASS empty — call install.sh hy2-creds fetch first" >&2
-        return 1
+    (( present == 0 )) && have_ctr=1
+    # The rendered yaml and its backups (re_render_* left hysteria2-client.yaml.bak.<epoch>
+    # copies, which carry the same credentials), the restart-gate sha, and the two
+    # host scripts that could bring CH3 back (the activation helper and the
+    # first-boot render lib) — no release delivers them any more.
+    for f in "$etc"/hysteria2-client.yaml* "$lib/hysteria2-config.sha" \
+             "$sbin/oxpulse-partner-edge-enable-hy2" "$sbin/hydrate-hy2.sh"; do
+        [[ -e "$f" ]] && { have_files=1; break; }
+    done
+    if [[ -f "$env_file" ]] && awk -F= '$1=="COMPOSE_PROFILES"{ n=split($2,a,","); for(i=1;i<=n;i++) if(a[i]=="ch3") f=1 } END{exit !f}' "$env_file"; then
+        have_profile=1
     fi
-    if [[ -z "$server" ]]; then
-        echo "ERR re_render_hysteria2: no hy2 server resolved — set HY2_SERVER, HYSTERIA2_SERVER or OXPULSE_HY2_SERVER, or provide hysteria2_server in $NODE_CFG" >&2
-        return 1
+    if (( ! have_ctr && ! have_files && ! have_profile )); then
+        unset -f _ch3_ctr_present
+        return 0
     fi
 
-    # Backup with mode-preserved copy (install -m 600 preserves secret perms, cp does not).
-    [[ -f "$out" ]] && install -m 600 "$out" "$backup"
+    # 1. Container. Compose first, through the node's own project dir: `cd` there
+    #    so .env's COMPOSE_FILE (rvpn's docker-compose.override.yml) is honoured.
+    #    On a node whose compose no longer defines the service that fails, so a
+    #    plain `docker rm -f` by name is the fallback — by name, never a pattern.
+    if (( have_ctr )); then
+        ( cd "$etc" 2>/dev/null && "$docker" compose --profile ch3 rm -sf hysteria2-client ) >/dev/null 2>&1 || true
+        present=0; _ch3_ctr_present || present=$?
+        if (( present == 0 )); then
+            "$docker" rm -f "$ctr" >/dev/null 2>&1 || true
+            present=0; _ch3_ctr_present || present=$?
+        fi
+        if (( present != 1 )); then
+            warn "retire_hysteria2_ch3: could not confirm container $ctr is gone — leaving its config in place, will retry"
+            unset -f _ch3_ctr_present
+            return 0
+        fi
+    fi
+    unset -f _ch3_ctr_present
 
-    # Atomic write: render into a 0600 tmp in same dir, then rename.
-    local tmp="${out}.tmp.$$"
-    ( umask 077 && _render_hysteria2_to "$tpl" "$tmp" \
-        "$server" "$HY2_AUTH_PASS" "$HY2_OBFS_PASS" "$listen" "$backend" )
-    mv -f "$tmp" "$out"
-    log "re_render_hysteria2: wrote $out (backup $backup)"
+    # 2. Config + sha (yaml, .bak.*, .tmp.* — all carry the channel credentials)
+    #    and the helper scripts.
+    for f in "$etc"/hysteria2-client.yaml* "$lib/hysteria2-config.sha" \
+             "$sbin/oxpulse-partner-edge-enable-hy2" "$sbin/hydrate-hy2.sh"; do
+        # A directory at the yaml path is what docker leaves behind when it started
+        # the container with the file missing; remove exactly that path.
+        if [[ -d "$f" && ! -L "$f" ]]; then rm -r -- "$f"; continue; fi
+        [[ -e "$f" ]] && rm -f "$f"
+    done
+
+    # 3. `ch3` out of COMPOSE_PROFILES, keeping every other line (COMPOSE_FILE!).
+    if (( have_profile )); then
+        local tmp
+        if tmp=$(mktemp "${env_file}.XXXXXX" 2>/dev/null); then
+            if awk -F= '
+                $1=="COMPOSE_PROFILES" {
+                    n=split(substr($0, index($0,"=")+1), a, ","); out=""
+                    for(i=1;i<=n;i++) if(a[i]!="ch3" && a[i]!="") out = out (out==""?"":",") a[i]
+                    if(out!="") print "COMPOSE_PROFILES=" out
+                    next }
+                { print }' "$env_file" > "$tmp"; then
+                chmod --reference="$env_file" "$tmp" 2>/dev/null || chmod 0644 "$tmp" 2>/dev/null || true
+                mv -f "$tmp" "$env_file" || { rm -f "$tmp"; warn "retire_hysteria2_ch3: could not rewrite $env_file"; }
+            else
+                rm -f "$tmp"; warn "retire_hysteria2_ch3: could not drop ch3 from $env_file"
+            fi
+        fi
+    fi
+
+    # 4. channels-status.env: hysteria2=retired (replace or append, atomically).
+    if [[ -f "$chs" ]]; then
+        local ctmp
+        if ctmp=$(mktemp "$lib/.channels-status-XXXXXX.tmp" 2>/dev/null); then
+            { grep -v '^hysteria2=' "$chs" || true; echo 'hysteria2=retired'; } > "$ctmp"
+            chmod --reference="$chs" "$ctmp" 2>/dev/null || chmod 0640 "$ctmp" 2>/dev/null || true
+            mv -f "$ctmp" "$chs" || { rm -f "$ctmp"; warn "retire_hysteria2_ch3: could not update $chs"; }
+        fi
+    fi
+
+    log "CH3 (hysteria2) retired: container_removed=${have_ctr} config_removed=${have_files} profile_dropped=${have_profile}"
+    return 0
 }

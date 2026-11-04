@@ -13,7 +13,7 @@
 #   5. lib/reconcile.sh primitives: atomic_swap, mark_restart dedup.
 #
 # Scope: Caddyfile.tpl only (Phase 1; other surfaces are Phase 4).
-# channel-render-lib.sh-managed templates (hysteria2, xray, coturn) are tested
+# channel-render-lib.sh-managed templates (xray, coturn) are tested
 # by their own existing tests.
 #
 set -euo pipefail
@@ -98,15 +98,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test 3: the 6 expected Caddyfile.tpl placeholders are present and covered
+# Test 3: the 4 expected Caddyfile.tpl placeholders are present and covered
 # ---------------------------------------------------------------------------
-echo "==> Test 3: Caddyfile.tpl 6-placeholder presence + coverage"
+echo "==> Test 3: Caddyfile.tpl 4-placeholder presence + coverage"
 EXPECTED_CADDY_VARS=(
     "PARTNER_DOMAIN"
     "TURNS_SUBDOMAIN"
     "AWG_MOTHERLY_IP"
-    "HY2_FALLBACK_HOST"
-    "HY2_FALLBACK_PORT"
     "NAIVE_SOCKS_PORT"
 )
 caddy_issues=()
@@ -118,10 +116,16 @@ for var in "${EXPECTED_CADDY_VARS[@]}"; do
         caddy_issues+=("$var not exported in install.sh/upgrade.sh/lib/reconcile.sh")
     fi
 done
+# CH3 retired: the hysteria2 fallback upstream (and its two placeholders) are gone.
+for var in HY2_FALLBACK_HOST HY2_FALLBACK_PORT; do
+    if grep -qF "{{${var}}}" "$CADDY_TPL" 2>/dev/null; then
+        caddy_issues+=("retired {{${var}}} is still in Caddyfile.tpl")
+    fi
+done
 if [[ "${#caddy_issues[@]}" -eq 0 ]]; then
-    pass "all 6 Caddyfile.tpl placeholders present and exported"
+    pass "all 4 Caddyfile.tpl placeholders present and exported"
 else
-    fail "Caddyfile.tpl 6-placeholder coverage: ${caddy_issues[*]}"
+    fail "Caddyfile.tpl 4-placeholder coverage: ${caddy_issues[*]}"
 fi
 
 # ---------------------------------------------------------------------------

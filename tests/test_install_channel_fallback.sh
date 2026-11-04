@@ -80,21 +80,17 @@ pass "install.sh uses render_channel_soft for naive channel"
 # Case 5 — behavioral: all channels fail → install dies with diagnostic
 # MAJOR 6 fix: was presence-only grep; now exercises real control flow.
 # ---------------------------------------------------------------------------
-# Stub render_channel_soft to always fail; stub re_render_hysteria2 to fail.
+# Stub render_channel_soft to always fail.
 # Extract the guard block and verify it calls die when all channels fail.
 # We cannot source install.sh top-to-bottom (it runs real installs), so we
 # exercise the CHANNELS_FAILED / _CHANNELS_TOTAL logic in isolation.
 (
     set +e
     # Reproduce the guard logic with all channels failed.
-    CHANNELS_FAILED=("xray" "naive" "hysteria2")
-    _hy2_status="failed_at_start"
+    CHANNELS_FAILED=("xray" "naive")
     NAIVE_SERVER="n.example.com"
-    HYSTERIA2_SERVER="h.example.com"
     _CHANNELS_TOTAL=1
     [[ -n "${NAIVE_SERVER:-}" ]] && _CHANNELS_TOTAL=$((_CHANNELS_TOTAL + 1))
-    [[ -n "${HYSTERIA2_SERVER:-}" ]] && _CHANNELS_TOTAL=$((_CHANNELS_TOTAL + 1))
-    [[ "${_hy2_status}" == "failed_at_start" ]] && CHANNELS_FAILED+=("hysteria2_dup_sentinel_ignored") || true
     CHANNELS_FAILED_COUNT=${#CHANNELS_FAILED[@]}
     # Guard: die when count >= total
     if [[ $CHANNELS_FAILED_COUNT -ge $_CHANNELS_TOTAL && $_CHANNELS_TOTAL -gt 0 ]]; then
@@ -125,13 +121,13 @@ pass "healthcheck.sh reads channels-status.env"
 T8=$(mktemp -d)
 cat > "$T8/channels-status.env" <<'EOF'
 xray=failed_at_render
-hysteria2=active
+awg=active
 naive=skipped
 EOF
 
 # Source just the per-channel healthcheck logic by running healthcheck.sh
 # with the test state file and --local flag (skips external probes).
-# We check that when hysteria2=active the exit code is 0 (healthy/degraded).
+# We check that when awg=active the exit code is 0 (healthy/degraded).
 # Full integration test requires docker; here we unit-test the aggregate logic.
 grep -qE 'degraded|overall.*healthy|count.*active' "$REPO_ROOT/healthcheck.sh" \
     || fail "healthcheck.sh missing degraded/overall aggregate logic"
@@ -169,29 +165,30 @@ grep -qE '\[.*FORCE_KEYGEN.*\].*--rotate|FORCE_KEYGEN.*--rotate' "$REPO_ROOT/ins
 pass "Bug 10: --force-keygen/--rotate-identity sets FORCE_KEYGEN=1, opec --rotate wired"
 
 # ---------------------------------------------------------------------------
-# BLOCKER 2 — _CHANNELS_TOTAL includes hysteria2 when HYSTERIA2_SERVER is set
+# BLOCKER 2 — _CHANNELS_TOTAL counts the configured bypass channels (xray + naive).
+# hysteria2 (CH3) is retired and must NOT be counted: a total inflated by a
+# channel that is never rendered would hide an all-channels-failed install.
 # ---------------------------------------------------------------------------
-grep -qE 'HYSTERIA2_SERVER.*_CHANNELS_TOTAL|_CHANNELS_TOTAL.*HYSTERIA2_SERVER' "$REPO_ROOT/install.sh" \
-    || fail "BLOCKER 2: install.sh does not count hysteria2 in _CHANNELS_TOTAL"
-pass "BLOCKER 2: hysteria2 counted in _CHANNELS_TOTAL when HYSTERIA2_SERVER set"
+grep -qE '_CHANNELS_TOTAL.*NAIVE_SERVER|NAIVE_SERVER.*_CHANNELS_TOTAL' "$REPO_ROOT/install.sh" \
+    || fail "BLOCKER 2: install.sh does not count naive in _CHANNELS_TOTAL"
+! grep -qE 'HYSTERIA2_SERVER.*_CHANNELS_TOTAL|_CHANNELS_TOTAL.*HYSTERIA2_SERVER' "$REPO_ROOT/install.sh" \
+    || fail "BLOCKER 2: install.sh still counts the retired hysteria2 channel in _CHANNELS_TOTAL"
+pass "BLOCKER 2: naive counted in _CHANNELS_TOTAL, retired hysteria2 is not"
 
-# Verify the guard doesn't die when hy2 succeeds but xray+naive both fail.
+# Verify the guard doesn't die when naive succeeds but xray fails.
 (
     set +e
-    CHANNELS_FAILED=("xray" "naive")
-    _hy2_status="active"   # hy2 succeeded
+    CHANNELS_FAILED=("xray")
     NAIVE_SERVER="n.example.com"
-    HYSTERIA2_SERVER="h.example.com"
     _CHANNELS_TOTAL=1
     [[ -n "${NAIVE_SERVER:-}" ]]    && _CHANNELS_TOTAL=$((_CHANNELS_TOTAL + 1))
-    [[ -n "${HYSTERIA2_SERVER:-}" ]] && _CHANNELS_TOTAL=$((_CHANNELS_TOTAL + 1))
-    # hy2 active — do NOT add to CHANNELS_FAILED
+    # naive rendered — do NOT add to CHANNELS_FAILED
     CHANNELS_FAILED_COUNT=${#CHANNELS_FAILED[@]}
     [[ $CHANNELS_FAILED_COUNT -ge $_CHANNELS_TOTAL ]] && exit 99
     exit 0
 )
-[[ $? -eq 0 ]] || fail "BLOCKER 2 behavioral: guard fired even though hy2 succeeded (xray+naive failed)"
-pass "BLOCKER 2 behavioral: install continues when hy2 active despite xray+naive failure"
+[[ $? -eq 0 ]] || fail "BLOCKER 2 behavioral: guard fired even though naive succeeded (xray failed)"
+pass "BLOCKER 2 behavioral: install continues when naive renders despite xray failure"
 
 # ---------------------------------------------------------------------------
 # BLOCKER 3 — channels-status.env write is atomic (tmp+mv, not direct redirect)

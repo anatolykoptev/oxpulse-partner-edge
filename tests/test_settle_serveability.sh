@@ -3,8 +3,9 @@
 #
 # Covers the multi-homed-box false-rollback fix (P3 of the channel-honest arc):
 #   PART A: oxpulse-channels-health-report.sh --serveability emits parseable
-#           chN=OK|DOWN lines for provisioned ch1/ch2/ch3 by REUSING the honest
-#           end-to-end probe_ch1/ch2/ch3 (no POST, no peer-probe, no ch4).
+#           chN=OK|DOWN lines for provisioned ch1/ch2 by REUSING the honest
+#           end-to-end probe_ch1/ch2 (no POST, no peer-probe, no ch4). The
+#           retired ch3 (hysteria2) is never probed or reported.
 #   PART B: upgrade.sh's _settle_serveability_adjudicate pure diff logic —
 #           all-regressed -> LOST, some -> SERVING_PARTIAL, none -> SERVING_FULL,
 #           no baseline serving -> INDETERMINATE. OR-quorum shape mirrors the
@@ -15,7 +16,7 @@
 #           or when no serve data is available (INDETERMINATE -> current behavior).
 #
 # Live-verified motivating case (edge-b, 2026-07): xray ТСПУ-blocked (canary
-# 502) while AmneziaWG + Hysteria2 served real users at 200 via Caddy's
+# 502) while AmneziaWG (and the since-retired Hysteria2) served real users via Caddy's
 # multi-homed tunnel_upstream — the xray-only canary alone must NOT roll back.
 #
 # Plain bash, no bats (repo convention). Negation: `run; [ "$status" -ne 0 ]`.
@@ -38,7 +39,7 @@ echo
 
 # ── PATH stub: real coreutils + jq, a URL-branching curl stub ─────────────────
 # The curl stub returns a controllable %{http_code} keyed on the dialled URL so
-# a test can simulate "xray blocked, awg+hy2 serving" without any containers.
+# a test can simulate "xray blocked, awg serving" without any containers.
 make_bin() {
     local dir="$1"
     local cmd loc
@@ -57,7 +58,7 @@ for a in "$@"; do url="$a"; done
 case "$url" in
     *canary/tunnel*)   printf '502' ;;   # ch1 xray — ТСПУ-blocked
     *10.9.0.2:8907*)   printf '200' ;;   # ch2 AmneziaWG — serving
-    *127.0.0.1:18443*) printf '200' ;;   # ch3 Hysteria2 — serving
+    *127.0.0.1:18443*) printf '200' ;;   # retired ch3 Hysteria2 — answers, but must never be asked
     *)                 printf '000' ;;
 esac
 exit 0
@@ -89,7 +90,6 @@ OUT_A=$(PATH="$TA:/usr/bin:/bin" \
     OXPULSE_CH1_CANARY_URL="http://127.0.0.1:9080/canary/tunnel" \
     OXPULSE_AWG_MOTHERLY_IP="10.9.0.2" \
     OXPULSE_BACKEND_PORT="8907" \
-    OXPULSE_HY2_FALLBACK_PORT="18443" \
     bash "$HEALTH_REPORT" --serveability 2>/dev/null)
 EXIT_A=$?
 set -e
@@ -111,10 +111,13 @@ if printf '%s\n' "$SERVE_A" | grep -x 'ch2=OK' >/dev/null; then
 else
     bad "A2: expected 'ch2=OK'; got: $SERVE_A"
 fi
-if printf '%s\n' "$SERVE_A" | grep -x 'ch3=OK' >/dev/null; then
-    ok "A3: ch3 (hy2 200) reported OK"
+# ch3 is listed in node-config but retired: it must not be probed or reported,
+# even though the stub would answer 200 on its old port (a retired channel
+# reported OK would count as a serving channel in the settle quorum).
+if ! grep -q '^ch3=' <<< "$SERVE_A"; then
+    ok "A3: retired ch3 is neither probed nor reported"
 else
-    bad "A3: expected 'ch3=OK'; got: $SERVE_A"
+    bad "A3: retired ch3 appeared in --serveability output: $SERVE_A"
 fi
 # Contract: pure chN=OK|DOWN lines (no JSON/POST noise, no ch4).
 NOISE_A=$(printf '%s\n' "$OUT_A" | grep -vE '^ch[0-9]+=(OK|DOWN)$' | grep -vE '^$' || true)

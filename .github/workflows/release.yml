@@ -506,11 +506,6 @@ jobs:
           # upgrade.sh _HOST_SCRIPT_SBIN_FILES (verified against SHA256SUMS),
           # same delivery pattern as surgical-restart-lib.sh directly above.
           cp lib/xprb-refresh-lib.sh           xprb-refresh-lib.sh
-          # Hy2 channel render lib — sourced by oxpulse-partner-edge-hydrate
-          # (first-boot hy2 render), synced to existing boxes via upgrade.sh
-          # _HOST_SCRIPT_SBIN_FILES (verified against SHA256SUMS), same delivery
-          # pattern as xprb-refresh-lib.sh directly above.
-          cp lib/hydrate-hy2.sh                hydrate-hy2.sh
           # NOTE: reconcile.sh is intentionally NOT staged as a repo-root release
           # asset. upgrade.sh's _source_lib fetches it from $REPO_RAW/lib/reconcile.sh
           # and verifies it against lib-checksums.txt (the lib/*.sh home manifest,
@@ -595,7 +590,6 @@ jobs:
             metric-sink-lib.sh \
             surgical-restart-lib.sh \
             xprb-refresh-lib.sh \
-            hydrate-hy2.sh \
           ) > lib/lib-checksums.txt
           cp lib/lib-checksums.txt        lib-checksums.txt
           chmod +x partner-cli-amd64 partner-cli-arm64
@@ -633,7 +627,6 @@ jobs:
             metric-sink-lib.sh \
             surgical-restart-lib.sh \
             xprb-refresh-lib.sh \
-            hydrate-hy2.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
@@ -661,7 +654,6 @@ jobs:
             oxpulse-partner-edge-ru-subnets-update.service \
             oxpulse-partner-edge-ru-subnets-update.timer \
             oxpulse-awg-params-agent.service \
-            oxpulse-partner-edge-enable-hy2 \
             partner-cli-amd64 \
             partner-cli-arm64 \
             opec-amd64 \
@@ -712,7 +704,6 @@ jobs:
             metric-sink-lib.sh \
             surgical-restart-lib.sh \
             xprb-refresh-lib.sh \
-            hydrate-hy2.sh \
             oxpulse-xray-update.sh \
             oxpulse-geoip-refresh.sh \
             oxpulse-partner-edge.service \
@@ -747,7 +738,6 @@ jobs:
             oxpulse-partner-edge-split-routing.service \
             oxpulse-partner-edge-ru-subnets-update.service \
             oxpulse-partner-edge-ru-subnets-update.timer \
-            oxpulse-partner-edge-enable-hy2 \
             SHA256SUMS \
             --clobber
 
