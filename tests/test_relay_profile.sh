@@ -34,15 +34,26 @@ S1="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 S2="BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
 
 # Runs relay_assert_no_registration_material in a subshell against an etc dir.
+# Hermetic: `env -i` so a forbidden variable exported in the runner (TURN_SECRET,
+# REALITY_*) cannot leak in, and PREFIX_LIB defaults to a path that does not exist so
+# the gate never sees the host's real /var/lib/oxpulse-partner-edge (any host that ever
+# ran a full edge install has it, even empty). A case that exercises that dir passes
+# its own PREFIX_LIB, which wins because it comes later on the env command line.
 assert_clean() { # <etc-dir> [VAR=VALUE ...]
 	local etc="$1"; shift
-	( env "$@" PREFIX_ETC="$etc" bash -c '
+	( env -i PATH="$PATH" PREFIX_LIB="${etc}.no-lib" "$@" PREFIX_ETC="$etc" bash -c '
 		log(){ :; }; warn(){ :; }; die(){ echo "$*" >&2; exit 1; }
 		. "$1"; relay_assert_no_registration_material' _ "$R/relay-lib.sh" )
 }
 
 mkdir -p "$T/clean"
 check "clean host passes the registration-material gate" assert_clean "$T/clean"
+# The seam must not change what the gate reads by DEFAULT: with no PREFIX_* set, the
+# real full-edge paths are the ones inspected (a typo here would make the gate vacuous
+# in production while every PREFIX_-driven case above stays green).
+defaults="$(env -i PATH="$PATH" bash -c '. "$1"; printf "%s %s" "$RELAY_PREFIX_ETC" "$RELAY_PREFIX_LIB"' _ "$R/relay-lib.sh")"
+[[ "$defaults" == "/etc/oxpulse-partner-edge /var/lib/oxpulse-partner-edge" ]] \
+	&& pass "gate defaults to the real /etc and /var/lib paths" || fail "gate defaults to the real /etc and /var/lib paths (got: $defaults)"
 for v in SIGNALING_SFU_SECRET TURN_PARTNER_LEGACY TURN_CENTRAL_SECRET ROOM_HMAC_KEY REALITY_PRIVATE_KEY REALITY_SHORT_ID OXPULSE_SERVICE_TOKEN; do
 	refuses "fails closed: env $v" assert_clean "$T/clean" "$v=x"
 done

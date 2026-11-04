@@ -370,6 +370,41 @@ rc=$(_watchb "$TC/base")
 [[ "$rc" != "0" ]] && grep -q 'ignores oxpulse-partner-hysteria2' "$TC/warns" && ! grep -q 'ignores oxpulse-partner-xray' "$TC/warns" \
     && ok "T20: v1 baseline still honoured (hy2 ignored, starting xray watched)" || bad "T20: v1 baseline mishandled (rc=$rc)"
 
+# T21 - an inspect that fails (container vanished between `ps -a` and `inspect`) must leave
+# NO line for that name, so the watch keeps it strict. Writing `unknown unknown 0` made it
+# pre-broken = silently ignored.
+# Mutation: restore `[[ -z "$_line" ]] && _line="unknown unknown 0"` in
+# _settle_docker_baseline_capture (upgrade.sh) -> T21 goes RED.
+_reset
+printf 'oxpulse-partner-xray\noxpulse-partner-gone\n' > "$TC/names"
+printf 'running healthy 0\n' > "$TC/state_oxpulse-partner-xray"
+bash -c "source '$PRE'; _settle_docker_baseline_capture '$TC/cap'" >/dev/null 2>&1
+if grep -qx 'oxpulse-partner-xray running healthy 0' "$TC/cap" && ! grep -q 'oxpulse-partner-gone' "$TC/cap"; then
+    ok "T21: failed inspect omits the line (name stays watched)"
+else
+    bad "T21: failed inspect left a baseline line: $(tr '\n' '|' < "$TC/cap")"
+fi
+printf 'oxpulse-partner-gone\n' > "$TC/names"; printf 'unhealthy\n' > "$TC/health_oxpulse-partner-gone"
+rc=$(_watchb "$TC/cap")
+[[ "$rc" != "0" ]] && ok "T21b: container with no baseline line is watched (wedge fails the watch)" || bad "T21b: vanished-at-capture container was ignored"
+
+# T22 - the flapper rule needs RECENT restarts. RestartCount 5, last started 1 h ago =
+# stable now -> watched; same count started 20 s ago = live crash-looper -> ignored.
+# A line without the AGE column keeps the old count-only rule.
+# Mutation: drop `|| !fresh` from _settle_baseline_prebroken (upgrade.sh) -> T22 goes RED.
+_pb() { printf 'oxpulse-partner-coturn running starting %s\n' "$1" | _mkbase
+        bash -c "source '$PRE'; _settle_baseline_prebroken '$TC/base' oxpulse-partner-coturn" && echo ignored || echo watched; }
+[[ "$(_pb '5 3600')" == watched && "$(_pb '5 20')" == ignored && "$(_pb '5')" == ignored && "$(_pb '1 20')" == watched ]] \
+    && ok "T22: flapper needs RestartCount>=3 AND a recent start (stable-for-1h watched, 20s ignored, no AGE = legacy)" \
+    || bad "T22: recency rule wrong (old=$(_pb '5 3600') new=$(_pb '5 20') legacy=$(_pb '5') few=$(_pb '1 20'))"
+# T22b - the capture itself emits AGE from State.StartedAt.
+_reset
+printf 'oxpulse-partner-coturn\n' > "$TC/names"
+printf 'running starting 5 %s\n' "$(date -u -d '2 hours ago' +%FT%T.123456789Z)" > "$TC/state_oxpulse-partner-coturn"
+bash -c "source '$PRE'; _settle_docker_baseline_capture '$TC/cap'" >/dev/null 2>&1
+age=$(awk '$1=="oxpulse-partner-coturn"{print $5}' "$TC/cap")
+[[ "$age" =~ ^[0-9]+$ && "$age" -ge 7190 && "$age" -le 7300 ]] && ok "T22b: capture records AGE seconds from StartedAt (${age}s)" || bad "T22b: AGE column wrong ('$age'): $(tr '\n' '|' < "$TC/cap")"
+
 # T17 - wiring: every settle_healthcheck_with_retry CALL SITE passes a container baseline
 # captured before the change (plain, --with-templates, render gate). A site that does not
 # silently reverts to the strict watch and re-opens the hy2 false-positive rollback.
