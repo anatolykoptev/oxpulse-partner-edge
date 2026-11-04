@@ -231,7 +231,7 @@ _flush_gauges() {
 
 # --- state --------------------------------------------------------------------
 # One file per SUBJECT, key=value. Keys: win_start, attempts, last_attempt,
-# pending_since, gave_up. Container subjects keep their bare v1 filename so the
+# pending_since, gave_up, restart_count (last RestartCount seen, for the crash-loop check). Container subjects keep their bare v1 filename so the
 # budget already accrued on the fleet survives this upgrade; the newer kinds are
 # namespaced so `unit:x` and `enable:x` cannot share one budget.
 _state_file() { echo "$STATE_DIR/${1//[^A-Za-z0-9._@-]/_}.state"; }
@@ -314,6 +314,10 @@ _managed_containers() {   # [ps-extra-args...]
 _has_healthcheck() { [[ -n "$(docker inspect -f '{{if .State.Health}}y{{end}}' "$1" 2>/dev/null)" ]]; }
 _health()          { docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null; }
 _started_epoch()   { date -d "$(docker inspect -f '{{.State.StartedAt}}' "$1" 2>/dev/null)" +%s 2>/dev/null || echo 0; }
+# RestartCount is bumped by the daemon's restart policy only (a manual
+# `docker restart`, which is what this script issues, does not move it), so a
+# rise between two ticks means the container died on its own.
+_restart_count()   { docker inspect -f '{{.RestartCount}}' "$1" 2>/dev/null; }
 _finished_epoch()  { date -d "$(docker inspect -f '{{.State.FinishedAt}}' "$1" 2>/dev/null)" +%s 2>/dev/null || echo 0; }
 _oneoff()          { [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.oneoff"}}' "$1" 2>/dev/null)" == True ]]; }
 
@@ -458,6 +462,23 @@ _evaluate_container() {   # container now
 	_gauge partner_edge_container_unhealthy "$lbl" "$([[ "$status" == unhealthy ]] && echo 1 || echo 0)"
 	_gauge partner_edge_container_stopped "$lbl" 0
 
+	# --- crash-loop signal ------------------------------------------------------
+	# State.StartedAt resets on every restart, so a container that dies and is
+	# restarted by docker every ~65 s is never older than START_GRACE at a tick and
+	# the grace below would hide it forever (rvpn: 30,440 restarts over 3 weeks, no
+	# budget spent, no alert). A rise in RestartCount since the last tick is the
+	# evidence the grace cannot erase: it switches the grace off for this tick.
+	# The first sight of a container (no stored count) is a baseline, not a rise.
+	# Recorded on every tick, before any early return, so the baseline never lags.
+	local rc prev rose=0
+	rc="$(_restart_count "$c")"
+	if [[ "$rc" =~ ^[0-9]+$ ]]; then
+		_gauge partner_edge_container_restarts_total "$lbl" "$rc"
+		prev="$(_get "$c" restart_count "")"
+		[[ "$prev" =~ ^[0-9]+$ ]] && (( rc > prev )) && rose=1
+		[[ "$prev" == "$rc" ]] || _set "$c" restart_count "$rc"
+	fi
+
 	# --- resolve any attempt still awaiting a verdict --------------------------
 	# Verification is asynchronous on purpose. After a restart the container sits
 	# in `starting` for start_period + interval*retries — measured at ~2 min on
@@ -485,7 +506,9 @@ _evaluate_container() {   # container now
 
 	# --- guards ---------------------------------------------------------------
 	local started; started="$(_started_epoch "$c")"
-	if (( started > 0 && t - started < START_GRACE )); then
+	if (( rose )); then
+		log "$c: unhealthy and docker restarted it since the last tick (RestartCount $prev -> $rc) — a crash loop, start grace does not apply"
+	elif (( started > 0 && t - started < START_GRACE )); then
 		log "$c: unhealthy but only $((t - started))s old — inside start grace"
 		return 0
 	fi
