@@ -34,7 +34,7 @@ setup() {
 #!/bin/bash
 C="$FAKE_DOCKER_STATE"
 case "$1" in
-  ps) cat "$C/containers" ;;
+  ps) [[ -n "${FAKE_PS_FAILS:-}" ]] && exit 1; cat "$C/containers" ;;
   rm)
     echo "$PWD|$*" >> "$C/calls"
     [[ -n "${FAKE_RM_FAILS:-}" ]] && exit 1
@@ -54,7 +54,7 @@ DOCKER
 	chmod +x "$BIN/docker"
 	export FAKE_DOCKER_STATE="$TMP" PATH="$BIN:$PATH"
 	export PREFIX_ETC="$ETC" PREFIX_LIB="$VAR" PREFIX_SBIN="$SBIN" DOCKER_BIN=docker
-	unset FAKE_RM_FAILS FAKE_COMPOSE_RM_FAILS
+	unset FAKE_RM_FAILS FAKE_COMPOSE_RM_FAILS FAKE_PS_FAILS
 }
 teardown() { rm -rf "$TMP"; }
 
@@ -69,11 +69,17 @@ fixture_ch3_node() {
 	printf '# Generated\nxray=active\nhysteria2=active\nnaive=active\nawg=active\n' > "$VAR/channels-status.env"
 	: > "$SBIN/oxpulse-partner-edge-enable-hy2"; : > "$SBIN/hydrate-hy2.sh"
 }
-# A node that never had CH3 (pillow): other containers, metrics profile, skipped.
+# A node that never had CH3 and never ran a release that shipped the helpers.
 fixture_clean_node() {
 	printf '%s\n' oxpulse-partner-xray oxpulse-partner-caddy > "$TMP/containers"
 	printf 'COMPOSE_FILE=docker-compose.yml\nCOMPOSE_PROFILES=metrics\n' > "$ETC/.env"
 	printf '# Generated\nxray=active\nhysteria2=skipped\nnaive=active\nawg=active\n' > "$VAR/channels-status.env"
+}
+# pillow as it really is: never had CH3, but it ran older releases that installed
+# the two CH3 helper scripts, and its status file says hysteria2=skipped.
+fixture_pillow_node() {
+	fixture_clean_node
+	: > "$SBIN/oxpulse-partner-edge-enable-hy2"; : > "$SBIN/hydrate-hy2.sh"
 }
 # Everything the teardown could change, in one comparable blob.
 snapshot() { ( cd "$TMP" && find etc var sbin containers -type f -print0 | sort -z | xargs -0 md5sum; ) ; }
@@ -124,12 +130,29 @@ run_lib; rc=$?
 	|| fail "second run not a no-op (rc=$rc calls=$(mutations) out=$(cat "$TMP/out"))"
 teardown
 
-# 3 — node that never had CH3
+# 3 — node that never had CH3 and carries nothing of it: byte-for-byte no-op
 setup; fixture_clean_node; before="$(snapshot)"
 run_lib; rc=$?
 [[ $rc -eq 0 && "$(snapshot)" == "$before" && "$(mutations)" == 0 && ! -s "$TMP/out" ]] \
-	&& pass "node without CH3: no-op (files byte-identical, no docker mutation, silent)" \
+	&& pass "node with no CH3 trace: no-op (files byte-identical, no docker mutation, silent)" \
 	|| fail "touched a node without CH3 (rc=$rc calls=$(mutations) out=$(cat "$TMP/out"))"
+teardown
+
+# 3b — pillow for real: first run has an effect (helper scripts go, skipped -> retired),
+#      containers and profiles untouched; the second run is then a true no-op.
+setup; fixture_pillow_node
+run_lib; rc=$?
+[[ $rc -eq 0 && ! -e "$SBIN/oxpulse-partner-edge-enable-hy2" && ! -e "$SBIN/hydrate-hy2.sh" ]] \
+	&& pass "pillow first run: the two leftover CH3 helper scripts are removed" || fail "pillow helpers left (rc=$rc): $(ls "$SBIN")"
+grep -qx 'hysteria2=retired' "$VAR/channels-status.env" \
+	&& pass "pillow first run: hysteria2=skipped flipped to retired" || fail "pillow status: $(cat "$VAR/channels-status.env")"
+[[ "$(tr '\n' ' ' < "$TMP/containers")" == "oxpulse-partner-xray oxpulse-partner-caddy " && "$(mutations)" == 0 ]] \
+	&& grep -qx 'COMPOSE_PROFILES=metrics' "$ETC/.env" \
+	&& pass "pillow first run: containers, docker calls and .env profiles untouched" || fail "pillow collateral change"
+before="$(snapshot)"; : > "$TMP/calls"
+run_lib; rc=$?
+[[ $rc -eq 0 && "$(snapshot)" == "$before" && "$(mutations)" == 0 && ! -s "$TMP/out" ]] \
+	&& pass "pillow second run: no-op" || fail "pillow second run changed something (rc=$rc out=$(cat "$TMP/out"))"
 teardown
 
 # 4 — .env holding only the ch3 profile: the line goes, nothing else is invented
@@ -159,6 +182,24 @@ setup; fixture_ch3_node; export FAKE_COMPOSE_RM_FAILS=1 FAKE_RM_FAILS=1; run_lib
 	|| fail "config deleted while container survives (rc=$rc): $(ls "$ETC")"
 grep -q 'ch3' "$ETC/.env" && grep -qx 'hysteria2=active' "$VAR/channels-status.env" \
 	&& pass "container stuck: nothing else changed, next cycle retries" || fail "partial state written: $(cat "$ETC/.env")"
+teardown
+
+# 8 — docker is installed but not answering (dockerd restarting): the container may
+#     be alive, so NOTHING is touched.
+setup; fixture_ch3_node; export FAKE_PS_FAILS=1; before="$(snapshot)"
+run_lib; rc=$?
+[[ $rc -eq 0 && "$(snapshot)" == "$before" && "$(mutations)" == 0 ]] \
+	&& pass "docker ps failing: every file untouched, no docker mutation, exit 0" \
+	|| fail "touched files while docker was unreachable (rc=$rc calls=$(mutations))"
+grep -q 'not answering' "$TMP/out" && pass "docker ps failing: says so" || fail "no warning: $(cat "$TMP/out")"
+teardown
+
+# 9 — a directory sits at the yaml path (docker made one after an earlier race):
+#     the teardown converges instead of failing on it.
+setup; fixture_ch3_node; rm -f "$ETC/hysteria2-client.yaml"; mkdir "$ETC/hysteria2-client.yaml"
+run_lib; rc=$?
+[[ $rc -eq 0 && ! -e "$ETC/hysteria2-client.yaml" ]] \
+	&& pass "directory at the yaml path is removed" || fail "directory left behind (rc=$rc): $(ls -la "$ETC")"
 teardown
 
 # --- mutation: skip the profile removal ---------------------------------------

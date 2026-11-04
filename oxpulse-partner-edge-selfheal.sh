@@ -314,9 +314,10 @@ _managed_containers() {   # [ps-extra-args...]
 _has_healthcheck() { [[ -n "$(docker inspect -f '{{if .State.Health}}y{{end}}' "$1" 2>/dev/null)" ]]; }
 _health()          { docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null; }
 _started_epoch()   { date -d "$(docker inspect -f '{{.State.StartedAt}}' "$1" 2>/dev/null)" +%s 2>/dev/null || echo 0; }
-# RestartCount is bumped by the daemon's restart policy only (a manual
-# `docker restart`, which is what this script issues, does not move it), so a
-# rise between two ticks means the container died on its own.
+# RestartCount is bumped by the daemon's restart policy. A manual `docker
+# restart` (which is what this script issues) RESETS it to 0 rather than leaving
+# it alone, so it can fall between ticks; only a RISE counts as "died on its
+# own", and a fall just re-bases the stored count.
 _restart_count()   { docker inspect -f '{{.RestartCount}}' "$1" 2>/dev/null; }
 _finished_epoch()  { date -d "$(docker inspect -f '{{.State.FinishedAt}}' "$1" 2>/dev/null)" +%s 2>/dev/null || echo 0; }
 _oneoff()          { [[ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.oneoff"}}' "$1" 2>/dev/null)" == True ]]; }
@@ -473,7 +474,7 @@ _evaluate_container() {   # container now
 	local rc prev rose=0
 	rc="$(_restart_count "$c")"
 	if [[ "$rc" =~ ^[0-9]+$ ]]; then
-		_gauge partner_edge_container_restarts_total "$lbl" "$rc"
+		_gauge partner_edge_container_restart_count "$lbl" "$rc"
 		prev="$(_get "$c" restart_count "")"
 		[[ "$prev" =~ ^[0-9]+$ ]] && (( rc > prev )) && rose=1
 		[[ "$prev" == "$rc" ]] || _set "$c" restart_count "$rc"

@@ -418,14 +418,27 @@ retire_hysteria2_ch3() {
     local sbin="${PREFIX_SBIN:-/usr/local/sbin}"
     local have_ctr=0 have_files=0 have_profile=0 f
 
+    # 0 = present, 1 = absent, 2 = docker is installed but cannot answer (dockerd
+    # restarting). 2 must never read as "absent": the container may be alive, and
+    # deleting its bind-mount source under it makes docker create a directory there.
     # Capture, then match: `docker ps | grep -q` under pipefail reports failure
     # when grep exits on the first hit and docker takes SIGPIPE.
     _ch3_ctr_present() {
-        local names; names=$("$docker" ps -a --format '{{.Names}}' 2>/dev/null || true)
+        local names rc=0
+        command -v "$docker" >/dev/null 2>&1 || return 1
+        names=$("$docker" ps -a --format '{{.Names}}' 2>/dev/null) || rc=$?
+        (( rc == 0 )) || return 2
         grep -qx "$ctr" <<< "$names"
     }
 
-    _ch3_ctr_present && have_ctr=1
+    local present=0
+    _ch3_ctr_present || present=$?
+    if (( present == 2 )); then
+        warn "retire_hysteria2_ch3: docker is not answering — touching nothing, will retry"
+        unset -f _ch3_ctr_present
+        return 0
+    fi
+    (( present == 0 )) && have_ctr=1
     # The rendered yaml and its backups (re_render_* left hysteria2-client.yaml.bak.<epoch>
     # copies, which carry the same credentials), the restart-gate sha, and the two
     # host scripts that could bring CH3 back (the activation helper and the
@@ -448,11 +461,13 @@ retire_hysteria2_ch3() {
     #    plain `docker rm -f` by name is the fallback — by name, never a pattern.
     if (( have_ctr )); then
         ( cd "$etc" 2>/dev/null && "$docker" compose --profile ch3 rm -sf hysteria2-client ) >/dev/null 2>&1 || true
-        if _ch3_ctr_present; then
+        present=0; _ch3_ctr_present || present=$?
+        if (( present == 0 )); then
             "$docker" rm -f "$ctr" >/dev/null 2>&1 || true
+            present=0; _ch3_ctr_present || present=$?
         fi
-        if _ch3_ctr_present; then
-            warn "retire_hysteria2_ch3: could not remove container $ctr — leaving its config in place, will retry"
+        if (( present != 1 )); then
+            warn "retire_hysteria2_ch3: could not confirm container $ctr is gone — leaving its config in place, will retry"
             unset -f _ch3_ctr_present
             return 0
         fi
@@ -463,6 +478,9 @@ retire_hysteria2_ch3() {
     #    and the helper scripts.
     for f in "$etc"/hysteria2-client.yaml* "$lib/hysteria2-config.sha" \
              "$sbin/oxpulse-partner-edge-enable-hy2" "$sbin/hydrate-hy2.sh"; do
+        # A directory at the yaml path is what docker leaves behind when it started
+        # the container with the file missing; remove exactly that path.
+        if [[ -d "$f" && ! -L "$f" ]]; then rm -r -- "$f"; continue; fi
         [[ -e "$f" ]] && rm -f "$f"
     done
 

@@ -51,7 +51,6 @@ Optional channel (enable with `--naive-server=<host>`):
 | `443` | udp | yes | Caddy QUIC (h3) |
 | `3478`, `5349` | tcp + udp | yes | Coturn STUN / TURN / TURN-TLS |
 | `7878` | udp | yes | SFU media (WebRTC RTP) |
-| `18443` | tcp + udp | yes | Formerly the Hysteria2 (CH3) forwarder. CH3 is retired and nothing listens here; the host firewall still opens it (follow-up) |
 | *partner-specific* | udp | yes | AmneziaWG mesh inbound (port allocated by motherly per partner, e.g. `43994`) |
 | `9317` | tcp | **mesh-only** (`10.9.0.0/24`) | SFU Prometheus `/metrics` |
 | `8912` | tcp | **mesh-only** (`10.9.0.0/24`) | SFU relay API |

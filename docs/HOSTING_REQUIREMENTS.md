@@ -85,8 +85,8 @@ Ubuntu) **or** `firewalld` (RHEL / CentOS / Rocky / Alma). On other
 distros the installer warns and skips — the operator must apply the
 whitelist manually. Allowed ports:
 
-- Public TCP: `22, 80, 443, 18443, 3478, 5349`
-- Public UDP: `443, 18443, 3478, 5349, 7878, <AWG_PORT>`
+- Public TCP: `22, 80, 443, 3478, 5349`
+- Public UDP: `443, 3478, 5349, 7878, <AWG_PORT>`
 - Mesh-only (10.9.0.0/24): `9317/tcp, 8912/tcp`
 
 If you disable the firewall after install, re-expose this surface to

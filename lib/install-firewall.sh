@@ -26,7 +26,7 @@
 #
 # Closes the 2026-05-21 audit finding: edge-b.example + edge-c + edge-d shipped
 # with no host firewall, exposing :9317 (SFU /metrics), :8912 (SFU relay
-# API), :8920 (SFU client WS), and :18443 (hysteria2) on the public IP.
+# API) and :8920 (SFU client WS) on the public IP.
 # The SFU code uses a single SFU_BIND_ADDRESS for ALL its sockets
 # (per oxpulse-sfu-kit/examples/basic-sfu.rs), so we cannot scope the
 # metrics socket to the mesh at the application layer. Firewall is the
@@ -50,9 +50,9 @@
 # --- Allowed ports (mirrors the manual 2026-05-21 hardening) -----------------
 
 # Public TCP:
-_PE_FW_PUB_TCP=(22 80 443 18443 3478 5349)
+_PE_FW_PUB_TCP=(22 80 443 3478 5349)
 # Public UDP:
-_PE_FW_PUB_UDP=(443 18443 3478 5349 7878)
+_PE_FW_PUB_UDP=(443 3478 5349 7878)
 # Public UDP RANGES — coturn's relay port range, for cascade-relay RTP and RFC 7675
 # STUN consent-freshness traffic. Without this, peer-edge consent packets
 # (~104-128 byte UDP) get dropped at our INPUT chain, causing silent mid-call
@@ -251,6 +251,14 @@ _firewall_apply_firewalld() {
 	done
 	firewall-cmd --permanent --zone=$zone --add-port="${awg_port}/udp" >/dev/null
 
+	# Retire :18443, the retired hysteria2 (CH3) forwarder. Older releases opened it
+	# to the world (tcp+udp) and add-port alone never removes it. Permanent AND
+	# runtime; `|| true` + silent: absent on a clean node.
+	for p in tcp udp; do
+		firewall-cmd --permanent --zone=$zone --remove-port="18443/${p}" >/dev/null 2>&1 || true
+		firewall-cmd --zone=$zone --remove-port="18443/${p}" >/dev/null 2>&1 || true
+	done
+
 	# Strip any legacy public exposure of mesh-only ports.
 	for p in "${_PE_FW_MESH_TCP[@]}" 8920; do
 		firewall-cmd --permanent --zone=$zone --remove-port="${p}/tcp" 2>/dev/null || true
@@ -316,7 +324,7 @@ firewall_apply() {
 		none|*)
 			warn "[firewall] no supported firewall tool (ufw/firewalld) — skipping."
 			warn "           Apply the partner-edge whitelist manually:"
-			warn "           public: 22,80,443/tcp 443,${awg_port}/udp 18443,3478,5349/tcp+udp 7878/udp"
+			warn "           public: 22,80,443/tcp 443,${awg_port}/udp 3478,5349/tcp+udp 7878/udp"
 			warn "           mesh-only (10.9.0.0/24): 9317,8912/tcp"
 			# Distinct non-zero (t14 fix): this branch applies NOTHING, so it must
 			# not report success. Previously `return 0` here made

@@ -41,8 +41,8 @@ teardown() {
 # interpolation surprises).
 _stub_curl() {
     local code="$1"
-    printf '#!/bin/bash\necho "$*" >> "%s/curl.args"\nfor a; do [[ "$a" == "%%{http_code}" ]] && { printf '"'"'%%s'"'"' "%s"; exit 0; }; done; exit 0\n' \
-        "$TMPD" "$code" > "$TMPD/bin/curl"
+    printf '#!/bin/bash\necho "$*" >> "%s/curl.args"\nfor a; do [[ "$a" == "-" ]] && cat >> "%s/curl.stdin"; done\nfor a; do [[ "$a" == "%%{http_code}" ]] && { printf '"'"'%%s'"'"' "%s"; exit 0; }; done; exit 0\n' \
+        "$TMPD" "$TMPD" "$code" > "$TMPD/bin/curl"
     chmod +x "$TMPD/bin/curl"
 }
 
@@ -146,4 +146,28 @@ _run_hc() {
     grep -q 'X-Node-Id: node-xyz' "$TMPD/curl.args" || {
         echo "X-Node-Id header not sent: $(cat "$TMPD/curl.args")"; false
     }
+}
+
+# ── 6. token never in argv; http code is exactly 3 digits ───────────────────
+@test "probe_token_not_in_argv: bearer token goes via stdin config, not curl argv" {
+    printf 'stkn_SECRET_ARGV_CANARY' > "$CONF_DIR/token"
+    chmod 600 "$CONF_DIR/token"
+    _stub_curl 200
+    _run_hc
+
+    [ -s "$TMPD/curl.args" ] || { echo "curl was never called"; false; }
+    ! grep -q 'stkn_SECRET_ARGV_CANARY' "$TMPD/curl.args" || {
+        echo "token leaked into curl argv: $(cat "$TMPD/curl.args")"; false
+    }
+    grep -q 'Authorization: Bearer stkn_SECRET_ARGV_CANARY' "$TMPD/curl.stdin" || {
+        echo "token not delivered on stdin: $(cat "$TMPD/curl.stdin" 2>&1)"; false
+    }
+}
+
+@test "probe_http_code_clean: a 401 reports HTTP 401, not 401000" {
+    printf 'stkn_revoked_token' > "$CONF_DIR/token"
+    chmod 600 "$CONF_DIR/token"
+    _stub_curl 401
+    _run_hc
+    [[ "$output" == *"(HTTP 401 "* ]] || { echo "code not clean: $output"; false; }
 }

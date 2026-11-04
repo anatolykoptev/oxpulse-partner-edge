@@ -323,12 +323,17 @@ else
 		# does. The probe used to hit /api/partner/hy2-credentials, which is the
 		# CH3 credential endpoint and goes away with CH3.
 		_probe_nid=$(jq -r '.node_id // .partner_id // empty' "$CONF_DIR/node-config.json" 2>/dev/null || true)
-		_http_code=$(curl -fsS --max-time 8 \
-			-H "Authorization: Bearer $_svc_token" \
+		# The bearer token travels on stdin (`--config -`), never in argv, where any
+		# local user could read it from /proc/<pid>/cmdline. No `-f`: with it a 4xx
+		# makes curl exit non-zero AFTER printing the code, and the old `|| echo 000`
+		# then glued "000" on ("401000"). Default the code only if curl printed none.
+		_tok_cfg=${_svc_token//\\/\\\\}; _tok_cfg=${_tok_cfg//\"/\\\"}
+		_http_code=$(printf 'header = "Authorization: Bearer %s"\n' "$_tok_cfg" | curl -sS --max-time 8 --config - \
 			${_probe_nid:+-H "X-Node-Id: $_probe_nid"} \
 			"${_backend%/}/api/partner/node-config" \
-			-o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
-		unset _probe_nid
+			-o /dev/null -w "%{http_code}" 2>/dev/null) || true
+		[[ "$_http_code" =~ ^[0-9]{3}$ ]] || _http_code=000
+		unset _probe_nid _tok_cfg
 		if [[ "$_http_code" == "200" ]]; then
 			snap_emit "check_19_token_probe" 0 "$(printf '\033[32mOK\033[0m (HTTP %s — auth accepted)\n' "$_http_code")"
 		else

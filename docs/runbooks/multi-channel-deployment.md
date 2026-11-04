@@ -88,7 +88,6 @@ ssh edge "docker exec oxpulse-partner-caddy curl -s --resolve localhost:2019:127
 
 # Expected: one line per upstream in pool:
 # caddy_reverse_proxy_upstreams_healthy{upstream="xray-client:3080"} 1
-# caddy_reverse_proxy_upstreams_healthy{upstream="host.docker.internal:18443"} 0|1
 # caddy_reverse_proxy_upstreams_healthy{upstream="127.0.0.1:1080"} 0|1
 
 # HTTP endpoints

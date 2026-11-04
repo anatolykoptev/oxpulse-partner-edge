@@ -841,8 +841,8 @@ teardown
 
 # 53 — the restarts gauge, next to container_unhealthy
 setup; fixture oxpulse-partner-c1 healthy "$OLD"; restartcount oxpulse-partner-c1 42; run_it
-grep -q 'partner_edge_container_restarts_total{container="oxpulse-partner-c1"} 42' "$TMP"/textfile/*.prom 2>/dev/null \
-	&& pass "partner_edge_container_restarts_total emitted" \
+grep -q 'partner_edge_container_restart_count{container="oxpulse-partner-c1"} 42' "$TMP"/textfile/*.prom 2>/dev/null \
+	&& pass "partner_edge_container_restart_count emitted" \
 	|| fail "restarts gauge missing: $(cat "$TMP"/textfile/*.prom 2>/dev/null | tr '\n' ';')"
 teardown
 
