@@ -457,7 +457,7 @@ probe_ch4() {
     # operators and they could silently run STUN-only (no auth/quota coverage,
     # the exact blind spot this probe exists to close).
     local probe_mode="allocate"
-    # probe_reason carries WHY a probe failed (timeout / auth-486 / other) so a
+    # probe_reason carries WHY a probe failed (timeout / auth-401 / auth-486 / other) so a
     # false handshake_ok=false is no longer indistinguishable from a real one.
     # Reported in the payload AND the state file (stderr is swallowed).
     local probe_reason=""
@@ -553,7 +553,7 @@ probe_ch4() {
         uclient_out=$(_coturn_probe_run 10 turnutils_uclient \
                 -u "$turn_username" \
                 -w "$turn_password" \
-                -y -n 1 \
+                -v -y -n 1 \
                 -p "$turn_port" \
                 "$probe_target" \
             2>&1)
@@ -573,6 +573,19 @@ probe_ch4() {
                         # completed (the classic anti-SSRF denied-peer collision,
                         # or a genuinely dead relay path).
                         probe_reason="timeout"
+                        # coturn >= 4.18 turnutils_uclient answers a 401 (bad or
+                        # expired HMAC credential) by silently re-sending the
+                        # Allocate for ~15 s, i.e. past the 10 s bound above, so
+                        # an auth failure looks like a timeout. Under -v every
+                        # retry prints "allocate response received"; a healthy
+                        # handshake has two (401 challenge, then success, whose
+                        # "Received relay addr" line follows) and a dead server
+                        # has none. 3+ responses and no relay address = the
+                        # server is answering and rejecting us: auth.
+                        if (( $(printf '%s\n' "$uclient_out" | grep -c 'allocate response received') >= 3 )) \
+                            && ! printf '%s' "$uclient_out" | grep -q 'Received relay addr'; then
+                            probe_reason="auth-401"
+                        fi
                         ;;
                     *)
                         if printf '%s' "$uclient_out" | grep -qiE '486|Allocation Quota Reached'; then

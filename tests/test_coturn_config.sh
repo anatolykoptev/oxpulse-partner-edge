@@ -50,7 +50,8 @@ sed -e 's/{{TURN_SECRET}}/throwaway-secret/g' -e 's/{{PARTNER_DOMAIN}}/example.t
     -e 's#{{EXTERNAL_IP_LINE}}#192.0.2.10/10.0.0.5#g' \
     -e 's#{{ALLOWED_PEER_IP_LINE}}#allowed-peer-ip=10.0.0.5#g' "$TPL" > "$RENDERED"
 ! grep -q '{{' "$RENDERED" || { echo "FAIL: unrendered placeholder in test render"; exit 1; }
-for key in allocation-default-timeout no-loopback-peers allow-loopback-peers no-dtls no-tlsv1 no-tlsv1_1; do
+# no-cli: deprecated ERROR on every 4.18 parse; cli: would start the telnet CLI.
+for key in allocation-default-timeout no-loopback-peers allow-loopback-peers no-dtls no-tlsv1 no-tlsv1_1 no-cli cli; do
     if grep -qE "^${key}([=[:space:]]|$)" "$RENDERED"; then
         echo "FAIL: '${key}' rendered — not a coturn 4.18 option (or, for allow-loopback-peers, a loopback SSRF opening)"
         exit 1

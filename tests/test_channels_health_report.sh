@@ -892,6 +892,58 @@ fi
 trap - EXIT
 rm -rf "$T15"
 
+# ── Test 15b: coturn >= 4.18 uclient retries a 401 past the inner bound ───────
+# A bad/expired HMAC credential makes the 4.18 turnutils_uclient re-send Allocate
+# for ~15 s (4.6.3 failed at once), so timeout(1) kills it (124) and the failure
+# read probe_reason=timeout. Under -v each retry prints "allocate response
+# received"; the stub replays real captured output of that retry loop.
+# Controls: a dead server (one "allocate sent", no response) and a healthy-but-
+# killed handshake (2 responses + relay addr) must STAY timeout.
+run15b() {  # $1 = name, $2 = stub body printed by uclient, $3 = expected reason
+    local T; T=$(mktemp -d)
+    make_bin "$T"; mkdir -p "$T/etc"
+    write_node_config "$T/etc" '{"id":"ch4"}'
+    write_coturn_conf "$T/etc" "probe-test-secret" "203.0.113.77"
+    cat > "$T/docker" <<STUB
+#!/bin/bash
+if [[ "\$*" == *"sed"* && "\$*" == *"static-auth-secret"* ]]; then echo "probe-test-secret"; exit 0; fi
+if [[ "\$*" == *"sed"* && "\$*" == *"external-ip"* ]]; then echo "203.0.113.77"; exit 0; fi
+if [[ "\$*" == *"turnutils_uclient"* ]]; then
+    if [[ "\$*" != *" -v "* ]]; then echo "STUB-ERROR: probe lost -v; 401 retry is undetectable" >&2; exit 255; fi
+    cat <<'OUT'
+$2
+OUT
+    exit 124
+fi
+exit 1
+STUB
+    chmod +x "$T/docker"
+    local out
+    set +e
+    out=$(PATH="$T:/usr/bin:/bin" _NODE_CONFIG="$T/etc/node-config.json" _TOKEN_LIB=/nonexistent \
+        OXPULSE_SERVICE_TOKEN="stkn_test" bash "$SCRIPT" --dry-run 2>/dev/null)
+    set -e
+    if printf '%s\n' "$out" | jq -e --arg r "$3" 'select(.channel_name=="coturn" and .channel_handshake_ok==false and .channel_probe_reason==$r)' >/dev/null 2>&1; then
+        ok "test15b: $1 → handshake_ok=false + channel_probe_reason=$3"
+    else
+        fail "test15b: $1: expected channel_probe_reason=$3; got: $out"
+    fi
+    rm -rf "$T"
+}
+RETRY401=$(printf '%s\n' \
+  '2026-11-04T10:47:58.226+0000 INFO IPv4. Connected to: 11.77.0.2:3478' \
+  '2026-11-04T10:47:58.229+0000 INFO allocate sent' \
+  '2026-11-04T10:47:58.229+0000 INFO allocate response received: ' \
+  '2026-11-04T10:47:58.230+0000 INFO allocate sent' \
+  '2026-11-04T10:47:58.230+0000 INFO allocate response received: ' \
+  '2026-11-04T10:47:58.731+0000 INFO allocate sent' \
+  '2026-11-04T10:47:58.731+0000 INFO allocate response received: ' \
+  '2026-11-04T10:47:59.233+0000 INFO allocate sent' \
+  '2026-11-04T10:47:59.234+0000 INFO allocate response received: ')
+run15b "4.18 401-retry loop killed at the bound" "$RETRY401" "auth-401"
+run15b "dead server (sent, never answered)" $'INFO Connected to: 11.77.0.77:3478\nINFO allocate sent' "timeout"
+run15b "healthy handshake killed mid-data" $'INFO allocate sent\nINFO allocate response received: \nINFO allocate sent\nINFO allocate response received: \nINFO IPv4. Received relay addr: 11.77.0.2:49702' "timeout"
+
 # ── Test 16: all probe-target sources absent → loopback-fallback, exit 0 ──────
 # Regression guard for the case where OXPULSE_COTURN_PROBE_TARGET is unset,
 # the container has no external-ip line, and node-config.json has no public_ip.

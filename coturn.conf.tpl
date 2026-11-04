@@ -136,4 +136,7 @@ no-stdout-log
 simple-log
 syslog
 
-no-cli
+# No `no-cli`: coturn >= 4.18 logs it as a deprecated ERROR on every parse, and the
+# telnet CLI is OFF unless `cli` is given (use_cli defaults to false in
+# turn_admin_server.c; the listener starts only under `if (use_cli)`). Never add
+# `cli` here.
