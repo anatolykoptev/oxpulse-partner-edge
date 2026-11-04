@@ -134,7 +134,6 @@ COMPOSE_FILE="$PREFIX_ETC/docker-compose.yml"
 STATE_FILE="$PREFIX_LIB/install.env"
 PREV_STATE_FILE="$PREFIX_LIB/install.env.prev"
 PREV_COMPOSE_FILE="$PREFIX_LIB/docker-compose.yml.prev"
-PREV_COTURN_CONF="$PREFIX_LIB/coturn.conf.prev"
 PREV_CADDYFILE="$PREFIX_LIB/Caddyfile.prev"
 PREV_HEALTHCHECK="$PREFIX_LIB/healthcheck.prev"
 # Directory where pre-upgrade host-script snapshots are stored for rollback.
@@ -2959,34 +2958,6 @@ sync_host_scripts() {
 # from .prev backups. Called by --rollback when template backups exist, and
 # auto-triggered after --with-templates healthcheck failure.
 # ---------------------------------------------------------------------------
-# snapshot_coturn_conf / restore_coturn_conf — coturn.conf is rendered by
-# reconcile_all BEFORE the image pull and recreate, so a failed pull / compose up /
-# settle gate used to roll the image back to the previous coturn while leaving the
-# NEW conf on disk (4.18 conf on a 4.6 binary: no `no-dtls` -> DTLS on 5349/udp, no
-# `no-cli` -> telnet CLI on 127.0.0.1, TLS 1.0/1.1 allowed; all silent). Snapshot
-# it with the other templates, restore it with them.
-# No stale snapshot survives: with no conf to back up, an old .prev is removed so
-# a later rollback cannot resurrect an unrelated version.
-snapshot_coturn_conf() {
-	local _conf="$PREFIX_ETC/coturn.conf"
-	if [[ -f "$_conf" ]]; then
-		cp -a "$_conf" "$PREV_COTURN_CONF"
-	else
-		rm -f "$PREV_COTURN_CONF"
-	fi
-}
-# Same tmp+rename shape as atomic_swap (lib/reconcile.sh), but cp -a so the mode and
-# owner of the snapshot come back exactly (atomic_swap forces a caller-chosen mode,
-# and a restore must reproduce what was there). Returns 1 when there is no snapshot.
-restore_coturn_conf() {
-	local _conf="$PREFIX_ETC/coturn.conf" _tmp
-	[[ -f "$PREV_COTURN_CONF" ]] || return 1
-	_tmp="${_conf}.new.$$"
-	cp -a "$PREV_COTURN_CONF" "$_tmp" || { rm -f "$_tmp"; warn "rollback: could not stage coturn.conf from backup"; return 1; }
-	mv -f "$_tmp" "$_conf" || { rm -f "$_tmp"; warn "rollback: could not restore coturn.conf from backup"; return 1; }
-	log "restored coturn.conf from backup"
-}
-
 do_rollback_templates() {
 	local restored=0
 
@@ -3008,9 +2979,6 @@ do_rollback_templates() {
 	if [[ -f "$PREV_COMPOSE_FILE" ]]; then
 		cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
 		log "restored docker-compose.yml from backup"
-		restored=1
-	fi
-	if restore_coturn_conf; then
 		restored=1
 	fi
 
@@ -3167,7 +3135,7 @@ maybe_v01_to_v02_preflight
 if [[ "$MODE" == rollback ]]; then
 	# Template rollback: restore Caddyfile/healthcheck if .prev files exist.
 	_have_template_prev=0
-	[[ -f "$PREV_CADDYFILE" || -f "$PREV_HEALTHCHECK" || -f "$PREV_COTURN_CONF" ]] && _have_template_prev=1
+	[[ -f "$PREV_CADDYFILE" || -f "$PREV_HEALTHCHECK" ]] && _have_template_prev=1
 
 	# Image rollback: compose.prev + state.prev must exist.
 	_have_image_prev=0
@@ -3971,7 +3939,6 @@ if [[ "$MODE" == with_templates ]]; then
 	[[ -f "$HEALTHCHECK" ]]           && cp -a "$HEALTHCHECK" "$PREV_HEALTHCHECK"
 	cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
 	cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
-	snapshot_coturn_conf
 	snapshot_host_scripts "$CURRENT"
 
 	# Phase 2 (Task 6): opec-presence + caddy-render-capable probe BEFORE reconcile.

@@ -74,3 +74,16 @@ grep -qxF 'denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff' "$RENDERED" \
 grep -qxF 'denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255' "$RENDERED" \
     || { echo "FAIL: IPv4-mapped denied-peer-ip range missing"; exit 1; }
 echo "PASS: NAT64 + IPv4-mapped peer denies present"
+# Every rendered key must be a coturn 4.6.1 option: the conf is read by a 4.6
+# binary on rollback / in the upgrade window, where an unknown key is a startup
+# warning at best. The list is the 4.6.1 `turnserver` usage (fixture header says how
+# it was produced). A key only 4.18 knows (e.g. `dtls`) fails here.
+OPTS46="$REPO_ROOT/tests/fixtures/coturn-4.6.1-options.txt"
+[[ -s "$OPTS46" ]] || { echo "FAIL: 4.6.1 option fixture missing"; exit 1; }
+while IFS= read -r line; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    key="${line%%=*}"
+    grep -qxF -- "$key" <(grep -v "^#" "$OPTS46") \
+        || { echo "FAIL: rendered key \"${key}\" is not a coturn 4.6.1 option (4.18-only or a typo)"; exit 1; }
+done < "$RENDERED"
+echo "PASS: every rendered key is a coturn 4.6.1 option"
