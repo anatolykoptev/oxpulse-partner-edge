@@ -23,6 +23,15 @@ export RELAY_HOSTNAME EXTERNAL_IP
 "${OPEC}" check-node-secret --file "${PREFIX_ETC}/node-secret" >/dev/null || die "node-secret is invalid"
 "${OPEC}" render coturn --tpl "${PREFIX_ETC}/coturn-relay.conf.tpl" --out "${PREFIX_ETC}/coturn.conf" \
 	--secret-file "${PREFIX_ETC}/node-secret"
+# The binary the unit will exec decides the TLS/DTLS directives (see relay-lib.sh).
+TURNSERVER_BIN="${TURNSERVER_BIN:-}"
+if [[ -z "$TURNSERVER_BIN" ]]; then
+	if [[ -x "${LIB}/current/turnserver" ]]; then TURNSERVER_BIN="${LIB}/current/turnserver"; else TURNSERVER_BIN=/usr/bin/turnserver; fi
+fi
+if relay_coturn_is_legacy "$TURNSERVER_BIN"; then
+	relay_append_legacy_directives "${PREFIX_ETC}/coturn.conf"
+	log "coturn < 4.18 or unknown version at ${TURNSERVER_BIN}: rendered with no-dtls / no-tlsv1 / no-tlsv1_1"
+fi
 [[ "${ALLOW_NONROOT:-0}" = 1 ]] || chown root:turnserver "${PREFIX_ETC}/coturn.conf"
 chmod 0640 "${PREFIX_ETC}/coturn.conf"
 log "coturn.conf rendered"

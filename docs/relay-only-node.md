@@ -45,7 +45,10 @@ token. It never registers with the backend.
 5. Issues a certificate with `certbot certonly --standalone` (only when DNS
    already resolves to `--public-ip`; otherwise it skips TLS and exits `3`) and
    installs a deploy hook that copies the certificate for coturn and restarts it.
-6. Installs the heartbeat timer (every 60 s).
+6. Installs the heartbeat timer (every 60 s), the upgrader and its daily timer
+   (see [Auto-update](#auto-update)), and a `releases/0.0.0` + `current` baseline so
+   the coturn unit always has a binary to start (the distro package until the first
+   upgrade).
 
 coturn is rendered **only** by `opec render coturn --secret-file`, from
 `relay/coturn-relay.conf.tpl`, by the unit's root `ExecStartPre`
@@ -117,3 +120,136 @@ keeps it in the healthy pool.
 
 The service token file must be `0600`, root-owned and shaped `stkn_<base64url>`,
 or the heartbeat refuses to use it.
+
+## Auto-update
+A relay-only node follows the fleet release the same way an edge does, without
+Docker and without registering. `oxpulse-relay-upgrade.timer` fires daily at
+00:30 UTC (+ up to 1 h jitter; an upgrade restarts coturn and drops live calls, so
+this is the quiet window). `oxpulse-relay-upgrade --check`:
+
+1. Asks central for the node's `desired_release` with the unauthenticated
+   `POST /api/partner/heartbeat {"node_id": ...}`. No token is sent, and the answer
+   carries only convergence fields (`desired_release`, `keys_version`,
+   `config_version`), never Reality material (that is the node-config endpoint,
+   which the relay never calls). A node with no `desired_release` stays put.
+2. Does nothing unless `desired` is a bare `MAJOR.MINOR.PATCH` strictly greater than
+   the installed version in `/usr/local/share/oxpulse-partner-edge/VERSION` (the
+   same file the heartbeat reports as `installer_version`). An equal version is a
+   no-op, a lower one is refused (downgrade guard), a version that already failed its
+   health gate is parked in `/usr/local/lib/oxpulse-relay/failed-version` and not
+   retried (remove the file to retry).
+3. Starts the real upgrade as its own transient unit, `oxpulse-relay-self-upgrade`
+   (`systemd-run`, like edge #678), so the timer service's `TimeoutStartSec` can
+   never kill it mid-swap. Follow it with `journalctl -u oxpulse-relay-self-upgrade`.
+
+The target is the `desired_release` column of the node's `partner_nodes` row (the
+same column an edge uses). To run it by hand: `sudo oxpulse-relay-upgrade --to X.Y.Z` (same guards, same detached
+unit). It re-runs the registration-material gate first and refuses on any hit.
+
+### Where the binary comes from
+coturn is **not** the distro package (Ubuntu noble ships 4.6.1, exposed to the
+pre-auth TCP/TLS DoS GHSA-m562, GHSA-5538 and the denied-peer canonicalisation
+bypasses fixed through 4.13). Every release carries a fully **static musl** build of
+coturn 4.18.0 (`turnserver`, `turnutils_uclient`) for amd64 and arm64, so it runs on
+any Debian/Ubuntu whatever the glibc. `relay/coturn-static/Dockerfile` builds it in
+Alpine from the upstream tag tarball, pinned by sha256 in
+`relay/coturn-static/version.env` (the build fails on a mismatch). Attack surface
+removed: no database drivers (sqlite, postgres, mysql, mongo, redis), no
+libmicrohttpd and so no Prometheus exporter, no systemd, no OAuth token code
+(`-DTURN_NO_OAUTH`); linked statically against libevent and OpenSSL, built with
+stack protector and `_FORTIFY_SOURCE`. The release workflow smoke-tests the binary
+with the real template before it can be published (starts without "Bad
+configuration", Allocate succeeds, permissions to `127.0.0.1` and
+`::ffff:127.0.0.1` are refused by the template's `denied-peer-ip` lines).
+
+### What an upgrade does
+Assets come from the GitHub release `vX.Y.Z` only (never from `main`). The upgrader
+fetches `SHA256SUMS` and `relay-manifest.txt` (which lists exactly the files to
+install; it carries file names, never paths), then every asset, and **fails closed**:
+an asset that is not listed in `SHA256SUMS`, or does not match it, aborts the
+upgrade before anything is touched. It also runs the new `turnserver --version` on
+the host and makes sure `opec` can render the relay template (it fetches the
+checksummed release `opec` otherwise). Then:
+
+1. The binaries are laid out under `/usr/local/lib/oxpulse-relay/releases/<ver>/`.
+2. Every file about to be replaced (libs, template, units, sbin scripts, the
+   `current` symlink, VERSION) is copied to `.../snapshots/last`.
+3. Files are installed atomically (temp + rename), the `current` symlink flips to
+   the new release, `daemon-reload`, `systemctl restart oxpulse-relay-coturn`. The
+   unit starts `/usr/local/lib/oxpulse-relay/current/turnserver`; the prestart re-renders
+   `coturn.conf` from the new template.
+4. **Health gate** (same probes as the heartbeat, `relay/relay-probe-lib.sh`): the
+   unit is active, a TURN Allocate over TCP 3478 against the node's address
+   succeeds, the TURNS handshake on 443 verifies, and `turnserver` holds a UDP
+   socket on 3478 (retried for ~30 s after the restart). A UDP-transport allocate
+   from the box itself cannot succeed by design (the self-relay guard drops
+   coturn's UDP replies to a local client), so the UDP legs are covered by the
+   probe's `-y` relay-to-relay traffic and the bound-socket check.
+5. On success only, VERSION is written (the heartbeat then reports the new
+   `installer_version`) and old releases are pruned (the two newest are kept).
+
+### Failure is visible centrally
+`oxpulse-relay-upgrade` records its last failing exit code in
+`/usr/local/lib/oxpulse-relay/last-rc` (10 verify/pre-swap, 11 rolled back, 12
+rollback failed) beside `failed-version`; a successful upgrade (or reaching the
+desired version) clears them. While either exists the 60-second heartbeat adds a third
+channel, `relay-upgrade` (`channel_handshake_ok=false`, `channel_probe_mode=upgrade`,
+`channel_probe_reason=verify-failed|rolled-back|rollback-failed`), posted best-effort
+so it can never fail the liveness report. **Central must know the channel first**:
+`channel_health.rs` rejects any `channel_name` outside `ch1|ch2|ch3|coturn|coturn-udp|coturn-tls`
+(`unknown_channel_name`), and `alerts-partner-channel-health.yml` matches
+`ch1|ch2|ch3` only. Until `relay-upgrade` is added to both allowlist sites (and its
+class in `channel_class.rs`) and an alert such as
+`partner_node_channel_heartbeat_total{channel_name="relay-upgrade",handshake_ok="false"}`
+is added, the report is refused with a 400 and the failure stays journald-only.
+
+The upgrade itself is bounded only where it is safe: each download has its own
+timeout, but the swap, health gate and rollback run to completion (the transient
+unit has a 1 h cap and TERM/INT/HUP are ignored once the swap starts).
+
+### Rollback
+If activation or the gate fails, the snapshot is restored (previous binary via the
+`current` symlink, unit, template, scripts, libs), coturn is restarted and gated
+again, and the failure is logged at `crit` priority (journal + syslog). Exit codes:
+`11` rolled back and healthy, `12` the rollback itself did not come up healthy (page
+a human: `journalctl -u oxpulse-relay-self-upgrade`). The failed version is parked
+in `failed-version`. Manual rollback to the pre-upgrade state is the same restore;
+the previous files are in `/usr/local/lib/oxpulse-relay/snapshots/last`.
+
+The firewall, self-relay guard nft table and sysctl reservation are deliberately not
+touched by an upgrade; they change only through `install-relay.sh`.
+
+### Bootstrapping an existing relay node
+A node installed before auto-update has no upgrader and no VERSION. One-time,
+safe on a live node (touches no coturn file and never restarts coturn):
+```
+V=X.Y.Z   # the first release that ships relay-manifest.txt
+cd "$(mktemp -d)"
+curl -fsSLO "https://github.com/anatolykoptev/oxpulse-partner-edge/releases/download/v$V/SHA256SUMS"
+curl -fsSLO "https://github.com/anatolykoptev/oxpulse-partner-edge/releases/download/v$V/oxpulse-relay-upgrade.sh"
+grep ' oxpulse-relay-upgrade.sh$' SHA256SUMS | sha256sum -c -
+sudo bash oxpulse-relay-upgrade.sh --install-upgrader --version "$V"
+```
+It verifies and installs the upgrader, `relay-lib.sh`, `relay-probe-lib.sh` and the
+upgrade service/timer, writes the `VERSION` baseline `0.0.0` (a pre-auto-update
+relay) and creates `releases/0.0.0` + `current`. The node then reports
+`installer_version=0.0.0` until its first upgrade. Run the first upgrade in a quiet
+window: `sudo oxpulse-relay-upgrade --to "$V"`, or let central drive it.
+
+**Template and binary always match.** The shipped template is the 4.18 form: 4.18
+rejects `no-dtls`, `no-tlsv1` and `no-tlsv1_1`, but on coturn < 4.18 their absence
+switches a DTLS listener (UDP on the TLS port) and TLS 1.0/1.1 on. So
+`oxpulse-relay-prestart`, which runs before every start (upgrade, certbot renewal
+restart, `oxpulse-relay-apply`, rollback), runs `--version` on the binary the unit
+will exec (`current/turnserver`, else `/usr/bin/turnserver`) and appends those three
+directives when it is below 4.18 or its version cannot be parsed. A fresh install,
+which runs the distro 4.6.1 until its first upgrade, is therefore safe. The CI smoke
+test proves it on a real `coturn/coturn:4.6.1`: with the legacy render nothing binds
+UDP on the TLS port; without the lines it does. (Firewall note: a node built by
+`install-relay.sh` opens `443/tcp` only. A node whose ufw has a bare `443 ALLOW`,
+such as msk1, also exposes udp/443, which is why the guarantee is made at render
+time and not by the firewall.)
+
+`coturn-relay.conf.tpl` keeps `no-cli`: coturn 4.18 logs it as deprecated (the CLI is
+off by default there) but 4.6.x, which a fresh install runs until its first
+upgrade, has the CLI on by default.

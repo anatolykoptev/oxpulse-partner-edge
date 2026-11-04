@@ -19,7 +19,7 @@ EnvironmentFile=/etc/oxpulse-partner-edge/relay.env
 # "+" = full privileges, outside the sandbox below: gate, validate, require the
 # guard, and render coturn.conf from the CURRENT node-secret on every (re)start.
 ExecStartPre=+/usr/local/sbin/oxpulse-relay-prestart
-ExecStart=/usr/bin/turnserver -c /etc/oxpulse-partner-edge/coturn.conf
+ExecStart=/usr/local/lib/oxpulse-relay/current/turnserver -c /etc/oxpulse-partner-edge/coturn.conf
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536

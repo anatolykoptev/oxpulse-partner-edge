@@ -148,3 +148,31 @@ relay_secret_fingerprints() {
 		printf 'secret line %d: sha256 %s\n' "$n" "$(printf '%s' "$line" | sha256sum | cut -c1-8)"
 	done < "$1"
 }
+
+# ---- coturn generation vs template -----------------------------------------------
+# The shipped template is the coturn 4.18 form: 4.18 REJECTS no-dtls / no-tlsv1 /
+# no-tlsv1_1 ("Bad configuration format"), while on coturn < 4.18 their absence
+# switches DTLS (udp on the TLS port) and TLS 1.0/1.1 ON. So the directives follow
+# the binary that will actually run, decided at render time on every start.
+RELAY_LEGACY_DIRECTIVES=(no-dtls no-tlsv1 no-tlsv1_1)
+
+# relay_coturn_is_legacy <turnserver> — 0 (legacy) when its --version is below
+# 4.18 OR cannot be parsed (fail safe: the extra lines are harmless on <4.18 and
+# an unparsable binary is not known to be 4.18).
+relay_coturn_is_legacy() {
+	local out maj min
+	out=$("$1" --version 2>&1) || return 0
+	[[ "$out" =~ ([0-9]+)\.([0-9]+)\.[0-9]+ ]] || return 0
+	maj="${BASH_REMATCH[1]}"; min="${BASH_REMATCH[2]}"
+	if ((maj > 4 || (maj == 4 && min >= 18))); then return 1; fi
+	return 0
+}
+
+# relay_append_legacy_directives <rendered conf>
+relay_append_legacy_directives() {
+	local d
+	{
+		printf '# legacy coturn (< 4.18): DTLS and TLS 1.0/1.1 stay off (added by oxpulse-relay-prestart)\n'
+		for d in "${RELAY_LEGACY_DIRECTIVES[@]}"; do printf '%s\n' "$d"; done
+	} >> "$1"
+}

@@ -108,21 +108,26 @@ relay_ensure_opec() {
 relay_install_files() {
 	install -d -m 0755 "${LIB_DST}" "${SBIN}" "${UNIT_DIR}" "${SYSCTL_DIR}"
 	install -d -m 0750 -o root -g turnserver "${PREFIX_ETC}"
-	install -m 0644 "${HERE}/relay-lib.sh" "${REPO_DIR}/lib/firewall-lib.sh" "${REPO_DIR}/lib/channel-health-lib.sh" "${LIB_DST}/"
+	install -m 0644 "${HERE}/relay-lib.sh" "${HERE}/relay-probe-lib.sh" "${REPO_DIR}/lib/firewall-lib.sh" "${REPO_DIR}/lib/channel-health-lib.sh" "${LIB_DST}/"
 	install -m 0755 "${HERE}/oxpulse-relay-apply.sh" "${SBIN}/oxpulse-relay-apply"
 	install -m 0755 "${HERE}/oxpulse-relay-prestart.sh" "${SBIN}/oxpulse-relay-prestart"
 	install -m 0755 "${HERE}/oxpulse-relay-health-report.sh" "${SBIN}/oxpulse-relay-health-report.sh"
+	install -m 0755 "${HERE}/oxpulse-relay-upgrade.sh" "${SBIN}/oxpulse-relay-upgrade"
 	install -m 0644 "${HERE}/coturn-relay.conf.tpl" "${PREFIX_ETC}/coturn-relay.conf.tpl"
 	install -m 0644 "${HERE}/coturn-self-relay-guard.nft" "${PREFIX_ETC}/coturn-self-relay-guard.nft"
 	install -m 0644 "${HERE}/99-coturn-relay-ports.conf" "${SYSCTL_DIR}/99-coturn-relay-ports.conf"
 	local u
-	for u in oxpulse-relay-coturn.service oxpulse-relay-health.service oxpulse-relay-health.timer coturn-self-relay-guard.service; do
+	for u in oxpulse-relay-coturn.service oxpulse-relay-health.service oxpulse-relay-health.timer oxpulse-relay-upgrade.service oxpulse-relay-upgrade.timer coturn-self-relay-guard.service; do
 		install -m 0644 "${HERE}/${u}" "${UNIT_DIR}/${u}"
 	done
 	printf '%s\n' "${NODE_ID}" > "${PREFIX_ETC}/node-id"
 	printf 'RELAY_HOSTNAME=%s\nEXTERNAL_IP=%s\n' "${RELAY_HOSTNAME}" "${PUBLIC_IP}" > "${PREFIX_ETC}/relay.env"
 	chmod 0644 "${PREFIX_ETC}/node-id" "${PREFIX_ETC}/relay.env"
 	systemctl daemon-reload
+	# The coturn unit starts ${LIB_DST}/current/turnserver: releases/0.0.0 maps that
+	# to the distro package until the first upgrade installs the static coturn 4.18.
+	RELAY_LIB_DIR="${LIB_DST}" PREFIX_SHARE="${PREFIX_SHARE:-/usr/local/share}" UNIT_DIR="${UNIT_DIR}" \
+		bash "${SBIN}/oxpulse-relay-upgrade" --init-baseline
 	log "relay files installed"
 }
 
@@ -179,6 +184,7 @@ relay_main() {
 	relay_setup_tls
 	systemctl enable oxpulse-relay-coturn.service >/dev/null 2>&1
 	systemctl enable --now oxpulse-relay-health.timer >/dev/null 2>&1
+	systemctl enable --now oxpulse-relay-upgrade.timer >/dev/null 2>&1
 	log "DONE. Next: write ${PREFIX_ETC}/node-secret and ${PREFIX_ETC}/service-token (both 0600 root), then run: oxpulse-relay-apply"
 	if [[ "$TLS_OK" != 1 ]]; then
 		warn "EXIT 3: TLS not issued; coturn will not start until the certificate exists."

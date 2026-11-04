@@ -40,7 +40,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
           shopt -s nullglob
-          for f in *.sh; do
+          for f in *.sh relay/*.sh; do
             echo ">> $f"
             shellcheck -x -S warning "$f"
           done
@@ -340,6 +340,61 @@ jobs:
           path: ${{ matrix.arch.asset }}
           retention-days: 1
 
+  # Static musl coturn for relay-only nodes (relay/oxpulse-relay-upgrade.sh installs
+  # it). Built natively per arch from the upstream tag tarball pinned by sha256 in
+  # relay/coturn-static/version.env, then smoke-tested against the real relay
+  # template BEFORE it can be published: starts clean, allocates, refuses the
+  # denied peers. A binary that fails here never reaches the release assets.
+  build-relay-coturn:
+    needs: extract-version
+    strategy:
+      fail-fast: true
+      matrix:
+        arch:
+          - runner: ubuntu-24.04
+            token: amd64
+          - runner: ubuntu-24.04-arm
+            token: arm64
+    runs-on: ${{ matrix.arch.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build static coturn (${{ matrix.arch.token }})
+        run: |
+          set -euo pipefail
+          . relay/coturn-static/version.env
+          docker buildx build --target artifacts \
+            --build-arg "COTURN_VERSION=${COTURN_VERSION}" \
+            --build-arg "COTURN_SHA256=${COTURN_SHA256}" \
+            --output type=local,dest=relay-out relay/coturn-static
+          file relay-out/turnserver
+          # Static means no dynamic section at all (runs on any glibc).
+          ! readelf -d relay-out/turnserver 2>/dev/null | grep -q NEEDED
+          relay-out/turnserver --version
+
+      - name: Smoke test against the relay template
+        env:
+          RELAY_COTURN_BIN_DIR: ${{ github.workspace }}/relay-out
+          RELAY_SMOKE_REQUIRE_IPV6: "1"
+        run: bash tests/test_relay_coturn_smoke.sh
+
+      - name: Name the assets
+        run: |
+          cp relay-out/turnserver relay-turnserver-${{ matrix.arch.token }}
+          cp relay-out/turnutils_uclient relay-turnutils_uclient-${{ matrix.arch.token }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-coturn-${{ matrix.arch.token }}
+          path: |
+            relay-turnserver-${{ matrix.arch.token }}
+            relay-turnutils_uclient-${{ matrix.arch.token }}
+          retention-days: 1
+
   build-awg-params-agent:
     needs: extract-version
     strategy:
@@ -386,7 +441,7 @@ jobs:
           retention-days: 1
 
   attach-release-assets:
-    needs: [extract-version, build-and-push, merge-manifests, build-partner-cli, build-opec, build-awg-params-agent]
+    needs: [extract-version, build-and-push, merge-manifests, build-partner-cli, build-opec, build-awg-params-agent, build-relay-coturn]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -416,6 +471,14 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: oxpulse-awg-params-agent-arm64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: relay-coturn-amd64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: relay-coturn-arm64
 
       - name: Stage artifacts
         env:
@@ -563,6 +626,26 @@ jobs:
           # from /usr/local/share/oxpulse-partner-edge/VERSION; sync_host_scripts
           # fetches it from REPO_RAW/VERSION on upgrade.  Must be a release asset
           # so SHA256SUMS covers it.  (File is already at repo root, no cp needed.)
+          # Relay-only nodes (docs/relay-only-node.md): scripts, template and units
+          # staged flat (asset names are unique in the release), plus relay-manifest.txt,
+          # which tells oxpulse-relay-upgrade.sh exactly which assets to fetch and where
+          # each installs. The static coturn binaries come from build-relay-coturn.
+          # channel-health-lib.sh (a relay lib) is already staged above.
+          cp relay/oxpulse-relay-upgrade.sh        oxpulse-relay-upgrade.sh
+          cp relay/oxpulse-relay-apply.sh          oxpulse-relay-apply.sh
+          cp relay/oxpulse-relay-prestart.sh       oxpulse-relay-prestart.sh
+          cp relay/oxpulse-relay-health-report.sh  oxpulse-relay-health-report.sh
+          cp relay/relay-lib.sh                    relay-lib.sh
+          cp relay/relay-probe-lib.sh              relay-probe-lib.sh
+          cp relay/coturn-relay.conf.tpl           coturn-relay.conf.tpl
+          cp relay/oxpulse-relay-coturn.service    oxpulse-relay-coturn.service
+          cp relay/oxpulse-relay-health.service    oxpulse-relay-health.service
+          cp relay/oxpulse-relay-health.timer      oxpulse-relay-health.timer
+          cp relay/oxpulse-relay-upgrade.service   oxpulse-relay-upgrade.service
+          cp relay/oxpulse-relay-upgrade.timer     oxpulse-relay-upgrade.timer
+          cp relay/relay-manifest.txt              relay-manifest.txt
+          chmod +x relay-turnserver-amd64 relay-turnserver-arm64 \
+            relay-turnutils_uclient-amd64 relay-turnutils_uclient-arm64
           # Phase 5.7 Item 3: regenerate lib-checksums.txt from the lib/*.sh
           # files at release time so the integrity is pinned to this exact
           # release. install.sh _install_lib_source validates tier-4 fetches
@@ -660,6 +743,23 @@ jobs:
             opec-arm64 \
             oxpulse-awg-params-agent-amd64 \
             oxpulse-awg-params-agent-arm64 \
+            oxpulse-relay-upgrade.sh \
+            oxpulse-relay-apply.sh \
+            oxpulse-relay-prestart.sh \
+            oxpulse-relay-health-report.sh \
+            relay-lib.sh \
+            relay-probe-lib.sh \
+            coturn-relay.conf.tpl \
+            oxpulse-relay-coturn.service \
+            oxpulse-relay-health.service \
+            oxpulse-relay-health.timer \
+            oxpulse-relay-upgrade.service \
+            oxpulse-relay-upgrade.timer \
+            relay-manifest.txt \
+            relay-turnserver-amd64 \
+            relay-turnserver-arm64 \
+            relay-turnutils_uclient-amd64 \
+            relay-turnutils_uclient-arm64 \
             > SHA256SUMS
 
       - name: Upload release assets
@@ -738,6 +838,23 @@ jobs:
             oxpulse-partner-edge-split-routing.service \
             oxpulse-partner-edge-ru-subnets-update.service \
             oxpulse-partner-edge-ru-subnets-update.timer \
+            oxpulse-relay-upgrade.sh \
+            oxpulse-relay-apply.sh \
+            oxpulse-relay-prestart.sh \
+            oxpulse-relay-health-report.sh \
+            relay-lib.sh \
+            relay-probe-lib.sh \
+            coturn-relay.conf.tpl \
+            oxpulse-relay-coturn.service \
+            oxpulse-relay-health.service \
+            oxpulse-relay-health.timer \
+            oxpulse-relay-upgrade.service \
+            oxpulse-relay-upgrade.timer \
+            relay-manifest.txt \
+            relay-turnserver-amd64 \
+            relay-turnserver-arm64 \
+            relay-turnutils_uclient-amd64 \
+            relay-turnutils_uclient-arm64 \
             SHA256SUMS \
             --clobber
 
