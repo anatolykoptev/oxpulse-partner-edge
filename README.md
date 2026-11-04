@@ -294,3 +294,5 @@ cargo build --release -p opec
 ```
 
 See [`crates/opec/README.md`](crates/opec/README.md) and [`docs/runbooks/opec-tenant.md`](docs/runbooks/opec-tenant.md).
+
+Operator runbook for the retired hysteria2 channel: [`docs/runbooks/ch3-retired.md`](docs/runbooks/ch3-retired.md).
