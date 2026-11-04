@@ -130,6 +130,43 @@ else
 	fail "TURNS TLS 1.2 handshake: $(tail -3 "$T/tls.out")"
 fi
 
+# --- legacy coturn (4.6.x): the prestart's legacy render keeps DTLS off ----------------------
+# On coturn < 4.18 the ABSENCE of no-dtls switches a DTLS listener on (udp on the TLS
+# port). oxpulse-relay-prestart renders the legacy lines for such a binary; here the
+# same relay-lib.sh functions render for a real coturn 4.6.1 container and a control
+# (4.18 form, no legacy lines) shows the UDP bind the lines are there to prevent.
+if [[ "${RELAY_SMOKE_LEGACY:-0}" == 1 ]]; then
+	if ! command -v docker >/dev/null; then fail "legacy: docker not available"; else
+	LB=$((BASE+100)); LI="${RELAY_LEGACY_IMAGE:-coturn/coturn:4.6.1}"
+	chmod 755 "$T"; chmod 644 "$T/cert.pem" "$T/key.pem"   # the container runs as nobody
+	legacy_conf() { # name port with_legacy
+		local f="$T/$1.conf"
+		sed -e "s/^listening-port=.*/listening-port=$2/" -e "s/^tls-listening-port=.*/tls-listening-port=$(($2+5))/" \
+			-e "s#^cert=.*#cert=$T/cert.pem#" -e "s#^pkey=.*#pkey=$T/key.pem#" \
+			-e '/^syslog$/d' -e '/^no-stdout-log$/d' -e '/^simple-log$/d' "$T/rendered.conf" > "$f"
+		# TLS port is port+5: port+1 is coturn's default alt-listening-port and 4.6.x refuses to bind both.
+		printf 'log-file=stdout\nlistening-ip=127.0.0.1\nrelay-ip=127.0.0.1\n' >> "$f"
+		if [[ "$3" == 1 ]]; then ( . "$REPO_ROOT/relay/relay-lib.sh"; relay_append_legacy_directives "$f" ); fi
+		chmod 644 "$f"
+	}
+	legacy_conf L "$LB" 1; legacy_conf LC "$((LB+10))" 0
+	for n in L LC; do
+		docker run -d --rm --name "relay-smoke-$n-$BASE" --network host -v "$T:$T:ro" --entrypoint turnserver "$LI" -c "$T/$n.conf" >/dev/null 2>&1 || true
+	done
+	trap 'docker rm -f "relay-smoke-L-$BASE" "relay-smoke-LC-$BASE" >/dev/null 2>&1; cleanup' EXIT
+	for _ in $(seq 1 120); do
+		if ss -lnt | grep "127.0.0.1:$((LB+5)) " >/dev/null && ss -lnt | grep "127.0.0.1:$((LB+15)) " >/dev/null; then break; fi
+		sleep 0.5
+	done
+	if ss -lnt | grep "127.0.0.1:$((LB+5)) " >/dev/null; then
+		ss -lnu | grep ":$((LB+5)) " >/dev/null && fail "legacy 4.6.1 with the legacy render binds no UDP on the TLS port" || pass "legacy 4.6.1 with the legacy render binds no UDP on the TLS port"
+		ss -lnu | grep ":$((LB+15)) " >/dev/null && pass "control: 4.6.1 WITHOUT the legacy lines does bind UDP on the TLS port (what they prevent)" || fail "control: 4.6.1 without the legacy lines binds UDP on the TLS port"
+	else
+		fail "legacy 4.6.1 container did not come up: $(docker logs "relay-smoke-L-$BASE" 2>&1 | tail -3) | listening: $(ss -lntu | grep -E ":$((LB))|:$((LB+5))" | tr -s ' ' | tr '\n' ';')"
+	fi
+	fi
+fi
+
 echo ""
 echo "relay coturn smoke: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" -eq 0 ]]

@@ -97,11 +97,12 @@ dest_for() {
 		lib)  printf '%s/%s' "$LIB_ROOT" "$2" ;;
 		etc)  printf '%s/%s' "$PREFIX_ETC" "$2" ;;
 		unit) printf '%s/%s' "$UNIT_DIR" "$2" ;;
+		opec) printf '%s' "$OPEC_DST" ;;
 		bin)  printf '%s/releases/%s/%s' "$LIB_ROOT" "$3" "$2" ;;
 		*) return 1 ;;
 	esac
 }
-mode_for() { case "$1" in sbin|bin) printf '0755' ;; *) printf '0644' ;; esac; }
+mode_for() { case "$1" in sbin|bin|opec) printf '0755' ;; *) printf '0644' ;; esac; }
 
 # install_atomic SRC DST MODE — sibling temp + rename(2).
 install_atomic() {
@@ -144,6 +145,7 @@ verify_asset() {
 }
 
 MANIFEST_ROWS=()   # "group|kind|asset|name"
+OPEC_NEW=""        # verified replacement opec, installed with the swap (empty = keep)
 # stage_release VER GROUPS STAGE_DIR — download and verify SHA256SUMS, the
 # manifest and every asset of the requested groups into STAGE_DIR.
 # GROUPS: "upgrader" or "all".
@@ -193,8 +195,9 @@ ensure_opec() { # <ver> <stage>
 	fetch "${RELEASES_BASE}/v$1/${asset}" "$f" || die "opec: could not fetch ${asset}"
 	verify_asset "$f" "$asset"
 	opec_supports "$f" || die "opec: release v$1 ${asset} lacks the relay subcommands"
-	install_atomic "$f" "$OPEC_DST" 0755
-	log "opec replaced from release v$1 (checksum verified)"
+	# Installed by activate() AFTER the snapshot, so a rollback restores the old one.
+	OPEC_NEW="$f"
+	log "opec from release v$1 verified; it replaces ${OPEC_DST} with the swap"
 }
 
 # ---- snapshot / activate / rollback ------------------------------------------
@@ -215,6 +218,9 @@ snapshot_live() { # <ver> — copy every file the activation will replace
 			printf '%s %s\n' "$kind" "$name" >> "${new}/ABSENT"
 		fi
 	done
+	if [[ -n "$OPEC_NEW" ]]; then
+		if [[ -e "$OPEC_DST" ]]; then install -d -m 0700 "${new}/opec"; cp -p "$OPEC_DST" "${new}/opec/opec"; else printf 'opec opec\n' >> "${new}/ABSENT"; fi
+	fi
 	if [[ -L "${LIB_ROOT}/current" ]]; then readlink "${LIB_ROOT}/current" > "${new}/current.target"; else : > "${new}/current.none"; fi
 	cp -p "$VERSION_FILE" "${new}/VERSION" 2>/dev/null || true
 	rm -rf "${LIB_ROOT}/snapshots/last"
@@ -242,6 +248,7 @@ activate() {
 			install_atomic "${STAGE}/${a}" "$dst" "$(mode_for "$kind")" || return 1
 		done
 	done
+	if [[ -n "$OPEC_NEW" ]]; then install_atomic "$OPEC_NEW" "$OPEC_DST" 0755 || return 1; fi
 	set_current "releases/${ver}" || return 1
 	"$SYSTEMCTL" daemon-reload || return 1
 }
@@ -249,7 +256,7 @@ activate() {
 restore_snapshot() {
 	local kind name f
 	[[ -d "${SNAP_DIR}" ]] || { crit "no snapshot to roll back to"; return 1; }
-	for kind in lib etc unit sbin; do
+	for kind in lib etc unit sbin opec; do
 		[[ -d "${SNAP_DIR}/${kind}" ]] || continue
 		for f in "${SNAP_DIR}/${kind}"/*; do
 			[[ -e "$f" ]] || continue
@@ -342,6 +349,14 @@ prune_releases() { # keep the two newest staged releases (the baseline dir stays
 # ---- apply ------------------------------------------------------------------------
 STAGE=""
 cleanup_stage() { [[ -z "$STAGE" ]] || rm -rf -- "$STAGE"; }
+# on_exit — persist a failing outcome (10 verify/pre-swap, 11 rolled back, 12 rollback
+# failed) next to failed-version so the heartbeat can report it centrally.
+on_exit() {
+	local rc=$?
+	cleanup_stage
+	case "$rc" in 10|11|12) printf '%s\n' "$rc" > "${LIB_ROOT}/last-rc" ;; esac
+	return "$rc"
+}
 
 apply_upgrade() { # <ver>
 	local ver="$1" inst failed lockf
@@ -358,7 +373,7 @@ apply_upgrade() { # <ver>
 
 	inst=$(installed_version)
 	is_semver "$inst" || die "installed version '${inst:-unset}' is not a concrete semver; bootstrap with --install-upgrader first"
-	if [[ "$ver" == "$inst" ]]; then log "already at v${inst}; nothing to do"; return 0; fi
+	if [[ "$ver" == "$inst" ]]; then rm -f "${LIB_ROOT}/last-rc"; log "already at v${inst}; nothing to do"; return 0; fi
 	if ! ver_gt "$ver" "$inst"; then log "refusing downgrade: desired=${ver} installed=${inst}"; return 0; fi
 	failed=$(cat "${LIB_ROOT}/failed-version" 2>/dev/null || true)
 	if [[ "$failed" == "$ver" ]]; then
@@ -371,7 +386,7 @@ apply_upgrade() { # <ver>
 	install -d -m 0755 "${LIB_ROOT}/releases"
 	STAGE="${LIB_ROOT}/.stage.$$"
 	rm -rf -- "$STAGE"; install -d -m 0700 "$STAGE"
-	trap cleanup_stage EXIT
+	trap on_exit EXIT
 	stage_release "$ver" all "$STAGE"
 	# Pre-swap checks: the shipped binary must execute on THIS host.
 	local bin_ts
@@ -387,6 +402,8 @@ apply_upgrade() { # <ver>
 		[[ "$kind" == bin ]] || continue
 		install_atomic "${STAGE}/${asset}" "${rel_dir}/${name}" 0755
 	done
+	# From here on a signal must not leave a half-done swap: finish or roll back.
+	trap '' TERM INT HUP
 	snapshot_live "$ver"
 	local swapped=0
 	if activate "$ver"; then
@@ -397,7 +414,7 @@ apply_upgrade() { # <ver>
 	fi
 	if [[ "$swapped" == 1 ]]; then
 		write_version "$ver"
-		rm -f "${LIB_ROOT}/failed-version"
+		rm -f "${LIB_ROOT}/failed-version" "${LIB_ROOT}/last-rc"
 		prune_releases
 		log "upgrade to v${ver} complete"
 		return 0
@@ -437,8 +454,8 @@ launch_detached() {
 	[[ -x "$self" ]] || self="$(readlink -f "${BASH_SOURCE[0]}")"
 	if "$SYSTEMD_RUN" --quiet --no-block --collect --unit="$SELF_UNIT" \
 		--description="OxPulse relay-only upgrade to v${ver}" \
-		--property=Type=oneshot --property=TimeoutStartSec=1200 \
-		timeout 1000 "$self" --apply "$ver" >/dev/null 2>&1; then
+		--property=Type=oneshot --property=TimeoutStartSec=3600 \
+		"$self" --apply "$ver" >/dev/null 2>&1; then
 		log "v${ver} started detached as ${SELF_UNIT}.service (journalctl -u ${SELF_UNIT})"
 	else
 		warn "could not start ${SELF_UNIT}.service for v${ver} (retry next tick)"

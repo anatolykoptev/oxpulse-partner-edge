@@ -11,6 +11,8 @@
 #   * relay/oxpulse-relay-upgrade.sh apply_upgrade(): delete the
 #     `restore_snapshot || { ...; return 12; }` line (skip rollback on a failed
 #     health gate) -> "health gate failure rolls back", "rollback restores ...".
+#   * relay/oxpulse-relay-upgrade.sh on_exit(): delete the `case "$rc" in 10|11|12)` line
+#     (never persist the failure) -> "persists last-rc".
 #   * relay/oxpulse-relay-upgrade.sh apply_upgrade(): delete the `ver_gt` guard
 #     line (`if ! ver_gt "$ver" "$inst"; then ...`) -> "a downgrade is refused".
 set -uo pipefail
@@ -70,8 +72,7 @@ STUB
 cat > "$T/bin/systemd-run" <<'STUB'
 #!/bin/bash
 echo "systemd-run $*" >> "$SYSLOG"
-while [[ $# -gt 0 && "$1" != timeout ]]; do shift; done
-shift 2
+while [[ $# -gt 0 && "$1" != */oxpulse-relay-upgrade ]]; do shift; done
 exec "$@"
 STUB
 printf '#!/bin/bash\nexit 0\n' > "$T/bin/openssl"
@@ -90,6 +91,7 @@ export FIXTURES="$T/rel" RELAY_RELEASES_BASE="https://example.test/releases/down
 #   BAD_UCLIENT=1  the release's turnutils_uclient fails (health gate must fail)
 #   CORRUPT=name   change the bytes of asset NAME after SHA256SUMS was written
 #   OMIT=name      leave NAME out of SHA256SUMS
+#   WITH_OPEC=1    ship an opec-amd64 asset
 mkrelease() {
 	local ver="$1" d="$FIXTURES/v$1" line asset src
 	rm -rf "$d"; mkdir -p "$d"
@@ -105,6 +107,7 @@ mkrelease() {
 			   cp "$src" "$d/$asset"; printf '\n# fixture release v%s\n' "$ver" >> "$d/$asset" ;;
 		esac
 	done < "$R/relay-manifest.txt"
+	[[ -z "${WITH_OPEC:-}" ]] || cp "$T/bin/opec-ok" "$d/opec-amd64"
 	( cd "$d" && sha256sum * > SHA256SUMS.all
 	  if [[ -n "${OMIT:-}" ]]; then grep -v " ${OMIT}\$" SHA256SUMS.all > SHA256SUMS; else cp SHA256SUMS.all SHA256SUMS; fi
 	  rm SHA256SUMS.all )
@@ -168,10 +171,11 @@ HB_DESIRED=1.2.3 HB_CODE=500 UPARGS="--check" up >/dev/null
 ! grep -q 'systemd-run' "$SYSLOG" && pass "check: a failing central answer launches nothing" || fail "check: a failing central answer launches nothing"
 
 # ============ 3. happy path: check -> detached apply -> installed =============================
-node; setup_opec; mkrelease 1.2.3; : > "$CURL_LOG"
+node; setup_opec; mkrelease 1.2.3; : > "$CURL_LOG"; echo 11 > "$N/lib/last-rc"; echo 1.1.0 > "$N/lib/failed-version"
 HB_DESIRED=1.2.3 UPARGS="--check" up >"$T/happy.out"; rc=$?
 [[ "$rc" -eq 0 ]] && pass "happy path exits 0" || fail "happy path exits 0 (rc=$rc: $(tail -3 "$T/happy.out"))"
 grep -q 'systemd-run.*--unit=oxpulse-relay-self-upgrade.*--apply 1.2.3' "$SYSLOG" && pass "upgrade runs detached as its own transient unit" || fail "upgrade runs detached as its own transient unit"
+[[ ! -e "$N/lib/last-rc" && ! -e "$N/lib/failed-version" ]] && pass "success leaves no failure state" || fail "success leaves no failure state"
 [[ "$(installed)" == "1.2.3" ]] && pass "VERSION written only on success" || fail "VERSION written (got $(installed))"
 [[ "$(readlink "$N/lib/current")" == "releases/1.2.3" && -x "$N/lib/releases/1.2.3/turnserver" && -x "$N/lib/releases/1.2.3/turnutils_uclient" ]] && pass "binaries staged under releases/<ver>, current switched" || fail "binaries staged, current switched ($(readlink "$N/lib/current"))"
 grep -q 'ExecStart=/usr/local/lib/oxpulse-relay/current/turnserver' "$N/units/oxpulse-relay-coturn.service" && pass "unit ExecStart points at current/turnserver" || fail "unit ExecStart points at current/turnserver"
@@ -194,6 +198,7 @@ node; setup_opec; CORRUPT=oxpulse-relay-apply.sh mkrelease 1.2.3; before="$(snap
 UPARGS="--apply 1.2.3" up >"$T/m.out"; rc=$?
 [[ "$rc" -eq 10 && "$(restarts)" -eq 0 && "$(snap_state)" == "$before" && "$(grep -c 'MISMATCH' "$T/m.out")" -ge 1 ]] \
 	&& pass "checksum mismatch aborts before any swap (rc 10, nothing changed, no restart)" || fail "checksum mismatch aborts before any swap (rc=$rc: $(tail -2 "$T/m.out"))"
+[[ "$(cat "$N/lib/last-rc" 2>/dev/null)" == "10" ]] && pass "a verify failure persists last-rc 10" || fail "a verify failure persists last-rc 10"
 [[ ! -e "$N/lib/releases/1.2.3" && ! -e "$N/lib/snapshots/last" ]] && pass "mismatch: no release dir, no snapshot taken" || fail "mismatch: no release dir, no snapshot"
 CORRUPT=relay-turnserver-amd64 mkrelease 1.2.3
 UPARGS="--apply 1.2.3" up >/dev/null; rc=$?
@@ -217,6 +222,7 @@ UPARGS="--apply 1.2.3" up >"$T/r.out"; rc=$?
 [[ "$(restarts)" -eq 2 ]] && pass "rollback restarts coturn again (2 restarts)" || fail "rollback restarts coturn again ($(restarts) restarts)"
 [[ "$(snap_state)" == "$before" ]] && pass "rollback restores template, scripts, unit, current and VERSION" || fail "rollback restores previous state"
 grep -q 'ExecStart=/usr/bin/turnserver' "$N/units/oxpulse-relay-coturn.service" && [[ "$(readlink "$N/lib/current")" == "releases/0.0.0" ]] && pass "rollback: old unit ExecStart and the previous binary are back" || fail "rollback: old unit and binary"
+[[ "$(cat "$N/lib/last-rc" 2>/dev/null)" == "11" ]] && pass "a rolled-back upgrade persists last-rc 11" || fail "a rolled-back upgrade persists last-rc 11 ($(cat "$N/lib/last-rc" 2>/dev/null))"
 [[ "$(cat "$N/lib/failed-version" 2>/dev/null)" == "1.2.3" ]] && grep -q 'CRIT' "$T/r.out" && pass "failure is logged loudly and the version is parked" || fail "failure is logged loudly and parked"
 [[ "$(stat -c %a "$N/etc")" == "750" ]] && pass "/etc dir mode stays 0750 across a rollback" || fail "/etc dir mode stays 0750 across a rollback ($(stat -c %a "$N/etc"))"
 : > "$SYSLOG"; : > "$CURL_LOG"; UPARGS="--apply 1.2.3" up >/dev/null; rc=$?
@@ -227,6 +233,7 @@ grep -q 'ExecStart=/usr/bin/turnserver' "$N/units/oxpulse-relay-coturn.service" 
 # ============ 7. rollback that cannot recover is reported as such ===========================================
 node; setup_opec; BAD_UCLIENT=1 mkrelease 1.2.3; : > "$T_SYS_UCLIENT_FAIL"
 UPARGS="--apply 1.2.3" up >"$T/rr.out"; rc=$?
+[[ "$(cat "$N/lib/last-rc" 2>/dev/null)" == "12" ]] && pass "a failed rollback persists last-rc 12" || fail "a failed rollback persists last-rc 12"
 [[ "$rc" -eq 12 ]] && grep -q 'ROLLBACK FAILED' "$T/rr.out" && pass "rollback that stays unhealthy exits 12 and says so" || fail "rollback that stays unhealthy exits 12 (rc=$rc)"
 rm -f "$T_SYS_UCLIENT_FAIL"
 node; setup_opec; mkrelease 1.2.3; : > "$T_COTURN_DOWN"; before="$(snap_state)"
@@ -268,6 +275,19 @@ setup_opec; UPARGS="--apply 1.2.3" up >/dev/null; rc=$?
 node; mkrelease 1.2.3; rm -rf "$N/lib/current"; : > "$N/etc/node-config.json"; : > "$CURL_LOG"
 UPARGS="--install-upgrader --version 1.2.3" up >/dev/null; rc=$?
 [[ "$rc" -ne 0 && ! -e "$N/units/oxpulse-relay-upgrade.timer" ]] && pass "bootstrap refuses a host with registration material, installing nothing" || fail "bootstrap gate (rc=$rc)"
+
+# ============ 10. opec replacement is part of the swap and is rolled back ====================================
+node; printf '#!/bin/bash\necho OLDOPEC\nexit 1\n' > "$N/opec"; chmod +x "$N/opec"; old_opec="$(sha256sum "$N/opec" | cut -d' ' -f1)"
+WITH_OPEC=1 BAD_UCLIENT=1 mkrelease 1.2.3
+UPARGS="--apply 1.2.3" up >/dev/null; rc=$?
+[[ "$rc" -eq 11 && "$(sha256sum "$N/opec" | cut -d' ' -f1)" == "$old_opec" ]] && pass "a rollback restores the previous opec" || fail "a rollback restores the previous opec (rc=$rc)"
+node; printf '#!/bin/bash\necho OLDOPEC\nexit 1\n' > "$N/opec"; chmod +x "$N/opec"; WITH_OPEC=1 mkrelease 1.2.3
+before_opec="$(sha256sum "$N/opec" | cut -d' ' -f1)"
+UPARGS="--apply 1.2.3" up >/dev/null; rc=$?
+[[ "$rc" -eq 0 && "$(sha256sum "$N/opec" | cut -d' ' -f1)" != "$before_opec" ]] && pass "an unsupported opec is replaced with the swap on success" || fail "opec replaced on success (rc=$rc)"
+node; printf '#!/bin/bash\necho OLDOPEC\nexit 1\n' > "$N/opec"; chmod +x "$N/opec"; CORRUPT=opec-amd64 WITH_OPEC=1 mkrelease 1.2.3; before_opec="$(sha256sum "$N/opec" | cut -d' ' -f1)"
+UPARGS="--apply 1.2.3" up >/dev/null; rc=$?
+[[ "$rc" -eq 10 && "$(sha256sum "$N/opec" | cut -d' ' -f1)" == "$before_opec" ]] && pass "a tampered opec is refused before anything changes" || fail "tampered opec refused (rc=$rc)"
 
 echo ""
 echo "relay upgrade: PASS=$PASS FAIL=$FAIL"

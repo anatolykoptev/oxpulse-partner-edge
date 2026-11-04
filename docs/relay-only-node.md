@@ -188,6 +188,25 @@ checksummed release `opec` otherwise). Then:
 5. On success only, VERSION is written (the heartbeat then reports the new
    `installer_version`) and old releases are pruned (the two newest are kept).
 
+### Failure is visible centrally
+`oxpulse-relay-upgrade` records its last failing exit code in
+`/usr/local/lib/oxpulse-relay/last-rc` (10 verify/pre-swap, 11 rolled back, 12
+rollback failed) beside `failed-version`; a successful upgrade (or reaching the
+desired version) clears them. While either exists the 60-second heartbeat adds a third
+channel, `relay-upgrade` (`channel_handshake_ok=false`, `channel_probe_mode=upgrade`,
+`channel_probe_reason=verify-failed|rolled-back|rollback-failed`), posted best-effort
+so it can never fail the liveness report. **Central must know the channel first**:
+`channel_health.rs` rejects any `channel_name` outside `ch1|ch2|ch3|coturn|coturn-udp|coturn-tls`
+(`unknown_channel_name`), and `alerts-partner-channel-health.yml` matches
+`ch1|ch2|ch3` only. Until `relay-upgrade` is added to both allowlist sites (and its
+class in `channel_class.rs`) and an alert such as
+`partner_node_channel_heartbeat_total{channel_name="relay-upgrade",handshake_ok="false"}`
+is added, the report is refused with a 400 and the failure stays journald-only.
+
+The upgrade itself is bounded only where it is safe: each download has its own
+timeout, but the swap, health gate and rollback run to completion (the transient
+unit has a 1 h cap and TERM/INT/HUP are ignored once the swap starts).
+
 ### Rollback
 If activation or the gate fails, the snapshot is restored (previous binary via the
 `current` symlink, unit, template, scripts, libs), coturn is restarted and gated
@@ -217,11 +236,19 @@ relay) and creates `releases/0.0.0` + `current`. The node then reports
 `installer_version=0.0.0` until its first upgrade. Run the first upgrade in a quiet
 window: `sudo oxpulse-relay-upgrade --to "$V"`, or let central drive it.
 
-**Known gap on a fresh install:** `install-relay.sh` still installs the distro coturn,
-so until the first upgrade (within a day, from the timer) a new node runs 4.6.1 with
-the 4.18-form template. That is functional (every key is valid on 4.6.1), but without
-`no-dtls` 4.6.1 also opens a DTLS listener on udp/443, which the relay firewall does
-not expose. The first upgrade replaces both.
+**Template and binary always match.** The shipped template is the 4.18 form: 4.18
+rejects `no-dtls`, `no-tlsv1` and `no-tlsv1_1`, but on coturn < 4.18 their absence
+switches a DTLS listener (UDP on the TLS port) and TLS 1.0/1.1 on. So
+`oxpulse-relay-prestart`, which runs before every start (upgrade, certbot renewal
+restart, `oxpulse-relay-apply`, rollback), runs `--version` on the binary the unit
+will exec (`current/turnserver`, else `/usr/bin/turnserver`) and appends those three
+directives when it is below 4.18 or its version cannot be parsed. A fresh install,
+which runs the distro 4.6.1 until its first upgrade, is therefore safe. The CI smoke
+test proves it on a real `coturn/coturn:4.6.1`: with the legacy render nothing binds
+UDP on the TLS port; without the lines it does. (Firewall note: a node built by
+`install-relay.sh` opens `443/tcp` only. A node whose ufw has a bare `443 ALLOW`,
+such as msk1, also exposes udp/443, which is why the guarantee is made at render
+time and not by the firewall.)
 
 `coturn-relay.conf.tpl` keeps `no-cli`: coturn 4.18 logs it as deprecated (the CLI is
 off by default there) but 4.6.x, which a fresh install runs until its first

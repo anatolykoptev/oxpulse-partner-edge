@@ -166,4 +166,5 @@ jobs:
           RELAY_COTURN_BIN_DIR: ${{ github.workspace }}/relay-out
           OPEC: ${{ github.workspace }}/target/release/opec
           RELAY_SMOKE_REQUIRE_IPV6: "1"
+          RELAY_SMOKE_LEGACY: "1"
         run: bash tests/test_relay_coturn_smoke.sh

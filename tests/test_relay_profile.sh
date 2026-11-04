@@ -4,6 +4,10 @@
 # never printed, heartbeat payload shape.
 #
 # Mutations that must turn this RED (stated as the edit):
+#   * relay/oxpulse-relay-prestart.sh: delete the `relay_append_legacy_directives` call
+#     (always render the 4.18 form) -> "prestart: coturn 4.6.1 ... legacy directives".
+#   * relay/oxpulse-relay-health-report.sh: delete the `if up_payload=...` block (never
+#     emit the relay-upgrade channel) -> "heartbeat: failed upgrade is reported".
 #   * relay/relay-lib.sh: delete SIGNALING_SFU_SECRET from RELAY_FORBIDDEN_ENV
 #     -> "fails closed: env SIGNALING_SFU_SECRET".
 #   * relay/relay-lib.sh: delete the `udp 49152:65535` line in relay_firewall_rules
@@ -215,6 +219,19 @@ STUB
 	out="$(hb OPENSSL_FAIL=1)"
 	payloads "$out" | jq -e -s 'map(select(.channel_name=="coturn-tls"))[0] | .channel_handshake_ok == false and .channel_probe_reason == "cert-verify"' >/dev/null 2>&1 \
 		&& pass "heartbeat payload (failed TLS verify carries reason)" || fail "heartbeat payload (failed TLS verify carries reason): $out"
+	# a failed self-upgrade is reported as its own channel, and only while it lasts
+	[[ "$(payloads "$(hb)" | jq -r '.channel_name' | paste -sd, -)" == "coturn,coturn-tls" ]] && pass "heartbeat: no upgrade channel when nothing failed" || fail "heartbeat: no upgrade channel when nothing failed"
+	for pair in 10:verify-failed 11:rolled-back 12:rollback-failed; do
+		printf '%s\n' "${pair%%:*}" > "$T/hlib/last-rc"
+		out="$(hb)"
+		payloads "$out" | jq -e -s --arg r "${pair##*:}" 'map(select(.channel_name=="relay-upgrade"))[0] | .channel_handshake_ok == false and .channel_probe_mode == "upgrade" and .channel_probe_reason == $r' >/dev/null 2>&1 \
+			&& pass "heartbeat: failed upgrade is reported (rc ${pair%%:*} -> ${pair##*:})" || fail "heartbeat: failed upgrade is reported (rc ${pair%%:*} -> ${pair##*:}): $out"
+	done
+	rm -f "$T/hlib/last-rc"; echo 1.2.3 > "$T/hlib/failed-version"
+	payloads "$(hb)" | jq -e -s 'map(select(.channel_name=="relay-upgrade"))[0].channel_probe_reason == "rolled-back"' >/dev/null 2>&1 \
+		&& pass "heartbeat: a parked failed-version alone is reported (rolled-back)" || fail "heartbeat: a parked failed-version alone is reported"
+	rm -f "$T/hlib/failed-version"
+	[[ "$(payloads "$(hb)" | jq -r '.channel_name' | paste -sd, -)" == "coturn,coturn-tls" ]] && pass "heartbeat: the upgrade channel clears with the failure state" || fail "heartbeat: the upgrade channel clears with the failure state"
 	chmod 644 "$E/service-token"
 	if out="$(hb)"; then rc=0; else rc=$?; fi
 	[[ "$rc" -ne 0 && "$out" == *"no service token"* ]] && pass "service-token with loose mode is refused" || fail "service-token with loose mode is refused"
@@ -311,6 +328,37 @@ if [[ "$rc" -ne 0 ]] && ! grep -q '^opec render' "$PSLOG" && [[ ! -e "$PSETC/cot
 PSETC="$(mktemp -d "$T/ps-etc.XXXXXX")"
 run_prestart OPEC_CHECK_FAIL=1 && rc=0 || rc=$?
 if [[ "$rc" -ne 0 ]] && grep -q '^opec check-node-secret' "$PSLOG" && ! grep -q '^opec render' "$PSLOG" && [[ ! -e "$PSETC/coturn.conf" ]]; then pass "prestart: invalid node-secret -> fails, no render"; else fail "prestart: invalid node-secret -> fails, no render (rc=$rc)"; fi
+
+# --- prestart renders the TLS/DTLS directives for the binary that will run ---------------
+mkbin() { printf '#!/bin/bash\n%s\n' "$2" > "$PS/$1"; chmod +x "$PS/$1"; }
+mkbin ts461 'echo "Version Coturn-4.6.1 '"'"'Gorst'"'"'"'
+mkbin ts4180 'echo "4.18.0"'
+mkbin ts4200 'echo "Version: Coturn-4.20.1"'
+mkbin tsjunk 'echo "something unexpected"'
+mkbin tsfail 'exit 3'
+legacy_conf() { # <stub> -> 0 when the rendered conf carries all three legacy lines
+	PSETC="$(mktemp -d "$T/ps-etc.XXXXXX")"
+	run_prestart TURNSERVER_BIN="$PS/$1" || return 2
+	grep -qx 'no-dtls' "$PSETC/coturn.conf" && grep -qx 'no-tlsv1' "$PSETC/coturn.conf" && grep -qx 'no-tlsv1_1' "$PSETC/coturn.conf"
+}
+no_legacy_conf() {
+	PSETC="$(mktemp -d "$T/ps-etc.XXXXXX")"
+	run_prestart TURNSERVER_BIN="$PS/$1" || return 2
+	! grep -qE '^(no-dtls|no-tlsv1|no-tlsv1_1)$' "$PSETC/coturn.conf"
+}
+legacy_conf ts461 && pass "prestart: coturn 4.6.1 -> legacy directives (no-dtls, no-tlsv1, no-tlsv1_1)" || fail "prestart: coturn 4.6.1 -> legacy directives (no-dtls, no-tlsv1, no-tlsv1_1)"
+no_legacy_conf ts4180 && pass "prestart: coturn 4.18.0 -> no legacy directives" || fail "prestart: coturn 4.18.0 -> no legacy directives"
+no_legacy_conf ts4200 && pass "prestart: coturn 4.20.1 -> no legacy directives" || fail "prestart: coturn 4.20.1 -> no legacy directives"
+legacy_conf tsjunk && pass "prestart: unparsable --version -> legacy directives (fail safe)" || fail "prestart: unparsable --version -> legacy directives (fail safe)"
+legacy_conf tsfail && pass "prestart: --version failing -> legacy directives (fail safe)" || fail "prestart: --version failing -> legacy directives (fail safe)"
+legacy_conf no-such-binary && pass "prestart: missing binary -> legacy directives (fail safe)" || fail "prestart: missing binary -> legacy directives (fail safe)"
+# with no override the unit's binary is current/turnserver
+mkdir -p "$T/pl/current"; cp "$PS/ts4180" "$T/pl/current/turnserver"
+PSETC="$(mktemp -d "$T/ps-etc.XXXXXX")"
+cp "$R/relay-lib.sh" "$R/relay-probe-lib.sh" "$T/pl/"
+env ALLOW_NONROOT=1 PREFIX_ETC="$PSETC" PREFIX_LIB="$T/no-such-lib" RELAY_LIB_DIR="$T/pl" NFT="$PS/nft" OPEC="$PS/opec" RELAY_HOSTNAME=relay.example.org EXTERNAL_IP=203.0.113.10 \
+	bash "$R/oxpulse-relay-prestart.sh" >/dev/null 2>&1
+! grep -qE '^no-dtls$' "$PSETC/coturn.conf" && pass "prestart: default binary is current/turnserver" || fail "prestart: default binary is current/turnserver"
 
 # --- apply: reset-failed precedes restart; gate and secret check precede both ---
 AP="$T/ap"; mkdir -p "$AP"; APLOG="$AP/calls.log"

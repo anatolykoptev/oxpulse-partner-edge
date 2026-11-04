@@ -92,7 +92,29 @@ probe_relay_tls() {
 	fi
 }
 
+# probe_relay_upgrade — a failed self-upgrade must be visible centrally, not only in
+# journald. Emitted ONLY while the node carries a failure (failed-version, or a
+# last-rc of 10/11/12 left by oxpulse-relay-upgrade); a successful upgrade clears both.
+# The reason is one of verify-failed | rolled-back | rollback-failed.
+probe_relay_upgrade() {
+	local fv="${_LIB_DIR}/failed-version" rcf="${_LIB_DIR}/last-rc" rc="" reason=""
+	[[ -r "$rcf" ]] && rc=$(tr -d '[:space:]' < "$rcf")
+	case "$rc" in
+		10) reason=verify-failed ;;
+		11) reason=rolled-back ;;
+		12) reason=rollback-failed ;;
+		*) [[ -s "$fv" ]] && reason=rolled-back ;;
+	esac
+	[[ -n "$reason" ]] || return 1
+	printf '{"channel_name":"relay-upgrade","channel_rtt_ms":0,"channel_handshake_ok":false,"channel_probe_mode":"upgrade","channel_probe_reason":"%s"}' "$reason"
+}
+
 rc_all=0
 _post_channel "$(probe_relay_coturn)" || rc_all=1
 _post_channel "$(probe_relay_tls)" || rc_all=1
+# Best effort: central's channel allowlist has to know "relay-upgrade" (see the PR); until
+# it does the POST is refused, which must not fail the liveness heartbeat above.
+if up_payload="$(probe_relay_upgrade)"; then
+	_post_channel "$up_payload" || warn "relay-upgrade failure report was not accepted by central"
+fi
 exit "$rc_all"
