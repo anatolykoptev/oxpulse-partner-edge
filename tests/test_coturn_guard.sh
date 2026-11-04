@@ -597,6 +597,32 @@ printf '#!/bin/bash\necho "ufw $*" >> "%s/calls"\n[[ "$1" == status ]] && { echo
 UFW_BIN="$FW/ufw_noop" FIREWALL_CMD=/nonexistent COTURN_CONF=/nonexistent run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1
 grep -q 'delete allow' "$FW/calls" && fail "ufw legacy rule deleted although the narrow rule never appeared" || pass "apply: ufw legacy rule kept when the narrow rule is not in force"
 
+# F7b: the wanted range is listed but NOT as an inbound ALLOW (DENY / ALLOW OUT) next to a
+# legacy ALLOW: the guard must still add the inbound allow, and must not delete the legacy
+# rule unless the inbound allow is listed. (A substring match let DENY/ALLOW OUT satisfy
+# both checks, then deleted the legacy rule: no inbound relay allowance left.)
+for bad_line in "DENY         Anywhere" "ALLOW OUT    Anywhere on eth0" "REJECT       Anywhere" "ALLOW        10.0.0.1"; do
+	fwreset; printf '49152:65535/udp ALLOW Anywhere\n%s:%s/udp %s\n' "$g_min" "$g_max" "$bad_line" > "$FW/ufw.state"
+	UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent COTURN_CONF=/nonexistent run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1
+	{ grep -q "ufw allow ${g_min}:${g_max}/udp" "$FW/calls" && grep -qx "${g_min}:${g_max}/udp ALLOW Anywhere" "$FW/ufw.state"; } \
+		&& pass "apply: ufw '$bad_line' is not an inbound allow -> inbound ALLOW added" \
+		|| fail "apply trusted a non-allow ufw line '$bad_line': $(cat "$FW/calls")"
+done
+# legacy kept when the add does not stick and only a DENY line lists the range
+printf '#!/bin/bash\necho "ufw $*" >> "%s/calls"\n[[ "$1" == status ]] && { echo "Status: active"; echo "49152:65535/udp ALLOW Anywhere"; echo "%s:%s/udp DENY Anywhere"; }\nexit 0\n' "$FW" "$g_min" "$g_max" > "$FW/ufw_deny"; chmod +x "$FW/ufw_deny"
+fwreset
+UFW_BIN="$FW/ufw_deny" FIREWALL_CMD=/nonexistent COTURN_CONF=/nonexistent run_guard "$REPO_ROOT/$GUARD" apply >/dev/null 2>&1
+grep -q 'delete allow' "$FW/calls" && fail "ufw legacy ALLOW deleted although only a DENY lists the wanted range" || pass "apply: legacy ufw ALLOW kept when only a DENY lists the wanted range"
+# forms recognised: plain, ALLOW IN, (v6)
+ufw_ok=1
+for l in "A:1/udp ALLOW Anywhere" "A:1/udp ALLOW IN Anywhere" "A:1/udp (v6) ALLOW Anywhere (v6)" "A:1/udp (v6) ALLOW IN Anywhere (v6)"; do
+	( . <(sed -n '/^ufw_allows_in() {/,/^}/p' "$REPO_ROOT/$GUARD"); ufw_allows_in "$l" A:1/udp ) || { ufw_ok=0; echo "not recognised: $l" >&2; }
+done
+for l in "A:1/udp DENY Anywhere" "A:1/udp ALLOW OUT Anywhere" "A:1/udp LIMIT Anywhere" "A:1/udp ALLOW 10.0.0.1" "xA:1/udp ALLOW Anywhere"; do
+	( . <(sed -n '/^ufw_allows_in() {/,/^}/p' "$REPO_ROOT/$GUARD"); ufw_allows_in "$l" A:1/udp ) && { ufw_ok=0; echo "wrongly accepted: $l" >&2; }
+done
+[[ $ufw_ok == 1 ]] && pass "ufw_allows_in: ALLOW / ALLOW IN / (v6) accepted; DENY / ALLOW OUT / LIMIT / source-restricted rejected" || fail "ufw_allows_in form handling wrong"
+
 # F8: ufw installed but INACTIVE (pillow): nothing to manage - rc 0, no rule writes, no false alarm.
 fwreset; printf '49152:65535/udp ALLOW Anywhere\n' > "$FW/ufw.state"
 UFW_STATUS=inactive UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent COTURN_CONF="$TMP/fwconf" run_guard "$REPO_ROOT/$GUARD" firewall-sync >/dev/null 2>"$FW/err8"; rc8=$?

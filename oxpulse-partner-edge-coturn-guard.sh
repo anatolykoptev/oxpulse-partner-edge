@@ -433,16 +433,32 @@ ufw_active() {
 
 # ufw does not coalesce (rules are textual), so the narrow rule is added first and
 # the legacy one is deleted only once the narrow one is listed.
+# ufw_allows_in STATUS RULE - exit 0 iff `ufw status` text STATUS lists an inbound ALLOW
+# of RULE (e.g. 49152:49999/udp) from Anywhere. A line that merely CONTAINS the rule does
+# not count: `DENY`, `REJECT`, `LIMIT`, `ALLOW OUT` and source-restricted ALLOWs do not
+# open the range for relay media. Real `ufw status` lines:
+#   49152:49999/udp            ALLOW       Anywhere
+#   49152:49999/udp            ALLOW IN    Anywhere
+#   49152:49999/udp (v6)       ALLOW       Anywhere (v6)
+#   49152:49999/udp            ALLOW OUT   Anywhere on eth0     <- not inbound
+ufw_allows_in() {
+	awk -v rule="$2" '
+		$1 == rule { i = 2; if ($i == "(v6)") i++
+			if ($i == "ALLOW") { i++; if ($i == "IN") i++
+				if ($i == "Anywhere") f = 1 } }
+		END { exit !f }' <<<"$1"
+}
+
 fw_converge_ufw() {
 	local want="$1" ufw_want="${1/-/:}" ufw_legacy="${LEGACY_RELAY_RANGE/-/:}" st
 	st=$("$UFW_BIN" status 2>/dev/null || true)
-	if [[ "$st" != *"${ufw_want}/udp"* ]]; then
+	if ! ufw_allows_in "$st" "${ufw_want}/udp"; then
 		"$UFW_BIN" allow "${ufw_want}/udp" >/dev/null 2>&1 || true
 		st=$("$UFW_BIN" status 2>/dev/null || true)
 	fi
-	[[ "$st" == *"${ufw_want}/udp"* ]] \
-		|| { warn "ufw: ${ufw_want}/udp is NOT allowed - inbound relay media is blocked"; return 1; }
-	if [[ "$want" != "$LEGACY_RELAY_RANGE" && "$st" == *"${ufw_legacy}/udp"* ]]; then
+	ufw_allows_in "$st" "${ufw_want}/udp" \
+		|| { warn "ufw: ${ufw_want}/udp is NOT allowed (inbound) - inbound relay media is blocked"; return 1; }
+	if [[ "$want" != "$LEGACY_RELAY_RANGE" ]] && ufw_allows_in "$st" "${ufw_legacy}/udp"; then
 		"$UFW_BIN" --force delete allow "${ufw_legacy}/udp" >/dev/null 2>&1 \
 			&& log "ufw: legacy ${ufw_legacy}/udp removed, ${ufw_want}/udp allowed"
 	fi
@@ -516,7 +532,7 @@ relay_firewall_in_force() {
 	fi
 	if ufw_active; then
 		local st; st=$("$UFW_BIN" status 2>/dev/null || true)
-		[[ "$st" == *"${want/-/:}/udp"* || "$st" == *"${LEGACY_RELAY_RANGE/-/:}/udp"* ]] \
+		{ ufw_allows_in "$st" "${want/-/:}/udp" || ufw_allows_in "$st" "${LEGACY_RELAY_RANGE/-/:}/udp"; } \
 			|| { echo "ufw: ${want/-/:}/udp not allowed - inbound relay media is blocked" >&2; return 1; }
 	fi
 	return 0
