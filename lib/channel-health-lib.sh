@@ -459,7 +459,9 @@ probe_ch4() {
     local probe_mode="allocate"
     # probe_reason carries WHY a probe failed (timeout / auth-401 / auth-486 / other) so a
     # false handshake_ok=false is no longer indistinguishable from a real one.
-    # Reported in the payload AND the state file (stderr is swallowed).
+    # LOCAL diagnosis: written to the state file and the edge log (stderr is swallowed
+    # by the dispatch). It also rides in the POST body, but central's
+    # ChannelHealthRequest has no such field, so it never reaches central.
     local probe_reason=""
     local uclient_out=""
 
@@ -588,7 +590,10 @@ probe_ch4() {
                         fi
                         ;;
                     *)
-                        if printf '%s' "$uclient_out" | grep -qiE '486|Allocation Quota Reached'; then
+                        # "error 486 (...)" is coturn's own line (4.6.x: "(Allocation Quota
+                        # Reached)", 4.18: "error 486 ()"). A bare 486 would also match the
+                        # millisecond field of the -v timestamps (17:43:02.486).
+                        if printf '%s' "$uclient_out" | grep -qiE 'error 486|Allocation Quota Reached'; then
                             probe_reason="auth-486"
                         else
                             probe_reason="other"
@@ -647,9 +652,9 @@ probe_ch4() {
     # channel_probe_mode is also emitted in the JSON payload — the central
     # server receives it over the wire (POST body is NOT swallowed), giving a
     # second, observable degraded signal independent of edge-local stderr.
-    # channel_probe_reason is added only on failure (the _post_channel jq filter
-    # preserves extra fields), so a false-negative carries its cause to the
-    # central server instead of an opaque handshake_ok=false.
+    # channel_probe_reason is added only on failure. It is LOCAL diagnosis: it goes
+    # to the state file and the edge log; central's ChannelHealthRequest has no
+    # such field, so it is dropped there. Do not rely on central seeing the cause.
     # coturn_skip_consecutive surfaces reconcile.sh's durable stuck-edge counter
     # so the central scraper / motherly health view can detect a non-zero count
     # on a stuck edge without needing to read edge-local state files directly.

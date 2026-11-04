@@ -62,14 +62,28 @@ no-rfc5780
 # layout for ACME HTTP-01 issuer is documented + stable across Caddy 2.x.
 cert=/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/{{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}}/{{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}}.crt
 pkey=/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/{{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}}/{{TURNS_SUBDOMAIN}}.{{PARTNER_DOMAIN}}.key
-# TLS version floor (R1 §5.5): coturn >= 4.18 disables TLS 1.0/1.1 by default,
-# so the old `no-tlsv1` / `no-tlsv1_1` lines are gone (the options were removed).
+# TLS version floor (R1 §5.5).
+# LEGACY-4.6-COMPAT (see the LEGACY-4.6-COMPAT block below): required on 4.6.x, which
+# allows TLS 1.0/1.1 without them; coturn >= 4.18 has them off by default and logs
+# `WARNING Bad configuration format` for these two keys (harmless).
+no-tlsv1
+no-tlsv1_1
 # Cipher-list aligned with Caddy/Go defaults — narrows JA3S divergence between
 # Caddy and coturn TLS stacks (design §4.2 Conflict 2). Not perfect alignment
 # (extension ordering + GREASE differ), but narrows flaggable anomaly surface.
 cipher-list="ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
-# DTLS: coturn >= 4.18 starts DTLS listeners only when `--dtls` is given, so the
-# old `no-dtls` line is gone (the option was removed). Never add `dtls` here.
+# LEGACY-4.6-COMPAT: `no-dtls`, `no-tlsv1`, `no-tlsv1_1` and `no-cli` are options
+# of coturn 4.6.x only. This conf is rendered BEFORE the image is pulled and can be
+# read by a still-4.6 container (rollback, a restart in the upgrade window, an edge
+# not yet on 4.18), and on 4.6 their ABSENCE silently means DTLS on 5349/udp (against
+# the anti-probing posture), the telnet CLI on 127.0.0.1:5766 and TLS 1.0/1.1. On
+# 4.18 they are inert: unknown keys log a WARNING ("Bad configuration format", not
+# fatal; no-cli logs a deprecated ERROR line) and DTLS / CLI / TLS 1.0-1.1 are off by
+# default. A conf that is safe on BOTH binaries beats a version-aware render, whose
+# failure mode (a misread version) is the silent insecure one. Removal: once every
+# edge runs >= 4.18 (fleet-versions check), drop these four lines and flip the
+# tests/test_coturn_config.sh legacy-lines assertion; never add `dtls` or `cli`.
+no-dtls
 
 # ─── Anti-SSRF denied-peer-ip (IPv4 + IPv6) ─────────────────────────────
 # Source: BBB template via scratch/C §BBB + scratch/B §3 IPv6 additions.
@@ -135,8 +149,7 @@ pidfile=/var/run/turnserver/turnserver.pid
 no-stdout-log
 simple-log
 syslog
-
-# No `no-cli`: coturn >= 4.18 logs it as a deprecated ERROR on every parse, and the
-# telnet CLI is OFF unless `cli` is given (use_cli defaults to false in
-# turn_admin_server.c; the listener starts only under `if (use_cli)`). Never add
-# `cli` here.
+# LEGACY-4.6-COMPAT (see above): 4.6 starts the telnet CLI unless told not to; 4.18
+# logs "ERROR no-cli option is deprecated" for it (non-fatal; the CLI is off by
+# default there).
+no-cli

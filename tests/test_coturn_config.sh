@@ -38,10 +38,13 @@ grep -qE ^max-allocate-lifetime=120 "$TPL" || { echo "FAIL: max-allocate-lifetim
 # (absent from `turnserver --help`; the former is silently ignored, so it only
 # looked like a control). Asserting their absence stops them creeping back.
 # (Now: not options in ANY coturn version.)
-# The edge image is coturn 4.18 (images/Dockerfile.coturn). There no-dtls /
-# no-tlsv1 / no-tlsv1_1 no longer exist either (DTLS starts only with --dtls;
-# TLS 1.0/1.1 are off by default) and an unknown key logs "Bad configuration
-# format". They stay valid ONLY in relay/coturn-relay.conf.tpl (Ubuntu 4.6.1).
+# The rendered conf must be safe on BOTH binaries: it is written before the image
+# is pulled, so a still-4.6.x container (rollback, a restart in the upgrade window,
+# an edge not yet on 4.18) can read it. On 4.6.x the ABSENCE of no-dtls / no-tlsv1 /
+# no-tlsv1_1 / no-cli silently turns on DTLS (5349/udp), TLS 1.0/1.1 and the telnet
+# CLI; on 4.18 those four are inert (WARNING / deprecated-ERROR log lines only).
+# So they MUST be present until the whole fleet is on >= 4.18 — when that is true,
+# drop them from coturn.conf.tpl and flip LEGACY_KEYS below to the absent list.
 # Assert on the RENDERED conf, so a placeholder-driven line cannot slip past.
 RENDERED="$(mktemp)"
 trap 'rm -f "$RENDERED"' EXIT
@@ -50,14 +53,21 @@ sed -e 's/{{TURN_SECRET}}/throwaway-secret/g' -e 's/{{PARTNER_DOMAIN}}/example.t
     -e 's#{{EXTERNAL_IP_LINE}}#192.0.2.10/10.0.0.5#g' \
     -e 's#{{ALLOWED_PEER_IP_LINE}}#allowed-peer-ip=10.0.0.5#g' "$TPL" > "$RENDERED"
 ! grep -q '{{' "$RENDERED" || { echo "FAIL: unrendered placeholder in test render"; exit 1; }
-# no-cli: deprecated ERROR on every 4.18 parse; cli: would start the telnet CLI.
-for key in allocation-default-timeout no-loopback-peers allow-loopback-peers no-dtls no-tlsv1 no-tlsv1_1 no-cli cli; do
+LEGACY_KEYS="no-dtls no-tlsv1 no-tlsv1_1 no-cli"
+for key in $LEGACY_KEYS; do
+    [[ "$(grep -cxF "$key" "$RENDERED")" -eq 1 ]] \
+        || { echo "FAIL: legacy 4.6 hardening line '${key}' must render exactly once (a 4.6 binary reading this conf would run without it)"; exit 1; }
+done
+echo "PASS: legacy 4.6 hardening lines present (safe on 4.6.x and 4.18)"
+# Never options in any version / never wanted: allow-loopback-peers opens loopback
+# SSRF, dtls starts DTLS listeners, cli starts the telnet CLI.
+for key in allocation-default-timeout no-loopback-peers allow-loopback-peers dtls cli; do
     if grep -qE "^${key}([=[:space:]]|$)" "$RENDERED"; then
-        echo "FAIL: '${key}' rendered — not a coturn 4.18 option (or, for allow-loopback-peers, a loopback SSRF opening)"
+        echo "FAIL: '${key}' rendered — not a coturn option, or a loopback-SSRF / DTLS / CLI opening"
         exit 1
     fi
 done
-echo "PASS: no phantom / removed coturn directives"
+echo "PASS: no phantom / forbidden coturn directives"
 # NAT64 well-known prefix (GHSA-2x4g) and the IPv4-mapped range (GHSA-w4hf / GHSA-j8mm)
 grep -qxF 'denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff' "$RENDERED" \
     || { echo "FAIL: NAT64 denied-peer-ip (64:ff9b::/96) missing"; exit 1; }
