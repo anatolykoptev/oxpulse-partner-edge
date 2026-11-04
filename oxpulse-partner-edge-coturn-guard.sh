@@ -411,6 +411,11 @@ fw_converge_firewalld() {
 	fi
 	if [[ "$retired" = 1 ]]; then
 		for scope in --permanent ""; do fw_set "$scope" add "$LEGACY_RELAY_RANGE"; done
+		# Verify, do not assume: the restore is the same kind of call that just failed.
+		if ! { fw_range_in_force --permanent "$LEGACY_RELAY_RANGE" && fw_range_in_force "" "$LEGACY_RELAY_RANGE"; }; then
+			warn "firewalld: restore FAILED - neither ${want}/udp nor legacy ${LEGACY_RELAY_RANGE}/udp is in force in both scopes; inbound relay media is BLOCKED - fix zone public and re-run 'coturn-guard apply'"
+			return 1
+		fi
 		warn "firewalld: could not put ${want}/udp in force in both scopes - legacy ${LEGACY_RELAY_RANGE}/udp RESTORED (too wide beats closed); fix the zone and re-run 'coturn-guard apply'"
 	else
 		warn "firewalld: ${want}/udp is NOT allowed in zone public (permanent or runtime) - inbound relay media is blocked"

@@ -554,6 +554,16 @@ FW_ADD_NOOP="${g_min}-${g_max}" fwgrd apply
 	|| fail "apply failed to restore the legacy range after a failed narrow add: $(fwstate)"
 grep -q 'RESTORED' "$FW/err" && pass "apply: the restore is loud (warn)" || fail "apply restored the legacy range silently"
 
+# F2b: the narrow add AND the legacy restore both silently fail -> the zone is empty. The
+# guard must say "restore FAILED" (never "RESTORED") and `firewall-sync` must exit non-zero
+# (`apply` deliberately stays rc 0 - F10).
+printf 'min-port=%s\nmax-port=%s\n' "$g_min" "$g_max" > "$TMP/fwconf2"
+fwreset; fwset 49152-65535/udp
+rc=0; FW_ADD_NOOP="${g_min}-${g_max} 49152-65535" FIREWALL_CMD="$FW/firewall-cmd" UFW_BIN=/nonexistent COTURN_CONF="$TMP/fwconf2" run_guard "$REPO_ROOT/$GUARD" firewall-sync >/dev/null 2>"$FW/err" || rc=$?
+{ grep -q 'restore FAILED' "$FW/err" && ! grep -q 'RESTORED' "$FW/err"; } && pass "firewall-sync: legacy restore that did not stick -> 'restore FAILED', not 'RESTORED'" \
+	|| fail "firewall-sync logged RESTORED (or nothing) although no range is in force: $(cat "$FW/err")"
+[[ "$rc" -ne 0 ]] && pass "firewall-sync: failed restore -> non-zero exit (rc=$rc)" || fail "firewall-sync exited 0 with no relay range in force"
+
 # F3: clean node (no legacy entry, narrow range present) -> no add/remove calls at all.
 fwreset; fwset "${g_min}-${g_max}/udp"
 fwgrd apply

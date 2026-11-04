@@ -304,8 +304,12 @@ _rollback_relay_firewall_sync() {
 	local copy="$1" installed="${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-partner-edge-coturn-guard" g rc
 	for g in "$copy" "$installed"; do
 		[[ -n "$g" && -x "$g" ]] || continue
-		rc=0; "$g" firewall-sync || rc=$?
-		[[ "$rc" -eq 2 ]] && continue   # usage error: this guard predates firewall-sync
+		# `bash "$g"`, not `"$g"`: the copy is a mktemp file under /tmp, and a noexec /tmp
+		# (CIS-hardened hosts) would fail its exec. 126/127 = could not run it at all;
+		# like 2 (usage error: this guard predates firewall-sync) that is not a verdict
+		# on the firewall, so try the next candidate (the installed guard).
+		rc=0; bash "$g" firewall-sync || rc=$?
+		[[ "$rc" -eq 2 || "$rc" -eq 126 || "$rc" -eq 127 ]] && continue
 		if [[ "$rc" -ne 0 ]]; then
 			warn "rollback: relay firewall range does not match coturn.conf (guard firewall-sync rc=$rc) - check 'firewall-cmd --zone=public --list-ports'"
 		else

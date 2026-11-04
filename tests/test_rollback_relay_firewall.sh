@@ -76,5 +76,42 @@ run_restore "$TC/nosnap"
 [[ "$(fwstate)" == "perm=[3478/udp 49152-49999/udp ] run=[3478/udp 49152-49999/udp ]" ]] \
     && ok "R4: the no-snapshot early return also re-asserts the range" || bad "R4: $(fwstate)"
 
+# run_sync COPY - drive _rollback_relay_firewall_sync directly with COPY as the pre-restore
+# guard copy and the NEW guard installed.
+run_sync() {
+    install -m 0755 "$GUARD" "$TC/sbin/oxpulse-partner-edge-coturn-guard"
+    ( set +e
+      export FWS="$TC/fw" FIREWALL_CMD="$TC/fw/firewall-cmd" UFW_BIN=/nonexistent COTURN_CONF="$TC/etc/oxpulse-partner-edge/coturn.conf"
+      export ETC_DIR="$TC/etc" SYSCTL_DIR="$TC/etc/sysctl.d"
+      log() { :; }; warn() { printf 'WARN: %s\n' "$*" >> "$TC/warns"; }
+      PREFIX_SBIN="$TC/sbin"
+      # shellcheck disable=SC1090
+      . "$LIB"
+      _rollback_relay_firewall_sync "$1" ) >/dev/null 2>&1
+}
+
+# R5: the first candidate cannot be run at all (rc 127) -> fall through to the installed guard.
+printf 'min-port=49152\nmax-port=49999\n' > "$TC/etc/oxpulse-partner-edge/coturn.conf"
+printf '#!/bin/bash\nexit 127\n' > "$TC/copy127"; chmod +x "$TC/copy127"
+reset 3478/udp
+run_sync "$TC/copy127"
+[[ "$(fwstate)" == "perm=[3478/udp 49152-49999/udp ] run=[3478/udp 49152-49999/udp ]" ]] \
+    && ok "R5: exec-failing first candidate (rc 127) falls through to the installed guard" \
+    || bad "R5: rollback gave up on the first candidate: $(fwstate)"
+printf '#!/bin/bash\nexit 126\n' > "$TC/copy126"; chmod +x "$TC/copy126"
+reset 3478/udp
+run_sync "$TC/copy126"
+[[ "$(fwstate)" == "perm=[3478/udp 49152-49999/udp ] run=[3478/udp 49152-49999/udp ]" ]] \
+    && ok "R5b: rc 126 falls through too" || bad "R5b: $(fwstate)"
+
+# R6: the copy is run through bash, so a noexec /tmp (modelled as an un-exec-able shebang)
+# does not stop it. The copy writes a marker and syncs the zone itself.
+rm -f "$TC/marker"
+{ echo '#!/nonexistent/interpreter'; echo "touch '$TC/marker'; exit 0"; } > "$TC/copybadshebang"; chmod +x "$TC/copybadshebang"
+reset 3478/udp
+run_sync "$TC/copybadshebang"
+[[ -f "$TC/marker" ]] && ok "R6: the pre-restore copy is run via bash (survives a noexec /tmp)" \
+    || bad "R6: the copy was exec'd directly, not via bash"
+
 echo; echo "Results: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

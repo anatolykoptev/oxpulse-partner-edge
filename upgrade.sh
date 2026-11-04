@@ -2234,10 +2234,14 @@ _settle_derive_recheck_window() {
 # state BEFORE the upgrade touches anything, so the late-wedge watch can tell a
 # container the upgrade broke from one that was already broken.
 #
-# Format: a `#baseline-v1` header line (so an empty/failed capture is distinguishable
-# from "nothing was running"), then `NAME STATUS HEALTH` per container, STATUS from
-# State.Status (running|restarting|exited|...), HEALTH from State.Health.Status or
-# `none` when the image declares no HEALTHCHECK. Includes stopped containers (ps -a).
+# Format: a `#baseline-v2` header line (so an empty/failed capture is distinguishable
+# from "nothing was running"), then `NAME STATUS HEALTH RESTARTS` per container, STATUS
+# from State.Status (running|restarting|exited|...), HEALTH from State.Health.Status or
+# `none` when the image declares no HEALTHCHECK, RESTARTS = RestartCount. Includes
+# stopped containers (ps -a). v1 (no RESTARTS column) is still read; RESTARTS = 0 there.
+# RESTARTS exists because a crash-looper flaps through `running starting` between
+# `restarting unhealthy` samples (rvpn 2026-11-03: 2 of 20 samples), so status+health
+# alone mis-record it as healthy-before about 1 upgrade in 10.
 # Best effort: returns 1 and leaves OUTFILE without the header when docker is
 # unreachable - the watch then runs strict, as before.
 #
@@ -2249,30 +2253,42 @@ _settle_docker_baseline_capture() {
 	local _out="$1" _docker="${DOCKER_BIN:-docker}" _names _n _line
 	: > "$_out"
 	_names=$("$_docker" ps -a --filter name=oxpulse-partner- --format '{{.Names}}' 2>/dev/null) || return 1
-	printf '#baseline-v1\n' > "$_out"
+	printf '#baseline-v2\n' > "$_out"
 	while IFS= read -r _n; do
 		[[ -z "$_n" ]] && continue
-		_line=$("$_docker" inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$_n" 2>/dev/null || true)
-		[[ -z "$_line" ]] && _line="unknown unknown"
+		_line=$("$_docker" inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}' "$_n" 2>/dev/null || true)
+		[[ -z "$_line" ]] && _line="unknown unknown 0"
 		printf '%s %s\n' "$_n" "$_line" >> "$_out"
 	done <<< "$_names"
 	return 0
 }
 
-# _settle_baseline_was_healthy BASELINE_FILE NAME - exit 0 iff NAME was running and
-# `healthy` (or still `starting` - not yet judged, so it stays accountable) in the baseline. Absent from a valid baseline = not healthy (it did not
-# exist or was down; the upgrade is not accountable for it).
-_settle_baseline_was_healthy() {
-	awk -v n="$2" '$1 == n { ok = ($2 == "running" && ($3 == "healthy" || $3 == "starting")) } END { exit !ok }' "$1" 2>/dev/null
+# A container recorded `starting` with at least this many restarts is a crash-looper
+# caught between crashes, not one that is genuinely starting fresh.
+_SETTLE_BASELINE_FLAP_RESTARTS=3
+
+# _settle_baseline_prebroken BASELINE_FILE NAME - exit 0 iff NAME is PRESENT in the
+# baseline AND was already broken: not running, not healthy/starting, or `starting`
+# with RestartCount >= _SETTLE_BASELINE_FLAP_RESTARTS (a flapping crash-looper). Only
+# those are ignored by the late-wedge watch. A name ABSENT from the baseline (new in
+# this release) is NOT pre-broken: it stays watched, so a header-only baseline (stack
+# down, `docker ps -a` listed nothing) degrades to the strict watch by itself.
+# A v1 line has no RESTARTS (= 0).
+_settle_baseline_prebroken() {
+	awk -v n="$2" -v flap="${_SETTLE_BASELINE_FLAP_RESTARTS:-3}" '
+		$1 == n { seen = 1; r = ($4 == "" ? 0 : $4 + 0)
+			ok = ($2 == "running" && ($3 == "healthy" || ($3 == "starting" && r < flap))) }
+		END { exit !(seen && !ok) }' "$1" 2>/dev/null
 }
 
 _settle_docker_health_watch() {
 	local _label="${1:-post-upgrade}"
 	# Optional pre-upgrade baseline (_settle_docker_baseline_capture). With a valid
-	# baseline only containers that were running+healthy BEFORE the upgrade can trip
-	# the watch. Without one (no argument / failed capture) it stays strict.
+	# baseline, containers recorded as already broken BEFORE the upgrade are ignored;
+	# everything else (healthy, new, absent) is watched. Without one (no argument /
+	# failed or empty capture) it stays strict.
 	local _baseline="${2:-}"
-	if [[ -n "$_baseline" ]] && ! { [[ -f "$_baseline" ]] && [[ "$(head -n1 "$_baseline" 2>/dev/null)" == "#baseline-v1" ]]; }; then
+	if [[ -n "$_baseline" ]] && ! { [[ -f "$_baseline" ]] && [[ "$(head -n1 "$_baseline" 2>/dev/null)" =~ ^#baseline-v[12]$ ]]; }; then
 		warn "settle_healthcheck: late-wedge watch - container baseline unusable (${_baseline}); watching every container strictly"
 		_baseline=""
 	fi
@@ -2314,12 +2330,12 @@ _settle_docker_health_watch() {
 				_skipped=$(( _skipped + 1 ))
 				continue
 			fi
-			if [[ -n "$_baseline" ]] && ! _settle_baseline_was_healthy "$_baseline" "$_n"; then
+			if [[ -n "$_baseline" ]] && _settle_baseline_prebroken "$_baseline" "$_n"; then
 				# Not healthy before the upgrade: not a late wedge, and rolling the core
 				# back cannot fix it. Said once per watch, not per poll.
 				if [[ "$_ignored_seen" != *" ${_n} "* ]]; then
 					_ignored_seen="${_ignored_seen}${_n} "; _ignored_seen=" ${_ignored_seen# }"
-					warn "settle_healthcheck: late-wedge watch ignores ${_n} (state '${_st}'): it was not running+healthy in the pre-upgrade baseline (${_label})"
+					warn "settle_healthcheck: late-wedge watch ignores ${_n} (state '${_st}'): it was already broken in the pre-upgrade baseline (${_label})"
 				fi
 				_skipped=$(( _skipped + 1 ))
 				continue

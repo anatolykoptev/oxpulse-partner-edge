@@ -44,7 +44,7 @@ PRE="$TC/preamble.sh"
     _extract_fn settle_healthcheck_with_retry
     _extract_fn _settle_derive_recheck_window
     _extract_fn _settle_docker_health_watch
-    _extract_fn _settle_baseline_was_healthy
+    _extract_fn _settle_baseline_prebroken
     _extract_fn _settle_docker_baseline_capture
 } > "$PRE"
 
@@ -275,15 +275,27 @@ rc=$(_watchb "$TC/base")
 [[ "$rc" != "0" ]] && ok "T12: xray wedge still fails while hy2 is ignored (rc=$rc)" \
                    || bad "T12: ignoring hy2 also hid the xray wedge"
 
-# T13 — absent from the baseline (new/down container) is not accountable either.
+# T13 — ABSENT from the baseline (container new in this release) is watched: only names
+# PRESENT in the baseline and already broken are ignored. Ignoring absent names would hide
+# a real wedge in a container the release added.
 _reset
 printf 'oxpulse-partner-xray\noxpulse-partner-hysteria2\n' > "$TC/names"
 printf 'healthy\n'   > "$TC/health_oxpulse-partner-xray"
 printf 'unhealthy\n' > "$TC/health_oxpulse-partner-hysteria2"
-printf 'oxpulse-partner-xray running healthy\n' | _mkbase
+printf 'oxpulse-partner-xray running healthy 0\n' | _mkbase
 rc=$(_watchb "$TC/base")
-[[ "$rc" == "0" ]] && ok "T13: container absent from the baseline is ignored" \
-                   || bad "T13: absent-in-baseline container failed the watch (rc=$rc)"
+[[ "$rc" != "0" ]] && ok "T13: container absent from the baseline is WATCHED (rc=$rc)" \
+                   || bad "T13: absent-in-baseline container was ignored - a new container's wedge is hidden"
+
+# T13b — header-only baseline (stack down / docker ps -a listed nothing) = no baseline:
+# every name is absent, so the watch must stay strict, not become a no-op.
+_reset
+printf 'oxpulse-partner-xray\n' > "$TC/names"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-xray"
+printf '' | _mkbase
+rc=$(_watchb "$TC/base")
+[[ "$rc" != "0" ]] && ok "T13b: header-only baseline -> strict, wedge still fails (rc=$rc)" \
+                   || bad "T13b: header-only baseline turned the watch into a no-op"
 
 # T14 — an unusable baseline (no header = capture failed) degrades to STRICT, never to "ignore all".
 _reset
@@ -298,12 +310,12 @@ rc=$(_watchb "$TC/base")
 _reset
 printf 'oxpulse-partner-xray\noxpulse-partner-hysteria2\n' > "$TC/names"
 printf 'healthy\n'   > "$TC/health_oxpulse-partner-xray"
-printf 'running healthy\n' > "$TC/state_oxpulse-partner-xray"
-printf 'restarting unhealthy\n' > "$TC/state_oxpulse-partner-hysteria2"
+printf 'running healthy 0\n' > "$TC/state_oxpulse-partner-xray"
+printf 'restarting unhealthy 30439\n' > "$TC/state_oxpulse-partner-hysteria2"
 bash -c "source '$PRE'; _settle_docker_baseline_capture '$TC/cap'" >/dev/null 2>&1
-if [[ "$(head -n1 "$TC/cap")" == "#baseline-v1" ]] && grep -qx 'oxpulse-partner-hysteria2 restarting unhealthy' "$TC/cap" \
-   && grep -qx 'oxpulse-partner-xray running healthy' "$TC/cap"; then
-    ok "T15: baseline capture records header + name/state/health per container"
+if [[ "$(head -n1 "$TC/cap")" == "#baseline-v2" ]] && grep -qx 'oxpulse-partner-hysteria2 restarting unhealthy 30439' "$TC/cap" \
+   && grep -qx 'oxpulse-partner-xray running healthy 0' "$TC/cap"; then
+    ok "T15: baseline capture records header + name/state/health/restarts per container"
 else
     bad "T15: baseline capture malformed: $(tr '\n' '|' < "$TC/cap")"
 fi
@@ -324,9 +336,39 @@ rc=$(bash -c "source '$PRE'
 _reset
 printf 'oxpulse-partner-xray\n' > "$TC/names"
 printf 'unhealthy\n' > "$TC/health_oxpulse-partner-xray"
-printf 'oxpulse-partner-xray running starting\n' | _mkbase
+printf 'oxpulse-partner-xray running starting 0\n' | _mkbase
 rc=$(_watchb "$TC/base")
-[[ "$rc" != "0" ]] && ok "T18: baseline 'starting' is still watched (rc=$rc)" || bad "T18: a starting container was ignored"
+[[ "$rc" != "0" ]] && ok "T18: baseline 'starting' (RestartCount 0) is still watched (rc=$rc)" || bad "T18: a fresh starting container was ignored"
+
+# T19 - FLAPPER: a crash-looper sampled at `running starting` with a high RestartCount
+# (rvpn hysteria2: 2 of 20 samples, RestartCount 30439) is pre-broken, not "healthy before".
+# Mutation: drop the `$3 == "starting" && r < flap` RestartCount clause in
+# _settle_baseline_prebroken (upgrade.sh) -> this case goes RED.
+_reset
+printf 'oxpulse-partner-xray\noxpulse-partner-hysteria2\n' > "$TC/names"
+printf 'healthy\n'   > "$TC/health_oxpulse-partner-xray"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-hysteria2"
+printf 'oxpulse-partner-xray running healthy 0\noxpulse-partner-hysteria2 running starting 30439\n' | _mkbase
+rc=$(_watchb "$TC/base")
+[[ "$rc" == "0" ]] && ok "T19: flapper sampled at running+starting with RestartCount 30439 is ignored" \
+                   || bad "T19: flapping crash-looper recorded as starting still rolls the upgrade back (rc=$rc)"
+# boundary: 2 restarts = fresh (watched), 3 = flapper (ignored)
+printf 'oxpulse-partner-hysteria2 running starting 2\n' | _mkbase
+bash -c "source '$PRE'; _settle_baseline_prebroken '$TC/base' oxpulse-partner-hysteria2" && r2=0 || r2=1
+printf 'oxpulse-partner-hysteria2 running starting 3\n' | _mkbase
+bash -c "source '$PRE'; _settle_baseline_prebroken '$TC/base' oxpulse-partner-hysteria2" && r3=0 || r3=1
+[[ "$r2" == 1 && "$r3" == 0 ]] && ok "T19b: RestartCount 2 -> watched, 3 -> pre-broken" || bad "T19b: threshold wrong (r2=$r2 r3=$r3)"
+
+# T20 - a v1 baseline (no RESTARTS column) is still read: `restarting unhealthy` ignored,
+# `running starting` watched (RESTARTS defaults to 0).
+_reset
+printf 'oxpulse-partner-xray\noxpulse-partner-hysteria2\n' > "$TC/names"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-xray"
+printf 'unhealthy\n' > "$TC/health_oxpulse-partner-hysteria2"
+{ echo '#baseline-v1'; printf 'oxpulse-partner-xray running starting\noxpulse-partner-hysteria2 restarting unhealthy\n'; } > "$TC/base"
+rc=$(_watchb "$TC/base")
+[[ "$rc" != "0" ]] && grep -q 'ignores oxpulse-partner-hysteria2' "$TC/warns" && ! grep -q 'ignores oxpulse-partner-xray' "$TC/warns" \
+    && ok "T20: v1 baseline still honoured (hy2 ignored, starting xray watched)" || bad "T20: v1 baseline mishandled (rc=$rc)"
 
 # T17 - wiring: every settle_healthcheck_with_retry CALL SITE passes a container baseline
 # captured before the change (plain, --with-templates, render gate). A site that does not
