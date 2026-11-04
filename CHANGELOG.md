@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.35](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.34...v0.16.35) (2026-11-04)
+
+
+### Bug Fixes
+
+* relay firewall range follows coturn.conf (also after rollback); late-wedge ignores pre-broken containers ([#671](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/671)) ([3ed8d33](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/3ed8d33724a2c84a60160d0c2e07fd8ae0a21ca8))
+
 ## [0.16.34](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.33...v0.16.34) (2026-10-31)
 
 
