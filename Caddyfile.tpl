@@ -94,7 +94,7 @@
 # A second snippet (tunnel_upstream_default) handles the no-path catch-all SPA
 # fallback where there is no route argument.
 (tunnel_upstream) {
-    reverse_proxy {args[0]} {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
+    reverse_proxy {args[0]} {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
         lb_policy first
         lb_retries 2
         lb_try_duration 5s
@@ -117,7 +117,7 @@
 }
 
 (tunnel_upstream_default) {
-    reverse_proxy {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 {{HY2_FALLBACK_HOST}}:{{HY2_FALLBACK_PORT}} 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
+    reverse_proxy {{AWG_MOTHERLY_IP}}:8907 xray-client:3080 127.0.0.1:{{NAIVE_SOCKS_PORT}} {
         lb_policy first
         lb_retries 2
         lb_try_duration 5s
@@ -186,7 +186,7 @@
     # Content-hashed SPA assets — the ONLY cacheable surface on this edge.
     #
     # Measured 2026-08-07: a visitor in Russia loads 69 assets, each tunnelled
-    # Moscow → San Jose over AWG → xray → HY2 → naive, the slowest and most
+    # Moscow → San Jose over AWG → xray → naive, the slowest and most
     # fragile path in the system. Proven by firing 8 requests at one chunk on
     # zvonilka.net and watching the origin's own counter move by exactly 8.
     #

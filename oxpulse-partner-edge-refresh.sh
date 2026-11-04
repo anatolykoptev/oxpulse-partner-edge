@@ -476,7 +476,7 @@ _channel_restart_if_changed() {
 # _rederive_channels_status — re-evaluate channels-status.env from live state.
 #
 # oxpulse-partner-edge#505: channels-status.env was frozen at install time — a
-# channel marked "skipped" (because HYSTERIA2_SERVER was empty at install) stayed
+# channel marked "skipped" (because its server was empty at install) stayed
 # skipped forever, even after the inputs appeared and the container was running.
 # _channel_restart_if_changed then skipped every restart for that channel, so
 # config re-renders never reached the container (rvpn-seed ran May's config for
@@ -499,9 +499,7 @@ _channel_restart_if_changed() {
 # Inputs per channel:
 #   xray       — always active (install.sh always attempts it; ch1 is the
 #                primary signaling channel, never skipped).
-#   hysteria2  — node-config .hysteria2_server present AND
-#                /etc/.../hysteria2-client.yaml exists AND
-#                container oxpulse-partner-hysteria2 is running.
+#   hysteria2  — retired (CH3); never promoted. See retire_hysteria2_ch3.
 #   naive      — /etc/.../naive-client.json exists AND
 #                container oxpulse-partner-naive is running.
 #   awg        — node-config .awg_ip present AND
@@ -541,19 +539,6 @@ _rederive_channels_status() {
     }
 
     local _changed=0
-
-    # hysteria2: skipped → active when hysteria2_server in node-config +
-    # config file exists + container running.
-    if [[ "${_cur[hysteria2]:-}" == "skipped" ]]; then
-        local _hy2_server
-        _hy2_server=$(jq -r '.hysteria2_server // empty' "$NODE_CFG" 2>/dev/null || true)
-        if [[ -n "$_hy2_server" && -f "${PREFIX_ETC}/hysteria2-client.yaml" ]] && \
-           _rdcs_container_running oxpulse-partner-hysteria2; then
-            log "  [rederive] hysteria2: skipped → active (server=$_hy2_server, config+container present)"
-            _cur[hysteria2]=active
-            _changed=1
-        fi
-    fi
 
     # naive: skipped → active when config file exists + container running.
     if [[ "${_cur[naive]:-}" == "skipped" || \
@@ -783,6 +768,20 @@ if [[ "$KEYS_OK" -eq 1 ]]; then
     unset _sfu_compose _sfu_wired
 fi
 
+# CH3 (hysteria2) is retired. Tear down whatever an older release left on this
+# node (container, config, sha, ch3 profile, helper scripts) on EVERY cycle — not
+# only on a channels_version change — so a node the upgrade could not reach, or
+# one that re-acquires the config, converges within one refresh tick. Idempotent
+# and a silent no-op without CH3. Sourced in a subshell: the lib is only needed
+# for this call, and a stale or missing copy must never abort the refresh.
+_crl_ch3="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
+if [[ -r "$_crl_ch3" ]]; then
+    # shellcheck source=/dev/null  # installed on the node, not in the repo layout
+    ( . "$_crl_ch3" && declare -F retire_hysteria2_ch3 >/dev/null && retire_hysteria2_ch3 ) \
+        || log "WARNING: CH3 teardown did not complete — will retry next cycle"
+fi
+unset _crl_ch3
+
 # oxpulse-partner-edge#505: re-derive channels-status.env from live state
 # BEFORE the restart gate runs. A channel marked "skipped" at install time
 # that now has its inputs present + container running becomes "active", so
@@ -835,30 +834,6 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
                 "$_compose" \
                 naive restart oxpulse-partner-naive
         fi
-        # Hysteria2 channel (CH3) — restart existing or bootstrap from node-config
-        _hy2_server=$(jq -r ".hysteria2_server // empty" "$NODE_CFG" 2>/dev/null || true)
-        if [[ -f "${PREFIX_ETC}/hysteria2-client.yaml" ]]; then
-            _channel_restart_if_changed hysteria2 \
-                "${PREFIX_ETC}/hysteria2-client.yaml" \
-                "${PREFIX_LIB}/hysteria2-config.sha" \
-                "$_compose" \
-                hysteria2-client restart oxpulse-partner-hysteria2
-        elif [[ -n "${_hy2_server:-}" ]]; then
-            # Bootstrap path: node-config returns hysteria2_server but channel was
-            # never activated on this edge (installed before Phase 1.7).
-            # enable-hy2 is idempotent — safe to retry on every channels_version tick
-            # until the file exists.
-            log "  hy2 channel: bootstrap (node-config has hysteria2_server=${_hy2_server}; local config absent)"
-            if [[ -x "${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-partner-edge-enable-hy2" ]]; then
-                "${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-partner-edge-enable-hy2" \
-                    --server "$_hy2_server" \
-                    2>&1 | sed "s/^/    [enable-hy2] /" || \
-                    log "WARNING: hy2 bootstrap failed (non-fatal); next channels_version tick will retry"
-            else
-                log "WARNING: hy2 bootstrap requested but enable-hy2 not installed at ${PREFIX_SBIN:-/usr/local/sbin}/oxpulse-partner-edge-enable-hy2 — run upgrade.sh --host-scripts-only"
-            fi
-        fi
-        unset _hy2_server
     else
         log "WARNING: docker-compose.yml not found at $_compose — skipping surgical restart"
     fi

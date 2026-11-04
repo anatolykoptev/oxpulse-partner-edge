@@ -8,13 +8,13 @@
 #   { node_id, channel_name, channel_rtt_ms?, channel_handshake_ok?,
 #     channel_probed_at }
 #
-# probe_ch1/ch2/ch3 each dial all the way through their own tunnel/upstream
+# probe_ch1/ch2 each dial all the way through their own tunnel/upstream
 # to the central backend's lightweight /api/health (or the local canary
 # route that fronts it) — NOT a local container-liveness check. A relay
 # whose process is up but whose tunnel is DPI-blocked end-to-end (live-
 # verified on edge-b: xray listening, VLESS-Reality 502 on the real path)
 # now reports channel_handshake_ok=false instead of a false-healthy local
-# check. ch1-ch3 run CONCURRENTLY (backgrounded, each bounded by its own
+# check. ch1-ch2 run CONCURRENTLY (backgrounded, each bounded by its own
 # curl --max-time via OXPULSE_CHANNEL_PROBE_TIMEOUT) so one blocked channel
 # cannot delay the others.
 #
@@ -253,7 +253,7 @@ _AUTH_FAIL=0
 # backgrounded so a single stuck/blocked channel (e.g. ch1 blackholed by
 # ТСПУ) cannot delay the others' reports. Every probe's own external call is
 # bounded by its own hard timeout (curl --max-time via
-# OXPULSE_CHANNEL_PROBE_TIMEOUT for ch1/ch2/ch3; probe_ch4 keeps its existing
+# OXPULSE_CHANNEL_PROBE_TIMEOUT for ch1/ch2; probe_ch4 keeps its existing
 # internal `timeout` calls) — nothing backgrounded here can hang forever.
 # Results land in per-channel temp files under a private mktemp -d dir, then
 # POST runs serially afterwards (POST already has its own bounded --max-time
@@ -273,8 +273,9 @@ _chan_idx=0
 
 for _chan in "${_PROVISIONED[@]}"; do
     # Channel ids in node-config may carry a node-specific suffix (e.g. "ch1-edge-b").
-    # Match on prefix: ch1* = Reality/VLESS, ch2* = AmneziaWG, ch3* = Hysteria2.
-    # The server expects canonical names ch1/ch2/ch3, not the local variant.
+    # Match on prefix: ch1* = Reality/VLESS, ch2* = AmneziaWG. (ch3* = Hysteria2
+    # is retired; an entry still advertised for it falls through to "unknown".)
+    # The server expects canonical names ch1/ch2, not the local variant.
     case "$_chan" in
         ch1*)
             _probe_fn=probe_ch1
@@ -283,10 +284,6 @@ for _chan in "${_PROVISIONED[@]}"; do
         ch2*)
             _probe_fn=probe_ch2
             _fallback='{"channel_name":"ch2","channel_handshake_ok":false}'
-            ;;
-        ch3*)
-            _probe_fn=probe_ch3
-            _fallback='{"channel_name":"ch3","channel_rtt_ms":0,"channel_handshake_ok":false}'
             ;;
         ch4*)
             _probe_fn=probe_ch4

@@ -50,8 +50,9 @@ set_frozen_vars() {
   HYSTERIA2_AUTH=
   HYSTERIA2_OBFS=
   HYSTERIA2_SOCKS_PORT=18891
-  # HY2_* vars are rendered by re_render_hysteria2() in production; in the test
-  # fixture they appear in hy2.tpl and render as empty (matches expected/hy2.txt).
+  # HY2_* vars: the frozen compose/caddy fixtures still carry the Phase-1 hysteria2
+  # placeholders; they render as empty / the literals below. (hy2.tpl was removed
+  # with CH3.)
   HY2_SERVER=
   HY2_AUTH_PASS=
   HY2_OBFS_PASS=
@@ -106,10 +107,9 @@ render_one() {
 @test "render_template byte-identical: Caddyfile"           { render_one caddy; }
 @test "render_template byte-identical: xray-client.json"    { render_one xray; }
 @test "render_template byte-identical: coturn.conf"         { render_one coturn; }
-@test "render_template byte-identical: hysteria2-client.yaml" { render_one hy2; }
 @test "render_template byte-identical: naive-client.json"   { render_one naive; }
 
-# Regression guard: every {{NAME}} placeholder in the 6 .tpl files MUST appear
+# Regression guard: every {{NAME}} placeholder in the 5 .tpl files MUST appear
 # in mirror_install_exports above. If a new placeholder is added to a template
 # without a matching export, this test fails noisily before fixtures-pass
 # silences it.
@@ -119,7 +119,7 @@ render_one() {
   cd tests/fixtures/install-render
 
   # Collect placeholders used in templates
-  placeholders=$(grep -rohE '\{\{[A-Z][A-Z0-9_]*\}\}' compose.tpl caddy.tpl xray.tpl coturn.tpl hy2.tpl naive.tpl \
+  placeholders=$(grep -rohE '\{\{[A-Z][A-Z0-9_]*\}\}' compose.tpl caddy.tpl xray.tpl coturn.tpl naive.tpl \
                    | sed -E 's/[{}]//g' | sort -u)
 
   # Collect currently-exported names (POSIX subset that bats can introspect)

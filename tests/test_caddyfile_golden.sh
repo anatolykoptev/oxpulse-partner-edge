@@ -60,13 +60,11 @@ TMP_RENDERED="$TMP_DIR/Caddyfile"
 TMP_JSON="$TMP_DIR/caddy.json"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# Test inputs — all 6 Caddyfile.tpl placeholders set.
+# Test inputs — all 4 Caddyfile.tpl placeholders set.
 # __CADDYFILE_SHA__ is a post-render computed value (not an env placeholder).
 export PARTNER_DOMAIN="test.example"
 export TURNS_SUBDOMAIN="api-abc.test.example"
 export AWG_MOTHERLY_IP="${AWG_MOTHERLY_IP_TEST:-10.9.0.2}"
-export HY2_FALLBACK_HOST="${HY2_FALLBACK_HOST_TEST:-host.docker.internal}"
-export HY2_FALLBACK_PORT="${HY2_FALLBACK_PORT_TEST:-18443}"
 export NAIVE_SOCKS_PORT="${NAIVE_SOCKS_PORT_TEST:-1080}"
 
 # Render via opec (single render authority — same path as reconcile_caddy_surface).
@@ -95,7 +93,7 @@ docker run --rm \
 
 if [[ "${REGEN:-0}" == "1" ]]; then
   cp "$TMP_JSON" "$GOLDEN_JSON"
-  echo "REGEN: golden JSON updated at $GOLDEN_JSON (opec render path, all 6 placeholders substituted)"
+  echo "REGEN: golden JSON updated at $GOLDEN_JSON (opec render path, all 4 placeholders substituted)"
   exit 0
 fi
 

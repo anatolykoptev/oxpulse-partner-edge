@@ -140,7 +140,7 @@ PREV_HEALTHCHECK="$PREFIX_LIB/healthcheck.prev"
 PREV_HOST_SCRIPTS_DIR="$PREFIX_LIB/host-scripts.prev"
 HEALTHCHECK="${OXPULSE_HEALTHCHECK:-/usr/local/sbin/oxpulse-partner-edge-healthcheck}"
 # Installed per-channel health reporter — the upgrade settle gate invokes it in
-# a focused --serveability mode to REUSE the honest end-to-end probe_ch1/ch2/ch3.
+# a focused --serveability mode to REUSE the honest end-to-end probe_ch1/ch2.
 CHANNELS_HEALTH_REPORT="${OXPULSE_CHANNELS_HEALTH_REPORT:-$PREFIX_SBIN/oxpulse-channels-health-report}"
 # @RELEASE_TAG_PLACEHOLDER@ in the default below is substituted by release.yml to the release tag
 # (vX.Y.Z starting at v0.12.60) so REPO_RAW fetches are pinned to the exact release
@@ -1146,30 +1146,9 @@ if [[ "$MODE" == templates ]]; then
 	# it dies if the lib did not load, the opposite tradeoff.
 	command -v refetch_node_config >/dev/null 2>&1 && refetch_node_config
 	re_render_xray
-	# Phase 1.7 — render hy2 too if creds available
-	if [[ -n "${HY2_AUTH_PASS:-${OXPULSE_HY2_AUTH_PASS:-}}" \
-	   && -n "${HY2_OBFS_PASS:-${OXPULSE_HY2_OBFS_PASS:-}}" ]]; then
-		HY2_AUTH_PASS="${HY2_AUTH_PASS:-$OXPULSE_HY2_AUTH_PASS}"
-		HY2_OBFS_PASS="${HY2_OBFS_PASS:-$OXPULSE_HY2_OBFS_PASS}"
-		export HY2_AUTH_PASS HY2_OBFS_PASS
-		if re_render_hysteria2; then
-			log "hy2 channel refreshed"
-		else
-			log "WARNING: hy2 channel refresh failed — render returned non-zero (check HYSTERIA2_SERVER endpoint)"
-			_templates_hy2_failed=1
-		fi
-	else
-		log "hy2 credentials not in env — skipping (set OXPULSE_HY2_AUTH_PASS + OXPULSE_HY2_OBFS_PASS)"
-	fi
-	# The `if` guard above stops set -e from killing the refresh, which is the
-	# point — xray is already re-rendered and must not be rolled back by a hy2
-	# failure.  But the exit code must still tell the truth: before the guard
-	# existed a bare failing render exited non-zero, and a cron or monitor that
-	# checks only the status would otherwise read this run as a clean refresh.
-	if [[ "${_templates_hy2_failed:-0}" -eq 1 ]]; then
-		log "done (hy2 refresh FAILED — exiting non-zero)"
-		exit 1
-	fi
+	# CH3 (hysteria2) is retired: remove whatever an older release left behind
+	# instead of re-rendering it. Idempotent; a no-op on nodes without CH3.
+	declare -F retire_hysteria2_ch3 >/dev/null 2>&1 && retire_hysteria2_ch3
 	log "done"
 	exit 0
 fi
@@ -1209,15 +1188,6 @@ fi
 # fire up-to-date script bodies (not stale pre-upgrade copies).
 _HOST_SCRIPT_SBIN_FILES=(
 	oxpulse-partner-edge-upgrade
-	# Hy2 channel render lib — sourced as a SAME-DIR sibling by
-	# oxpulse-partner-edge-hydrate (first-boot hy2 render). MUST precede its
-	# consumer (the hydrate script) in this array: sync_host_scripts installs
-	# each file independently, so a partial sync that lands a NEW hydrate
-	# (which sources this lib) without the lib would leave first-boot hy2
-	# render marked failed and stripped from compose (hydrate.sh marks the
-	# hy2 channel failed and strips it from compose when the lib is missing).
-	# Same fetch+sha256-verify path as channel-render-lib.sh below.
-	hydrate-hy2.sh
 	oxpulse-partner-edge-hydrate
 	oxpulse-partner-edge-refresh
 	# SNI selection helper — sourced as a SAME-DIR sibling by
@@ -1305,8 +1275,6 @@ _HOST_SCRIPT_SBIN_FILES=(
 	oxpulse-partner-edge-split-routing
 	oxpulse-partner-edge-split-disable
 	oxpulse-partner-edge-ru-subnets-update
-	# Hysteria2 CH3 activation helper (Phase 1.7 standalone entry point).
-	oxpulse-partner-edge-enable-hy2
 	# healthcheck.sh (edge-a chicken-and-egg incident, 2026-07): previously
 	# updated ONLY by re_render_healthcheck() on --with-templates. The plain
 	# apply path (sync_host_scripts, this array) never delivered it, so a
@@ -1349,12 +1317,10 @@ _host_script_remote_name() {
 		metric-sink-lib.sh)              echo "lib/metric-sink-lib.sh" ;;
 		surgical-restart-lib.sh)         echo "lib/surgical-restart-lib.sh" ;;
 		xprb-refresh-lib.sh)             echo "lib/xprb-refresh-lib.sh" ;;
-		hydrate-hy2.sh)                  echo "lib/hydrate-hy2.sh" ;;
 		install-awg.sh)                  echo "lib/install-awg.sh" ;;
 		oxpulse-partner-edge-split-routing)    echo "oxpulse-partner-edge-split-routing.sh" ;;
 		oxpulse-partner-edge-split-disable)    echo "oxpulse-partner-edge-split-disable.sh" ;;
 		oxpulse-partner-edge-ru-subnets-update) echo "oxpulse-partner-edge-ru-subnets-update" ;;
-		oxpulse-partner-edge-enable-hy2)        echo "oxpulse-partner-edge-enable-hy2" ;;
 		oxpulse-partner-edge-healthcheck)       echo "healthcheck.sh" ;;
 		*)                               echo "$installed_name" ;;
 	esac
@@ -2079,7 +2045,7 @@ settle_healthcheck_with_retry() {
 		# back, adjudicate ACTUAL serve-ability across the box's PROVISIONED channels
 		# by reusing the honest end-to-end probes. The xray-only canary (check_13/14)
 		# or check_07 going RED is NOT a serve-ability loss on a multi-homed box:
-		# Caddy's tunnel_upstream fails over to awg/hy2 and real users keep being
+		# Caddy's tunnel_upstream fails over to awg and real users keep being
 		# served (live-verified on edge-b). This can only SUPPRESS a false rollback,
 		# never create one — INDETERMINATE (no serve data / reporter absent / the
 		# awk-extracted isolation harness) and LOST (every serving channel went dark)
@@ -2478,8 +2444,8 @@ _collect_stale_images() {
 # healthcheck check regressed GREEN→RED. Those are real box problems beyond channel
 # routing (coturn secret, API, containers, cert, SFU, TCP443, …) and must roll back
 # regardless of multi-homed failover. The DEFERRED channel-serve checks — the
-# single-channel liveness/canary checks that falsely trip when one channel (xray/
-# hy2) is ТСПУ-blocked while others still serve — are the ONLY checks whose
+# single-channel liveness/canary checks that falsely trip when one channel (xray)
+# is ТСПУ-blocked while others still serve — are the ONLY checks whose
 # GREEN→RED is adjudicated by the honest per-channel serve-ability quorum instead.
 # awg (ch2) has no healthcheck check, so an awg change only shows in the probe.
 _settle_nonchannel_regression() {
@@ -2488,7 +2454,7 @@ _settle_nonchannel_regression() {
 	while IFS="=" read -r _id _bst || [[ -n "$_id" ]]; do
 		[[ "$_bst" == "GREEN" ]] || continue
 		case "$_id" in
-			check_07_xray_tunnel|check_13_canary_tunnel|check_14_canary_upstream|check_16_hy2|check_18_hy2_tcp)
+			check_07_xray_tunnel|check_13_canary_tunnel|check_14_canary_upstream)
 				continue ;;
 		esac
 		_pst=$(grep "^${_id}=" "$_po" 2>/dev/null | head -1 | cut -d= -f2 || true)
@@ -2499,7 +2465,7 @@ _settle_nonchannel_regression() {
 
 # _settle_serveability_snapshot OUTFILE — capture a per-channel serve-ability
 # snapshot (chN=OK|DOWN) by invoking the installed reporter's focused
-# --serveability mode, which reuses the honest end-to-end probe_ch1/ch2/ch3.
+# --serveability mode, which reuses the honest end-to-end probe_ch1/ch2.
 # Writes only parseable chN=OK|DOWN lines to OUTFILE. Returns 0 iff >=1 line was
 # captured (mode supported + >=1 provisioned serve channel); 1 otherwise (legacy
 # reporter without the mode, reporter absent, or no serve channels) — the caller
@@ -2532,7 +2498,8 @@ _settle_serveability_snapshot() {
 # server-side oracle compute_health_signal_perchannel() in oxpulse-chat
 # crates/server/src/partner_registry/health_poller.rs (Wave 3b.2):
 #   healthy = (any of ch1/ch2/ch3 handshake_ok=true) AND (coturn ok/absent)
-# Both consume the SAME per-channel handshake_ok signal (probe_ch1/ch2/ch3);
+# Both consume the SAME per-channel handshake_ok signal (probe_ch1/ch2 here; the
+# server still ORs a ch3 that edges no longer report);
 # keeping the boolean shape identical stops the edge gate and the server oracle
 # silently drifting apart (the two-copies-diverge class behind the v0.13→v0.14.x
 # xray-recreate regression). coturn (ch4) is excluded — a TURN relay, not a
@@ -2850,6 +2817,32 @@ _assert_self_update_converged() {
 	die "self-update did not converge: this process is still running the OLD upgrade.sh, but the ${RELEASE_TAG:-target} release is already installed at $_installed.
 Continuing would apply stale upgrade logic (reconcile_all / firewall / caddy) to the freshly-synced host-scripts - the exact failure that killed the v0.14.4 rollout deep in reconcile_firewall_surface.
 FIX: simply re-run this upgrade. The correct bytes are already on disk, so the next invocation starts fresh and converges immediately (or set OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 to override if you intend the mismatch)."
+}
+
+# _retire_ch3_best_effort — tear down the retired CH3 (hysteria2) client.
+#
+# Called from both apply paths right after sync_host_scripts and BEFORE the
+# pre-change health/docker baselines, so a crash-looping or healthy hysteria2
+# container is gone before anything is measured: the settle gates and the
+# late-wedge watch never see it, and the upgrade no longer depends on the
+# baseline "already broken" carve-out to survive a node that has one (rvpn
+# rolled 0.16.28 -> 0.16.34 back for exactly that).
+#
+# retire_hysteria2_ch3 lives in channel-render-lib.sh, which sync_host_scripts
+# just installed. It is sourced in a SUBSHELL: this runs after compose and
+# host scripts were already rewritten, where _ensure_channel_render_lib's die()
+# would abort with no rollback, and a node that cannot run the teardown must
+# still upgrade (refresh retries it every cycle). Never fails the upgrade.
+_retire_ch3_best_effort() {
+	local _crl="${PREFIX_SBIN:-/usr/local/sbin}/channel-render-lib.sh"
+	if [[ ! -r "$_crl" ]]; then
+		warn "CH3 teardown skipped: $_crl not readable — refresh will retry"
+		return 0
+	fi
+	if ! ( . "$_crl" && declare -F retire_hysteria2_ch3 >/dev/null && retire_hysteria2_ch3 ); then
+		warn "CH3 teardown did not complete — refresh will retry"
+	fi
+	return 0
 }
 
 # sync_host_scripts TAG — forwarder; see snapshot_host_scripts/restore_host_scripts's
@@ -3922,6 +3915,9 @@ if [[ "$MODE" == with_templates ]]; then
 	# when self-update was not applicable to this run (dev/CI/manual/dry-run).
 	_assert_self_update_converged
 
+	# CH3 retired: remove its container/config BEFORE any baseline is captured.
+	_retire_ch3_best_effort
+
 	# Step 5: capture baseline health snapshot BEFORE reconcile_all (MAJOR-2 fix).
 	# Correct order: sync_host_scripts → baseline → reconcile_all → pull/recreate → post.
 	# Prior order had baseline AFTER reconcile_all: a caddy-reload-induced breakage was
@@ -4187,6 +4183,9 @@ sync_host_scripts "$RELEASE_TAG"
 # (the v0.14.4 stale-in-memory failure class). No-op when self-update was not
 # applicable to this run. See _assert_self_update_converged.
 _assert_self_update_converged
+
+# CH3 retired: remove its container/config BEFORE any baseline is captured.
+_retire_ch3_best_effort
 
 # Refresh ghcr auth from stored token (no-op if file absent).
 ghcr_login_from_file || warn "ghcr: login from stored token failed; will attempt pull anyway"

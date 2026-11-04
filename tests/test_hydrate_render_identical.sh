@@ -104,7 +104,6 @@ render_one() {
 @test "hydrate render byte-identical: Caddyfile (ASCII)"          { render_one caddy; }
 @test "hydrate render byte-identical: xray-client.json (ASCII)"   { render_one xray; }
 @test "hydrate render byte-identical: coturn.conf (ASCII)"        { render_one coturn; }
-@test "hydrate render byte-identical: hysteria2-client.yaml (ASCII)" { render_one hy2; }
 @test "hydrate render byte-identical: naive-client.json (ASCII)"  { render_one naive; }
 
 @test "hydrate render_template handles multi-line PEM (bug-class closure)" {

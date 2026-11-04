@@ -78,7 +78,7 @@ ssh edge "cat /var/lib/oxpulse-partner-edge/channels-status.env"
 
 # Expected output (full multi-channel — xray + awg + naive provisioned):
 # xray=active
-# hysteria2=active   (or skipped if no creds)
+# hysteria2=retired   (CH3 was removed; skipped on a node that never had it)
 # naive=active        (or skipped if no NAIVE_SERVER env)
 # awg=active
 
@@ -128,7 +128,7 @@ State file (when implemented): `/var/lib/oxpulse-partner-edge/circuit-breaker.st
 |---|---|---|---|
 | xray (CH1) | `oxpulse-partner-xray` | Always rendered + required | vless-reality params from node-config |
 | AWG mesh (CH2) | host kmod/userspace | Always required for control plane | AWG keys from `opec secrets awg-keygen` |
-| hysteria2 (CH3) | `oxpulse-partner-hy2` | Optional — skipped if no `HYSTERIA2_*` env | Env: `HYSTERIA2_SERVER`, `HYSTERIA2_PORT`, `HYSTERIA2_AUTH`, `HYSTERIA2_OBFS` |
+| hysteria2 (CH3) | — | **Retired.** Torn down by `retire_hysteria2_ch3` on upgrade and on every refresh; never provisioned | — |
 | naive (UC5) | `oxpulse-partner-naive` | Optional — skipped if no `NAIVE_SERVER` env | Env: `NAIVE_SERVER`, `NAIVE_SOCKS_PORT`, `NAIVE_USERNAME`, `NAIVE_PASSWORD` |
 
 ## Recovery procedures
@@ -182,7 +182,7 @@ systemctl start oxpulse-partner-edge-refresh.service
 
 - **Backend reality 0rtt session cache** — separate concern (oxpulse-chat repo). When
   backend restarts, ML-KEM 0rtt blob in edge's stored encryption may expire/mismatch.
-  Symptom: xray container healthy but caddy `/api/health` falls back to hy2 fallback.
+  Symptom: xray container healthy but caddy `/api/health` falls back to the naive upstream.
   Mitigation: `systemctl start oxpulse-partner-edge-refresh.service` to refetch a fresh blob.
 - **Circuit breaker** — not implemented (see above); simultaneous all-channel
   failure alerts indefinitely with no auto-park.

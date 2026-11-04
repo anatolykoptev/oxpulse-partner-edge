@@ -157,21 +157,21 @@ DEF_PADDING=$(python3 "$READ_XHTTP" "$FIXTURE_NO_XHTTP" padding --default 100-10
 
 [[ $FAIL -eq 0 ]] && echo "  OK: defaults returned when xhttp block absent"
 
-# ── Case 4: Bug 3 — AWG/HY2 vars have :- fallback in install.sh ─────────────
-echo "==> Case 4: Bug 3 — OXPULSE_AWG_MOTHERLY_IP / HY2_* have :- fallback"
+# ── Case 4: Bug 3 — AWG var has :- fallback in install.sh ───────────────────
+echo "==> Case 4: Bug 3 — OXPULSE_AWG_MOTHERLY_IP has :- fallback"
 
-# All three assignments must use :- (not bare variable reference)
+# The assignment must use :- (not bare variable reference). The HY2_FALLBACK_*
+# pair this case used to cover went with CH3 (hysteria2 upstream removed from
+# the Caddyfile), so only AWG remains.
 for pattern in \
-    'AWG_MOTHERLY_IP.*OXPULSE_AWG_MOTHERLY_IP.*:-' \
-    'HY2_FALLBACK_HOST.*OXPULSE_HY2_FALLBACK_HOST.*:-' \
-    'HY2_FALLBACK_PORT.*OXPULSE_HY2_FALLBACK_PORT.*:-'; do
+    'AWG_MOTHERLY_IP.*OXPULSE_AWG_MOTHERLY_IP.*:-'; do
     if ! grep -P "$pattern" "$INSTALL" > /dev/null 2>&1; then
         echo "FAIL [case4]: install.sh missing :- fallback for pattern: $pattern"
         FAIL=1
     fi
 done
 
-[[ $FAIL -eq 0 ]] && echo "  OK: AWG/HY2 vars have :- fallback"
+[[ $FAIL -eq 0 ]] && echo "  OK: AWG var has :- fallback"
 
 # ── Result ───────────────────────────────────────────────────────────────────
 if [[ $FAIL -ne 0 ]]; then

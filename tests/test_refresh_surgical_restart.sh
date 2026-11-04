@@ -340,8 +340,10 @@ EOF
 		|| { echo "naive call site does not pass service key + state_container"; return 1; }
 }
 
-@test "refresh.sh: hysteria2 call site passes hysteria2-client (service key) not oxpulse-partner-hysteria2" {
-	grep -A5 "_channel_restart_if_changed hysteria2" "$REPO_ROOT/oxpulse-partner-edge-refresh.sh" | \
-		grep -q "hysteria2-client restart oxpulse-partner-hysteria2" \
-		|| { echo "hysteria2 call site does not pass service key + state_container"; return 1; }
+@test "refresh.sh: no hysteria2 restart/bootstrap call site remains (CH3 retired)" {
+	# CH3 is torn down by retire_hysteria2_ch3, never restarted or bootstrapped.
+	! grep -q "_channel_restart_if_changed hysteria2" "$REPO_ROOT/oxpulse-partner-edge-refresh.sh" \
+		|| { echo "refresh.sh still restarts the hysteria2 channel"; return 1; }
+	! grep -q "enable-hy2" "$REPO_ROOT/oxpulse-partner-edge-refresh.sh" \
+		|| { echo "refresh.sh still bootstraps hysteria2 via enable-hy2"; return 1; }
 }

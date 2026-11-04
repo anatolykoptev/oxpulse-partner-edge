@@ -306,34 +306,9 @@ services:
       retries: 3
       start_period: 10s
 
-  # ── CH3 Hysteria2 client (fallback) ─────────────────────────────────────
-  # Started only when install.sh renders hysteria2-client.yaml (backend
-  # provisioned CH3). Activated via `docker compose --profile ch3 up -d`.
-  # Traffic: QUIC + salamander obfuscation → looks like random UDP noise.
-  # tcpForwarding listener on 127.0.0.1:18443 for local proxying.
-  hysteria2-client:
-    image: tobyxdd/hysteria:v2.8.2
-    container_name: oxpulse-partner-hysteria2
-    profiles: [ch3]
-    restart: unless-stopped
-    network_mode: host
-    volumes:
-      - ./hysteria2-client.yaml:/etc/hysteria/config.yaml:ro
-    command: ["client", "--config", "/etc/hysteria/config.yaml"]
-    healthcheck:
-      # Probe the local tcpForwarding listener that Hysteria2 exposes.
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 18443 || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    labels:
-      oxpulse.channel: "hy2"
-      oxpulse.phase: "1.7"
-
   # ── CH5 NaiveProxy client ───────────────────────────────────────────────────
   # HTTP/2 CONNECT proxy tunnelled over TLS:443 — ТСПУ-resilient channel.
-  # Activated via `docker compose --profile ch5 up -d` (same pattern as CH3).
+  # Activated via `docker compose --profile ch5 up -d`.
   # compose_strip_failed_channels() in lib/render-channel-lib.sh still removes
   # this block post-render as a defence-in-depth fallback when NAIVE_SERVER unset.
   # Image: partner-edge-naive (klzgrad/naiveproxy wrapper, Task 8).

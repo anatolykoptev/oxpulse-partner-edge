@@ -41,8 +41,8 @@ teardown() {
 # interpolation surprises).
 _stub_curl() {
     local code="$1"
-    printf '#!/bin/bash\nfor a; do [[ "$a" == "%%{http_code}" ]] && { printf '"'"'%s'"'"' "%s"; exit 0; }; done; exit 0\n' \
-        "$code" > "$TMPD/bin/curl"
+    printf '#!/bin/bash\necho "$*" >> "%s/curl.args"\nfor a; do [[ "$a" == "%%{http_code}" ]] && { printf '"'"'%%s'"'"' "%s"; exit 0; }; done; exit 0\n' \
+        "$TMPD" "$code" > "$TMPD/bin/curl"
     chmod +x "$TMPD/bin/curl"
 }
 
@@ -109,20 +109,41 @@ _run_hc() {
     }
 }
 
-# ── 4. probe_accepts_503_as_auth_ok ──────────────────────────────────────────
-@test "probe_accepts_503_as_auth_ok: backend returns 503 → OK (auth ok, unconfigured)" {
+# ── 4. probe_rejects_503 ─────────────────────────────────────────────────────
+# The probe used to hit /api/partner/hy2-credentials, where 503 meant "auth
+# accepted, hysteria2 unconfigured". It now hits /api/partner/node-config (the
+# CH3-independent endpoint the edge's own refetch uses), where a 503 is just a
+# backend that is not answering: the check is "2xx", so it must FAIL.
+@test "probe_rejects_503: node-config returning 503 is not an auth success" {
     printf 'stkn_valid_503_token' > "$CONF_DIR/token"
     chmod 600 "$CONF_DIR/token"
     _stub_curl 503
     _run_hc
 
-    [[ "$output" == *"service-token authed probe"* ]] || {
-        echo "check 19 label not found"; false
+    [[ "$output" == *"(HTTP 503 "* ]] && [[ "$output" == *"token rejected or endpoint unreachable"* ]] || {
+        echo "expected check 19 to FAIL on 503, got: $output"; false
     }
-    [[ "$output" == *"auth accepted"* ]] || {
-        echo "expected 'auth accepted' for 503, got: $output"; false
+    [[ "$output" != *"auth accepted"* ]] || {
+        echo "503 wrongly reported as auth accepted: $output"; false
     }
-    [[ "$output" != *"FAIL (HTTP 503"* ]] || {
-        echo "check 19 incorrectly FAILed on 503"; false
+}
+
+# ── 5. probe_targets_node_config_not_hy2 ─────────────────────────────────────
+@test "probe_targets_node_config_not_hy2: token probe hits /api/partner/node-config only" {
+    printf 'stkn_valid_test_token' > "$CONF_DIR/token"
+    chmod 600 "$CONF_DIR/token"
+    printf '{"node_id":"node-xyz"}' > "$CONF_DIR/node-config.json"
+    _stub_curl 200
+    _run_hc
+
+    [ -s "$TMPD/curl.args" ] || { echo "curl was never called"; false; }
+    grep -q '/api/partner/node-config' "$TMPD/curl.args" || {
+        echo "probe did not hit node-config: $(cat "$TMPD/curl.args")"; false
+    }
+    ! grep -q 'hy2-credentials' "$TMPD/curl.args" || {
+        echo "probe still hits the CH3 credentials endpoint: $(cat "$TMPD/curl.args")"; false
+    }
+    grep -q 'X-Node-Id: node-xyz' "$TMPD/curl.args" || {
+        echo "X-Node-Id header not sent: $(cat "$TMPD/curl.args")"; false
     }
 }

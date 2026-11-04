@@ -118,12 +118,12 @@ else
     fail "Rust authoritative comment not found in install.sh"
 fi
 
-# ── Case 8: MAJOR #1 -- hysteria2-client.yaml gets 0600 perms ────────────────
-echo "==> Case 8: MAJOR #1 -- chmod 0600 present for hysteria2-client.yaml"
-if grep -qE 'chmod 0600.*hysteria2-client\.yaml' "$INSTALL"; then
-    pass "chmod 0600 for hysteria2-client.yaml found in install.sh"
+# ── Case 8: CH3 retired -- install.sh no longer writes hysteria2-client.yaml ─
+echo "==> Case 8: install.sh renders no hysteria2 (CH3 retired) config"
+if grep -qE 'hysteria2-client\.yaml|re_render_hysteria2' "$INSTALL"; then
+    fail "install.sh still references hysteria2-client.yaml / re_render_hysteria2 (CH3 is retired)"
 else
-    fail "chmod 0600 for hysteria2-client.yaml NOT found in install.sh"
+    pass "install.sh has no hysteria2-client.yaml render path"
 fi
 
 # ── Result ────────────────────────────────────────────────────────────────────

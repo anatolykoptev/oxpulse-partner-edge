@@ -47,7 +47,6 @@ else. No website, no mail server, no other VPN.
 |---|---|
 | oxpulse-partner-caddy     | 27 MiB |
 | oxpulse-partner-xray      | 23 MiB |
-| oxpulse-partner-hysteria2 | 22 MiB |
 | oxpulse-partner-coturn    | 9 MiB |
 | oxpulse-partner-sfu       | 4 MiB (idle) |
 | dockerd                   | 58 MiB |
@@ -61,7 +60,7 @@ current production workload across all 4 partners as of 2026-05-22).**
 **4 GiB is the comfortable choice** for:
 
 - larger rooms (more participants -> more str0m RTP buffers + decoder state)
-- bursty hysteria2 / Reality channels
+- bursty Reality channel
 - co-resident logs that accumulate between log rotations
 - headroom for the SFU under load spikes without paging
 

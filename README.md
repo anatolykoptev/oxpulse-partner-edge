@@ -24,7 +24,6 @@ or `/api/partner/register` on such a host.
 |-----------|---------|--------------|
 | **caddy** | TLS (ACME/Let's Encrypt), SNI mux, reverse proxy for `/api/*` + `/ws/*` + `/sfu/ws/*` | bridge (`:80`, `:443`) |
 | **xray-client** | Encrypted outbound tunnel — VLESS + Reality + XHTTP + ML-KEM-768 PQ | bridge (internal `:3080`) |
-| **hysteria2** | Anti-censorship fallback channel — `lb_policy first` failover from Reality | bridge (`:18443`) |
 | **coturn** | TURN/STUN relay — UDP 3478, TURNS on `:5349` via Caddy SNI mux | host |
 | **sfu** | WebRTC Selective Forwarding Unit — Rust binary (`crates/sfu/`) | host |
 | **amneziawg-go** | Userspace AmneziaWG (WireGuard obfuscation fork) mesh link to motherly | host iface `awg0` |
@@ -52,7 +51,7 @@ Optional channel (enable with `--naive-server=<host>`):
 | `443` | udp | yes | Caddy QUIC (h3) |
 | `3478`, `5349` | tcp + udp | yes | Coturn STUN / TURN / TURN-TLS |
 | `7878` | udp | yes | SFU media (WebRTC RTP) |
-| `18443` | tcp + udp | yes | Hysteria2 fallback channel |
+| `18443` | tcp + udp | yes | Formerly the Hysteria2 (CH3) forwarder. CH3 is retired and nothing listens here; the host firewall still opens it (follow-up) |
 | *partner-specific* | udp | yes | AmneziaWG mesh inbound (port allocated by motherly per partner, e.g. `43994`) |
 | `9317` | tcp | **mesh-only** (`10.9.0.0/24`) | SFU Prometheus `/metrics` |
 | `8912` | tcp | **mesh-only** (`10.9.0.0/24`) | SFU relay API |
@@ -129,7 +128,7 @@ Once installed, four systemd timers run without intervention:
 | `oxpulse-partner-edge-refresh.timer` | Daily (4h jitter, `Persistent=true`) | Fetches updated credentials from the backend; refreshes `sfu-keys.env` (Ed25519 JWT verify key); re-renders tunnel config if the operator has rotated keys or changed channel settings |
 | `oxpulse-partner-edge-sni-rotate.timer` | Daily (04:00–06:00 UTC, randomised) | Rotates the tunnel's server-name indicator from a pool provided by the backend; reduces long-lived traffic correlation |
 | `oxpulse-partner-cert-watch.path` | On cert change | Signals coturn to reload when Caddy renews the TURNS TLS certificate |
-| `oxpulse-channels-health-report.timer` | Every 60s | Probes local channel listeners (Reality / Hysteria2 / Naive) and reports RTT + handshake status to the central server via `POST /api/partner/channel-health` |
+| `oxpulse-channels-health-report.timer` | Every 60s | Probes the tunnel channels (Reality / AmneziaWG) and coturn and reports RTT + handshake status to the central server via `POST /api/partner/channel-health` |
 
 Check timer status:
 ```bash

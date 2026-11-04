@@ -265,22 +265,6 @@ _systemd_install_lib_scripts() {
 		chmod 0644 "$PREFIX_SBIN/oxpulse-token-lib.sh"
 	fi
 
-	# Hy2 channel render lib (sourced by oxpulse-partner-edge-hydrate on
-	# first-boot). 0644 (sourced, not executed). Same 4-way delivery tiers
-	# as cross-probe-lib.sh; upgrade.sh syncs it to existing boxes via
-	# _HOST_SCRIPT_SBIN_FILES.
-	if [[ -n "${src_dir:-}" && -f "$src_dir/lib/hydrate-hy2.sh" ]]; then
-		install -m 0644 "$src_dir/lib/hydrate-hy2.sh" "$PREFIX_SBIN/hydrate-hy2.sh"
-	elif [[ -n "${src_dir:-}" && -f "$src_dir/hydrate-hy2.sh" ]]; then
-		install -m 0644 "$src_dir/hydrate-hy2.sh" "$PREFIX_SBIN/hydrate-hy2.sh"
-	elif [[ -f "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/hydrate-hy2.sh" ]]; then
-		install -m 0644 "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/hydrate-hy2.sh" \
-			"$PREFIX_SBIN/hydrate-hy2.sh"
-	else
-		curl -fsSL "$REPO_RAW/lib/hydrate-hy2.sh" -o "$PREFIX_SBIN/hydrate-hy2.sh"
-		chmod 0644 "$PREFIX_SBIN/hydrate-hy2.sh"
-	fi
-
 	# Phase 5.8 Task 6: telegram-alert-lib.sh — shared rate-limited Telegram
 	# alert primitive (used by oxpulse-channels-health-report.sh transition
 	# detector + future per-channel watchdogs).
@@ -583,8 +567,6 @@ EXPECTED_SBIN_FILES=(
 	channel-health-lib.sh
 	render-channel-lib.sh
 	oxpulse-token-lib.sh
-	# Hy2 channel render lib — sourced by oxpulse-partner-edge-hydrate.
-	hydrate-hy2.sh
 	# AWG installer lib — _ensure_awg_lib sibling candidate of
 	# oxpulse-partner-edge-upgrade (the AWG 3.1 converge step).
 	install-awg.sh

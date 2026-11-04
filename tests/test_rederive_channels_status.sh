@@ -3,15 +3,19 @@
 #
 # Proves that channels-status.env is re-derived from live state on each
 # refresh, not frozen at install time. The specific defect: a channel
-# marked "skipped" at install (because HYSTERIA2_SERVER was empty then)
+# marked "skipped" at install (because NAIVE_SERVER was empty then)
 # that now has its inputs present + container running must become "active"
 # after one re-derivation, and _channel_restart_if_changed must then act
 # on it instead of skipping.
 #
 # Before/after structure:
-#   BEFORE: hysteria2=skipped → _channel_restart_if_changed skips (no docker call)
-#   REDERIVE: inputs present + container running → hysteria2 becomes active
-#   AFTER:  hysteria2=active  → _channel_restart_if_changed acts (docker call made)
+#   BEFORE: naive=skipped → _channel_restart_if_changed skips (no docker call)
+#   REDERIVE: inputs present + container running → naive becomes active
+#   AFTER:  naive=active  → _channel_restart_if_changed acts (docker call made)
+#
+# (This used to be driven by hysteria2. CH3 is retired — hysteria2 is never
+# promoted, which t_hysteria2_never_promoted pins — so naive carries the
+# mechanism now; it is the same skipped→active arm.)
 #
 # Also verifies failed_at_* statuses are NOT promoted (sticky failures —
 # "we tried and it broke" ≠ "we had nothing to try with").
@@ -40,14 +44,18 @@ setup_env() {
     mkdir -p "$PREFIX_ETC" "$PREFIX_LIB"
     DOCKER_LOG="$TMP/docker.log"; : > "$DOCKER_LOG"
 
-    # node-config with hysteria2_server + awg_ip present (inputs now available)
+    # node-config with awg_ip present (inputs now available). hysteria2_server is
+    # present TOO, together with the hy2 yaml and a running container below:
+    # every input the retired CH3 promotion used to need, so t_hysteria2_never_promoted
+    # proves the arm is gone rather than merely unfed.
     cat > "$PREFIX_ETC/node-config.json" <<EOF
 {"node_id":"test-node","hysteria2_server":"hy2.example.com:443","awg_ip":"10.9.0.4"}
 EOF
     NODE_CFG="$PREFIX_ETC/node-config.json"
 
-    # hysteria2 config file exists (rendered by enable-hy2 bootstrap)
+    # hysteria2 config file (retired CH3 input) + naive config file
     touch "$PREFIX_ETC/hysteria2-client.yaml"
+    touch "$PREFIX_ETC/naive-client.json"
 
     # docker shim: record calls, report container as running
     mkdir -p "$TMP/shims"
@@ -117,14 +125,14 @@ STUB
 }
 
 # ---------------------------------------------------------------------------
-# 1. BEFORE: hysteria2=skipped → gate skips (no docker call)
+# 1. BEFORE: naive=skipped → gate skips (no docker call)
 # ---------------------------------------------------------------------------
 t_before_skip() {
     setup_env
-    # channels-status.env with hysteria2=skipped (install-time decision)
+    # channels-status.env with naive=skipped (install-time decision)
     cat > "$PREFIX_LIB/channels-status.env" <<EOF
 xray=active
-hysteria2=skipped
+hysteria2=retired
 naive=skipped
 awg=skipped
 EOF
@@ -134,30 +142,30 @@ EOF
     source "$funcs"
 
     local out
-    out=$(_channel_restart_if_changed hysteria2 \
-        "$PREFIX_ETC/hysteria2-client.yaml" \
-        "$PREFIX_LIB/hysteria2-config.sha" \
+    out=$(_channel_restart_if_changed naive \
+        "$PREFIX_ETC/naive-client.json" \
+        "$PREFIX_LIB/naive-config.sha" \
         "$PREFIX_ETC/docker-compose.yml" \
-        hysteria2-client restart oxpulse-partner-hysteria2 2>&1)
+        naive restart oxpulse-partner-naive 2>&1)
 
-    # The gate must SKIP — hysteria2=skipped, no GATE_PASSED in output
+    # The gate must SKIP — naive=skipped, no GATE_PASSED in output
     if grep -q "GATE_PASSED" <<<"$out"; then
         fail "t_before_skip: gate should have skipped but _docker_restart_if_sha_changed was called"
     else
-        pass "t_before_skip: hysteria2=skipped → gate skips (no docker call)"
+        pass "t_before_skip: naive=skipped → gate skips (no docker call)"
     fi
 
     teardown_env
 }
 
 # ---------------------------------------------------------------------------
-# 2. REDERIVE: inputs present + container running → hysteria2 becomes active
+# 2. REDERIVE: inputs present + container running → naive becomes active
 # ---------------------------------------------------------------------------
 t_rederive_promotes() {
     setup_env
     cat > "$PREFIX_LIB/channels-status.env" <<EOF
 xray=active
-hysteria2=skipped
+hysteria2=retired
 naive=skipped
 awg=skipped
 EOF
@@ -168,13 +176,13 @@ EOF
 
     PATH="$TMP/shims:$PATH" _rederive_channels_status
 
-    local hy2_status
-    hy2_status=$(grep '^hysteria2=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
+    local naive_status
+    naive_status=$(grep '^naive=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
 
-    if [[ "$hy2_status" == "active" ]]; then
-        pass "t_rederive_promotes: hysteria2 skipped → active (inputs+container present)"
+    if [[ "$naive_status" == "active" ]]; then
+        pass "t_rederive_promotes: naive skipped → active (inputs+container present)"
     else
-        fail "t_rederive_promotes: hysteria2 still '$hy2_status' after re-derive (expected active)"
+        fail "t_rederive_promotes: naive still '$naive_status' after re-derive (expected active)"
     fi
 
     # Also check awg promoted (awg_ip present + awg0 active)
@@ -199,15 +207,15 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# 3. AFTER: hysteria2=active → gate acts (docker call made)
+# 3. AFTER: naive=active → gate acts (docker call made)
 # ---------------------------------------------------------------------------
 t_after_acts() {
     setup_env
-    # Post-rederive state: hysteria2=active
+    # Post-rederive state: naive=active
     cat > "$PREFIX_LIB/channels-status.env" <<EOF
 xray=active
-hysteria2=active
-naive=skipped
+hysteria2=retired
+naive=active
 awg=active
 EOF
 
@@ -216,16 +224,16 @@ EOF
     source "$funcs"
 
     local out
-    out=$(_channel_restart_if_changed hysteria2 \
-        "$PREFIX_ETC/hysteria2-client.yaml" \
-        "$PREFIX_LIB/hysteria2-config.sha" \
+    out=$(_channel_restart_if_changed naive \
+        "$PREFIX_ETC/naive-client.json" \
+        "$PREFIX_LIB/naive-config.sha" \
         "$PREFIX_ETC/docker-compose.yml" \
-        hysteria2-client restart oxpulse-partner-hysteria2 2>&1)
+        naive restart oxpulse-partner-naive 2>&1)
 
     if grep -q "GATE_PASSED" <<<"$out"; then
-        pass "t_after_acts: hysteria2=active → gate passes (_docker_restart_if_sha_changed called)"
+        pass "t_after_acts: naive=active → gate passes (_docker_restart_if_sha_changed called)"
     else
-        fail "t_after_acts: gate skipped even though hysteria2=active"
+        fail "t_after_acts: gate skipped even though naive=active"
     fi
 
     teardown_env
@@ -238,8 +246,8 @@ t_failed_sticky() {
     setup_env
     cat > "$PREFIX_LIB/channels-status.env" <<EOF
 xray=active
-hysteria2=failed_at_start
-naive=skipped
+hysteria2=retired
+naive=failed_at_render
 awg=skipped
 EOF
 
@@ -249,13 +257,13 @@ EOF
 
     PATH="$TMP/shims:$PATH" _rederive_channels_status
 
-    local hy2_status
-    hy2_status=$(grep '^hysteria2=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
+    local naive_status
+    naive_status=$(grep '^naive=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
 
-    if [[ "$hy2_status" == "failed_at_start" ]]; then
-        pass "t_failed_sticky: hysteria2=failed_at_start stays failed_at_start (not promoted to active)"
+    if [[ "$naive_status" == "failed_at_render" ]]; then
+        pass "t_failed_sticky: naive=failed_at_render stays failed_at_render (not promoted to active)"
     else
-        fail "t_failed_sticky: hysteria2 failed_at_start became '$hy2_status' (expected sticky)"
+        fail "t_failed_sticky: naive failed_at_render became '$naive_status' (expected sticky)"
     fi
 
     teardown_env
@@ -266,17 +274,17 @@ EOF
 # ---------------------------------------------------------------------------
 t_skipped_stays_when_absent() {
     setup_env
-    # node-config WITHOUT hysteria2_server
+    # node-config WITHOUT any channel input
     cat > "$PREFIX_ETC/node-config.json" <<EOF
 {"node_id":"test-node","awg_ip":"10.9.0.4"}
 EOF
     NODE_CFG="$PREFIX_ETC/node-config.json"
-    # Remove hy2 config file
-    rm -f "$PREFIX_ETC/hysteria2-client.yaml"
+    # Remove the naive config file
+    rm -f "$PREFIX_ETC/naive-client.json"
 
     cat > "$PREFIX_LIB/channels-status.env" <<EOF
 xray=active
-hysteria2=skipped
+hysteria2=retired
 naive=skipped
 awg=skipped
 EOF
@@ -287,15 +295,55 @@ EOF
 
     PATH="$TMP/shims:$PATH" _rederive_channels_status
 
-    local hy2_status
-    hy2_status=$(grep '^hysteria2=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
+    local naive_status
+    naive_status=$(grep '^naive=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
 
-    if [[ "$hy2_status" == "skipped" ]]; then
-        pass "t_skipped_stays_when_absent: hysteria2 stays skipped (inputs absent)"
+    if [[ "$naive_status" == "skipped" ]]; then
+        pass "t_skipped_stays_when_absent: naive stays skipped (inputs absent)"
     else
-        fail "t_skipped_stays_when_absent: hysteria2 promoted to '$hy2_status' without inputs (false positive)"
+        fail "t_skipped_stays_when_absent: naive promoted to '$naive_status' without inputs (false positive)"
     fi
 
+    teardown_env
+}
+
+# 5b. CH3 is retired: hysteria2 is NEVER promoted, whatever the inputs say.
+#     setup_env provides every input the old promotion needed (hysteria2_server
+#     in node-config, the yaml, a running container). A node that never had CH3
+#     ("skipped") must stay skipped, and "retired" must survive the rewrite that
+#     the naive promotion triggers in the same pass.
+t_hysteria2_never_promoted() {
+    setup_env
+    cat > "$PREFIX_LIB/channels-status.env" <<EOF
+xray=active
+hysteria2=skipped
+naive=skipped
+awg=skipped
+EOF
+    local funcs; funcs=$(extract_functions)
+    # shellcheck source=/dev/null
+    source "$funcs"
+    PATH="$TMP/shims:$PATH" _rederive_channels_status
+    local st; st=$(grep '^hysteria2=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
+    if [[ "$st" == "skipped" ]]; then
+        pass "t_hysteria2_never_promoted: skipped stays skipped despite server+yaml+container"
+    else
+        fail "t_hysteria2_never_promoted: hysteria2 became '$st' (CH3 is retired, must never be active)"
+    fi
+
+    cat > "$PREFIX_LIB/channels-status.env" <<EOF
+xray=active
+hysteria2=retired
+naive=skipped
+awg=skipped
+EOF
+    PATH="$TMP/shims:$PATH" _rederive_channels_status
+    st=$(grep '^hysteria2=' "$PREFIX_LIB/channels-status.env" | cut -d= -f2)
+    if [[ "$st" == "retired" ]] && [[ "$(grep -c '^naive=active' "$PREFIX_LIB/channels-status.env")" == 1 ]]; then
+        pass "t_hysteria2_never_promoted: retired survives the rewrite (naive promoted in the same pass)"
+    else
+        fail "t_hysteria2_never_promoted: hysteria2='$st' after rewrite (expected retired)"
+    fi
     teardown_env
 }
 
@@ -460,6 +508,7 @@ t_rederive_promotes
 t_after_acts
 t_failed_sticky
 t_skipped_stays_when_absent
+t_hysteria2_never_promoted
 t_no_file_noop
 t_degraded_heals_when_fields_restored
 t_degraded_stays_when_field_missing

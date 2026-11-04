@@ -159,10 +159,12 @@ OUTPUT3=$(PATH="$T3:/usr/bin:/bin" \
 set -e
 
 COUNT3=$(printf '%s\n' "$OUTPUT3" | grep -c '"channel_name"' 2>/dev/null || echo 0)
-if [[ "$COUNT3" -eq 3 ]]; then
-    ok "test3: ch1/ch2/ch3 still probed (3 entries), ch0 contributes no payload"
+# ch3 (hysteria2) is retired: an entry for it that central may still advertise
+# is skipped like any unknown channel, and must not produce a payload.
+if [[ "$COUNT3" -eq 2 ]] && ! grep -qE '"channel_name": ?"ch3"' <<< "$OUTPUT3"; then
+    ok "test3: ch1/ch2 still probed (2 entries), retired ch3 and ch0 contribute no payload"
 else
-    fail "test3: expected 3 channel entries (ch1/ch2/ch3), got $COUNT3; output: $OUTPUT3"
+    fail "test3: expected 2 channel entries (ch1/ch2; ch3 retired), got $COUNT3; output: $OUTPUT3"
 fi
 
 if printf '%s\n' "$OUTPUT3" | grep -E '"channel_name":"ch0"' >/dev/null; then

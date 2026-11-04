@@ -11,8 +11,6 @@
 #                                                 tunnel probe (canary/tunnel)
 #   probe_ch2                                  — AmneziaWG mesh real tunnel
 #                                                 probe (awg0 → backend)
-#   probe_ch3                                  — Hysteria2 real tunnel probe
-#                                                 (tcpForwarding → backend)
 #   _resolve_coturn_probe_target                — resolves the public relay
 #                                                 IP the ch4 -y self-test
 #                                                 dials (anti-SSRF vs.
@@ -57,7 +55,7 @@
 #     Oracle: tests/test_settle_serveability.sh.
 #
 # ADR-5 fail-loud precondition: _emit_serveability dynamically dispatches
-# probe_ch1/2/3 via a variable holding the function name; a `declare -F
+# probe_ch1/2 via a variable holding the function name; a `declare -F
 # probe_ch1 || die` guard at its top converts a load-order/missing-function
 # regression into a hard exit instead of a silent all-DOWN (which would trip
 # upgrade.sh's LOST/rollback verdict on a healthy box). See its own comment
@@ -107,8 +105,7 @@
 # Requires (env overrides, all optional — every one has an inline default in
 # the function that reads it, so none of these are hard runtime requirements):
 #   OXPULSE_CHANNEL_PROBE_TIMEOUT, OXPULSE_CH1_CANARY_URL,
-#   OXPULSE_AWG_MOTHERLY_IP, OXPULSE_BACKEND_PORT, OXPULSE_HY2_LOCAL_LISTEN,
-#   OXPULSE_HY2_FALLBACK_PORT, OXPULSE_COTURN_PORT,
+#   OXPULSE_AWG_MOTHERLY_IP, OXPULSE_BACKEND_PORT, OXPULSE_COTURN_PORT,
 #   OXPULSE_COTURN_PROBE_TARGET, OXPULSE_TURN_SECRET, OXPULSE_HMAC_BIN,
 #   OXPULSE_METRICS_SRC
 #
@@ -200,40 +197,6 @@ probe_ch2() {
         printf '{"channel_name":"ch2","channel_rtt_ms":%d,"channel_handshake_ok":true}' "$rtt_ms"
     else
         printf '{"channel_name":"ch2","channel_rtt_ms":%d,"channel_handshake_ok":false}' "$rtt_ms"
-    fi
-}
-
-# ---------- probe: ch3 — Hysteria2 — REAL end-to-end tunnel ----------
-# Dials the central backend's /api/health through the hysteria2-client
-# container's local tcpForwarding listener (127.0.0.1:PORT), which forwards
-# over the QUIC tunnel to OXPULSE_HY2_REMOTE_BACKEND on the far side (the same
-# backend every other channel targets — defaults.conf: 127.0.0.1:8907, from
-# the hysteria2 SERVER's own vantage). This is the FIRST real signal for ch3:
-# the `nc -z` port check it replaces only proved the local forwarder was
-# LISTENING, never that a byte made it through the tunnel — and it never
-# emitted channel_handshake_ok at all, so the backend's ch1/ch2/ch3 OR'd
-# signaling health (health_poller.rs) had zero ch3 visibility.
-# channel_handshake_ok is populated for the first time here.
-probe_ch3() {
-    local listen port t0 t1 http_code rtt_ms
-    local timeout_s="${OXPULSE_CHANNEL_PROBE_TIMEOUT:-5}"
-
-    # Derive port from OXPULSE_HY2_LOCAL_LISTEN (addr:port) or override.
-    listen="${OXPULSE_HY2_LOCAL_LISTEN:-0.0.0.0:18443}"
-    port="${listen##*:}"
-    port="${OXPULSE_HY2_FALLBACK_PORT:-${port:-18443}}"
-
-    t0="${EPOCHREALTIME}"
-    http_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$timeout_s" \
-        "http://127.0.0.1:${port}/api/health" 2>/dev/null || echo '000')
-    t1="${EPOCHREALTIME}"
-
-    rtt_ms=$(_elapsed_ms "$t0" "$t1")
-
-    if [[ "$http_code" =~ ^2 ]]; then
-        printf '{"channel_name":"ch3","channel_rtt_ms":%d,"channel_handshake_ok":true}' "$rtt_ms"
-    else
-        printf '{"channel_name":"ch3","channel_rtt_ms":%d,"channel_handshake_ok":false}' "$rtt_ms"
     fi
 }
 
@@ -878,28 +841,28 @@ _check_upstream_transitions() {
 }
 
 # ---------- serve-ability probe (upgrade settle-gate consumer) ----------
-# --serveability: probe ONLY the provisioned tunnel channels (ch1/ch2/ch3) via
-# the SAME honest end-to-end probe_ch1/ch2/ch3 used by the 60s health report,
+# --serveability: probe ONLY the provisioned tunnel channels (ch1/ch2) via
+# the SAME honest end-to-end probe_ch1/ch2 used by the 60s health report,
 # and emit one parseable `chN=OK|DOWN` line each — no POST, no peer-probe, no
 # ch4 (coturn is a TURN relay, not a user-facing serve channel; its probe is
 # also slow and leaks allocations, so it must never run on the settle path).
 # This is the real-time serve-ability oracle the upgrade settle gate consults
 # before rolling back: a box whose xray (ch1) is ТСПУ-blocked but whose awg
-# (ch2) / hy2 (ch3) still serve via Caddy's multi-homed tunnel_upstream must NOT
+# (ch2) still serves via Caddy's multi-homed tunnel_upstream must NOT
 # be rolled back. `OK` = the channel's tunnel reached the backend end-to-end
 # (handshake_ok true); `DOWN` otherwise. Channels absent from node-config are
 # simply not emitted (the consumer treats an absent channel as non-applicable /
 # info, never a regression).
 _emit_serveability() {
     # ADR-5 fail-loud precondition: _emit_serveability dynamically dispatches
-    # probe_ch1/2/3 via a variable holding the function name ("$_fn" below);
+    # probe_ch1/2 via a variable holding the function name ("$_fn" below);
     # if a future regression (load-order bug, partial source failure, a
     # truncated/corrupt copy of this lib) leaves those functions undefined,
     # the dispatch would silently degrade every channel to DOWN instead of
     # failing loudly. A false all-DOWN here trips upgrade.sh's
     # _settle_serveability_snapshot LOST verdict and auto-rolls back an
     # otherwise healthy relay node — so this converts a silent false-DOWN
-    # into a hard exit instead. Co-located in the same file as probe_ch1-3
+    # into a hard exit instead. Co-located in the same file as probe_ch1-2
     # since the 3-lib collapse (ADR-3) made this an intra-file check, not a
     # cross-lib one — cheap insurance, kept anyway.
     declare -F probe_ch1 >/dev/null || die "channel-health-lib.sh probe functions not loaded — refusing to emit a possibly-false serveability verdict"
@@ -908,7 +871,6 @@ _emit_serveability() {
         case "$_chan" in
             ch1*) _fn=probe_ch1; _canon=ch1 ;;
             ch2*) _fn=probe_ch2; _canon=ch2 ;;
-            ch3*) _fn=probe_ch3; _canon=ch3 ;;
             *)    continue ;;   # ch4/coturn, ch0/naive (unwired), unknown → not a serve channel
         esac
         _json=$( "$_fn" 2>/dev/null || printf '{"channel_handshake_ok":false}' )
