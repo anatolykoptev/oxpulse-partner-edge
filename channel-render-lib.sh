@@ -411,7 +411,64 @@ _esc() { printf '%s' "$1" | sed -e 's/[\\&|"]/\\&/g'; }
 # Order is load-bearing: the config file is deleted only once the container is
 # verifiably gone. A leftover container whose bind-mount source has vanished is
 # restarted by docker, which creates a DIRECTORY at the missing path.
+# retire_ch3_close_port — close :18443, the retired forwarder's port, in the HOST
+# firewall. The CH3 client listened on 0.0.0.0:18443 and older releases opened it
+# to the world; a plain upgrade never re-runs firewall_apply, so the rule would
+# outlive the container. Runs on every call of retire_hysteria2_ch3 on its OWN
+# check (never gated on the container/files, which a first run already removed)
+# and is silent once the port is absent. Only allow rules for 18443/tcp|udp are
+# deleted; no reset, no nft/docker chains. Never fails the caller.
+retire_ch3_close_port() {
+    local closed="" proto st l
+    # ufw: only when active. `ufw status` lists v4 and v6 lines:
+    #   18443/tcp            ALLOW       Anywhere
+    #   18443/tcp (v6)       ALLOW       Anywhere (v6)
+    _ch3_ufw_allows() {   # status-text rule
+        awk -v rule="$2" '
+            $1 == rule { i = 2; if ($i == "(v6)") i++
+                if ($i == "ALLOW") { i++; if ($i == "IN") i++
+                    if ($i == "Anywhere") f = 1 } }
+            END { exit !f }' <<< "$1"
+    }
+    if command -v ufw >/dev/null 2>&1; then
+        st=$(ufw status 2>/dev/null) || st=""
+        if [[ "$st" == "Status: active"* ]]; then
+            for proto in tcp udp; do
+                if _ch3_ufw_allows "$st" "18443/$proto"; then
+                    ufw --force delete allow "18443/$proto" >/dev/null 2>&1 || true
+                    st=$(ufw status 2>/dev/null) || st=""
+                    if _ch3_ufw_allows "$st" "18443/$proto"; then
+                        warn "retire_ch3_close_port: ufw still allows 18443/$proto — will retry"
+                    else
+                        closed+=" ufw:$proto"
+                    fi
+                fi
+            done
+        fi
+    fi
+    # firewalld: only when running. Check each scope; the rule can be permanent,
+    # runtime, or both.
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        for proto in tcp udp; do
+            for l in "--permanent" ""; do
+                # Capture, then match (no `| grep -q` under pipefail).
+                # shellcheck disable=SC2086  # $l is one flag or empty
+                st=$(firewall-cmd $l --zone=public --list-ports 2>/dev/null) || st=""
+                if grep -qx "18443/$proto" <<< "${st// /$'\n'}"; then
+                    # shellcheck disable=SC2086
+                    firewall-cmd $l --zone=public --remove-port="18443/$proto" >/dev/null 2>&1 || true
+                    closed+=" firewalld${l:+-perm}:$proto"
+                fi
+            done
+        done
+    fi
+    unset -f _ch3_ufw_allows
+    [[ -z "$closed" ]] || log "CH3 port 18443 closed in the host firewall:${closed}"
+    return 0
+}
+
 retire_hysteria2_ch3() {
+    retire_ch3_close_port || true
     local etc="${PREFIX_ETC:-/etc/oxpulse-partner-edge}" lib="${PREFIX_LIB:-/var/lib/oxpulse-partner-edge}"
     local docker="${DOCKER_BIN:-docker}" ctr="oxpulse-partner-hysteria2"
     local env_file="$etc/.env" chs="$lib/channels-status.env"

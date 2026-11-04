@@ -82,7 +82,7 @@ fixture_pillow_node() {
 	: > "$SBIN/oxpulse-partner-edge-enable-hy2"; : > "$SBIN/hydrate-hy2.sh"
 }
 # Everything the teardown could change, in one comparable blob.
-snapshot() { ( cd "$TMP" && find etc var sbin containers -type f -print0 | sort -z | xargs -0 md5sum; ) ; }
+snapshot() { ( cd "$TMP" && find etc var sbin containers ufw.rules fw.perm fw.run -type f -print0 2>/dev/null | sort -z | xargs -0 md5sum; ) ; }
 mutations() { wc -l < "$TMP/calls" | tr -d ' '; }
 
 run_lib() {   # [lib-path]
@@ -200,6 +200,91 @@ setup; fixture_ch3_node; rm -f "$ETC/hysteria2-client.yaml"; mkdir "$ETC/hysteri
 run_lib; rc=$?
 [[ $rc -eq 0 && ! -e "$ETC/hysteria2-client.yaml" ]] \
 	&& pass "directory at the yaml path is removed" || fail "directory left behind (rc=$rc): $(ls -la "$ETC")"
+teardown
+
+# --- :18443 closed in the host firewall, independent of CH3 leftovers ---------
+# Stateful stubs. ufw: `status` prints the rule file, `--force delete allow X`
+# drops X's v4 AND v6 lines like the real tool. firewalld: perm/run port files.
+firewall_stubs() {
+	cat > "$BIN/ufw" <<'UFW'
+#!/bin/bash
+R="$FAKE_DOCKER_STATE/ufw.rules"
+case "$1" in
+  status) echo "Status: active"; echo; echo "To                         Action      From"; echo "--                         ------      ----"; cat "$R" ;;
+  --force) [[ "$2" == delete && "$3" == allow ]] && { echo "ufw $*" >> "$FAKE_DOCKER_STATE/calls"; grep -v "^$4 " "$R" > "$R.n"; mv "$R.n" "$R"; } ;;
+  *) echo "ufw $*" >> "$FAKE_DOCKER_STATE/calls" ;;
+esac
+exit 0
+UFW
+	cat > "$BIN/firewall-cmd" <<'FWC'
+#!/bin/bash
+S="$FAKE_DOCKER_STATE"; scope=run; for a in "$@"; do [[ $a == --permanent ]] && scope=perm; done
+f="$S/fw.$scope"; touch "$f"
+for a in "$@"; do case "$a" in
+  --state) echo running ;;
+  --list-ports) tr '\n' ' ' < "$f"; echo ;;
+  --remove-port=*) echo "firewall-cmd $*" >> "$S/calls"; p=${a#*=}; grep -vxF "$p" "$f" > "$f.n"; mv "$f.n" "$f" ;;
+esac; done
+exit 0
+FWC
+	chmod +x "$BIN/ufw" "$BIN/firewall-cmd"
+}
+ufw_rules_fixture() {
+	printf '%s\n' \
+	  '22/tcp                     ALLOW       Anywhere' \
+	  '18443/tcp                  ALLOW       Anywhere' \
+	  '18443/udp                  ALLOW       Anywhere' \
+	  '443/tcp                    ALLOW       Anywhere' \
+	  '18443/tcp (v6)             ALLOW       Anywhere (v6)' \
+	  '18443/udp (v6)             ALLOW       Anywhere (v6)' \
+	  '443/tcp (v6)               ALLOW       Anywhere (v6)' > "$TMP/ufw.rules"
+}
+
+# 10 — ufw: 18443 v4+v6 closed, every other rule intact, second run no-op. The node
+#      is pillow AFTER its teardown ran: no container, no yaml, no helper scripts.
+setup; fixture_clean_node; firewall_stubs; ufw_rules_fixture
+run_lib; rc=$?
+! grep -q '18443' "$TMP/ufw.rules" && [[ $rc -eq 0 ]] \
+	&& pass "ufw: 18443/tcp+udp (v4 and v6) removed on a node with no CH3 leftovers" \
+	|| fail "ufw still allows 18443 (rc=$rc): $(cat "$TMP/ufw.rules")"
+[[ "$(grep -c . "$TMP/ufw.rules")" == 3 ]] && grep -q '^22/tcp' "$TMP/ufw.rules" && grep -q '^443/tcp (v6)' "$TMP/ufw.rules" \
+	&& pass "ufw: every other rule intact" || fail "ufw collateral: $(cat "$TMP/ufw.rules")"
+grep -q 'CH3 port 18443 closed' "$TMP/out" && [[ "$(grep -c . "$TMP/out")" == 1 ]] \
+	&& pass "ufw: exactly one log line" || fail "ufw log: $(cat "$TMP/out")"
+! grep -qE 'reset|ufw (allow|deny|enable|disable)' "$TMP/calls" && pass "ufw: only targeted deletes (no reset/enable)" || fail "ufw calls: $(cat "$TMP/calls")"
+before="$(snapshot)"; : > "$TMP/calls"; run_lib
+[[ "$(snapshot)" == "$before" && ! -s "$TMP/out" && ! -s "$TMP/calls" ]] \
+	&& pass "ufw: second run is a silent no-op" || fail "ufw second run not a no-op: $(cat "$TMP/out") $(cat "$TMP/calls")"
+teardown
+
+# 11 — firewalld: 18443 removed from permanent AND runtime, other ports intact.
+setup; fixture_clean_node; firewall_stubs
+printf '%s\n' 443/tcp 18443/tcp 18443/udp 5349/tcp > "$TMP/fw.perm"; cp "$TMP/fw.perm" "$TMP/fw.run"
+run_lib
+! grep -q 18443 "$TMP/fw.perm" "$TMP/fw.run" && grep -qx 443/tcp "$TMP/fw.perm" && grep -qx 5349/tcp "$TMP/fw.run" \
+	&& pass "firewalld: 18443 removed permanent+runtime, other ports intact" || fail "firewalld state: $(cat "$TMP/fw.perm") | $(cat "$TMP/fw.run")"
+before="$(snapshot)"; : > "$TMP/calls"; run_lib
+[[ "$(snapshot)" == "$before" && ! -s "$TMP/out" && ! -s "$TMP/calls" ]] \
+	&& pass "firewalld: second run is a silent no-op" || fail "firewalld second run: $(cat "$TMP/out")"
+teardown
+
+# 12 — neither firewall tool present: nothing happens.
+setup; fixture_clean_node; before="$(snapshot)"; run_lib
+[[ "$(snapshot)" == "$before" && ! -s "$TMP/out" ]] && pass "no firewall tool: no-op" || fail "no-tool run changed something: $(cat "$TMP/out")"
+teardown
+
+# --- mutation: gate the port closure on CH3 leftovers (have_files) -------------
+# The pillow-after-teardown case (test 10) has no leftovers, so it must go RED.
+setup; fixture_clean_node; firewall_stubs; ufw_rules_fixture
+MUT2="$TMP/mutant2-channel-render-lib.sh"
+sed 's/^    retire_ch3_close_port || true$/    [[ -e "$PREFIX_ETC\/hysteria2-client.yaml" ]] \&\& retire_ch3_close_port || true/' "$LIB" > "$MUT2"
+if cmp -s "$LIB" "$MUT2"; then
+	fail "port-closure mutation did not apply (pattern drifted)"
+else
+	run_lib "$MUT2"
+	grep -q '18443' "$TMP/ufw.rules" && pass "MUTANT (closure gated on CH3 leftovers) is caught: 18443 survives" \
+		|| fail "mutant not caught: 18443 closed anyway"
+fi
 teardown
 
 # --- mutation: skip the profile removal ---------------------------------------
