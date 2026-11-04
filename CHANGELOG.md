@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.37](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.36...v0.16.37) (2026-11-04)
+
+
+### Bug Fixes
+
+* **edge:** close public 18443 in the host firewall on upgrade and refresh ([#686](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/686)) ([535dc29](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/535dc29d263467ef19ffb004c8319b9283ff994a))
+
 ## [0.16.36](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.35...v0.16.36) (2026-11-04)
 
 
