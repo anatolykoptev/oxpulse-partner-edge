@@ -1898,6 +1898,7 @@ settle_healthcheck_with_retry() {
 	local label="${1:-post-upgrade}"            # context for log messages
 	local _baseline_snap="${2:-}"               # Phase 3: pre-change snapshot file
 	local _serve_baseline="${3:-}"              # P3-serveability: pre-change chN=OK|DOWN snapshot
+	local _docker_baseline="${4:-}"             # pre-change container health (_settle_docker_baseline_capture)
 	local budget="${OXPULSE_UPGRADE_HEALTH_TIMEOUT:-30}"
 	local interval=3
 	local max_attempts=$(( (budget + interval - 1) / interval ))  # ceil(budget/interval)
@@ -2133,7 +2134,7 @@ settle_healthcheck_with_retry() {
 	# the awk-extracted isolation harness (which extracts only this function)
 	# keeps its current behaviour.
 	if declare -F _settle_docker_health_watch >/dev/null 2>&1; then
-		if ! _settle_docker_health_watch "$label"; then
+		if ! _settle_docker_health_watch "$label" "$_docker_baseline"; then
 			_settle_emit_rollback_metric late_unhealthy 1
 			return 1
 		fi
@@ -2229,8 +2230,68 @@ _settle_derive_recheck_window() {
 	printf '%s\n' "$_max"
 }
 
+# _settle_docker_baseline_capture OUTFILE - record every oxpulse-partner-* container's
+# state BEFORE the upgrade touches anything, so the late-wedge watch can tell a
+# container the upgrade broke from one that was already broken.
+#
+# Format: a `#baseline-v2` header line (so an empty/failed capture is distinguishable
+# from "nothing was running"), then `NAME STATUS HEALTH RESTARTS` per container, STATUS
+# from State.Status (running|restarting|exited|...), HEALTH from State.Health.Status or
+# `none` when the image declares no HEALTHCHECK, RESTARTS = RestartCount. Includes
+# stopped containers (ps -a). v1 (no RESTARTS column) is still read; RESTARTS = 0 there.
+# RESTARTS exists because a crash-looper flaps through `running starting` between
+# `restarting unhealthy` samples (rvpn 2026-11-03: 2 of 20 samples), so status+health
+# alone mis-record it as healthy-before about 1 upgrade in 10.
+# Best effort: returns 1 and leaves OUTFILE without the header when docker is
+# unreachable - the watch then runs strict, as before.
+#
+# Why (2026-10-12, rvpn v0.16.28 -> v0.16.31): oxpulse-partner-hysteria2 was
+# crash-looping BEFORE the upgrade (hy2 checks red in the baseline, never recreated by
+# it), the watch saw it `unhealthy`, and a clean upgrade was rolled back on a
+# false positive.
+_settle_docker_baseline_capture() {
+	local _out="$1" _docker="${DOCKER_BIN:-docker}" _names _n _line
+	: > "$_out"
+	_names=$("$_docker" ps -a --filter name=oxpulse-partner- --format '{{.Names}}' 2>/dev/null) || return 1
+	printf '#baseline-v2\n' > "$_out"
+	while IFS= read -r _n; do
+		[[ -z "$_n" ]] && continue
+		_line=$("$_docker" inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.RestartCount}}' "$_n" 2>/dev/null || true)
+		[[ -z "$_line" ]] && _line="unknown unknown 0"
+		printf '%s %s\n' "$_n" "$_line" >> "$_out"
+	done <<< "$_names"
+	return 0
+}
+
+# A container recorded `starting` with at least this many restarts is a crash-looper
+# caught between crashes, not one that is genuinely starting fresh.
+_SETTLE_BASELINE_FLAP_RESTARTS=3
+
+# _settle_baseline_prebroken BASELINE_FILE NAME - exit 0 iff NAME is PRESENT in the
+# baseline AND was already broken: not running, not healthy/starting, or `starting`
+# with RestartCount >= _SETTLE_BASELINE_FLAP_RESTARTS (a flapping crash-looper). Only
+# those are ignored by the late-wedge watch. A name ABSENT from the baseline (new in
+# this release) is NOT pre-broken: it stays watched, so a header-only baseline (stack
+# down, `docker ps -a` listed nothing) degrades to the strict watch by itself.
+# A v1 line has no RESTARTS (= 0).
+_settle_baseline_prebroken() {
+	awk -v n="$2" -v flap="${_SETTLE_BASELINE_FLAP_RESTARTS:-3}" '
+		$1 == n { seen = 1; r = ($4 == "" ? 0 : $4 + 0)
+			ok = ($2 == "running" && ($3 == "healthy" || ($3 == "starting" && r < flap))) }
+		END { exit !(seen && !ok) }' "$1" 2>/dev/null
+}
+
 _settle_docker_health_watch() {
 	local _label="${1:-post-upgrade}"
+	# Optional pre-upgrade baseline (_settle_docker_baseline_capture). With a valid
+	# baseline, containers recorded as already broken BEFORE the upgrade are ignored;
+	# everything else (healthy, new, absent) is watched. Without one (no argument /
+	# failed or empty capture) it stays strict.
+	local _baseline="${2:-}"
+	if [[ -n "$_baseline" ]] && ! { [[ -f "$_baseline" ]] && [[ "$(head -n1 "$_baseline" 2>/dev/null)" =~ ^#baseline-v[12]$ ]]; }; then
+		warn "settle_healthcheck: late-wedge watch - container baseline unusable (${_baseline}); watching every container strictly"
+		_baseline=""
+	fi
 	local _window="${OXPULSE_UPGRADE_SETTLE_RECHECK_SECS:-}"
 	local _interval="${OXPULSE_UPGRADE_SETTLE_RECHECK_INTERVAL:-5}"
 	local _docker="${DOCKER_BIN:-docker}"
@@ -2258,7 +2319,7 @@ _settle_docker_health_watch() {
 	fi
 
 	log "settle_healthcheck: late-wedge watch for ${_window}s (${_label})"
-	local _elapsed=0 _n _st _unhealthy _watched _skipped
+	local _elapsed=0 _n _st _unhealthy _watched _skipped _ignored_seen=" "
 	while [[ "$_elapsed" -lt "$_window" ]]; do
 		_unhealthy=""; _watched=0; _skipped=0
 		while IFS= read -r _n; do
@@ -2266,6 +2327,16 @@ _settle_docker_health_watch() {
 			# Empty output = the image declares no HEALTHCHECK. Skip, never fail.
 			_st=$("$_docker" inspect -f '{{.State.Health.Status}}' "$_n" 2>/dev/null || true)
 			if [[ -z "$_st" || "$_st" == "<no value>" ]]; then
+				_skipped=$(( _skipped + 1 ))
+				continue
+			fi
+			if [[ -n "$_baseline" ]] && _settle_baseline_prebroken "$_baseline" "$_n"; then
+				# Not healthy before the upgrade: not a late wedge, and rolling the core
+				# back cannot fix it. Said once per watch, not per poll.
+				if [[ "$_ignored_seen" != *" ${_n} "* ]]; then
+					_ignored_seen="${_ignored_seen}${_n} "; _ignored_seen=" ${_ignored_seen# }"
+					warn "settle_healthcheck: late-wedge watch ignores ${_n} (state '${_st}'): it was already broken in the pre-upgrade baseline (${_label})"
+				fi
 				_skipped=$(( _skipped + 1 ))
 				continue
 			fi
@@ -2394,7 +2465,7 @@ _assert_node_cfg_renderable() {
 
 _render_gate() {
 	local _label="${1:-render}"
-	local _base="" _serve="" _snapdir="" _restored=0
+	local _base="" _serve="" _dbase="" _snapdir="" _restored=0
 	local _xray_cfg="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
 
 	if [[ -x "$HEALTHCHECK" ]]; then
@@ -2403,6 +2474,8 @@ _render_gate() {
 	fi
 	_serve=$(mktemp)
 	_settle_serveability_snapshot "$_serve" || true
+	_dbase=$(mktemp)
+	_settle_docker_baseline_capture "$_dbase" || true
 
 	# Snapshot exactly what the render is about to overwrite. The existing
 	# ${XRAY_CFG}.bak.<epoch> copies are NOT a safety net — nothing reads them.
@@ -2413,11 +2486,11 @@ _render_gate() {
 	# #512 — see _assert_node_cfg_renderable. Placed BEFORE the render so it fires
 	# while nothing has been overwritten, and kept adjacent so the refetch/render
 	# pairing asserted by tests/test_refetch_node_config.sh test5b still holds.
-	_assert_node_cfg_renderable || { rm -rf "$_snapdir"; rm -f "$_base" "$_serve"; return 1; }
+	_assert_node_cfg_renderable || { rm -rf "$_snapdir"; rm -f "$_base" "$_serve" "$_dbase"; return 1; }
 	re_render_xray
 
-	if settle_healthcheck_with_retry "$_label" "$_base" "$_serve"; then
-		rm -rf "$_snapdir"; rm -f "$_base" "$_serve"
+	if settle_healthcheck_with_retry "$_label" "$_base" "$_serve" "$_dbase"; then
+		rm -rf "$_snapdir"; rm -f "$_base" "$_serve" "$_dbase"
 		return 0
 	fi
 
@@ -2433,7 +2506,7 @@ _render_gate() {
 	else
 		warn "render gate: no pre-render xray-client.json to restore — leaving the rendered config in place"
 	fi
-	rm -rf "$_snapdir"; rm -f "$_base" "$_serve"
+	rm -rf "$_snapdir"; rm -f "$_base" "$_serve" "$_dbase"
 	return 1
 }
 
@@ -3936,6 +4009,9 @@ if [[ "$MODE" == with_templates ]]; then
 		log "healthcheck binary absent — skipping pre-change baseline (first install?)"
 		rm -f "$_wt_baseline_snap"; _wt_baseline_snap=""
 	fi
+	_wt_docker_baseline=$(mktemp)
+	_CLEANUP_PATHS+=("$_wt_docker_baseline")
+	_settle_docker_baseline_capture "$_wt_docker_baseline" || true
 	# P3-serveability: pre-change per-channel serve-ability baseline (chN=OK|DOWN)
 	# captured at the SAME pre-change point as the health baseline and registered
 	# for EXIT cleanup, so the settle gate can tell a real serve-ability loss from a
@@ -4047,7 +4123,7 @@ if [[ "$MODE" == with_templates ]]; then
 
 	# Step 8: verify with retry — Phase 3 baseline-aware gate.
 	# Pass baseline snapshot so gate diffs pre-change vs post-change.
-	if ! settle_healthcheck_with_retry "with-templates-upgrade" "${_wt_baseline_snap:-}" "${_wt_serve_baseline:-}"; then
+	if ! settle_healthcheck_with_retry "with-templates-upgrade" "${_wt_baseline_snap:-}" "${_wt_serve_baseline:-}" "$_wt_docker_baseline"; then
 		warn "healthcheck regression after --with-templates upgrade — rolling back"
 		rm -f "${_wt_baseline_snap:-}"
 		do_rollback_templates
@@ -4201,6 +4277,9 @@ else
 	log "healthcheck binary absent — skipping pre-change baseline"
 	rm -f "$_baseline_snapshot"; _baseline_snapshot=""
 fi
+_docker_baseline=$(mktemp)
+_CLEANUP_PATHS+=("$_docker_baseline")
+_settle_docker_baseline_capture "$_docker_baseline" || true
 # P3-serveability: pre-change per-channel serve-ability baseline (chN=OK|DOWN),
 # registered for EXIT cleanup — lets the settle gate tell a real serve-ability
 # loss from a single-channel (e.g. xray-only) regression. Best-effort (empty file
@@ -4275,7 +4354,7 @@ fi
 # with added margin for a loaded edge.  A single sleep 10 was replaced because
 # the 2s slack was insufficient on loaded edges (see function definition comment).
 # Phase 3: pass baseline snapshot for regression-aware gate.
-if ! settle_healthcheck_with_retry "plain-upgrade" "${_baseline_snapshot:-}" "${_serve_baseline_snapshot:-}"; then
+if ! settle_healthcheck_with_retry "plain-upgrade" "${_baseline_snapshot:-}" "${_serve_baseline_snapshot:-}" "$_docker_baseline"; then
 	warn "healthcheck regression after upgrade — rolling back"
 	rm -f "${_baseline_snapshot:-}"
 	cp -a "$PREV_COMPOSE_FILE" "$COMPOSE_FILE"
