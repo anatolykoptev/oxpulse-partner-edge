@@ -134,7 +134,7 @@ grep -q '^Before=oxpulse-relay-coturn.service' "$R/coturn-self-relay-guard.servi
 	&& pass "guard unit ordered Before coturn, no hard coupling from the guard" || fail "guard unit ordered Before coturn, no hard coupling from the guard"
 
 # --- template: directives coturn 4.6.1 rejects must not come back ---
-if grep -qE '^(allocation-default-timeout|no-loopback-peers)' "$R/coturn-relay.conf.tpl"; then fail "template: no directives rejected by coturn 4.6.1"; else pass "template: no directives rejected by coturn 4.6.1"; fi
+if grep -qE '^(allocation-default-timeout|no-loopback-peers)' "$R/coturn-relay.conf.tpl"; then fail "template: no directives rejected by coturn"; else pass "template: no directives rejected by coturn"; fi
 for d in 'denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff' 'denied-peer-ip=2002::-2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff' 'max-bps=625000'; do
 	grep -qx "$d" "$R/coturn-relay.conf.tpl" && pass "template has $d" || fail "template has $d"
 done
@@ -192,7 +192,8 @@ echo "\$*" > "$T/openssl.argv"
 echo ok
 STUB
 	chmod +x "$T/bin/uclient" "$T/bin/openssl"
-	hb() { env PREFIX_ETC="$E" RELAY_LIB_DIR="$REPO_ROOT/lib" RELAY_TOKEN_OWNER_UID="$(id -u)" TURN_UCLIENT="$T/bin/uclient" OPENSSL_BIN="$T/bin/openssl" "$@" bash "$R/oxpulse-relay-health-report.sh" --dry-run 2>&1; }
+	mkdir -p "$T/hlib"; cp "$REPO_ROOT/lib/channel-health-lib.sh" "$R/relay-probe-lib.sh" "$T/hlib/"
+	hb() { env PREFIX_ETC="$E" RELAY_LIB_DIR="$T/hlib" RELAY_TOKEN_OWNER_UID="$(id -u)" TURN_UCLIENT="$T/bin/uclient" OPENSSL_BIN="$T/bin/openssl" "$@" bash "$R/oxpulse-relay-health-report.sh" --dry-run 2>&1; }
 	payloads() { sed -n '/^{/,/^}/p' <<<"$1" | jq -c .; }   # one compact object per channel
 	out="$(hb)"
 	[[ "$(payloads "$out" | jq -r '.channel_name' | paste -sd, -)" == "coturn,coturn-tls" ]] && pass "heartbeat reports coturn and coturn-tls" || fail "heartbeat reports coturn and coturn-tls: $out"
@@ -251,7 +252,7 @@ printf '0\n' > "$M/reserved"
 newenv() { ETC="$(mktemp -d "$T/etc.XXXXXX")"; LEDIR="$(mktemp -d "$T/le.XXXXXX")"; }
 run_main() { # env assignments...
 	: > "$LOG"
-	env "$@" PATH="$M/bin:$PATH" PREFIX_ETC="$ETC" PREFIX_LIB="$T/no-such-lib" RELAY_LIB_DIR="$M/libdst" PREFIX_SBIN="$M/sbin" UNIT_DIR="$M/units" \
+	env "$@" PATH="$M/bin:$PATH" PREFIX_ETC="$ETC" PREFIX_LIB="$T/no-such-lib" RELAY_LIB_DIR="$M/libdst" PREFIX_SBIN="$M/sbin" PREFIX_SHARE="$M/share" UNIT_DIR="$M/units" \
 		OPEC_DST="$M/root/opec" SYSCTL_DIR="$M/sysctl" LE_DIR="$LEDIR" RESERVED_PORTS_FILE="$M/reserved" OS_RELEASE_PATH="$M/os-release" UFW_DEFAULT="$M/ufw.default" \
 		bash -c '
 			. "$1"

@@ -1,0 +1,15 @@
+[Unit]
+Description=OxPulse relay-only node: check for a central-driven upgrade
+After=network-online.target
+Wants=network-online.target
+# Only a provisioned relay node asks central about its release.
+ConditionPathExists=/etc/oxpulse-partner-edge/relay.env
+ConditionPathExists=/etc/oxpulse-partner-edge/node-id
+
+[Service]
+Type=oneshot
+# --check only asks central and, if a newer release is wanted, starts the real
+# upgrade as its OWN transient unit (oxpulse-relay-self-upgrade): this unit's
+# TimeoutStartSec can then never kill a swap half-way.
+ExecStart=/usr/local/sbin/oxpulse-relay-upgrade --check
+TimeoutStartSec=120

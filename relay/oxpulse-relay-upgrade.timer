@@ -1,0 +1,13 @@
+[Unit]
+Description=OxPulse relay-only node: daily upgrade check
+
+[Timer]
+# Once a day in the small hours (UTC), with random jitter so a fleet of relays
+# does not hit central and GitHub at the same minute. An upgrade restarts coturn
+# and drops live calls, so the window is the quietest one, not "whenever".
+OnCalendar=*-*-* 00:30:00 UTC
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

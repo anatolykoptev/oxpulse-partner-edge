@@ -132,3 +132,38 @@ jobs:
 
       - name: Run bats tests
         run: scripts/run-shell-tests.sh --bats
+
+  # Relay-only nodes run a static musl coturn (relay/coturn-static). Build it and
+  # run the real turnserver with the real relay template, rendered by the real
+  # `opec render coturn`: starts clean, allocates, refuses the denied peers.
+  # tests/test_relay_coturn_smoke.sh SKIPs in the installer job (no binaries); this
+  # job is where it actually runs on every PR.
+  relay-coturn-static:
+    name: Relay static coturn smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "relay-opec"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build opec (the renderer the coturn unit uses)
+        run: cargo build -p opec --release --locked
+      - name: Build static coturn
+        run: |
+          set -euo pipefail
+          . relay/coturn-static/version.env
+          docker buildx build --target artifacts \
+            --build-arg "COTURN_VERSION=${COTURN_VERSION}" \
+            --build-arg "COTURN_SHA256=${COTURN_SHA256}" \
+            --output type=local,dest=relay-out relay/coturn-static
+          ! readelf -d relay-out/turnserver 2>/dev/null | grep -q NEEDED
+          relay-out/turnserver --version
+      - name: Smoke test
+        env:
+          RELAY_COTURN_BIN_DIR: ${{ github.workspace }}/relay-out
+          OPEC: ${{ github.workspace }}/target/release/opec
+          RELAY_SMOKE_REQUIRE_IPV6: "1"
+        run: bash tests/test_relay_coturn_smoke.sh

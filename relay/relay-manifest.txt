@@ -1,0 +1,24 @@
+# Relay-only release manifest. Published as a release asset covered by SHA256SUMS;
+# oxpulse-relay-upgrade.sh fetches it first and installs EXACTLY these files.
+#   group: upgrader = installed by `--install-upgrader` (bootstrap of a live node);
+#          release  = installed only by a real upgrade.
+#   kind : sbin -> /usr/local/sbin   lib -> /usr/local/lib/oxpulse-relay
+#          etc  -> /etc/oxpulse-partner-edge   unit -> /etc/systemd/system
+#          bin  -> /usr/local/lib/oxpulse-relay/releases/<ver>  (the `current` symlink points there)
+#   asset: release asset name (@ARCH@ -> amd64|arm64); name: installed file name.
+# The manifest never carries a path: the kind fixes the directory.
+upgrader sbin oxpulse-relay-upgrade.sh          oxpulse-relay-upgrade
+upgrader lib  relay-lib.sh                      relay-lib.sh
+upgrader lib  relay-probe-lib.sh                relay-probe-lib.sh
+upgrader unit oxpulse-relay-upgrade.service     oxpulse-relay-upgrade.service
+upgrader unit oxpulse-relay-upgrade.timer       oxpulse-relay-upgrade.timer
+release  lib  channel-health-lib.sh             channel-health-lib.sh
+release  sbin oxpulse-relay-apply.sh            oxpulse-relay-apply
+release  sbin oxpulse-relay-prestart.sh         oxpulse-relay-prestart
+release  sbin oxpulse-relay-health-report.sh    oxpulse-relay-health-report.sh
+release  etc  coturn-relay.conf.tpl             coturn-relay.conf.tpl
+release  unit oxpulse-relay-coturn.service      oxpulse-relay-coturn.service
+release  unit oxpulse-relay-health.service      oxpulse-relay-health.service
+release  unit oxpulse-relay-health.timer        oxpulse-relay-health.timer
+release  bin  relay-turnserver-@ARCH@           turnserver
+release  bin  relay-turnutils_uclient-@ARCH@    turnutils_uclient

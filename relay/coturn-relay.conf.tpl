@@ -1,4 +1,6 @@
-# Relay-only node coturn config. Rendered ONLY by:
+# Relay-only node coturn config (coturn 4.18.x; every key is in the 4.18.0
+# mainrelay.c option table). Shipped in the same release as the static binary.
+# Rendered ONLY by:
 #   opec render coturn --tpl coturn-relay.conf.tpl --out <conf> --secret-file <node-secret>
 # Holds the node's own TURN secret(s) and nothing else; no registration, no
 # backend-issued material. Do not edit the rendered file.
@@ -67,10 +69,9 @@ max-port=65535
 # Written by the certbot deploy hook (root:turnserver 0640).
 cert=/etc/oxpulse-partner-edge/relay-certs/fullchain.pem
 pkey=/etc/oxpulse-partner-edge/relay-certs/privkey.pem
-no-tlsv1
-no-tlsv1_1
+# coturn 4.18: TLS 1.0/1.1 are off by default and DTLS needs an explicit --dtls,
+# so the old no-tlsv1 / no-tlsv1_1 / no-dtls directives are gone (4.18 rejects them).
 cipher-list="ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
-no-dtls
 
 # ─── Logging: syslog only, no verbose (verbose logs credentials) ────────
 syslog
