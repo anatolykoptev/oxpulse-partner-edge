@@ -104,7 +104,21 @@ EOF
 chmod +x "$TMP/bin/ip"
 export IP_BIN="$TMP/bin/ip"
 : > "$STUB_LOG"; : > "$STUB_RULES"
-run_guard() { ETC_DIR="$TMP/etc" NFT="$TMP/bin/nft" SYSCTL_BIN="$TMP/bin/sysctl" SS_BIN=/nonexistent "$@"; }
+# Hermetic: EVERY host seam the guard has is pointed at the fixture tree by default, so a
+# result never depends on the box the test runs on (reserved ports, ufw/firewalld state,
+# running turnserver, docker, a real /etc/oxpulse-partner-edge/coturn.conf). Before this,
+# the unset seams read the host: the "sysctl -w for the reservation" assertion failed on any
+# host whose ip_local_reserved_ports already held ports, and on a real root node `apply`
+# could have driven the real ufw/docker. A case that needs a different value passes it as
+# a per-call env prefix; `${VAR:-default}` lets that win.
+: > "$TMP/reserved.empty"
+run_guard() {
+	ETC_DIR="$TMP/etc" NFT="$TMP/bin/nft" SYSCTL_BIN="$TMP/bin/sysctl" SS_BIN=/nonexistent \
+	RESERVED_PORTS_FILE="${RESERVED_PORTS_FILE:-$TMP/reserved.empty}" \
+	PROC_DIR="${PROC_DIR:-$TMP/noproc}" PGREP_BIN="${PGREP_BIN:-/nonexistent}" \
+	DOCKER_BIN="${DOCKER_BIN:-/nonexistent}" FIREWALL_CMD="${FIREWALL_CMD:-/nonexistent}" \
+	UFW_BIN="${UFW_BIN:-/nonexistent}" COTURN_CONF="${COTURN_CONF:-/nonexistent}" "$@"
+}
 
 # SFU port comes from the node's compose file when not overridden
 cat > "$TMP/etc/oxpulse-partner-edge/docker-compose.yml" <<'EOF'
