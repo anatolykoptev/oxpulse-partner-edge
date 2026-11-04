@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.36](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.35...v0.16.36) (2026-11-04)
+
+
+### Bug Fixes
+
+* **edge:** retire CH3 hysteria2, close public 18443, selfheal alerts on crash-loops ([#684](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/684)) ([30bfb63](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/30bfb63019796a0a4043b8bacd7ad1cfe20f6ce0))
+
 ## [0.16.35](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.34...v0.16.35) (2026-11-04)
 
 
