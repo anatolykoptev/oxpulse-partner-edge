@@ -412,6 +412,71 @@ restore_host_scripts() {
 	_rollback_relay_firewall_sync "$_guard_copy"
 }
 
+# _tighten_mode PATH ALLOWED_OCTAL — chmod PATH to (current & ALLOWED).
+# Only ever clears bits, so it can never loosen a mode.  Skips symlinks and
+# missing paths.  Bumps _PREFIX_ETC_PERMS_FIXED when it changes something.
+_PREFIX_ETC_PERMS_FIXED=0
+_tighten_mode() {
+	local _p="$1" _allow="$2" _cur _new
+	[[ -e "$_p" && ! -L "$_p" ]] || return 0
+	_cur=$(stat -c %a "$_p" 2>/dev/null) || return 0
+	_new=$(( 8#$_cur & 8#$_allow ))
+	if (( _new == 8#$_cur )); then
+		return 0
+	fi
+	if chmod "$(printf '%o' "$_new")" "$_p" 2>/dev/null; then
+		log "  perms: $_p $_cur -> $(printf '%o' "$_new")"
+		_PREFIX_ETC_PERMS_FIXED=$(( _PREFIX_ETC_PERMS_FIXED + 1 ))
+	else
+		warn "perms: could not chmod $_p (was $_cur)"
+	fi
+	return 0
+}
+
+# harden_prefix_etc_perms [DIR] — one-shot, idempotent, tighten-only repair.
+#   * DIR                      -> at most 0750
+#   * reality.uuid, xray-client.json*, coturn.conf*, node-config.json*,
+#     hysteria2-client.yaml*, *.bak*, *.pre-*, *.bad-*   -> at most 0600
+#   * naive-client.json        -> exactly 0640 root:65532 (the distroless
+#     nonroot container reads it through that gid; install.sh sets the same)
+# Public files that are deliberately 0644 (reality.pub, awg-public.key,
+# Caddyfile, .env, xray.env) are not matched.  Missing files are skipped.
+# Always returns 0 (a mode repair must never fail an upgrade).
+harden_prefix_etc_perms() {
+	local _dir="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
+	[[ -d "$_dir" ]] || return 0
+	if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+		log "[dry-run] perms: would tighten secret-bearing files under $_dir"
+		return 0
+	fi
+	_PREFIX_ETC_PERMS_FIXED=0
+	_tighten_mode "$_dir" 0750
+	local _f
+	while IFS= read -r -d '' _f; do
+		_tighten_mode "$_f" 0600
+	done < <(find "$_dir" -maxdepth 1 -type f \( \
+		-name 'reality.uuid' -o -name 'xray-client.json*' -o -name 'coturn.conf*' \
+		-o -name 'node-config.json*' -o -name 'hysteria2-client.yaml*' \
+		-o -name '*.bak*' -o -name '*.pre-*' -o -name '*.bad-*' \) -print0 2>/dev/null)
+	local _naive="$_dir/naive-client.json" _nm _no
+	if [[ -f "$_naive" && ! -L "$_naive" ]]; then
+		_nm=$(stat -c %a "$_naive" 2>/dev/null || true)
+		_no=$(stat -c %u:%g "$_naive" 2>/dev/null || true)
+		if [[ "$_nm" != "640" || "$_no" != "0:65532" ]]; then
+			if chown root:65532 "$_naive" 2>/dev/null && chmod 0640 "$_naive" 2>/dev/null; then
+				log "  perms: $_naive ${_nm:-?} ${_no:-?} -> 640 0:65532"
+				_PREFIX_ETC_PERMS_FIXED=$(( _PREFIX_ETC_PERMS_FIXED + 1 ))
+			else
+				warn "perms: could not set $_naive to 0640 root:65532"
+			fi
+		fi
+	fi
+	if (( _PREFIX_ETC_PERMS_FIXED > 0 )); then
+		log "perms: tightened ${_PREFIX_ETC_PERMS_FIXED} path(s) under $_dir"
+	fi
+	return 0
+}
+
 # sync_host_scripts TAG — download, verify, and install host-scripts for TAG.
 # Safe to call in dry-run mode (sets DRY_RUN_HOSTSCRIPT_CHANGED to indicate
 # what would change).  Returns 0 always; logs skip/apply per file.
@@ -1027,12 +1092,19 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	# ------------------------------------------------------------------
 	local _xray_env_path="${PREFIX_ETC:-/etc/oxpulse-partner-edge}/xray.env"
 	if [[ ! -f "$_xray_env_path" ]]; then
-		install -d -m 0755 "${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+		install -d -m 0750 "${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
 		install -m 0644 /dev/null "$_xray_env_path"
 		log "  host-script: provisioned xray.env at $_xray_env_path"
 		_any_changed=1
 	fi
 
+	# ------------------------------------------------------------------
+	# Step 6.6: tighten modes of secret-bearing files under PREFIX_ETC.
+	# Runs on EVERY sync (plain upgrade, --host-scripts-only, --with-templates),
+	# regardless of _any_changed: reconcile_all is reached only by
+	# --with-templates, so the repair cannot live there alone.
+	# ------------------------------------------------------------------
+	harden_prefix_etc_perms "${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
 	# ------------------------------------------------------------------
 	# Step 7: daemon-reload + targeted restart of affected timers only.
 	# Coturn/sfu/xray images are the image path's concern — never touched here.

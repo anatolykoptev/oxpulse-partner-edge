@@ -112,8 +112,8 @@ fn keygen_native_path_produces_three_valid_files() {
         );
         let uuid_mode = fs::metadata(&uuid_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
-            uuid_mode, 0o644,
-            "reality.uuid must be 0644, got {uuid_mode:o}"
+            uuid_mode, 0o600,
+            "reality.uuid must be 0600 (it is a credential), got {uuid_mode:o}"
         );
     }
 

@@ -126,7 +126,7 @@ refetch_node_config() {
     # rename is atomic on the target filesystem.  A truncated or malformed
     # response never reaches node-config.json — the temp is removed on
     # validation failure and only renamed on success.
-    install -d -m 0755 "$PREFIX_ETC"
+    install -d -m 0750 "$PREFIX_ETC"
     local tmp
     tmp=$(mktemp --tmpdir="$PREFIX_ETC" ".node-config.json.XXXXXX.tmp" 2>/dev/null) || {
         warn "refetch_node_config: mktemp failed in $PREFIX_ETC — using local node-config.json"
@@ -164,7 +164,7 @@ refetch_node_config() {
     fi
 
     # Atomic install: backup old, rename validated temp into place (0600 — contains secrets).
-    [[ -f "$NODE_CFG" ]] && cp -a "$NODE_CFG" "${NODE_CFG}.bak.$(date +%s)" 2>/dev/null || true
+    _backup_secret_file "$NODE_CFG"
     mv -f "$tmp" "$NODE_CFG"
     chmod 0600 "$NODE_CFG"
     log "node-config.json refreshed from API (node_id=$fetched_id)"
@@ -211,6 +211,23 @@ with open(dst, "w") as f: f.write(out)
     fi
 }
 
+# _backup_secret_file SRC [KEEP] — copy SRC to SRC.bak.<epoch> with mode 0600,
+# then keep only the newest KEEP (default 5) epoch-named backups.
+#
+# `cp -a` copies the SOURCE mode, so one historically world-readable live file
+# bred world-readable backups forever; install -m fixes the mode regardless of
+# the source.  The epoch suffix is fixed-width (10 digits), so a reverse
+# lexical sort is newest-first.  Never fails the caller (a backup is best effort).
+_backup_secret_file() {
+    local src=$1 keep=${2:-5} f n=0
+    [[ -f "$src" ]] || return 0
+    install -m 0600 "$src" "${src}.bak.$(date +%s)" 2>/dev/null || return 0
+    while IFS= read -r f; do
+        n=$((n + 1))
+        if (( n > keep )); then rm -f -- "$f"; fi
+    done < <(printf '%s\n' "${src}".bak.[0-9]* 2>/dev/null | sort -r)
+    return 0
+}
 # Re-render xray-client.json from the upstream template, preserving secrets
 # from node-config.json. Called on every upgrade so structural changes
 # (e.g. flow, mode, padding) are applied without requiring reinstall.
@@ -372,7 +389,7 @@ except Exception:
     rm -f "$tpl"
 
     # Backup old config, install new one (0600 — contains secrets).
-    cp -a "$XRAY_CFG" "${XRAY_CFG}.bak.$(date +%s)" 2>/dev/null || true
+    _backup_secret_file "$XRAY_CFG"
     install -m 0600 "$out" "$XRAY_CFG"
     rm -f "$out"
 

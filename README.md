@@ -151,7 +151,7 @@ The mesh carries inter-partner control plane (SFU `/metrics` scraping, relay-API
 | `/etc/oxpulse-partner-edge/` | Rendered configs (docker-compose, Caddyfile, tunnel JSON, coturn) |
 | `/etc/oxpulse-partner-edge/reality.priv` | x25519 private key (mode 0600, never leaves this host) |
 | `/etc/oxpulse-partner-edge/reality.pub` | x25519 public key (mode 0644, sent to backend on register) |
-| `/etc/oxpulse-partner-edge/reality.uuid` | Per-edge VLESS UUID (mode 0644, sent to backend on register) |
+| `/etc/oxpulse-partner-edge/reality.uuid` | Per-edge VLESS UUID (mode 0600, a credential; sent to backend on register) |
 | `/etc/amnezia/amneziawg/awg0.conf` | AmneziaWG `[Interface]` + central peer (mode 0600, contains x25519 private key) |
 | `/var/lib/oxpulse-partner-edge/install.env` | Installed partner ID, domain, image version |
 | `/var/lib/oxpulse-partner-edge/node-config.json` | Full node config from registration (credentials, channel list, mesh params) |
