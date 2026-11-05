@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.39](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.38...v0.16.39) (2026-11-05)
+
+
+### Bug Fixes
+
+* tighten modes of secret-bearing files under /etc/oxpulse-partner-edge ([#696](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/696)) ([84e4f40](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/84e4f40f498cab56a836dd67078a2e84befa742a))
+
 ## [0.16.38](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.37...v0.16.38) (2026-11-05)
 
 
