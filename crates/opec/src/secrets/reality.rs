@@ -1,7 +1,7 @@
 //! Phase 4.3a — Reality x25519 identity management.
 //!
 //! Mirrors install.sh Step 4 sub-step 2 (L753-916):
-//! - 3 identity files: reality.priv (0600), reality.pub (0644), reality.uuid (0644)
+//! - 3 identity files: reality.priv (0600), reality.pub (0644), reality.uuid (0600)
 //! - Idempotent: all-three-valid → reuse; none → fresh keygen; partial → error
 //! - --rotate forces regeneration
 //! - base64url 43-char validation on private + public keys
@@ -76,7 +76,8 @@ pub fn keygen(out_dir: &Path, rotate: bool) -> Result<(), SecretsError> {
 
     write_atomic(&out_dir.join("reality.priv"), priv_key.as_bytes(), 0o600)?;
     write_atomic(&out_dir.join("reality.pub"), pub_key.as_bytes(), 0o644)?;
-    write_atomic(&out_dir.join("reality.uuid"), uuid.as_bytes(), 0o644)?;
+    // 0600: the UUID is the VLESS client id, an auth credential (not public).
+    write_atomic(&out_dir.join("reality.uuid"), uuid.as_bytes(), 0o600)?;
 
     eprintln!("opec secrets reality-keygen: generated new identity (uuid={uuid})");
     Ok(())

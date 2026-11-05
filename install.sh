@@ -543,7 +543,8 @@ fi
 # File layout (under PREFIX_ETC = /etc/oxpulse-partner-edge/):
 #   reality.priv  0600  base64url x25519 private key (never leaves this host)
 #   reality.pub   0644  base64url x25519 public key  (sent to hub on register)
-#   reality.uuid  0644  lowercase UUID               (sent to hub on register)
+#   reality.uuid  0600  lowercase UUID               (sent to hub on register; a
+#                       credential, so root-only — never world-readable)
 #
 # Idempotency: re-registration with the same (partner_id, domain) is a safe
 # upsert — ON CONFLICT DO UPDATE with COALESCE keeps the existing pubkey when
@@ -981,7 +982,7 @@ fi
 # /api/partner/keys, and reloads the bundle. The file MUST be 0600
 # because reality_encryption is the partner-fleet PQ seed.
 if [[ $DRY_RUN -eq 0 ]]; then
-	install -d -m 0755 "$PREFIX_ETC"
+	install -d -m 0750 "$PREFIX_ETC"
 	install -m 0600 "$tmp_cfg" "$PREFIX_ETC/node-config.json"
 	log "  persisted node-config.json → $PREFIX_ETC/node-config.json"
 	# Merge channels[] into node-config.json if server returned it.
@@ -1214,7 +1215,7 @@ export ALLOWED_PEER_IP_LINE
 # ---------- Step 5: stage templates ----------
 log "[5/10] rendering templates"
 if [[ $DRY_RUN -eq 0 ]]; then
-	install -d -m 0755 "$PREFIX_ETC"
+	install -d -m 0750 "$PREFIX_ETC"
 	install -d -m 0700 "$PREFIX_LIB"
 fi
 
@@ -1612,7 +1613,7 @@ fi
 # on every edge with: "FAIL missing /etc/oxpulse-partner-edge/xray.env".
 # Idempotent: touch only if absent so operators can add custom env overrides.
 if [[ $DRY_RUN -eq 0 ]]; then
-	install -d -m 0755 "$PREFIX_ETC"
+	install -d -m 0750 "$PREFIX_ETC"
 	if [[ ! -f "$PREFIX_ETC/xray.env" ]]; then
 		install -m 0644 /dev/null "$PREFIX_ETC/xray.env"
 		log "  provisioned $PREFIX_ETC/xray.env (empty — xray uses volume-mounted config)"

@@ -55,7 +55,8 @@ for arg in "$@"; do
 done
 
 # ---------- Ensure dirs ----------
-mkdir -p "$PREFIX_LIB" "$PREFIX_ETC"
+mkdir -p "$PREFIX_LIB"
+install -d -m 0750 "$PREFIX_ETC"
 
 # ---------- Load env ----------
 [[ -f "$HYDRATE_ENV" ]] || die "hydrate.env not found at $HYDRATE_ENV (cloud-init must write it)"
@@ -572,8 +573,14 @@ render_template "$(tpl_file coturn.conf.tpl)"        "$PREFIX_ETC/coturn.conf"
 render_channel_soft xray "$(tpl_file xray-client.json.tpl)" "$PREFIX_ETC/xray-client.json" \
     || warn "  xray render failed — continuing without xray channel"
 if [[ -n "${NAIVE_SERVER:-}" ]]; then
-    render_channel_soft naive "$(tpl_file naive-client.json.tpl)" "$PREFIX_ETC/naive-client.json" \
-        || warn "  naive render failed — continuing without naive channel"
+    if render_channel_soft naive "$(tpl_file naive-client.json.tpl)" "$PREFIX_ETC/naive-client.json"; then
+        # Same as install.sh: the distroless nonroot naive container (gid 65532)
+        # reads the proxy credential through the group; everyone else gets nothing.
+        chown root:65532 "$PREFIX_ETC/naive-client.json"
+        chmod 0640 "$PREFIX_ETC/naive-client.json"
+    else
+        warn "  naive render failed — continuing without naive channel"
+    fi
 fi
 
 # Strip failed channel service blocks from compose so docker compose up

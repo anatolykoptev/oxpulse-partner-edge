@@ -98,6 +98,12 @@ surfaces:
     required_by_unit: oxpulse-xray-update.service
     # wired: (absent = wired:true — Phase 4b, closes #5 root cause)
 
+  - id: prefix_etc_perms
+    kind: sync_verified
+    out: /etc/oxpulse-partner-edge
+    # Tighten-only mode repair for secret-bearing files; also run from
+    # sync_host_scripts so the plain self-upgrade path (which never reaches
+    # reconcile_all) repairs nodes too.
   - id: host_scripts
     kind: sync_verified
     checksum_source: SHA256SUMS

@@ -45,13 +45,15 @@ _RECONCILE_LIB_LOADED=1
 # Atomically installs CANDIDATE_PATH at INSTALLED_PATH using install(1) +
 # mv(1) (rename(2) on same filesystem — no partial-write window).
 #
-# MODE defaults to 0644.  Pass 0755 for executables.
+# MODE defaults to 0600 (fail safe: a new caller that renders secrets is never
+# world-readable by omission).  Pass 0644 explicitly for files that hold no
+# secrets (the Caddyfile) and 0755 for executables.
 # The candidate file is consumed (moved); caller must not re-use it.
 # ---------------------------------------------------------------------------
 atomic_swap() {
     local _installed="$1"
     local _candidate="$2"
-    local _mode="${3:-0644}"
+    local _mode="${3:-0600}"
     local _tmp
     _tmp="${_installed}.new.$$"
     install -m "$_mode" "$_candidate" "$_tmp" \
@@ -989,6 +991,12 @@ reconcile_all() {
                             _changed_count=$((_changed_count + 1))
                         fi
                         ;;
+                    prefix_etc_perms)
+                        # Tighten-only repair of secret-bearing files + the dir under
+                        # PREFIX_ETC.  A mode fix is not a file swap: it never counts
+                        # as "changed" and never triggers a restart.
+                        reconcile_prefix_etc_perms_surface "${PREFIX_ETC:-/etc/oxpulse-partner-edge}"
+                        ;;
                     *)
                         warn "reconcile_all: surface '$_sid' sync_verified — no handler (Phase 5+, skipping)"
                         ;;
@@ -1322,7 +1330,9 @@ reconcile_coturn_surface() {
     fi
 
     # Atomic swap.
-    atomic_swap "$_installed_path" "$_out_path" 0644
+    # 0600: coturn.conf holds static-auth-secret.  The non-root coturn container reads
+    # it through cap_dac_override (images/Dockerfile.coturn), so root-only is enough.
+    atomic_swap "$_installed_path" "$_out_path" 0600
     log "reconcile_coturn: coturn.conf updated (sha256=$_rendered_sha)"
     # Render succeeded (new config) — reset skip counter.
     _write_coturn_skip_count 0 "${STATE_DIR:-${_STATE_DIR_DEFAULT}}"
@@ -1603,7 +1613,8 @@ reconcile_xray_client_surface() {
     fi
 
     # Atomic swap.
-    atomic_swap "$_installed_path" "$_out_path" 0644
+    # 0600: the client config embeds the VLESS uuid + Reality keys; xray runs as root.
+    atomic_swap "$_installed_path" "$_out_path" 0600
     log "reconcile_xray_client: xray-client.json updated (sha256=$_rendered_sha)"
 
     # Set per-surface change flag.
@@ -1773,6 +1784,32 @@ reconcile_coturn_guard_surface() {
 }
 
 # ---------------------------------------------------------------------------
+# reconcile_prefix_etc_perms_surface [PREFIX_ETC]
+#
+# sync_verified handler: one-shot, idempotent, TIGHTEN-ONLY repair of the modes
+# of the secret-bearing files (and the directory) under PREFIX_ETC on nodes that
+# were provisioned before the writers were fixed.  The logic lives in
+# harden_prefix_etc_perms (lib/host-scripts-lib.sh) because sync_host_scripts
+# also calls it on EVERY upgrade path (plain / --host-scripts-only /
+# --with-templates), while reconcile_all is reached only by --with-templates.
+# This wrapper resolves that lib lazily, like _reconcile_emit_prom_gauge does.
+# ---------------------------------------------------------------------------
+reconcile_prefix_etc_perms_surface() {
+    local _prefix_etc="${1:-${PREFIX_ETC:-/etc/oxpulse-partner-edge}}"
+    if ! declare -f harden_prefix_etc_perms >/dev/null 2>&1; then
+        local _hsl="${HOST_SCRIPTS_LIB:-${LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)}/host-scripts-lib.sh}"
+        if [[ -f "$_hsl" ]]; then
+            # shellcheck source=lib/host-scripts-lib.sh
+            . "$_hsl"
+        fi
+    fi
+    if ! declare -f harden_prefix_etc_perms >/dev/null 2>&1; then
+        warn "reconcile_prefix_etc_perms: harden_prefix_etc_perms unavailable (host-scripts-lib.sh not found) — modes NOT repaired"
+        return 0
+    fi
+    harden_prefix_etc_perms "$_prefix_etc"
+}
+# ---------------------------------------------------------------------------
 # reconcile_xray_env_surface PREFIX_ETC
 #
 # Phase 4b sync_verified handler for xray.env.
@@ -1804,7 +1841,7 @@ reconcile_xray_env_surface() {
         return 0
     fi
 
-    install -d -m 0755 "$_prefix_etc" 2>/dev/null || true
+    install -d -m 0750 "$_prefix_etc" 2>/dev/null || true
     install -m 0644 /dev/null "$_xray_env_path" \
         || { warn "reconcile_xray_env: could not create $_xray_env_path"; return 0; }
     log "reconcile_xray_env: provisioned $_xray_env_path (empty; required by oxpulse-xray-update.service)"
