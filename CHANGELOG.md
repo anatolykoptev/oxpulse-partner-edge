@@ -5,6 +5,19 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.38](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.37...v0.16.38) (2026-11-05)
+
+
+### Features
+
+* **relay:** auto-update relay-only nodes and ship static coturn 4.18 ([#690](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/690)) ([4c54215](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/4c54215209f6a0ff9cde852f35a94b7cbc44334e))
+
+
+### Bug Fixes
+
+* **coturn:** 4.18.0 — closes pre-auth arm64 crash (GHSA-j662) and relay-port PRNG (GHSA-fvj6) ([#689](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/689)) ([0295912](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/02959125aa7c260ff83b69e636b31f8c6c464a84))
+* **tests:** make coturn-guard and relay-profile suites hermetic; harden late-wedge baseline ([#692](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/692)) ([b82e935](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/b82e935763a98ae22c61ea15cbe7c8d2d1a941df))
+
 ## [0.16.37](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.36...v0.16.37) (2026-11-04)
 
 
