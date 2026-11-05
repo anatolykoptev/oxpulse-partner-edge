@@ -12,10 +12,23 @@
 # UDP transport is not (use relay_probe_udp_listener for the bind check).
 #
 # Requires (caller): warn; globals _PREFIX_ETC EXTERNAL_IP RELAY_HOSTNAME.
-# Seams: TURN_UCLIENT, OPENSSL_BIN, SS_BIN.
+# Seams: TURN_UCLIENT, OPENSSL_BIN, SS_BIN, RELAY_LIB_DIR.
 # Contract: every probe returns 0 (ok) / 1 (failed) and sets RELAY_PROBE_REASON
 # ("" on success): no-secret | timeout | auth-486 | other | cert-verify.
 
+# relay_probe_uclient — the uclient to probe with: the one shipped next to the
+# running turnserver (${RELAY_LIB_DIR}/current/turnutils_uclient), else the one on
+# PATH. A client older than the server can fail a healthy TURN service (a distro
+# 4.6.1 client against a 4.18 turnserver: `channel bind: error 400`). `current`
+# is always valid: before any upgrade it points at releases/0.0.0, whose binaries
+# are symlinks to the distro ones; after an upgrade or a rollback it points at the
+# release that is running. TURN_UCLIENT overrides both.
+relay_probe_uclient() {
+	local shipped="${RELAY_LIB_DIR:-/usr/local/lib/oxpulse-relay}/current/turnutils_uclient"
+	if [[ -n "${TURN_UCLIENT:-}" ]]; then printf '%s' "$TURN_UCLIENT"
+	elif [[ -x "$shipped" ]]; then printf '%s' "$shipped"
+	else printf '%s' turnutils_uclient; fi
+}
 # relay_probe_allocate — TURN Allocate over TCP against this node's public
 # address. RFC 7635 ephemeral credential derived from the FIRST (current) secret
 # line; the base secret travels in the environment of one python3 process, never argv.
@@ -29,7 +42,7 @@ relay_probe_allocate() {
 		'import hmac,hashlib,os,sys,base64; print(base64.b64encode(hmac.new(os.environb[b"K"], sys.argv[1].encode(), hashlib.sha1).digest()).decode())' \
 		"$user")
 	secret=""
-	out=$(timeout 15 "${TURN_UCLIENT:-turnutils_uclient}" -t -u "$user" -w "$pass" -y -n 1 -p 3478 "${EXTERNAL_IP}" 2>&1) && rc=0 || rc=$?
+	out=$(timeout 15 "$(relay_probe_uclient)" -t -u "$user" -w "$pass" -y -n 1 -p 3478 "${EXTERNAL_IP}" 2>&1) && rc=0 || rc=$?
 	[[ "$rc" -ne 0 ]] || return 0
 	case "$rc" in
 		124|143) RELAY_PROBE_REASON=timeout ;;

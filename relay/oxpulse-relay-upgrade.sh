@@ -292,10 +292,6 @@ health_gate() {
 	: "${EXTERNAL_IP:?relay.env missing EXTERNAL_IP}" "${RELAY_HOSTNAME:?relay.env missing RELAY_HOSTNAME}"
 	_PREFIX_ETC="$PREFIX_ETC"
 	export EXTERNAL_IP RELAY_HOSTNAME
-	if [[ -z "${TURN_UCLIENT:-}" ]]; then
-		if [[ -x "${LIB_ROOT}/current/turnutils_uclient" ]]; then TURN_UCLIENT="${LIB_ROOT}/current/turnutils_uclient"; else TURN_UCLIENT=turnutils_uclient; fi
-	fi
-	export TURN_UCLIENT
 	for ((i = 1; i <= GATE_TRIES; i++)); do
 		if "$SYSTEMCTL" is-active --quiet "$COTURN_UNIT" && relay_probe_allocate && relay_probe_tls && relay_probe_udp_listener; then
 			log "health gate passed (attempt ${i})"
