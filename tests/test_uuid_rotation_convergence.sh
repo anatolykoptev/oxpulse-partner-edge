@@ -135,8 +135,8 @@ run_fn
 [ "$(tr -d '\n' < "$TMPD/etc/reality.uuid")" = "$U_OLD" ] && pass "D7: reality.uuid NOT touched while still drifted" || fail "D7: reality.uuid changed before the re-render converged"
 
 # D8 — wiring: the reconcile runs before the keys-fetch early exits
-call_line=$(grep -n '^_reconcile_served_uuid || true$' "$REFRESH" | head -1 | cut -d: -f1)
-exit_line=$(grep -n 'keys fetch failed — skipping rotation check, exiting 0' "$REFRESH" | head -1 | cut -d: -f1)
+call_line=$(grep -n -m1 '^_reconcile_served_uuid || true$' "$REFRESH" | cut -d: -f1)
+exit_line=$(grep -n -m1 'keys fetch failed — skipping rotation check, exiting 0' "$REFRESH" | cut -d: -f1)
 if [ -n "$call_line" ] && [ -n "$exit_line" ] && [ "$call_line" -lt "$exit_line" ]; then
     pass "D8: reconcile runs before the early exits (also when keys fetch fails / no rotation)"
 else

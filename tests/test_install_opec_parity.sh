@@ -190,8 +190,8 @@ mirror_install_exports() {
     grep -qE 'opec[[:space:]]+secrets[[:space:]]+awg-keygen' install.sh
 }
 
-@test "install.sh OPEC awg path maps FORCE_KEYGEN to --rotate" {
-    grep -qE 'FORCE_KEYGEN[[:space:]]*-eq[[:space:]]*1.*--rotate|--rotate.*FORCE_KEYGEN' install.sh
+@test "install.sh OPEC awg path maps FORCE_AWG_KEYGEN to --rotate" {
+    grep -qE 'FORCE_AWG_KEYGEN[[:space:]]*-eq[[:space:]]*1.*--rotate|--rotate.*FORCE_AWG_KEYGEN' install.sh
 }
 
 # ---------------------------------------------------------------------------
