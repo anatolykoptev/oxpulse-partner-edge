@@ -228,6 +228,22 @@ _backup_secret_file() {
     done < <(printf '%s\n' "${src}".bak.[0-9]* 2>/dev/null | sort -r)
     return 0
 }
+# node_config_xray_uuid [FILE] — the VLESS uuid node-config.json says this node
+# authenticates with. Same precedence re_render_xray applies when it renders:
+# channels[0].xray.uuid when channels[0] is the vless-reality channel, else the
+# flat reality_uuid. Prints nothing when neither is present.
+node_config_xray_uuid() {
+    jq -r '((((.channels // [])[0] // {}) | select(.protocol == "vless-reality") | .xray.uuid // empty) // .reality_uuid // empty)' \
+        "${1:-$NODE_CFG}" 2>/dev/null || true
+}
+
+# rendered_xray_uuid [FILE] — the uuid xray-client.json (the file the xray
+# container mounts) actually dials with. Prints nothing for a missing file or a
+# custom schema without the standard vnext layout.
+rendered_xray_uuid() {
+    jq -r '.outbounds[0].settings.vnext[0].users[0].id // empty' "${1:-$XRAY_CFG}" 2>/dev/null || true
+}
+
 # Re-render xray-client.json from the upstream template, preserving secrets
 # from node-config.json. Called on every upgrade so structural changes
 # (e.g. flow, mode, padding) are applied without requiring reinstall.

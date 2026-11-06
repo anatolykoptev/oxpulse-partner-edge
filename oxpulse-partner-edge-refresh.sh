@@ -840,6 +840,104 @@ if [[ "$KEYS_OK" -eq 1 && -n "$NEW_CHANNELS_VERSION" && "$NEW_CHANNELS_VERSION" 
     unset _compose
 fi
 
+# ── Served-vs-rendered uuid reconciliation (partner-cli rotate-reality-uuid) ──
+# The hub can change this node's VLESS uuid (a two-phase rotation: the old uuid
+# stays valid in the xray roster for a bounded overlap). Nothing above notices it:
+# channels_version hashes only the backend endpoint and SNI pool, and the keys
+# version tracks the fleet pubkey, so a new per-node uuid changes neither. Without
+# this step the node would keep dialling the OLD uuid until the overlap's hard
+# deadline cut it off.
+#
+# Compare the uuid /api/partner/node-config serves with the one xray-client.json
+# (the file the xray container mounts) is rendered with. They differ → start
+# `oxpulse-partner-edge-upgrade --render-only` as its own transient unit: it
+# refetches node-config and re-renders UNDER THE RENDER GATE (health, serveability
+# and docker baselines, render-scoped rollback) and then verifies the rendered uuid
+# actually changed. Detached for the same reason as the self-upgrade: the gate
+# watches for >=130 s, far beyond this unit's TimeoutStartSec.
+#
+# Fail-soft in every direction (the 2026-05-13 incident class): a failed fetch, an
+# unreadable file or a non-standard schema logs and returns; nothing here may abort
+# the refresh. Neither uuid is ever logged.
+#
+# Once converged, reality.uuid (the identity file registration reads) is aligned to
+# the served uuid. A later re-registration would otherwise send the RETIRED uuid and
+# overwrite the hub's rotated one.
+_reconcile_served_uuid() {
+    local _sbin="${PREFIX_SBIN:-/usr/local/sbin}"
+    local _xray="${PREFIX_ETC}/xray-client.json" _tokfile="${PREFIX_ETC}/token"
+    local _lib="${_sbin}/channel-render-lib.sh"
+    [[ -f "$_xray" && -f "$_tokfile" ]] || return 0   # custom-stack / not registered
+    if [[ ! -r "$_lib" ]]; then
+        log "uuid reconcile: $_lib not readable — skipping"
+        return 0
+    fi
+    # shellcheck source=/dev/null
+    source "$_lib" 2>/dev/null || { log "uuid reconcile: could not load $_lib — skipping"; return 0; }
+    declare -F node_config_xray_uuid >/dev/null 2>&1 && declare -F rendered_xray_uuid >/dev/null 2>&1 || {
+        log "uuid reconcile: installed channel-render-lib.sh predates the uuid helpers — skipping"
+        return 0
+    }
+    local _tok _resp _served _rendered
+    _tok="$(tr -d '\r\n[:space:]' < "$_tokfile" 2>/dev/null || true)"
+    [[ -n "$_tok" ]] || return 0
+    _resp=$(curl -fsS --max-time 15 \
+        -H "Authorization: Bearer $_tok" -H "X-Node-Id: ${NODE_ID}" \
+        "$BACKEND_URL/api/partner/node-config" 2>/dev/null) \
+        || { log "uuid reconcile: node-config fetch failed — will retry next run"; return 0; }
+    _served=$(printf '%s' "$_resp" | node_config_xray_uuid /dev/stdin)
+    unset _tok _resp
+    if [[ ! "$_served" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        log "uuid reconcile: node-config served no valid uuid — skipping"
+        return 0
+    fi
+    _rendered=$(rendered_xray_uuid "$_xray")
+    if [[ -z "$_rendered" ]]; then
+        log "uuid reconcile: xray-client.json has no readable uuid (non-standard schema) — skipping"
+        return 0
+    fi
+
+    if [[ "$_served" == "$_rendered" ]]; then
+        emit_gauge partner_edge_reality_uuid_applied "partner_id=\"${NODE_ID}\"" "1"
+        local _idfile="${PREFIX_ETC}/reality.uuid" _mode
+        if [[ -f "$_idfile" && "$(tr -d '\r\n' < "$_idfile" 2>/dev/null)" != "$_served" ]]; then
+            _mode=$(stat -c '%a' "$_idfile" 2>/dev/null || echo 600)
+            if write_secret_atomic "$_idfile" "${_served}"$'\n' "$_mode" 2>/dev/null; then
+                log "uuid reconcile: reality.uuid aligned to the served uuid (a re-registration must not send the retired one)"
+            else
+                log "WARN uuid reconcile: could not update reality.uuid — will retry next run"
+            fi
+        fi
+        return 0
+    fi
+
+    emit_gauge partner_edge_reality_uuid_applied "partner_id=\"${NODE_ID}\"" "0"
+    log "uuid drift: the hub serves a different uuid than xray-client.json is rendered with — starting a gated re-render"
+    local _unit="oxpulse-partner-edge-render-only" _st _other
+    for _other in "$_unit" "oxpulse-partner-edge-self-upgrade"; do
+        _st=$(systemctl show -p ActiveState --value "$_other.service" 2>/dev/null || true)
+        case "$_st" in
+            active|activating|deactivating|reloading)
+                log "uuid reconcile: $_other.service already $_st — not starting another (next run re-checks)"
+                return 0 ;;
+        esac
+    done
+    local _upg_bin
+    _upg_bin=$(command -v oxpulse-partner-edge-upgrade 2>/dev/null || echo "${_sbin}/oxpulse-partner-edge-upgrade")
+    if systemd-run --quiet --no-block --collect --unit="$_unit" \
+        --description="OxPulse partner-edge gated xray re-render (uuid drift)" \
+        --property=Type=oneshot --property=TimeoutStartSec=1000 \
+        --property="EnvironmentFile=-$PREFIX_LIB/install.env" \
+        timeout 900 "$_upg_bin" --render-only >/dev/null 2>&1; then
+        log "uuid reconcile: gated re-render started detached as $_unit.service (journalctl -u $_unit)"
+    else
+        log "WARN uuid reconcile: could not start $_unit.service (non-fatal; retry next run)"
+        emit_metric "partner_edge_reality_uuid_rerender_start_failure_total" "" "1"
+    fi
+    return 0
+}
+_reconcile_served_uuid || true
+
 if [[ "$KEYS_OK" -eq 0 ]]; then
     log "keys fetch failed — skipping rotation check, exiting 0"
     exit 0

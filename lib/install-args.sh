@@ -24,7 +24,7 @@
 #   BRAND_CTA_URL_RU, BRAND_CTA_URL_EN, BRAND_CTA_URL_ZH, BRAND_CTA_URL_FA,
 #   BRAND_CTA_TEXT_RU, BRAND_CTA_TEXT_EN, BRAND_CTA_TEXT_ZH, BRAND_CTA_TEXT_FA,
 #   BRAND_LEGAL_ENTITY, BRAND_LEGAL_COUNTRY, BRAND_LEGAL_CONTACT,
-#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN, CLEAN_SBIN, SERVE_COUNTRIES, PROFILE,
+#   DRY_RUN, BAKE_MODE, CHECK_MODE, FORCE_KEYGEN, FORCE_AWG_KEYGEN, CLEAN_SBIN, SERVE_COUNTRIES, PROFILE,
 #   ALLOW_DEGRADED, NO_INTEGRITY
 
 _args_usage() {
@@ -95,11 +95,17 @@ assembles a minimal BrandingConfig payload from whichever flags are set):
   --check                    Re-render templates to /tmp, diff vs installed files. Exit 0=clean, 1=Caddyfile drift, 2=compose drift.
   --dry-run                  Render templates + print plan, skip docker/systemd
   --bake                     Bake phase: install packages + images + units, no secrets, no start. For snapshot workflows.
-  --force-keygen             Force generation of a new Reality identity even if one exists.
-  --rotate-identity          Alias for --force-keygen (slice 3 operator-rotation contract).
-                             Both flags back up existing reality.{priv,pub,uuid} to .bak.<epoch>
-                             before invoking keygen. Without this flag, any existing identity is
-                             preserved — re-runs and re-deploys are fully idempotent.
+  --force-keygen             Generate a NEW Reality identity (uuid + x25519) on a FRESH install even if
+                             key files exist (e.g. restored from a backup). Rotates the Reality identity
+                             only — never the AmneziaWG key (see --rotate-awg-key).
+  --rotate-identity          Alias for --force-keygen.
+                             REFUSED on an installed node (install.env present): the installer's
+                             registration step is skipped there, so a locally regenerated identity
+                             would never reach the hub and the tunnel would lock itself out.
+                             To rotate an installed edge: run 'partner-cli rotate-reality-uuid --node-id <id>'
+                             on the hub, then 'systemctl start oxpulse-partner-edge-refresh' on the edge.
+  --rotate-awg-key           With --force-keygen on a fresh install: ALSO regenerate the AmneziaWG
+                             keypair. Off by default; the same installed-node refusal applies.
   -h|--help                  Show this help
 
 Env overrides: OXPULSE_IMAGE_REGISTRY, OXPULSE_BACKEND_API, OXPULSE_REPO_RAW, REGION
@@ -212,6 +218,10 @@ args_parse() {
 	# or --rotate-identity to override — this is the slice 3 contract for
 	# operator-initiated rotation. Requires explicit invocation; never auto-triggered.
 	FORCE_KEYGEN=0
+	# AmneziaWG keypair rotation is its own switch: rotating the Reality identity
+	# must not silently rotate the AWG key (the hub pre-creates the awg0 peer from
+	# the registered public key, so an unannounced change breaks the mesh tunnel).
+	FORCE_AWG_KEYGEN=0
 	# Phase 5.7 Item 5: when 1, remove stale sbin scripts not in EXPECTED_SBIN_FILES.
 	# Off by default — no surprise data-loss. Set to 1 via --clean-sbin.
 	CLEAN_SBIN=0
@@ -283,6 +293,7 @@ args_parse() {
 			--dry-run)          DRY_RUN=1 ;;
 			--bake)             BAKE_MODE=1 ;;
 			--force-keygen|--rotate-identity) FORCE_KEYGEN=1 ;;
+			--rotate-awg-key)   FORCE_AWG_KEYGEN=1 ;;
 			--clean-sbin)       CLEAN_SBIN=1 ;;
 			--no-integrity)     NO_INTEGRITY=1 ;;
 			--allow-degraded)   ALLOW_DEGRADED=1 ;;
@@ -458,4 +469,26 @@ args_parse() {
 		printf "[conf.d/] %d files preserved\n" "$_confd_count"
 		exit $_rc
 	fi
+}
+
+# args_assert_rotation_supported — refuse the rotation flags where they cannot work.
+#
+# `--rotate-identity` / `--force-keygen` / `--rotate-awg-key` regenerate key files
+# and rely on the registration step to tell the hub. On an installed node
+# (install.env present) install.sh skips registration ("existing install detected"
+# short-circuit, before the keygen block), so the flag either did nothing or — with
+# --manual-config — rotated locally while central kept the old identity, a
+# self-inflicted lockout. A flag that promises what it cannot deliver is worse than
+# no flag: fail BEFORE any host side effect and name the supported path.
+args_assert_rotation_supported() {
+	[[ "${FORCE_KEYGEN:-0}" -eq 1 || "${FORCE_AWG_KEYGEN:-0}" -eq 1 ]] || return 0
+	[[ -f "${PREFIX_LIB:-/var/lib/oxpulse-partner-edge}/install.env" ]] || return 0
+	die "--rotate-identity / --force-keygen / --rotate-awg-key cannot rotate an installed node.
+Registration is skipped on an existing install, so a locally regenerated identity would
+never reach the hub and ch1 would lock itself out.
+To rotate the Reality uuid of this edge, on the hub:
+    partner-cli rotate-reality-uuid --node-id <node_id>
+then on the edge (or wait for the daily refresh):
+    sudo systemctl start oxpulse-partner-edge-refresh.service
+(To reinstall from scratch: run uninstall.sh first, then install with a fresh bootstrap token.)"
 }

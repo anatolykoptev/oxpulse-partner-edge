@@ -19,6 +19,7 @@
 #   oxpulse-partner-edge-upgrade --check               # report pending upgrade, don't apply
 #   oxpulse-partner-edge-upgrade --rollback            # restore previous tag + host-scripts
 #   oxpulse-partner-edge-upgrade --templates-only      # re-render xray config from upstream template, no image pull
+#   oxpulse-partner-edge-upgrade --render-only         # refetch node-config + re-render xray-client.json UNDER THE RENDER GATE (health baseline, rollback); no image pull. Used by refresh when the served uuid drifted from the rendered one (partner-cli rotate-reality-uuid)
 #   oxpulse-partner-edge-upgrade --with-templates      # re-render Caddyfile + healthcheck + pull new image (atomic)
 #   oxpulse-partner-edge-upgrade --host-scripts-only   # sync host-scripts only; NO image pull/recreate
 #   oxpulse-partner-edge-upgrade --ghcr-token=ghp_xxx  # persist GHCR PAT before pull (one-time)
@@ -958,6 +959,7 @@ for arg in "$@"; do
 		--check)              MODE=check ;;
 		--rollback)           MODE=rollback ;;
 		--templates-only)     MODE=templates ;;
+		--render-only)        MODE=render_only ;;
 		--with-templates)     MODE=with_templates ;;
 		--host-scripts-only)  MODE=host_scripts_only ;;
 		--dry-run)            DRY_RUN=1 ;;
@@ -969,7 +971,7 @@ for arg in "$@"; do
 		--ghcr-token=*)   GHCR_TOKEN_ARG="${arg#--ghcr-token=}" ;;
 		v*|latest)        TARGET="$arg"; TARGET_EXPLICIT=1 ;;
 		-h|--help)
-			sed -n '2,29p' "$0"; exit 0 ;;
+			sed -n '2,30p' "$0"; exit 0 ;;
 		*) die "unknown arg: $arg" ;;
 	esac
 done
@@ -2447,6 +2449,36 @@ _assert_node_cfg_renderable() {
 	return 1
 }
 
+# _assert_rendered_uuid_matches_node_config — the OUTCOME check of --render-only.
+#
+# `_render_gate` proves the node is no less healthy after the render; it does not
+# prove the render CHANGED anything. re_render_xray soft-skips on a template fetch
+# failure or a node-config it cannot read and returns 0, and a re-render that
+# silently kept the old file is exactly what a uuid rotation must not mistake for
+# success (the hand-over would then expire under a node still dialling the old
+# uuid). So compare the file the xray container mounts with what node-config
+# says — by value, printing neither.
+_assert_rendered_uuid_matches_node_config() {
+	local _cfg="${NODE_CFG:-$PREFIX_ETC/node-config.json}"
+	local _xray="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
+	local _want _have
+	_want=$(node_config_xray_uuid "$_cfg")
+	_have=$(rendered_xray_uuid "$_xray")
+	if [[ -z "$_want" ]]; then
+		warn "render-only: node-config.json carries no uuid — nothing to apply"
+		return 1
+	fi
+	if [[ -z "$_have" ]]; then
+		warn "render-only: xray-client.json has no readable uuid (missing file or non-standard schema)"
+		return 1
+	fi
+	if [[ "$_want" != "$_have" ]]; then
+		warn "render-only: xray-client.json still carries a DIFFERENT uuid than node-config.json after the render (template fetch failed or render skipped) — the served uuid was NOT applied"
+		return 1
+	fi
+	return 0
+}
+
 _render_gate() {
 	local _label="${1:-render}"
 	local _base="" _serve="" _dbase="" _snapdir="" _restored=0
@@ -3178,6 +3210,28 @@ if [[ "$MODE" == rollback ]]; then
 		log "[dry-run] would docker compose pull + up -d after rollback"
 		exit 0
 	fi
+fi
+
+# ---- --render-only mode ----
+# Refetch node-config.json and re-render xray-client.json under the render gate
+# (health + serveability + docker baselines, render-scoped rollback), nothing else:
+# no image pull, no compose change, no host-script sync, no self-update.
+# oxpulse-partner-edge-refresh starts this, detached, when the uuid central serves
+# differs from the one the node rendered (partner-cli rotate-reality-uuid).
+if [[ "$MODE" == render_only ]]; then
+	log "--render-only: refetching node-config and re-rendering xray-client.json under the render gate"
+	if [[ "$DRY_RUN" -eq 1 ]]; then
+		log "[dry-run] would run _render_gate render-only and verify the rendered uuid matches node-config"
+		exit 0
+	fi
+	_ensure_channel_render_lib
+	if ! _render_gate "render-only"; then
+		die "render-only: the re-render regressed health — pre-render xray-client.json restored"
+	fi
+	_assert_rendered_uuid_matches_node_config \
+		|| die "render-only: re-render finished but did not apply the served uuid"
+	log "render-only: xray-client.json now carries the uuid node-config serves"
+	exit 0
 fi
 
 # ---- --host-scripts-only mode ----

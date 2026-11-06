@@ -356,6 +356,8 @@ fi
 # shellcheck source=lib/install-args.sh
 _install_lib_source install-args.sh
 args_parse "$@"
+# Rotation flags cannot work on an installed node — refuse before any side effect.
+args_assert_rotation_supported
 
 # shellcheck source=lib/install-preflight.sh
 _install_lib_source install-preflight.sh
@@ -535,7 +537,9 @@ fi
 # ---------- Reality x25519 keypair + UUID (M6 slice 2b) ----------
 # Generated once at first install; persisted so reinstalls / upgrade runs reuse
 # the same identity (idempotency guard — incident §13, 2026-05-14).
-# To rotate: use --force-keygen / --rotate-identity flag (backs up + regenerates).
+# To rotate a FRESH install's identity: --force-keygen / --rotate-identity (Reality only;
+# --rotate-awg-key adds the AWG keypair). Refused on an installed node — see
+# args_assert_rotation_supported; use `partner-cli rotate-reality-uuid` there.
 # reality_public_key is sent to the backend on POST /api/partner/register and
 # stored in partner_nodes.reality_pubkey via the COALESCE upsert; slice 2c
 # path-watcher SIGHUPs xray-reality to apply.
@@ -598,13 +602,14 @@ AWG_PUB_PATH="$PREFIX_ETC/awg-public.key"
 # Phase 4.8: opec is a hard requirement. Unconditionally delegate AWG keypair
 # generation to opec secrets awg-keygen.
 if [[ $DRY_RUN -eq 1 ]]; then
-	warn "  [dry-run] would invoke: opec secrets awg-keygen --out-dir $PREFIX_ETC$([[ $FORCE_KEYGEN -eq 1 ]] && echo ' --rotate')"
+	warn "  [dry-run] would invoke: opec secrets awg-keygen --out-dir $PREFIX_ETC$([[ $FORCE_AWG_KEYGEN -eq 1 ]] && echo ' --rotate')"
 	AWG_PUBKEY="dryrun-awg-pubkey-placeholder"
 else
 	log "  awg keypair: delegating to opec secrets awg-keygen"
 	# PREFIX_ETC is guaranteed to exist: created by the reality-keygen block above.
 	_opec_args=(secrets awg-keygen --out-dir "$PREFIX_ETC")
-	[[ $FORCE_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
+	# AWG is rotated only on its own switch: --rotate-identity is the Reality identity.
+	[[ $FORCE_AWG_KEYGEN -eq 1 ]] && _opec_args+=(--rotate)
 	if ! opec "${_opec_args[@]}"; then
 		die "opec secrets awg-keygen failed"
 	fi
