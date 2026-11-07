@@ -69,9 +69,11 @@ grep -qE -- '--force-keygen|--rotate-identity' "$INSTALL" \
 grep -qE 'FORCE_KEYGEN.*--rotate|--rotate.*FORCE_KEYGEN' "$TMP/reality_block.txt" \
     || { echo "FAIL [case3]: reality keygen block does not pass --rotate to opec when FORCE_KEYGEN=1"; exit 1; }
 
-# The awg keygen block must pass --rotate to opec when FORCE_KEYGEN=1.
-grep -qE 'FORCE_KEYGEN.*--rotate|--rotate.*FORCE_KEYGEN' "$TMP/awg_block.txt" \
-    || { echo "FAIL [case3]: awg keygen block does not pass --rotate to opec when FORCE_KEYGEN=1"; exit 1; }
+# The awg keygen block must pass --rotate to opec only on its OWN switch
+# (FORCE_AWG_KEYGEN, --rotate-awg-key): rotating the Reality identity must not
+# silently rotate the AmneziaWG keypair too. See tests/test_install_rotation_guard.sh.
+grep -qE 'FORCE_AWG_KEYGEN.*--rotate|--rotate.*FORCE_AWG_KEYGEN' "$TMP/awg_block.txt" \
+    || { echo "FAIL [case3]: awg keygen block does not pass --rotate to opec when FORCE_AWG_KEYGEN=1"; exit 1; }
 
 # ── Case 4: Dry-run block references opec, not partner-cli ─────────────────
 grep -qiE 'dry.run.*opec|opec.*reality-keygen' "$TMP/reality_block.txt" \

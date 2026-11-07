@@ -228,6 +228,41 @@ _backup_secret_file() {
     done < <(printf '%s\n' "${src}".bak.[0-9]* 2>/dev/null | sort -r)
     return 0
 }
+# node_config_xray_uuid [FILE] — the VLESS uuid node-config.json says this node
+# authenticates with. SAME precedence re_render_xray applies when it renders (its
+# python: `x.get('uuid','') or d.get('reality_uuid','')` with x = channels[0].xray
+# only when channels[0] is the vless-reality channel): a NON-EMPTY channel uuid
+# wins, otherwise the flat reality_uuid. jq's `//` only skips null/false, so an
+# empty-string channel uuid must be filtered explicitly or the two disagree about
+# which uuid the node is supposed to run. Prints nothing when neither is usable.
+node_config_xray_uuid() {
+    jq -r '((((.channels // [])[0] // {}) | select(.protocol == "vless-reality") | .xray.uuid | select(. != null and . != "")) // (.reality_uuid | select(. != null and . != "")) // empty)' \
+        "${1:-$NODE_CFG}" 2>/dev/null || true
+}
+
+# fetch_served_xray_uuid — the uuid the hub serves THIS node right now, fetched
+# in this call (Bearer token, same endpoint refetch_node_config uses). Returns 1
+# when it cannot be fetched; callers that must VERIFY something (the --render-only
+# outcome check) treat that as "cannot verify", never as "unchanged".
+fetch_served_xray_uuid() {
+    local token="" node_id="" resp=""
+    [[ -f "$TOKEN_FILE" ]] && token="$(tr -d '\r\n[:space:]' < "$TOKEN_FILE" 2>/dev/null || true)"
+    [[ -n "$token" ]] || return 1
+    [[ -f "$NODE_CFG" ]] && node_id=$(jq -r '.node_id // .partner_id // empty' "$NODE_CFG" 2>/dev/null || true)
+    resp=$(curl -fsS --max-time 15 \
+        -H "Authorization: Bearer $token" \
+        ${node_id:+-H "X-Node-Id: $node_id"} \
+        "$BACKEND_URL/api/partner/node-config" 2>/dev/null) || return 1
+    printf '%s' "$resp" | node_config_xray_uuid /dev/stdin
+}
+
+# rendered_xray_uuid [FILE] — the uuid xray-client.json (the file the xray
+# container mounts) actually dials with. Prints nothing for a missing file or a
+# custom schema without the standard vnext layout.
+rendered_xray_uuid() {
+    jq -r '.outbounds[0].settings.vnext[0].users[0].id // empty' "${1:-$XRAY_CFG}" 2>/dev/null || true
+}
+
 # Re-render xray-client.json from the upstream template, preserving secrets
 # from node-config.json. Called on every upgrade so structural changes
 # (e.g. flow, mode, padding) are applied without requiring reinstall.
