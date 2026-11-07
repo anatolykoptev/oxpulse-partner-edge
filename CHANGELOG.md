@@ -5,6 +5,13 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.41](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.40...v0.16.41) (2026-11-07)
+
+
+### Features
+
+* **refresh,install:** re-render on served-uuid drift under the render gate; make --rotate-identity honest ([#702](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/702)) ([0c356c7](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/0c356c7c269e272d397a9cca0ee1831c95c63bfa))
+
 ## [0.16.40](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.39...v0.16.40) (2026-11-05)
 
 
