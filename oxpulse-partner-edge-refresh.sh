@@ -878,15 +878,13 @@ _reconcile_served_uuid() {
         log "uuid reconcile: installed channel-render-lib.sh predates the uuid helpers — skipping"
         return 0
     }
-    local _tok _resp _served _rendered
-    _tok="$(tr -d '\r\n[:space:]' < "$_tokfile" 2>/dev/null || true)"
-    [[ -n "$_tok" ]] || return 0
-    _resp=$(curl -fsS --max-time 15 \
-        -H "Authorization: Bearer $_tok" -H "X-Node-Id: ${NODE_ID}" \
-        "$BACKEND_URL/api/partner/node-config" 2>/dev/null) \
+    declare -F fetch_served_xray_uuid >/dev/null 2>&1 || {
+        log "uuid reconcile: installed channel-render-lib.sh predates fetch_served_xray_uuid — skipping"
+        return 0
+    }
+    local _served _rendered
+    _served=$(fetch_served_xray_uuid) \
         || { log "uuid reconcile: node-config fetch failed — will retry next run"; return 0; }
-    _served=$(printf '%s' "$_resp" | node_config_xray_uuid /dev/stdin)
-    unset _tok _resp
     if [[ ! "$_served" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
         log "uuid reconcile: node-config served no valid uuid — skipping"
         return 0
@@ -899,11 +897,16 @@ _reconcile_served_uuid() {
 
     if [[ "$_served" == "$_rendered" ]]; then
         emit_gauge partner_edge_reality_uuid_applied "partner_id=\"${NODE_ID}\"" "1"
-        local _idfile="${PREFIX_ETC}/reality.uuid" _mode
-        if [[ -f "$_idfile" && "$(tr -d '\r\n' < "$_idfile" 2>/dev/null)" != "$_served" ]]; then
-            _mode=$(stat -c '%a' "$_idfile" 2>/dev/null || echo 600)
-            if write_secret_atomic "$_idfile" "${_served}"$'\n' "$_mode" 2>/dev/null; then
-                log "uuid reconcile: reality.uuid aligned to the served uuid (a re-registration must not send the retired one)"
+        local _idfile="${PREFIX_ETC}/reality.uuid"
+        local _idmode
+        _idmode=$(stat -c '%a' "$_idfile" 2>/dev/null || echo "")
+        if [[ -f "$_idfile" ]] && { [[ "$(tr -d '\r\n' < "$_idfile" 2>/dev/null)" != "$_served" ]] || [[ "$_idmode" != 600 ]]; }; then
+            # Always 0600 (tighten only): this is the node's identity secret and some
+            # edges carry it world-readable (0644) from their first install; preserving
+            # the existing mode would lock that in, so a wrong mode alone triggers the
+            # rewrite as well.
+            if write_secret_atomic "$_idfile" "${_served}"$'\n' 600 2>/dev/null; then
+                log "uuid reconcile: reality.uuid aligned to the served uuid and set to 0600 (a re-registration must not send the retired one)"
             else
                 log "WARN uuid reconcile: could not update reality.uuid — will retry next run"
             fi
@@ -936,15 +939,20 @@ _reconcile_served_uuid() {
     fi
     return 0
 }
-_reconcile_served_uuid || true
-
+# The uuid reconcile starts a DETACHED re-render of xray-client.json. It must never
+# run alongside this script's own key-rotation block below (that block re-renders
+# the same file and, on a failed reload, restores a pre-render backup — which would
+# undo whichever write landed first), so it runs only once that block is finished or
+# was not needed: at each clean exit of this script, never before the rotation.
 if [[ "$KEYS_OK" -eq 0 ]]; then
     log "keys fetch failed — skipping rotation check, exiting 0"
+    _reconcile_served_uuid || true
     exit 0
 fi
 
 if [[ "$NEW_VERSION" == "$CURRENT_VERSION" ]]; then
     log "no rotation: version=$NEW_VERSION"
+    _reconcile_served_uuid || true
     exit 0
 fi
 
@@ -1190,3 +1198,7 @@ if systemctl list-unit-files "$_sr_svc" --no-legend 2>/dev/null | grep -q "$_sr_
 else
     log "split-routing: $_sr_svc not installed — skipping re-assert"
 fi
+
+# Rotation (if any) is committed and the node is settled: only now may the uuid
+# reconcile start its own re-render (see the note above the first exit).
+_reconcile_served_uuid || true

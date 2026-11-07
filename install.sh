@@ -584,7 +584,10 @@ else
 	REALITY_UUID="$(cat "$REALITY_UUID_PATH")" \
 		|| die "post-keygen: failed to read $REALITY_UUID_PATH"
 	log "  reality_public_key: $REALITY_PUBKEY"
-	log "  reality_uuid: $REALITY_UUID"
+	# Fingerprint only: the uuid is the node's tunnel credential and this log goes to the
+	# operator's terminal, CI output and the install transcript. (A clear-text uuid here
+	# is a plausible source of the identity leak that prompted the rotation tooling.)
+	log "  reality_uuid fingerprint: $(printf '%s' "$REALITY_UUID" | sha256sum | cut -c1-8)"
 	unset _opec_args
 fi
 

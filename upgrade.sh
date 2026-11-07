@@ -2449,38 +2449,78 @@ _assert_node_cfg_renderable() {
 	return 1
 }
 
-# _assert_rendered_uuid_matches_node_config — the OUTCOME check of --render-only.
+# _assert_rendered_uuid_matches_node_config EXPECTED — the OUTCOME check of --render-only.
 #
 # `_render_gate` proves the node is no less healthy after the render; it does not
 # prove the render CHANGED anything. re_render_xray soft-skips on a template fetch
 # failure or a node-config it cannot read and returns 0, and a re-render that
 # silently kept the old file is exactly what a uuid rotation must not mistake for
 # success (the hand-over would then expire under a node still dialling the old
-# uuid). So compare the file the xray container mounts with what node-config
-# says — by value, printing neither.
+# uuid). So compare the file the xray container mounts with EXPECTED — the uuid the
+# hub served in THIS run (fetch_served_xray_uuid), NOT the local node-config.json:
+# refetch_node_config soft-fails and leaves a stale local file, and a stale file
+# that happens to equal the rendered uuid would pass vacuously. By value; neither
+# uuid is printed.
 _assert_rendered_uuid_matches_node_config() {
-	local _cfg="${NODE_CFG:-$PREFIX_ETC/node-config.json}"
+	local _expected="${1:-}"
 	local _xray="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
-	local _want _have
-	_want=$(node_config_xray_uuid "$_cfg")
+	local _have
 	_have=$(rendered_xray_uuid "$_xray")
-	if [[ -z "$_want" ]]; then
-		warn "render-only: node-config.json carries no uuid — nothing to apply"
+	if [[ -z "$_expected" ]]; then
+		warn "render-only: no served uuid to verify against"
 		return 1
 	fi
 	if [[ -z "$_have" ]]; then
 		warn "render-only: xray-client.json has no readable uuid (missing file or non-standard schema)"
 		return 1
 	fi
-	if [[ "$_want" != "$_have" ]]; then
-		warn "render-only: xray-client.json still carries a DIFFERENT uuid than node-config.json after the render (template fetch failed or render skipped) — the served uuid was NOT applied"
+	if [[ "$_expected" != "$_have" ]]; then
+		warn "render-only: xray-client.json still carries a DIFFERENT uuid than the hub serves after the render (template fetch failed or render skipped) — the served uuid was NOT applied"
 		return 1
 	fi
 	return 0
 }
 
+# _render_gate_channel_recovers BASELINE CH LABEL — after a render that restarts the
+# tunnel, CH must serve again (chN=OK in the serveability snapshot) if it served
+# before. Polls for OXPULSE_UPGRADE_HEALTH_TIMEOUT seconds (default 30) because the
+# tunnel needs a few seconds to re-establish. Returns 0 when CH did not serve in the
+# baseline (nothing to defend) or serves again, 1 otherwise.
+#
+# Why this exists: settle_healthcheck_with_retry deliberately TOLERATES a
+# per-channel regression while another channel still serves (SERVING_PARTIAL: the
+# box keeps serving real users via AWG/naive). That is right for an image upgrade
+# and wrong for a credential change: the render-only gate changes the ch1 uuid, and
+# "ch1 now rejected, everything else green" must roll back, not be committed.
+_render_gate_channel_recovers() {
+	local _bl="$1" _ch="$2" _label="$3"
+	local _deadline _post _step=3
+	if [[ ! -s "$_bl" ]]; then
+		warn "render gate: no serveability baseline (reporter without --serveability?) — ${_ch} cannot be verified after the render (${_label})"
+		return 0
+	fi
+	grep -qx "${_ch}=OK" "$_bl" 2>/dev/null || return 0
+	_deadline=$(( SECONDS + ${OXPULSE_UPGRADE_HEALTH_TIMEOUT:-30} ))
+	_post=$(mktemp)
+	while :; do
+		if _settle_serveability_snapshot "$_post" && grep -qx "${_ch}=OK" "$_post" 2>/dev/null; then
+			rm -f "$_post"
+			return 0
+		fi
+		[[ "$SECONDS" -ge "$_deadline" ]] && break
+		sleep "$_step"
+	done
+	rm -f "$_post"
+	warn "render gate: ${_ch} served before the render and does not serve after it (${_label}) — a credential change that the hub rejects must roll back even though other channels still serve"
+	return 1
+}
+
 _render_gate() {
 	local _label="${1:-render}"
+	# Optional 2nd arg: a channel (e.g. ch1) whose failure to serve again after the
+	# render fails the gate even when another channel still serves. Used by
+	# --render-only, which changes the credential that channel authenticates with.
+	local _strict_ch="${2:-}"
 	local _base="" _serve="" _dbase="" _snapdir="" _restored=0
 	local _xray_cfg="${XRAY_CFG:-$PREFIX_ETC/xray-client.json}"
 
@@ -2506,8 +2546,10 @@ _render_gate() {
 	re_render_xray
 
 	if settle_healthcheck_with_retry "$_label" "$_base" "$_serve" "$_dbase"; then
-		rm -rf "$_snapdir"; rm -f "$_base" "$_serve" "$_dbase"
-		return 0
+		if [[ -z "$_strict_ch" ]] || _render_gate_channel_recovers "$_serve" "$_strict_ch" "$_label"; then
+			rm -rf "$_snapdir"; rm -f "$_base" "$_serve" "$_dbase"
+			return 0
+		fi
 	fi
 
 	warn "render gate: RENDER REGRESSION (${_label}) — the re-render broke a check that was green immediately after the upgrade gate passed"
@@ -3221,16 +3263,21 @@ fi
 if [[ "$MODE" == render_only ]]; then
 	log "--render-only: refetching node-config and re-rendering xray-client.json under the render gate"
 	if [[ "$DRY_RUN" -eq 1 ]]; then
-		log "[dry-run] would run _render_gate render-only and verify the rendered uuid matches node-config"
+		log "[dry-run] would run _render_gate render-only (ch1 must serve again) and verify the rendered uuid matches the one the hub serves"
 		exit 0
 	fi
 	_ensure_channel_render_lib
-	if ! _render_gate "render-only"; then
-		die "render-only: the re-render regressed health — pre-render xray-client.json restored"
+	# The uuid the hub serves, fetched NOW: the outcome check compares against this,
+	# never against the local node-config (which a soft-failed refetch leaves stale).
+	_served_uuid=$(fetch_served_xray_uuid) \
+		|| die "render-only: cannot fetch the served uuid from the hub — nothing was changed and the outcome could not be verified"
+	[[ -n "$_served_uuid" ]] || die "render-only: the hub served no uuid — nothing was changed"
+	if ! _render_gate "render-only" ch1; then
+		die "render-only: the re-render regressed health or ch1 no longer serves — pre-render xray-client.json restored"
 	fi
-	_assert_rendered_uuid_matches_node_config \
-		|| die "render-only: re-render finished but did not apply the served uuid"
-	log "render-only: xray-client.json now carries the uuid node-config serves"
+	_assert_rendered_uuid_matches_node_config "$_served_uuid" \
+		|| die "render-only: nothing was rendered onto the served uuid (template fetch failed or the render was skipped) — xray-client.json is unchanged and the node still dials its previous uuid"
+	log "render-only: xray-client.json now carries the uuid the hub serves"
 	exit 0
 fi
 

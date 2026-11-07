@@ -125,23 +125,42 @@ setup_node "$U_OLD" "$U_NEW" ""
 [ "$rc" = 0 ] && grep -q 'could not start' "$TMPD/out" && pass "D5: systemd-run failure non-fatal and logged" || fail "D5: systemd-run failure not handled (rc=$rc)"
 
 # D6/D7 — after convergence the identity file follows the served uuid; untouched while drifted
+stat_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 setup_node "$U_NEW" "$U_NEW" "$U_OLD"
 run_fn
 [ "$(tr -d '\n' < "$TMPD/etc/reality.uuid")" = "$U_NEW" ] && pass "D6a: stale reality.uuid aligned to the served uuid" || fail "D6a: reality.uuid left stale (a re-registration would resend the retired uuid)"
-mode=$(stat -c '%a' "$TMPD/etc/reality.uuid" 2>/dev/null || stat -f '%Lp' "$TMPD/etc/reality.uuid")
-[ "$mode" = 600 ] && pass "D6b: mode preserved (600)" || fail "D6b: mode changed to $mode"
+[ "$(stat_mode "$TMPD/etc/reality.uuid")" = 600 ] && pass "D6b: rewritten file is 0600" || fail "D6b: mode is $(stat_mode "$TMPD/etc/reality.uuid")"
+# a world-readable identity file (some edges are 0644 from first install) is tightened,
+# whether or not its content differs — the mode is never preserved, only tightened
+setup_node "$U_NEW" "$U_NEW" "$U_OLD"; chmod 644 "$TMPD/etc/reality.uuid"
+run_fn
+[ "$(stat_mode "$TMPD/etc/reality.uuid")" = 600 ] && pass "D6c: 0644 file with stale content ends 0600" || fail "D6c: 0644 preserved (mode $(stat_mode "$TMPD/etc/reality.uuid"))"
+setup_node "$U_NEW" "$U_NEW" "$U_NEW"; chmod 644 "$TMPD/etc/reality.uuid"
+run_fn
+[ "$(stat_mode "$TMPD/etc/reality.uuid")" = 600 ] && pass "D6d: 0644 file with CORRECT content is still tightened to 0600" || fail "D6d: world-readable identity file left as is"
 setup_node "$U_OLD" "$U_NEW" "$U_OLD"
 run_fn
 [ "$(tr -d '\n' < "$TMPD/etc/reality.uuid")" = "$U_OLD" ] && pass "D7: reality.uuid NOT touched while still drifted" || fail "D7: reality.uuid changed before the re-render converged"
 
-# D8 — wiring: the reconcile runs before the keys-fetch early exits
-call_line=$(grep -n -m1 '^_reconcile_served_uuid || true$' "$REFRESH" | cut -d: -f1)
-exit_line=$(grep -n -m1 'keys fetch failed — skipping rotation check, exiting 0' "$REFRESH" | cut -d: -f1)
-if [ -n "$call_line" ] && [ -n "$exit_line" ] && [ "$call_line" -lt "$exit_line" ]; then
-    pass "D8: reconcile runs before the early exits (also when keys fetch fails / no rotation)"
+# D8 — wiring: reconcile never runs ahead of the key-rotation block. It runs at each
+# clean exit (keys fetch failed / no rotation) and at the very end of the script,
+# i.e. only after the rotation block has finished or was not needed.
+calls=$(grep -c '^ *_reconcile_served_uuid || true$' "$REFRESH")
+[ "$calls" = 3 ] && pass "D8a: exactly three call sites (two early exits + end of script)" || fail "D8a: $calls call sites"
+rot_line=$(grep -n 'log "rotation detected:' "$REFRESH" | cut -d: -f1)
+first_call=$(grep -n '^ *_reconcile_served_uuid || true$' "$REFRESH" | cut -d: -f1 | sed -n 1p)
+last_call=$(grep -n '^ *_reconcile_served_uuid || true$' "$REFRESH" | cut -d: -f1 | sed -n 3p)
+orig_end=$(grep -n 'OK rotation applied' "$REFRESH" | cut -d: -f1)
+if [ -n "$rot_line" ] && [ "$first_call" -lt "$rot_line" ] && [ "$last_call" -gt "$orig_end" ]; then
+    pass "D8b: the two early-exit calls sit before the rotation block, the last one after its commit"
 else
-    fail "D8: reconcile not wired ahead of the early exits"
+    fail "D8b: call placement wrong (first=$first_call rotation=$rot_line commit=$orig_end last=$last_call)"
 fi
+# every call that precedes the rotation block is immediately followed by an exit 0
+for n in $(grep -n '^ *_reconcile_served_uuid || true$' "$REFRESH" | cut -d: -f1 | sed -n 1,2p); do
+    next_line=$(sed -n "$((n+1))p" "$REFRESH")
+    if [[ "$next_line" =~ ^\ *exit\ 0$ ]]; then pass "D8c: call at line $n is directly followed by exit 0"; else fail "D8c: call at line $n is not at an exit"; fi
+done
 
 echo "=== upgrade.sh: --render-only ==="
 OUTCOME="$TMPD/outcome.sh"
@@ -154,19 +173,25 @@ else
     fail "U0: extract"; exit 1
 fi
 
-render_only() {  # $1=rendered uuid, $2=node-config uuid; env GATE_RC, DRY_RUN → prints the exit code
+# $1=rendered uuid, $2=uuid in the LOCAL node-config (may be stale), $3=uuid the hub serves
+# NOW ("" → fetch fails); env GATE_RC, DRY_RUN → prints the exit code
+render_only() {
     mkdir -p "$TMPD/u"
     printf '{"outbounds":[{"settings":{"vnext":[{"users":[{"id":"%s"}]}]}}]}\n' "$1" > "$TMPD/u/xray-client.json"
     printf '{"reality_uuid":"%s"}\n' "$2" > "$TMPD/u/node-config.json"
+    if [ -n "$3" ]; then printf '%s' "$3" > "$TMPD/u/served"; else rm -f "$TMPD/u/served"; fi
     (
         die() { printf 'die: %s\n' "$*" >&2; exit 9; }
         log() { :; }; warn() { printf 'warn: %s\n' "$*" >&2; }
         PREFIX_ETC="$TMPD/u"; NODE_CFG="$TMPD/u/node-config.json"; XRAY_CFG="$TMPD/u/xray-client.json"
         MODE=render_only; DRY_RUN="${DRY_RUN:-0}"
         _ensure_channel_render_lib() { :; }
-        _render_gate() { printf '%s\n' "$1" >> "$TMPD/gate_called"; return "$GATE_RC"; }
+        fetch_served_xray_uuid() { [ -f "$TMPD/u/served" ] && cat "$TMPD/u/served"; }
+        _render_gate() { printf '%s %s\n' "$1" "${2:-}" >> "$TMPD/gate_called"; return "$GATE_RC"; }
         # shellcheck disable=SC1090
         source "$ROOT/channel-render-lib.sh" >/dev/null 2>&1
+        # re-define after sourcing the lib (it also defines fetch_served_xray_uuid)
+        fetch_served_xray_uuid() { [ -f "$TMPD/u/served" ] && cat "$TMPD/u/served"; }
         # shellcheck disable=SC1090
         source "$OUTCOME"
         # shellcheck disable=SC1090
@@ -176,13 +201,20 @@ render_only() {  # $1=rendered uuid, $2=node-config uuid; env GATE_RC, DRY_RUN �
     echo $?
 }
 rm -f "$TMPD/gate_called"
-[ "$(GATE_RC=0 render_only "$U_NEW" "$U_NEW")" = 0 ] && pass "U1: gate ok + uuid applied → exit 0" || fail "U1: healthy render-only did not succeed"
-grep -q '^render-only$' "$TMPD/gate_called" && pass "U1b: ran under _render_gate" || fail "U1b: _render_gate not used"
-[ "$(GATE_RC=1 render_only "$U_OLD" "$U_NEW")" = 9 ] && pass "U2: gate regression → die" || fail "U2: gate failure not fatal"
-[ "$(GATE_RC=0 render_only "$U_OLD" "$U_NEW")" = 9 ] && pass "U3: gate ok but uuid NOT applied → die (a soft-skipped render must not read as success)" || fail "U3: unapplied uuid accepted"
-grep -q 'DIFFERENT uuid' "$TMPD/u/err" && pass "U3b: the failure names the cause" || fail "U3b: no explanation"
+[ "$(GATE_RC=0 render_only "$U_NEW" "$U_NEW" "$U_NEW")" = 0 ] && pass "U1: gate ok + served uuid applied → exit 0" || fail "U1: healthy render-only did not succeed"
+grep -q '^render-only ch1$' "$TMPD/gate_called" && pass "U1b: ran under _render_gate with ch1 as the strict channel" || fail "U1b: _render_gate not used with ch1 strict"
+[ "$(GATE_RC=1 render_only "$U_OLD" "$U_NEW" "$U_NEW")" = 9 ] && pass "U2: gate regression → die" || fail "U2: gate failure not fatal"
+[ "$(GATE_RC=0 render_only "$U_OLD" "$U_NEW" "$U_NEW")" = 9 ] && pass "U3: gate ok but served uuid NOT applied → die (a soft-skipped render must not read as success)" || fail "U3: unapplied uuid accepted"
+grep -q 'nothing was rendered' "$TMPD/u/err" && pass "U3b: the failure says nothing was rendered" || fail "U3b: misleading failure text"
+# SEC-CR-007: the LOCAL node-config is stale and happens to equal the rendered uuid
+# (refetch soft-failed) while the hub serves a different one. Comparing with the
+# local file would pass vacuously.
+[ "$(GATE_RC=0 render_only "$U_OLD" "$U_OLD" "$U_NEW")" = 9 ] && pass "U3c: stale local node-config == rendered, hub serves another → die" || fail "U3c: verified against a stale local node-config"
 rm -f "$TMPD/gate_called"
-if [ "$(DRY_RUN=1 GATE_RC=0 render_only "$U_OLD" "$U_NEW")" = 0 ] && [ ! -f "$TMPD/gate_called" ]; then
+[ "$(GATE_RC=0 render_only "$U_OLD" "$U_NEW" "")" = 9 ] && [ ! -f "$TMPD/gate_called" ] \
+    && pass "U3d: cannot fetch the served uuid → die before touching anything" || fail "U3d: proceeded without a verifiable target"
+rm -f "$TMPD/gate_called"
+if [ "$(DRY_RUN=1 GATE_RC=0 render_only "$U_OLD" "$U_NEW" "$U_NEW")" = 0 ] && [ ! -f "$TMPD/gate_called" ]; then
     pass "U4: --dry-run touches nothing"
 else
     fail "U4: dry-run ran the gate"

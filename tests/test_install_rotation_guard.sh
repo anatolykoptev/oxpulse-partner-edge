@@ -72,8 +72,31 @@ grep -q 'FORCE_AWG_KEYGEN.*--rotate' "$TMPD/awg.txt" \
     && pass "S2: AWG keygen block rotates on FORCE_AWG_KEYGEN" || fail "S2: AWG block not on its own switch"
 grep -q 'FORCE_KEYGEN' "$TMPD/awg.txt" \
     && fail "S3: AWG block still reads FORCE_KEYGEN (side-effect rotation)" || pass "S3: AWG block does not read FORCE_KEYGEN"
-grep -q '^args_assert_rotation_supported$' "$INSTALL" \
-    && pass "S4: install.sh calls the guard right after args_parse" || fail "S4: guard not wired in install.sh"
+guard_line=$(grep -n '^args_assert_rotation_supported$' "$INSTALL" | cut -d: -f1)
+parse_line=$(grep -n '^args_parse "\$@"$' "$INSTALL" | cut -d: -f1)
+if [ -n "$guard_line" ] && [ -n "$parse_line" ] && [ "$guard_line" -gt "$parse_line" ]; then
+    pass "S4a: the guard runs right after args_parse"
+else
+    fail "S4a: guard not wired after args_parse (guard=$guard_line parse=$parse_line)"
+fi
+# ... and BEFORE every host side effect: a refused rotation must not have installed
+# packages, touched the network config or written anything.
+for side in preflight_run deps_install network_run; do
+    l=$(grep -n "^${side}$" "$INSTALL" | cut -d: -f1)
+    if [ -n "$l" ] && [ -n "$guard_line" ] && [ "$guard_line" -lt "$l" ]; then
+        pass "S4b: guard precedes $side"
+    else
+        fail "S4b: guard does not precede $side (guard=$guard_line $side=$l)"
+    fi
+done
+
+# install.sh must not print the node's uuid in clear (fingerprint only)
+clear_logs=$(grep -nE '(log|warn|echo|printf)[^#]*\$\{?REALITY_UUID\}?([^_A-Za-z]|$)' "$INSTALL" | grep -v sha256sum || true)
+if [ -n "$clear_logs" ]; then
+    fail "S5: install.sh still logs REALITY_UUID in clear: $clear_logs"
+else
+    pass "S5: no log line prints REALITY_UUID in clear"
+fi
 
 echo "--- $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
