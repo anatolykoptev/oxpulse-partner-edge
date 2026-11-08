@@ -1131,8 +1131,20 @@ _maybe_detach_from_refresh_unit() {
 if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
 	_maybe_detach_from_refresh_unit "$@"
 	LOCK_FILE="$PREFIX_LIB/upgrade.lock"
-	exec 9>"$LOCK_FILE"
-	flock -n 9 || die "another upgrade.sh is running (lock: $LOCK_FILE). If stuck, check the pid and remove the lock file."
+	# Lock handoff across the self-update re-exec (UPG-2): the parent deliberately
+	# does NOT close fd 9 before exec — bash carries the open flock'd fd across
+	# the exec boundary, so the lock never leaves this PID and a second upgrader
+	# cannot slip into a release/reacquire gap. The re-exec'd child recognises
+	# the handoff via OXPULSE_UPGRADE_LOCK_HELD=1 plus a positive check that
+	# fd 9 resolves to the lock file, and skips the reacquire.
+	if [[ "${OXPULSE_UPGRADE_LOCK_HELD:-0}" == "1" \
+		&& -e "/proc/$$/fd/9" \
+		&& "$(readlink -f "/proc/$$/fd/9" 2>/dev/null)" == "$(readlink -f "$LOCK_FILE" 2>/dev/null || printf '%s' "$LOCK_FILE")" ]]; then
+		log "upgrade lock: fd 9 inherited already-locked from the pre-exec parent (handoff)"
+	else
+		exec 9>"$LOCK_FILE"
+		flock -n 9 || die "another upgrade.sh is running (lock: $LOCK_FILE). If stuck, check the pid and remove the lock file."
+	fi
 fi
 
 # --templates-only: re-render channel client configs from upstream templates, skip image ops.
@@ -1644,6 +1656,24 @@ $_cfg"
 	mapfile -t _res_svcs < <(_partner_edge_services_from_map _images)
 	[[ "${#_res_svcs[@]}" -gt 0 ]] \
 		|| die "compose config parsed but zero ghcr.io/anatolykoptev/partner-edge-* services found in $COMPOSE_FILE — compose file looks corrupted, refusing to proceed"
+}
+
+# _probe_running_edge_tag — print the LOWEST vX.Y.Z image tag (v stripped)
+# among running oxpulse-partner-* containers; empty when none are up or
+# docker is unavailable. UPG-1/UPG-5: IMAGE_VERSION alone is not proof the
+# apply converged — a crash between the compose rewrite and the post-gate
+# marker move (or the pre-fix marker placement that sat BEFORE pull) leaves
+# containers on the old tag while the marker claims the new one. The lowest
+# running tag is the conservative "installed" value: any diverging member
+# means the apply never finished.
+_probe_running_edge_tag() {
+	command -v "$DOCKER_BIN" >/dev/null 2>&1 || return 0
+	local _imgs
+	_imgs=$($DOCKER_BIN ps --filter "name=oxpulse-partner-" --format '{{.Image}}' 2>/dev/null || true)
+	[[ -n "$_imgs" ]] || return 0
+	printf '%s\n' "$_imgs" \
+		| sed -nE 's|.*:([vV]?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?).*|\1|p' \
+		| sed 's|^[vV]||' | sort -V | head -n1
 }
 
 # ---------------------------------------------------------------------------
@@ -2896,8 +2926,11 @@ _maybe_self_update_reexec() {
 	log "self-update: running upgrade.sh differs from the $_tag release - re-exec into the new version once so infra fixes apply this run"
 	export OXPULSE_UPGRADE_REEXECED=1
 	export OXPULSE_UPGRADE_REEXEC_TMPDIR="$_tmpdir"
-	# Release the upgrade-lock fd (if held) so the re-exec'd child reacquires cleanly.
-	{ exec 9>&-; } 2>/dev/null || true
+	# UPG-2: keep fd 9 (the upgrade flock) OPEN across the exec — bash carries it
+	# into the new image, so the lock never leaves this PID and a second upgrader
+	# cannot slip into a release/reacquire gap. OXPULSE_UPGRADE_LOCK_HELD tells
+	# the child to skip its reacquire after verifying fd 9 is the lock file.
+	export OXPULSE_UPGRADE_LOCK_HELD=1
 	# Throwaway-tmpdir hygiene (this dir is created on EVERY real fleet self-update):
 	#   • exec SUCCESS → the process image is replaced; the re-exec'd CHILD re-registers
 	#     this dir at top level (via OXPULSE_UPGRADE_REEXEC_TMPDIR) and its cumulative
@@ -2916,7 +2949,7 @@ _maybe_self_update_reexec() {
 	shopt -u execfail
 	warn "self-update: re-exec of $_new failed - continuing with the current process (converges next run)"
 	rm -rf "$_tmpdir" 2>/dev/null || true
-	unset OXPULSE_UPGRADE_REEXECED OXPULSE_UPGRADE_REEXEC_TMPDIR
+	unset OXPULSE_UPGRADE_REEXECED OXPULSE_UPGRADE_REEXEC_TMPDIR OXPULSE_UPGRADE_LOCK_HELD
 	return 0
 }
 
@@ -3012,18 +3045,22 @@ _assert_self_update_converged() {
 	# re-exec them with this invocation's original args — the call sites pass
 	# "$@" through for exactly this. Sentinel-guarded: the child sees
 	# OXPULSE_UPGRADE_REEXECED=1, skips its own _maybe_self_update_reexec AND
-	# this gate. Same fd-9 release + execfail recovery as
+	# this gate. Same fd-9 handoff + execfail recovery as
 	# _maybe_self_update_reexec. Dying here instead left the node stuck:
 	# IMAGE_VERSION was still marked applied before this gate in the old
 	# ordering, so refresh saw desired==installed and never retried.
 	log "self-update: still running the old upgrade.sh — re-exec into the ${RELEASE_TAG:-target} bytes just installed at $_installed"
 	export OXPULSE_UPGRADE_REEXECED=1
-	{ exec 9>&-; } 2>/dev/null || true
+	# UPG-2: same lock handoff as _maybe_self_update_reexec — fd 9 stays open
+	# across exec; the child skips reacquire on OXPULSE_UPGRADE_LOCK_HELD +
+	# the fd-9-is-lock check.
+	export OXPULSE_UPGRADE_LOCK_HELD=1
 	shopt -s execfail
 	# shellcheck disable=SC2093  # on success exec replaces the process; the
 	# lines below are the exec-FAILED recovery path, reachable via execfail.
 	exec "$_installed" "$@" || true
 	shopt -u execfail
+	unset OXPULSE_UPGRADE_LOCK_HELD
 
 	# Even the verified on-disk copy could not be exec'd — now fail closed and
 	# make noise: a silent die is how pillow sat un-upgraded until a human
@@ -4163,9 +4200,14 @@ if [[ "$MODE" == with_templates ]]; then
 	# the OLD release so the next refresh tick retries on its own — and so a
 	# gate-level re-exec child does not read CURRENT==TARGET and exit
 	# "nothing to do" before finishing the apply.
+	#
+	# UPG-1: the compose tag rewrite must stay here (the pull below needs it),
+	# but the IMAGE_VERSION marker now moves to AFTER pull + settle + render
+	# gates — a crash in between leaves the marker on the OLD version while
+	# the running containers' tags diverge from it, which refresh and the
+	# CURRENT==TARGET gate both read as "not installed" and retry.
 	sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
 		"$COMPOSE_FILE"
-	sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 
 	# CH3 retired: remove its container/config BEFORE any baseline is captured.
 	_retire_ch3_best_effort
@@ -4321,6 +4363,13 @@ if [[ "$MODE" == with_templates ]]; then
 		die "--with-templates upgrade applied but the post-upgrade re-render regressed health — pre-render channel config restored; images and compose left on $TARGET"
 	fi
 
+	# UPG-1: commit the installed-version marker ONLY now — pull, recreate,
+	# settle and render all passed. Until here $STATE_FILE kept the OLD
+	# version, so an interruption anywhere above leaves desired≠installed and
+	# the next refresh/upgrade retries (the container-tag divergence check
+	# covers the crash-between-compose-rewrite-and-pull window too).
+	sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
+
 	# Converge the amneziawg userspace stack to the pinned AWG_*_REF (3.x).
 	# Post-gate by design: the rebuild + awg-quick@awg0 restart briefly drops
 	# the mesh, so it must not contaminate the settle/baseline regression diff
@@ -4343,8 +4392,17 @@ derive_release_tag
 log "current=$CURRENT target=$TARGET release_tag=$RELEASE_TAG"
 
 if [[ "$CURRENT" == "$TARGET" && "$MODE" != rollback ]]; then
-	log "already on $TARGET — nothing to do"
-	exit 0
+	# UPG-1/UPG-5: the marker alone is not proof of convergence (pillow:
+	# IMAGE_VERSION claimed 0.16.41 while containers still ran 0.16.40). If
+	# the running containers report a different tag, the apply was
+	# interrupted — fall through and re-apply instead of exiting.
+	_running_edge_tag=$(_probe_running_edge_tag)
+	if [[ -z "$_running_edge_tag" || "v${_running_edge_tag}" == "$CURRENT" ]]; then
+		log "already on $TARGET — nothing to do"
+		exit 0
+	fi
+	log "IMAGE_VERSION claims $CURRENT but running containers report v${_running_edge_tag} — resuming the interrupted apply"
+	CURRENT="v${_running_edge_tag}"
 fi
 if [[ "$MODE" == check ]]; then
 	echo "UPGRADE_AVAILABLE current=$CURRENT target=$TARGET"
@@ -4434,13 +4492,13 @@ _assert_self_update_converged "$@"
 # BUG FIX (tag-rewrite): rewrite image tags to TARGET in the compose file
 # BEFORE docker compose pull so that pull fetches the correct target images.
 # The regex captures the full image name up to the colon and replaces the
-# tag portion with TARGET. The version markers sit BELOW the convergence
-# gate (pillow 0.16.40→0.16.41): a gate failure must leave install.env on
-# the OLD release so the next refresh tick retries, and a gate-level
-# re-exec child must not read CURRENT==TARGET and exit "nothing to do".
+# tag portion with TARGET. UPG-1: the IMAGE_VERSION marker is deliberately
+# NOT written here — it moves to AFTER pull + settle + render gates below,
+# so an interruption in this window leaves the marker on the OLD version
+# and the next refresh/upgrade retries (the container-tag probe at the
+# CURRENT==TARGET gate closes the crash window too).
 sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
 	"$COMPOSE_FILE"
-sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 log "compose image tags rewritten to $TARGET (pre-pull)"
 
 # CH3 retired: remove its container/config BEFORE any baseline is captured.
@@ -4557,6 +4615,13 @@ _ensure_channel_render_lib
 if ! _render_gate "plain-upgrade-render"; then
 	die "upgrade applied but the post-upgrade re-render regressed health — pre-render channel config restored; images and compose left on $TARGET"
 fi
+
+# UPG-1: commit the installed-version marker ONLY now — pull, recreate,
+# settle and render all passed. Until here $STATE_FILE kept the OLD version,
+# so an interruption anywhere above leaves desired≠installed and the next
+# refresh/upgrade retries (the container-tag divergence check covers the
+# crash-between-compose-rewrite-and-pull window too).
+sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 
 # Converge the amneziawg userspace stack to the pinned AWG_*_REF (3.x) — same
 # post-gate fail-soft semantics as the --with-templates path above: a rebuild +
