@@ -369,7 +369,11 @@ _maybe_self_upgrade() {
         emit_metric "partner_edge_self_upgrade_unknown_installed_total" "" "1"
         return 0
     fi
+    local _attempt_marker="$PREFIX_LIB/self-upgrade.attempted"
     if [[ "$_desired" == "$_installed" ]]; then
+        # Converged — retire a previous attempt marker (if any) so the NEXT
+        # rollout starts counting from 1.
+        rm -f "$_attempt_marker" 2>/dev/null || true
         return 0  # already converged — idempotent no-op
     fi
     if ! _self_upgrade_is_ge "$_desired" "$_installed"; then
@@ -377,6 +381,26 @@ _maybe_self_upgrade() {
         emit_metric "partner_edge_self_upgrade_downgrade_refused_total" "" "1"
         return 0
     fi
+    # Attempt tracking (pillow 0.16.40→0.16.41): the self-upgrade runs as a
+    # detached transient unit, so its outcome is invisible to this tick — a
+    # failed attempt previously left NO trace and the node could sit unapplied
+    # until a human noticed. Record tag:count so a re-attempt of the SAME
+    # desired tag is logged and metered (partner_edge_self_upgrade_retry_total
+    # / _attempts are the dozor-alertable signal); the marker clears above once
+    # installed==desired. Best-effort: a read-only $PREFIX_LIB must not abort
+    # the upgrade itself.
+    local _attempts=1 _m_tag="" _m_n=""
+    if [[ -f "$_attempt_marker" ]]; then
+        _m_tag=$(cut -d: -f1 "$_attempt_marker" 2>/dev/null || true)
+        _m_n=$(cut -d: -f2 "$_attempt_marker" 2>/dev/null || true)
+        [[ "$_m_tag" == "$_desired" && "$_m_n" =~ ^[0-9]+$ ]] && _attempts=$(( _m_n + 1 ))
+    fi
+    if [[ "$_attempts" -gt 1 ]]; then
+        log "self-upgrade: retrying v$_desired (attempt $_attempts — previous attempt(s) did not converge; journalctl -u oxpulse-partner-edge-self-upgrade)"
+        emit_metric "partner_edge_self_upgrade_retry_total" "tag=\"$_desired\"" "1"
+        emit_gauge "partner_edge_self_upgrade_attempts" "tag=\"$_desired\"" "$_attempts"
+    fi
+    printf '%s:%s\n' "$_desired" "$_attempts" > "$_attempt_marker" 2>/dev/null || true
     log "self-upgrade: desired_release=$_desired (installed=$_installed) — applying"
     emit_metric "partner_edge_self_upgrade_applied_total" "tag=\"$_desired\"" "1"
     local _upg_bin

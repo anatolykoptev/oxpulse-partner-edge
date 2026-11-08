@@ -408,15 +408,26 @@ python3 -m http.server "$RAW_PORT" --directory "$REPO_ROOT" \
 RAW_HTTP_PID=$!
 
 # Build SHA256SUMS with correct hashes for files that sync_host_scripts fetches.
-# Extract the remote_name for each managed file from the preamble.
+# Extract the remote_name for each managed file from the preamble. The verified
+# sync fetches every payload from RELEASES_BASE/$tag/<asset> (pillow fix), so
+# stage each file into the release dir under its release-asset name — the same
+# mapping lib/host-scripts-lib.sh applies (and test 9's sbin_to_asset asserts).
 declare -A EDGE_E_SHAS
 while IFS= read -r remote_name; do
-    [[ -z "$remote_name" ]] && continue
+    [[ -z "$remote_name" || "$remote_name" == "upgrade.sh" ]] && continue
     fpath="$REPO_ROOT/$remote_name"
     fname=$(basename "$remote_name")
+    asset="$fname"
+    case "$remote_name" in
+        lib/render-channel-lib.sh)        asset="render-channel-lib.sh" ;;
+        scripts/oxpulse-xray-update.sh)   asset="oxpulse-xray-update.sh" ;;
+        scripts/oxpulse-geoip-refresh.sh) asset="oxpulse-geoip-refresh.sh" ;;
+        healthcheck.sh)                   asset="partner-edge-healthcheck.sh" ;;
+    esac
     if [[ -f "$fpath" ]]; then
         sha=$(sha256sum "$fpath" | awk '{print $1}')
-        EDGE_E_SHAS["$fname"]="$sha"
+        EDGE_E_SHAS["$asset"]="$sha"
+        cp -f "$fpath" "$EDGE_E_RELEASE_DIR/$asset"
     fi
 done < <(
     bash -c "

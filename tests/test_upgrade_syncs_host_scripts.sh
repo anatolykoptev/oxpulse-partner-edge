@@ -305,6 +305,14 @@ T5_SYSTEMD="$TMPDIR_ROOT/t5/systemd"
 T5_RELEASE="$TMPDIR_ROOT/t5/release/v0.test"
 mkdir -p "$T5_SBIN" "$T5_BIN" "$T5_LIBDIR" "$T5_SYSTEMD" "$T5_RELEASE"
 
+# The verified-sync payload comes from the release bundle, not REPO_RAW
+# (pillow fix): stage real health-report bytes as the release asset so the
+# fetch reaches the sha guard, which must then reject them.
+curl -fsSL --max-time 10 \
+    "http://127.0.0.1:$SERVE_PORT/oxpulse-channels-health-report.sh" \
+    -o "$T5_RELEASE/oxpulse-channels-health-report.sh" \
+    || { fail "5: could not stage health-report release asset"; }
+
 # Build a SHA256SUMS with a bogus hash for health-report.
 FAKE_HASH="0000000000000000000000000000000000000000000000000000000000000000"
 printf '%s  oxpulse-channels-health-report.sh\n' "$FAKE_HASH" > "$T5_RELEASE/SHA256SUMS"

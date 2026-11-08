@@ -60,6 +60,7 @@ L2="$TMPD/l2.sh"
 {
     echo 'log() { printf "==> %s\n" "$*" >&2; }'
     echo 'emit_metric() { printf "METRIC %s\n" "$1" >> "$METRICS"; }'
+    echo 'emit_gauge() { printf "GAUGE %s\n" "$1" >> "$METRICS"; }'
     awk '/^_self_upgrade_is_ge\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
     awk '/^_maybe_self_upgrade\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
 } > "$L2"

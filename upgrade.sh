@@ -2774,15 +2774,18 @@ _settle_serveability_alert() {
 # (parity with the SHA256SUMS fetch), so an operator/rollout-operator sees the skip.
 #
 # CONVERGENCE GATE (PR4): _assert_self_update_converged() runs in each apply path
-# immediately AFTER that path's sync_host_scripts and fail-closed die()s if this
-# process is still executing the OLD upgrade.sh while the NEW release bytes are
-# already installed to disk — the exact v0.14.4 failure class (an old process walking
+# immediately AFTER that path's sync_host_scripts and stops it if this process is
+# still executing the OLD upgrade.sh while the NEW release bytes are already
+# installed to disk — the exact v0.14.4 failure class (an old process walking
 # into a freshly-synced host-script set, dying deep in reconcile_firewall_surface).
-# It compares OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA (the bytes THIS process is
-# executing, fingerprinted below before any sync can overwrite the sbin copy - the
-# running path IS the sbin path when self-update is applicable, so a post-sync re-hash
-# would read the new bytes and hide the divergence) against the post-sync installed
-# sha. Escape hatch OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 downgrades die->warn.
+# Since the pillow 0.16.40→0.16.41 incident the gate RECOVERS: it re-execs the
+# installed (SHA256SUMS-verified) bytes with the original args and die()s only
+# when even that exec fails. It compares OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA
+# (the bytes THIS process is executing, fingerprinted below before any sync can
+# overwrite the sbin copy - the running path IS the sbin path when self-update is
+# applicable, so a post-sync re-hash would read the new bytes and hide the
+# divergence) against the post-sync installed sha. Escape hatch
+# OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 downgrades die->warn.
 #
 # THREAT MODEL (this fetches upgrade.sh + SHA256SUMS same-origin and execs the result
 # as ROOT on match — the SAME threat surface as _source_lib's tier-3, so it inherits
@@ -2917,6 +2920,26 @@ _maybe_self_update_reexec() {
 	return 0
 }
 
+# _self_update_converge_alert MSG — one-shot operator alert when the convergence
+# gate below cannot recover itself (the re-exec of the installed copy failed
+# too, so the upgrade dies mid-flight). Lazy-sources telegram-alert-lib exactly
+# like _settle_serveability_alert (TELEGRAM_ALERT_LIB was already staged +
+# integrity-verified by _stage_lib); a missing lib downgrades to a no-op — the
+# die() message still carries the full diagnosis to the journal.
+_self_update_converge_alert() {
+	if ! declare -F tg_alert >/dev/null 2>&1; then
+		local _tg_lib="${TELEGRAM_ALERT_LIB:-${_UPGRADE_SH_DIR:-.}/lib/telegram-alert-lib.sh}"
+		if [[ -f "$_tg_lib" ]]; then
+			# shellcheck source=lib/telegram-alert-lib.sh
+			. "$_tg_lib"
+		fi
+	fi
+	declare -F tg_alert >/dev/null 2>&1 || return 0
+	local _host
+	_host=$(hostname -s 2>/dev/null || echo edge)
+	tg_alert "[$_host] CRITICAL partner-edge self-upgrade to ${RELEASE_TAG:-unknown}: $1 — node stays on the old release until a successful re-run" || true
+}
+
 # _assert_self_update_converged - fail-closed convergence gate, called ONCE in each
 # apply path immediately AFTER that path's sync_host_scripts. Invariant (general, NOT
 # narrowly "before reconcile_all"): never proceed past sync_host_scripts running STALE
@@ -2946,10 +2969,14 @@ _maybe_self_update_reexec() {
 # process is EXECUTING (OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA, fingerprinted by
 # _maybe_self_update_reexec before sync overwrote the sbin copy) against the post-sync
 # installed sbin bytes; a difference means we are still running the old release while the
-# new one is already on disk. die() with an actionable message — a plain re-run starts
-# fresh from the now-correct on-disk bytes and converges immediately (cheap, always
-# effective). Escape hatch OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 downgrades die->warn for an
-# operator who legitimately expects the bytes to differ (e.g. testing a locally-patched
+# new one is already on disk. Recovery is in-band: re-exec the just-installed,
+# SHA256SUMS-verified bytes with the original args (sentinel-guarded) so the run
+# converges HERE — the pillow 0.16.40→0.16.41 lesson, where a die() that merely
+# asked for a re-run left the node stuck (the version marker had already been
+# written, so refresh saw desired==installed and never retried). die() fires only
+# when even that exec cannot run, after _self_update_converge_alert. Escape hatch
+# OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 downgrades die->warn for an operator who
+# legitimately expects the bytes to differ (e.g. testing a locally-patched
 # upgrade.sh against a released sbin target) and wants to proceed anyway.
 _assert_self_update_converged() {
 	_should_self_update || return 0
@@ -2979,9 +3006,32 @@ _assert_self_update_converged() {
 		warn "self-update did NOT converge (this process runs the old upgrade.sh; ${RELEASE_TAG:-target} bytes are installed at $_installed) - OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 set, proceeding anyway"
 		return 0
 	fi
-	die "self-update did not converge: this process is still running the OLD upgrade.sh, but the ${RELEASE_TAG:-target} release is already installed at $_installed.
-Continuing would apply stale upgrade logic (reconcile_all / firewall / caddy) to the freshly-synced host-scripts - the exact failure that killed the v0.14.4 rollout deep in reconcile_firewall_surface.
-FIX: simply re-run this upgrade. The correct bytes are already on disk, so the next invocation starts fresh and converges immediately (or set OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 to override if you intend the mismatch)."
+
+	# Recover in the SAME run (pillow 0.16.40→0.16.41): the bytes just installed
+	# at $_installed passed SHA256SUMS verification inside sync_host_scripts, so
+	# re-exec them with this invocation's original args — the call sites pass
+	# "$@" through for exactly this. Sentinel-guarded: the child sees
+	# OXPULSE_UPGRADE_REEXECED=1, skips its own _maybe_self_update_reexec AND
+	# this gate. Same fd-9 release + execfail recovery as
+	# _maybe_self_update_reexec. Dying here instead left the node stuck:
+	# IMAGE_VERSION was still marked applied before this gate in the old
+	# ordering, so refresh saw desired==installed and never retried.
+	log "self-update: still running the old upgrade.sh — re-exec into the ${RELEASE_TAG:-target} bytes just installed at $_installed"
+	export OXPULSE_UPGRADE_REEXECED=1
+	{ exec 9>&-; } 2>/dev/null || true
+	shopt -s execfail
+	# shellcheck disable=SC2093  # on success exec replaces the process; the
+	# lines below are the exec-FAILED recovery path, reachable via execfail.
+	exec "$_installed" "$@" || true
+	shopt -u execfail
+
+	# Even the verified on-disk copy could not be exec'd — now fail closed and
+	# make noise: a silent die is how pillow sat un-upgraded until a human
+	# noticed. The version markers were NOT written yet (they sit below this
+	# gate), so the next refresh tick retries this upgrade on its own.
+	_self_update_converge_alert "self-update did not converge (re-exec of $_installed failed too)" || true
+	die "self-update did not converge: this process is still running the OLD upgrade.sh, the ${RELEASE_TAG:-target} release is already installed at $_installed, and re-exec of the installed bytes failed too.
+FIX: re-run this upgrade (the on-disk bytes are already correct, so the next invocation starts fresh and converges immediately) or inspect 'journalctl -u oxpulse-partner-edge-self-upgrade' for the exec failure (or set OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 to override if you intend the mismatch)."
 }
 
 # _retire_ch3_best_effort — tear down the retired CH3 (hysteria2) client.
@@ -4080,10 +4130,9 @@ if [[ "$MODE" == with_templates ]]; then
 	fi
 	_manifest_path_wt="$_manifest_tmpdir_wt/manifest.yaml"
 
-	# Step 3: patch image tags in compose (same as plain image upgrade).
-	sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
-		"$COMPOSE_FILE"
-	sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
+	# Step 3: live-box migration shims (compose healthcheck healing). The
+	# image-tag and IMAGE_VERSION marker writes that used to sit here moved
+	# BELOW the convergence gate — see there.
 	# Live-box migration shim (2026-07-08): heal any pre-v0.14.5 SFU
 	# healthcheck that still probes the raw /CIDR mesh IP — see the
 	# function's docstring above (_patch_compose_sfu_healthcheck_cidr).
@@ -4103,10 +4152,20 @@ if [[ "$MODE" == with_templates ]]; then
 
 	# Convergence gate (PR4): sync_host_scripts just installed the released upgrade.sh
 	# to disk. If this process is still executing the OLD bytes (a self-update no-op
-	# that _maybe_self_update_reexec could not re-exec through), fail-closed here rather
-	# than walk stale logic into the new host-script set (the v0.14.4 incident). No-op
-	# when self-update was not applicable to this run (dev/CI/manual/dry-run).
-	_assert_self_update_converged
+	# that _maybe_self_update_reexec could not re-exec through), the gate re-execs
+	# those installed, SHA256SUMS-verified bytes with "$@" — and only dies if even
+	# that fails (the v0.14.4 / pillow 0.16.40→0.16.41 failure class). No-op when
+	# self-update was not applicable to this run (dev/CI/manual/dry-run).
+	_assert_self_update_converged "$@"
+
+	# Version markers are written ONLY after the convergence gate (pillow
+	# 0.16.40→0.16.41): a gate failure must leave install.env/compose claiming
+	# the OLD release so the next refresh tick retries on its own — and so a
+	# gate-level re-exec child does not read CURRENT==TARGET and exit
+	# "nothing to do" before finishing the apply.
+	sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
+		"$COMPOSE_FILE"
+	sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 
 	# CH3 retired: remove its container/config BEFORE any baseline is captured.
 	_retire_ch3_best_effort
@@ -4348,15 +4407,6 @@ cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
 cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
 snapshot_host_scripts "$CURRENT"
 
-# BUG FIX (tag-rewrite): rewrite image tags to TARGET in the compose file
-# BEFORE docker compose pull so that pull fetches the correct target images.
-# The regex captures the full image name up to the colon and replaces the
-# tag portion with TARGET. This must happen before any pull invocation so
-# that both the pull and the subsequent `compose up` use the target tag, not
-# the currently-running tag.
-sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
-	"$COMPOSE_FILE"
-sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
 # Live-box migration shim (2026-07-08): heal any pre-v0.14.5 SFU healthcheck
 # that still probes the raw /CIDR mesh IP — see the function's docstring
 # above (_patch_compose_sfu_healthcheck_cidr).
@@ -4365,7 +4415,6 @@ _patch_compose_sfu_healthcheck_cidr "$COMPOSE_FILE"
 # that still probes a bound port (ss -ltn) instead of the tunnel path —
 # see the function's docstring above (_patch_compose_xray_healthcheck_probe).
 _patch_compose_xray_healthcheck_probe "$COMPOSE_FILE"
-log "compose image tags rewritten to $TARGET (pre-pull)"
 
 # Sync host-scripts for the release tag before pulling images so that a
 # failed image pull leaves the host-scripts already at the new version —
@@ -4376,9 +4425,23 @@ sync_host_scripts "$RELEASE_TAG"
 
 # Convergence gate (PR4): fail-closed if this process is still running the OLD
 # upgrade.sh while sync_host_scripts just installed the released bytes to disk
-# (the v0.14.4 stale-in-memory failure class). No-op when self-update was not
-# applicable to this run. See _assert_self_update_converged.
-_assert_self_update_converged
+# (the v0.14.4 stale-in-memory failure class). The gate first re-execs those
+# installed, SHA256SUMS-verified bytes with "$@" (converges THIS run) and dies
+# only if even that exec fails. No-op when self-update was not applicable to
+# this run. See _assert_self_update_converged.
+_assert_self_update_converged "$@"
+
+# BUG FIX (tag-rewrite): rewrite image tags to TARGET in the compose file
+# BEFORE docker compose pull so that pull fetches the correct target images.
+# The regex captures the full image name up to the colon and replaces the
+# tag portion with TARGET. The version markers sit BELOW the convergence
+# gate (pillow 0.16.40→0.16.41): a gate failure must leave install.env on
+# the OLD release so the next refresh tick retries, and a gate-level
+# re-exec child must not read CURRENT==TARGET and exit "nothing to do".
+sed -i -E "s|(ghcr\.io/anatolykoptev/partner-edge-[a-z]+):[^\"[:space:]]+|\1:${TARGET}|g" \
+	"$COMPOSE_FILE"
+sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=${TARGET}|" "$STATE_FILE"
+log "compose image tags rewritten to $TARGET (pre-pull)"
 
 # CH3 retired: remove its container/config BEFORE any baseline is captured.
 _retire_ch3_best_effort
