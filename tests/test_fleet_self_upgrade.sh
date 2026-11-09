@@ -62,6 +62,8 @@ L2="$TMPD/l2.sh"
     echo 'emit_metric() { printf "METRIC %s\n" "$1" >> "$METRICS"; }'
     echo 'emit_gauge() { printf "GAUGE %s\n" "$1" >> "$METRICS"; }'
     awk '/^_self_upgrade_is_ge\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
+    awk '/^_self_upgrade_running_tag\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
+    awk '/^_self_upgrade_alert\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
     awk '/^_maybe_self_upgrade\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
 } > "$L2"
 bash -n "$L2" && pass "C0: extracted L2 functions parse" || { fail "C0: L2 extract syntax"; exit 1; }
@@ -86,12 +88,17 @@ cat > "$BIN/systemctl" <<STUB
 [ "\$1" = show ] && echo "\${SELFUP_STATE:-inactive}"
 exit 0
 STUB
-chmod +x "$BIN/systemd-run" "$BIN/systemctl"
+# docker stub: no running partner containers → _self_upgrade_running_tag empty
+cat > "$BIN/docker" <<STUB
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$BIN/systemd-run" "$BIN/systemctl" "$BIN/docker"
 PREFIX_LIB="$TMPD/lib"; mkdir -p "$PREFIX_LIB"
 printf 'IMAGE_VERSION=v0.16.2\n' > "$PREFIX_LIB/install.env"
 
 run_l2() {  # $1=desired_release (or "" to omit)
-    rm -f "$TMPD/upg_called" "$TMPD/sdrun_called"; METRICS="$TMPD/metrics"; : > "$METRICS"
+    rm -f "$TMPD/upg_called" "$TMPD/sdrun_called" "$PREFIX_LIB/self-upgrade.attempted"; METRICS="$TMPD/metrics"; : > "$METRICS"
     local body='{}'; [ -n "$1" ] && body="{\"desired_release\":\"$1\"}"
     ( set -euo pipefail; export PATH="$BIN:$PATH" PREFIX_LIB METRICS; source "$L2"; _maybe_self_upgrade 200 "$body" ) 2>/dev/null
 }
@@ -196,7 +203,7 @@ SDRUN_RC=1 run_d "$TMPD/cg_refresh"
     && pass "D6: systemd-run failure → falls back to inline (legacy behaviour)" || fail "D6: no fallback when systemd-run fails"
 # wiring: the call sits BEFORE the flock (the transient unit does not inherit fd 9)
 _dl=$(grep -n '^	_maybe_detach_from_refresh_unit "\$@"' "$UPGRADE" -m1 | cut -d: -f1)
-_ll=$(grep -n '^	exec 9>"\$LOCK_FILE"' "$UPGRADE" -m1 | cut -d: -f1)
+_ll=$(grep -n '^[[:space:]]*exec 9>"\$LOCK_FILE"' "$UPGRADE" -m1 | cut -d: -f1)
 [ -n "$_dl" ] && [ -n "$_ll" ] && [ "$_dl" -lt "$_ll" ] \
     && pass "D7: detach is wired before the upgrade.lock flock" || fail "D7: detach missing or after the flock"
 
