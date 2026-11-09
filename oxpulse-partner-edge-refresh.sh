@@ -438,6 +438,16 @@ _maybe_self_upgrade() {
         emit_metric "partner_edge_self_upgrade_downgrade_refused_total" "" "1"
         return 0
     fi
+    # In-flight probe BEFORE attempt bookkeeping: an already-running
+    # self-upgrade unit must not consume retry budget or sit behind a backoff
+    # window — skip it without touching the marker.
+    local _unit="oxpulse-partner-edge-self-upgrade" _st
+    _st=$(systemctl show -p ActiveState --value "$_unit.service" 2>/dev/null || true)
+    case "$_st" in
+        active|activating|deactivating|reloading)
+            log "self-upgrade: $_unit.service already $_st — not starting another"
+            return 0 ;;
+    esac
     # Attempt tracking (pillow 0.16.40→0.16.41): the self-upgrade runs as a
     # detached transient unit, so its outcome is invisible to this tick — a
     # failed attempt previously left NO trace and the node could sit unapplied
@@ -507,16 +517,9 @@ _maybe_self_upgrade() {
     # upgrade mid-run (2026-10-31, pillow 0.16.31 -> 0.16.33), and mid-pull the
     # rollback path never runs. --no-block returns at once; the outcome lives in
     # `journalctl -u oxpulse-partner-edge-self-upgrade` and the upgrade log.
-    # upgrade.sh keeps its own flock; the ActiveState probe is a cheap pre-check so
-    # a second refresh tick during a long upgrade does not even try.
+    # upgrade.sh keeps its own flock; the ActiveState probe (above) is a cheap
+    # pre-check so a second refresh tick during a long upgrade does not even try.
     # timeout 900: a DPI-blocked docker pull must not run forever. Fail-soft.
-    local _unit="oxpulse-partner-edge-self-upgrade" _st
-    _st=$(systemctl show -p ActiveState --value "$_unit.service" 2>/dev/null || true)
-    case "$_st" in
-        active|activating|deactivating|reloading)
-            log "self-upgrade: $_unit.service already $_st — not starting another"
-            return 0 ;;
-    esac
     if systemd-run --quiet --no-block --collect --unit="$_unit" \
         --description="OxPulse partner-edge self-upgrade to v$_desired" \
         --property=Type=oneshot --property=TimeoutStartSec=1000 \

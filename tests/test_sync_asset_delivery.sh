@@ -346,9 +346,16 @@ _make_release() {
 	# tag=latest skips the SHA256SUMS fetch entirely (sha256sums_ok=0);
 	# ALLOW_UNVERIFIED=1 — which legitimately un-verifies the SCRIPT class —
 	# must NOT un-verify the root-daemon asset.
+	#
+	# UPG-3 contract: unarmed guard → every managed file is REQUIRED — so the
+	# fixture serves the two unconditionally-managed payloads (defaults.conf,
+	# VERSION) or the phase-1 die() fires before the asset step is reached.
 	printf '[Service]\nExecStart=/usr/local/bin/oxpulse-awg-params-agent\n' \
 		> "$FSYSTEMD/oxpulse-awg-params-agent.service"
 	printf 'SENTINEL' > "$FBIN/oxpulse-awg-params-agent"
+	mkdir -p "$FIXTURE/raw/config"
+	printf 'NAIVE_SOCKS_PORT=1080\n' > "$FIXTURE/raw/config/defaults.conf"
+	printf '9.9.9\n' > "$FIXTURE/raw/VERSION"
 
 	run env FAKE_SYSTEMCTL_ACTIVE=1 ALLOW_UNVERIFIED=1 PATH="$TMP/bin:$PATH" \
 		bash -c "$(_sync_env); bash '$TMP/run_sync.sh' latest"
