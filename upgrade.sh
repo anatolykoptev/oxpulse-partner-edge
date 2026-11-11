@@ -1145,6 +1145,12 @@ if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
 		exec 9>"$LOCK_FILE"
 		flock -n 9 || die "another upgrade.sh is running (lock: $LOCK_FILE). If stuck, check the pid and remove the lock file."
 	fi
+	# The handoff credential is single-use: it vouched for THIS process only.
+	# Drop it so no descendant (docker, systemd-run, a nested upgrade.sh) can
+	# inherit skip-lock credentials. fd 9 stays open on purpose — the lock
+	# lives on it for the whole run, and the self-update re-exec re-exports the
+	# flag right before it hands the same fd to the next image.
+	unset OXPULSE_UPGRADE_LOCK_HELD
 fi
 
 # --templates-only: re-render channel client configs from upstream templates, skip image ops.
@@ -1672,7 +1678,7 @@ _probe_running_edge_tag() {
 	_imgs=$($DOCKER_BIN ps --filter "name=oxpulse-partner-" --format '{{.Image}}' 2>/dev/null || true)
 	[[ -n "$_imgs" ]] || return 0
 	printf '%s\n' "$_imgs" \
-		| sed -nE 's|.*:([vV]?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?).*|\1|p' \
+		| sed -nE 's|^ghcr\.io/anatolykoptev/partner-edge-[a-z]+:([vV]?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?).*|\1|p' \
 		| sed 's|^[vV]||' | sort -V | head -n1
 }
 

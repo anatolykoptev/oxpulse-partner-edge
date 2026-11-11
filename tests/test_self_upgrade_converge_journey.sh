@@ -95,6 +95,9 @@ case "$*" in
 	*"ps"*"--filter"*)
 		_rt="$(cat "${DOCKER_RUNNING_TAG_FILE:?}" 2>/dev/null || true)"
 		[[ -n "$_rt" ]] && printf 'ghcr.io/anatolykoptev/partner-edge-sfu:%s\n' "$_rt"
+		# Extra running containers (node-exporter, stale/debug) - the real
+		# `docker ps --filter name=` would list them too.
+		[[ -r "${DOCKER_PS_EXTRA_FILE:-}" ]] && cat "$DOCKER_PS_EXTRA_FILE"
 		exit 0 ;;
 	*"config --services"*) printf 'sfu\n'; exit 0 ;;
 	*"compose config"*)    cat "${COMPOSE_FILE_PATH:?}"; exit 0 ;;
@@ -109,6 +112,7 @@ case "$*" in
 		esac
 		exit 0 ;;
 	*"pull"*)
+		printf 'LOCKHELD=%s\n' "${OXPULSE_UPGRADE_LOCK_HELD:-unset}" >> "${DOCKER_CALL_LOG}"
 		[[ -n "${DOCKER_PULL_SLEEP:-0}" && "${DOCKER_PULL_SLEEP}" != "0" ]] && sleep "$DOCKER_PULL_SLEEP"
 		if [[ "${DOCKER_KILL_UPGRADE:-0}" == "1" ]]; then
 			# Kill -9 the WORKER — the ancestor that actually holds the upgrade
@@ -156,7 +160,7 @@ for a in "$@"; do
 	case "$a" in is-enabled) printf 'enabled\n'; exit 0;; esac
 done
 case "$*" in
-	*"ActiveState"*) printf 'inactive\n'; exit 0 ;;
+	*"ActiveState"*) printf '%s\n' "${SELFUP_STATE:-inactive}"; exit 0 ;;
 	*"is-active --quiet"*) exit 0 ;;
 	*) exit 0 ;;
 esac
@@ -462,6 +466,7 @@ R7="$T/r7.sh"
 	echo 'emit_gauge()  { printf "GAUGE %s %s %s\n" "$1" "$2" "$3" >> "$METRICS"; }'
 	awk '/^_self_upgrade_is_ge\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
 	awk '/^_self_upgrade_running_tag\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
+	awk '/^_write_attempt_marker\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
 	awk '/^_self_upgrade_alert\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
 	awk '/^_maybe_self_upgrade\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
 } > "$R7"
@@ -470,6 +475,7 @@ bash -n "$R7" && pass "J7a: extracted refresh functions parse" || fail "J7a: ref
 R7D="$T/r7"; mkdir -p "$R7D/lib" "$R7D/sbin" "$R7D/bin"
 printf '1000\n' > "$R7D/epoch"
 printf 'tg_alert() { printf "ALERT %%s\\n" "$*" >> "${ALERT_LOG:?}"; }\n' > "$R7D/sbin/telegram-alert-lib.sh"
+printf '#!/usr/bin/env bash\nprintf "mv %%s\\n" "$*" >> "${MV_LOG:-/dev/null}"\nexec /bin/mv "$@"\n' > "$R7D/bin/mv"; chmod +x "$R7D/bin/mv"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$R7D/bin/oxpulse-partner-edge-upgrade"; chmod +x "$R7D/bin/oxpulse-partner-edge-upgrade"
 : > "$R7D/running_tag"
 
@@ -480,6 +486,8 @@ run_refresh() {  # $1=desired; env: R7_TAG_FILE, R7_*
 	         METRICS ALERT_LOG="$R7D/alert.log" FAKE_EPOCH_FILE="$R7D/epoch" \
 	         DOCKER_CALL_LOG=/dev/null DOCKER_RUNNING_TAG_FILE="$R7D/running_tag" \
 	         DOCKER_STATE_FILE=/dev/null COMPOSE_FILE_PATH=/dev/null \
+	         SELFUP_STATE="${SELFUP_STATE:-inactive}" DOCKER_PS_EXTRA_FILE="${R7_PS_EXTRA:-}" \
+	         MV_LOG="${MV_LOG:-/dev/null}" \
 	         OXPULSE_SELF_UPGRADE_BASE_BACKOFF="${R7_BASE:-3600}" \
 	         OXPULSE_SELF_UPGRADE_MAX_BACKOFF="${R7_MAX:-86400}" \
 	         OXPULSE_SELF_UPGRADE_MAX_ATTEMPTS="${R7_ATT:-8}"
@@ -536,6 +544,68 @@ _alerts=$(wc -l < "$R7D/alert.log" 2>/dev/null || printf '0')
 	&& pass "J7c-4: ceiling alert fires exactly once" \
 	|| fail "J7c-4: ceiling alerted $_alerts times"
 unset R7_BASE R7_MAX R7_ATT
+
+echo "=== J8: running-tag probes are scoped to the managed partner-edge images ==="
+# node-exporter (v1.8.2) and a stale oxpulse-partner-foo (0.1.0) share the
+# name prefix with the edge containers but are NOT managed images. Neither may
+# read as a diverging tag when the edge itself runs the desired release.
+PSX="$T/ps_extra"
+printf 'quay.io/prometheus/node-exporter:v1.8.2\nregistry.example/oxpulse-partner-foo:0.1.0\n' > "$PSX"
+printf 'IMAGE_VERSION=v9.9.9\n' > "$R7D/lib/install.env"
+printf '9.9.9\n' > "$R7D/running_tag"
+rm -f "$R7D/lib/self-upgrade.attempted" "$T/sdrun_marker"
+R7_PS_EXTRA="$PSX" SDRUN_CALL_LOG="$T/sdrun_marker" run_refresh "9.9.9"
+if [[ ! -s "$T/sdrun_marker" ]] && ! grep -q 'marker_diverged' "$R7D/metrics"; then
+	pass "J8a: refresh ignores node-exporter v1.8.2 / non-edge container (edge on desired, no divergence)"
+else
+	fail "J8a: refresh read a non-edge container as diverged (sdrun=$(cat "$T/sdrun_marker" 2>/dev/null), metrics=$(cat "$R7D/metrics"))"
+fi
+N8="$T/n8"; build_node "$N8" v9.9.9 new
+printf '9.9.9\n' > "$N8/running_tag"
+OUT8=$(run_upgrade "$N8" DOCKER_PS_EXTRA_FILE="$PSX" 2>&1); RC8=$?
+if [[ "$RC8" -eq 0 ]] && grep -q 'nothing to do' <<<"$OUT8" && ! grep -q 'resuming the interrupted apply' <<<"$OUT8"; then
+	pass "J8b: upgrade.sh probe ignores non-edge containers (already on target -> nothing to do)"
+else
+	fail "J8b: upgrade.sh treated a non-edge container as divergence (rc=$RC8; $(tail -4 <<<"$OUT8"))"
+fi
+
+echo "=== J9: in-flight self-upgrade unit consumes no retry budget ==="
+printf 'IMAGE_VERSION=v9.9.8\n' > "$R7D/lib/install.env"
+printf '9.9.8\n' > "$R7D/running_tag"
+printf '100000\n' > "$R7D/epoch"
+rm -f "$R7D/lib/self-upgrade.attempted" "$T/sdrun_marker"
+SELFUP_STATE=active SDRUN_CALL_LOG="$T/sdrun_marker" run_refresh "9.9.9"
+if [[ ! -e "$R7D/lib/self-upgrade.attempted" && ! -s "$T/sdrun_marker" ]]; then
+	pass "J9a: active unit, no prior marker -> no marker created, nothing launched"
+else
+	fail "J9a: in-flight unit touched the attempts marker ($(cat "$R7D/lib/self-upgrade.attempted" 2>/dev/null))"
+fi
+printf '9.9.9:2:5:0\n' > "$R7D/lib/self-upgrade.attempted"
+SELFUP_STATE=active SDRUN_CALL_LOG="$T/sdrun_marker" run_refresh "9.9.9"
+if [[ "$(cat "$R7D/lib/self-upgrade.attempted")" == "9.9.9:2:5:0" && ! -s "$T/sdrun_marker" ]]; then
+	pass "J9b: active unit, existing marker (attempts=2) -> marker byte-identical"
+else
+	fail "J9b: in-flight unit consumed budget (marker=$(cat "$R7D/lib/self-upgrade.attempted"))"
+fi
+
+echo "=== J10: attempts marker is written atomically (tmp in same dir + mv) ==="
+rm -f "$R7D/lib/self-upgrade.attempted" "$T/sdrun_marker" "$T/mv.log"
+MV_LOG="$T/mv.log" SDRUN_CALL_LOG="$T/sdrun_marker" run_refresh "9.9.9"
+if grep -qE "mv -f $R7D/lib/self-upgrade\.attempted\.tmp\.[0-9]+ $R7D/lib/self-upgrade\.attempted\$" "$T/mv.log" 2>/dev/null \
+	&& [[ "$(cut -d: -f1,2 "$R7D/lib/self-upgrade.attempted")" == "9.9.9:1" ]] \
+	&& ! ls "$R7D/lib"/self-upgrade.attempted.tmp.* >/dev/null 2>&1; then
+	pass "J10a: marker written via same-dir tmp + mv, no tmp left behind"
+else
+	fail "J10a: marker not written atomically (mv.log=$(cat "$T/mv.log" 2>/dev/null))"
+fi
+
+echo "=== J11: lock-handoff credential does not leak to descendants ==="
+if grep -q '^LOCKHELD=' "$N1/docker_calls.log" 2>/dev/null \
+	&& ! grep '^LOCKHELD=' "$N1/docker_calls.log" | grep -qv '^LOCKHELD=unset$'; then
+	pass "J11a: docker (descendant of the re-exec'd upgrader) sees no OXPULSE_UPGRADE_LOCK_HELD"
+else
+	fail "J11a: descendant inherited the skip-lock credential ($(grep '^LOCKHELD=' "$N1/docker_calls.log" 2>/dev/null | sort -u | tr '\n' ' '))"
+fi
 
 echo ""
 printf '=== RESULT: %s tests, %s failures ===\n' "$TESTS" "$FAILURES"

@@ -355,7 +355,7 @@ _self_upgrade_running_tag() {
     _imgs=$(docker ps --filter "name=oxpulse-partner-" --format '{{.Image}}' 2>/dev/null || true)
     [[ -n "$_imgs" ]] || return 0
     printf '%s\n' "$_imgs" \
-        | sed -nE 's|.*:([vV]?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?).*|\1|p' \
+        | sed -nE 's|^ghcr\.io/anatolykoptev/partner-edge-[a-z]+:([vV]?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?).*|\1|p' \
         | sed 's|^[vV]||' | sort -V | head -n1
 }
 # _self_upgrade_alert MSG — operator-visible alert through the existing
@@ -376,6 +376,20 @@ _self_upgrade_alert() {
         return 0
     fi
     tg_alert "$_msg" force || true
+}
+# _write_attempt_marker DESIRED ATTEMPTS EPOCH ALERTED — atomic: tmp file in
+# the SAME directory (rename(2) is atomic only within one filesystem) + mv, so
+# a crash mid-write can never leave a truncated marker that parses as
+# attempts=0 and silently resets the backoff/ceiling. Best-effort like before.
+_write_attempt_marker() {
+    local _m="$PREFIX_LIB/self-upgrade.attempted" _t
+    _t="$_m.tmp.$$"
+    if printf "%s:%s:%s:%s\n" "$1" "$2" "$3" "$4" > "$_t" 2>/dev/null; then
+        mv -f "$_t" "$_m" 2>/dev/null || rm -f "$_t" 2>/dev/null || true
+    else
+        rm -f "$_t" 2>/dev/null || true
+    fi
+    return 0
 }
 _maybe_self_upgrade() {
     local hb_code="$1" hb_body="$2"
@@ -482,7 +496,7 @@ _maybe_self_upgrade() {
             _self_upgrade_alert "self-upgrade to v${_desired} hit the retry ceiling (${_attempts} attempts, backoff ${_base_backoff}s→${_max_backoff}s exhausted) — node stays on v${_installed}; manual intervention required. journalctl -u oxpulse-partner-edge-self-upgrade"
             emit_metric "partner_edge_self_upgrade_ceiling_total" "tag=\"$_desired\"" "1"
             _alerted=1
-            printf '%s:%s:%s:%s\n' "$_desired" "$_attempts" "$_last_epoch" "$_alerted" > "$_attempt_marker" 2>/dev/null || true
+            _write_attempt_marker "$_desired" "$_attempts" "$_last_epoch" "$_alerted"
         fi
         log "self-upgrade: retry ceiling reached for v$_desired ($_attempts of $_max_attempts attempts) — not retrying this tag"
         return 0
@@ -505,7 +519,7 @@ _maybe_self_upgrade() {
         emit_metric "partner_edge_self_upgrade_retry_total" "tag=\"$_desired\"" "1"
     fi
     emit_gauge "partner_edge_self_upgrade_attempts" "tag=\"$_desired\"" "$_attempts"
-    printf '%s:%s:%s:%s\n' "$_desired" "$_attempts" "$_now" "$_alerted" > "$_attempt_marker" 2>/dev/null || true
+    _write_attempt_marker "$_desired" "$_attempts" "$_now" "$_alerted"
     log "self-upgrade: desired_release=$_desired (installed=$_installed) — applying"
     emit_metric "partner_edge_self_upgrade_applied_total" "tag=\"$_desired\"" "1"
     local _upg_bin
