@@ -368,6 +368,7 @@ _self_upgrade_alert() {
         local _tg
         for _tg in "${PREFIX_SBIN:-/usr/local/sbin}/telegram-alert-lib.sh" \
                    "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/telegram-alert-lib.sh"; do
+            # shellcheck source=/dev/null  # installed on the node, not in the repo layout
             [[ -r "$_tg" ]] && { . "$_tg"; break; }
         done
     fi
