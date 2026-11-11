@@ -142,7 +142,7 @@ Partner-edges form a layer-3 mesh with the central node via [AmneziaWG](https://
 
 **Critical invariant:** the obfuscation parameters (`Jc/Jmin/Jmax/S1/S2/S4/H1..H4/I1..I5`) MUST match byte-for-byte across every peer in the mesh. A single-byte drift makes the data plane silently drop decrypted packets while WireGuard handshake keeps succeeding — see [`docs/AWG_PARAM_INVARIANT.md`](docs/AWG_PARAM_INVARIANT.md) for the failure mode and the diagnostic procedure.
 
-The mesh carries inter-partner control plane (SFU `/metrics` scraping, relay-API, OTLP traces). It does **not** carry user media — SRTP frames are end-to-end encrypted client-to-client independently.
+The mesh carries inter-partner control plane (SFU `/metrics` collection, relay-API, OTLP traces). It does **not** carry user media — SRTP frames are end-to-end encrypted client-to-client independently.
 
 ## State and secrets
 

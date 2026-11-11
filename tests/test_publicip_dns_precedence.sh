@@ -8,8 +8,8 @@
 # from its reserved INBOUND public IP) that value has no inbound path —
 # using it verbatim for coturn's external-ip / the SFU's SFU_PUBLIC_IP makes
 # every WebRTC relay candidate unreachable, so ICE connectivity checks stall
-# (~6s) and calls never connect. Confirmed live: egress=132.145.192.254 (no
-# inbound path) vs. the real reachable IP 129.159.103.86 (the TURNS DNS
+# (~6s) and calls never connect. Confirmed live: egress=198.51.100.254 (no
+# inbound path) vs. the real reachable IP 198.51.100.86 (the TURNS DNS
 # A-record); relay RTT dropped 6000ms→67ms once corrected.
 #
 # Fix: hydrate.sh's resolve_external_ip() and upgrade.sh's resolve_public_ip()
@@ -143,21 +143,21 @@ _run_hydrate() {
 }
 
 # B1: this IS the live bug, falsified. Without the fix, PUBLIC_IP stays the
-# egress IP (132.145.192.254-style) even though the TURNS DNS A-record
-# (129.159.103.86) is the reachable one — revert resolve_external_ip to
+# egress IP (198.51.100.254-style) even though the TURNS DNS A-record
+# (198.51.100.86) is the reachable one — revert resolve_external_ip to
 # "PUBLIC_IP=$egress_ip; return" and this test goes RED.
-B1_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" \
-    _run_hydrate "132.145.192.254" "turns" "example.com" "") && B1_RC=0 || B1_RC=$?
+B1_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="198.51.100.86" \
+    _run_hydrate "198.51.100.254" "turns" "example.com" "") && B1_RC=0 || B1_RC=$?
 [[ "$B1_RC" -eq 0 ]] || fail "B1: resolve_external_ip died unexpectedly: $B1_OUT"
-echo "$B1_OUT" | grep -F 'PUBLIC_IP=129.159.103.86' >/dev/null \
-    && pass "B1: DNS A-record (129.159.103.86) wins over egress autodetect (132.145.192.254)" \
-    || fail "B1: expected DNS IP 129.159.103.86, got: $B1_OUT"
+echo "$B1_OUT" | grep -F 'PUBLIC_IP=198.51.100.86' >/dev/null \
+    && pass "B1: DNS A-record (198.51.100.86) wins over egress autodetect (198.51.100.254)" \
+    || fail "B1: expected DNS IP 198.51.100.86, got: $B1_OUT"
 echo "$B1_OUT" | grep -F 'PUBLIC_IP_SOURCE=dns' >/dev/null \
     && pass "B1b: source labeled dns" || fail "B1b: source not labeled dns: $B1_OUT"
 
 # B2: OXPULSE_PUBLIC_IP override wins over BOTH DNS and autodetect.
-B2_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" OXPULSE_PUBLIC_IP="203.0.113.9" \
-    _run_hydrate "132.145.192.254" "turns" "example.com" "") && B2_RC=0 || B2_RC=$?
+B2_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="198.51.100.86" OXPULSE_PUBLIC_IP="203.0.113.9" \
+    _run_hydrate "198.51.100.254" "turns" "example.com" "") && B2_RC=0 || B2_RC=$?
 [[ "$B2_RC" -eq 0 ]] || fail "B2: resolve_external_ip died unexpectedly: $B2_OUT"
 echo "$B2_OUT" | grep -F 'PUBLIC_IP=203.0.113.9' >/dev/null \
     && pass "B2: OXPULSE_PUBLIC_IP override (203.0.113.9) wins over DNS" \
@@ -168,11 +168,11 @@ echo "$B2_OUT" | grep -F 'PUBLIC_IP_SOURCE=override' >/dev/null \
 # B3: no DNS A-record (dig present, empty result) → falls through to the
 # step-1 egress autodetect value passed in as $1 (unchanged fallback).
 B3_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="" \
-    _run_hydrate "132.145.192.254" "turns" "example.com" "") && B3_RC=0 || B3_RC=$?
+    _run_hydrate "198.51.100.254" "turns" "example.com" "") && B3_RC=0 || B3_RC=$?
 [[ "$B3_RC" -eq 0 ]] || fail "B3: resolve_external_ip died unexpectedly: $B3_OUT"
-echo "$B3_OUT" | grep -F 'PUBLIC_IP=132.145.192.254' >/dev/null \
+echo "$B3_OUT" | grep -F 'PUBLIC_IP=198.51.100.254' >/dev/null \
     && pass "B3: no DNS record → falls through to egress autodetect" \
-    || fail "B3: expected fallback 132.145.192.254, got: $B3_OUT"
+    || fail "B3: expected fallback 198.51.100.254, got: $B3_OUT"
 echo "$B3_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \
     && pass "B3b: source labeled autodetect" || fail "B3b: source not labeled autodetect: $B3_OUT"
 
@@ -180,12 +180,12 @@ echo "$B3_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \
 # autodetect (no crash / die). hydrate.sh does NOT hard-require dig, unlike
 # upgrade.sh — this is the explicit graceful-degrade requirement.
 B4_OUT=$(PATH="$EMPTY_BIN" \
-    "$BASH_BIN" -c "source '$HYDRATE_PREAMBLE'; PUBLIC_IP='132.145.192.254'; PRIVATE_IP=''; resolve_external_ip '132.145.192.254' 'turns' 'example.com'; \
+    "$BASH_BIN" -c "source '$HYDRATE_PREAMBLE'; PUBLIC_IP='198.51.100.254'; PRIVATE_IP=''; resolve_external_ip '198.51.100.254' 'turns' 'example.com'; \
         echo \"PUBLIC_IP=\$PUBLIC_IP\"; echo \"PUBLIC_IP_SOURCE=\$PUBLIC_IP_SOURCE\"" 2>&1) && B4_RC=0 || B4_RC=$?
 [[ "$B4_RC" -eq 0 ]] \
     && pass "B4: dig+getent both absent → resolve_external_ip does not die (RC=0)" \
     || fail "B4: resolve_external_ip died with dig+getent absent (RC=$B4_RC): $B4_OUT"
-echo "$B4_OUT" | grep -F 'PUBLIC_IP=132.145.192.254' >/dev/null \
+echo "$B4_OUT" | grep -F 'PUBLIC_IP=198.51.100.254' >/dev/null \
     && pass "B4b: degrades to egress autodetect value" \
     || fail "B4b: expected egress fallback, got: $B4_OUT"
 echo "$B4_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \
@@ -197,10 +197,10 @@ echo "$B4_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \
 # SFU_PUBLIC_IP; a regression that keeps the OCI-hairpin lines pinned to the
 # egress IP would reintroduce the exact incident even if PUBLIC_IP itself
 # were fixed.
-B5_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" \
-    _run_hydrate "132.145.192.254" "turns" "example.com" "10.0.0.5") && B5_RC=0 || B5_RC=$?
+B5_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="198.51.100.86" \
+    _run_hydrate "198.51.100.254" "turns" "example.com" "10.0.0.5") && B5_RC=0 || B5_RC=$?
 [[ "$B5_RC" -eq 0 ]] || fail "B5: resolve_external_ip died unexpectedly: $B5_OUT"
-echo "$B5_OUT" | grep -F 'EXTERNAL_IP_LINE=129.159.103.86/10.0.0.5' >/dev/null \
+echo "$B5_OUT" | grep -F 'EXTERNAL_IP_LINE=198.51.100.86/10.0.0.5' >/dev/null \
     && pass "B5: EXTERNAL_IP_LINE recomputed from resolved DNS IP + PRIVATE_IP" \
     || fail "B5: EXTERNAL_IP_LINE not recomputed correctly, got: $B5_OUT"
 echo "$B5_OUT" | grep -F 'ALLOWED_PEER_IP_LINE=allowed-peer-ip=10.0.0.5' >/dev/null \
@@ -216,36 +216,36 @@ echo "=== Section C: upgrade.sh resolve_public_ip precedence ==="
 _run_upgrade() {
     # upgrade.sh sources STATE_FILE before calling resolve_public_ip, so the
     # global PUBLIC_IP is pre-set to a stale egress value in production.
-    bash -c "source '$UPGRADE_PREAMBLE'; PUBLIC_IP='132.145.192.254'; resolve_public_ip '$1' '$2'; \
+    bash -c "source '$UPGRADE_PREAMBLE'; PUBLIC_IP='198.51.100.254'; resolve_public_ip '$1' '$2'; \
         echo \"PUBLIC_IP=\$PUBLIC_IP\"; echo \"PUBLIC_IP_SOURCE=\$PUBLIC_IP_SOURCE\"; echo \"DIG_IPS=\$DIG_IPS\"" 2>&1
 }
 
 # C1: DNS tier wins over curl autodetect.
-C1_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" CURL_STUB_RESULT="132.145.192.254" \
+C1_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="198.51.100.86" CURL_STUB_RESULT="198.51.100.254" \
     _run_upgrade "turns" "example.com") && C1_RC=0 || C1_RC=$?
 [[ "$C1_RC" -eq 0 ]] || fail "C1: resolve_public_ip died unexpectedly: $C1_OUT"
-echo "$C1_OUT" | grep -F 'PUBLIC_IP=129.159.103.86' >/dev/null \
+echo "$C1_OUT" | grep -F 'PUBLIC_IP=198.51.100.86' >/dev/null \
     && pass "C1: DNS A-record wins over curl autodetect" \
     || fail "C1: expected DNS IP, got: $C1_OUT"
 echo "$C1_OUT" | grep -F 'PUBLIC_IP_SOURCE=dns' >/dev/null && pass "C1b: source labeled dns" || fail "C1b: $C1_OUT"
-echo "$C1_OUT" | grep -F 'DIG_IPS=129.159.103.86' >/dev/null \
+echo "$C1_OUT" | grep -F 'DIG_IPS=198.51.100.86' >/dev/null \
     && pass "C1c: DIG_IPS populated for the caller's DNS-preflight guard" || fail "C1c: $C1_OUT"
 
 # C2: OXPULSE_PUBLIC_IP override wins over DNS.
-C2_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="129.159.103.86" OXPULSE_PUBLIC_IP="203.0.113.9" \
+C2_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="198.51.100.86" OXPULSE_PUBLIC_IP="203.0.113.9" \
     _run_upgrade "turns" "example.com") && C2_RC=0 || C2_RC=$?
 [[ "$C2_RC" -eq 0 ]] || fail "C2: resolve_public_ip died unexpectedly: $C2_OUT"
 echo "$C2_OUT" | grep -F 'PUBLIC_IP=203.0.113.9' >/dev/null \
     && pass "C2: OXPULSE_PUBLIC_IP override wins over DNS" \
     || fail "C2: got: $C2_OUT"
-echo "$C2_OUT" | grep -F 'DIG_IPS=129.159.103.86' >/dev/null \
+echo "$C2_OUT" | grep -F 'DIG_IPS=198.51.100.86' >/dev/null \
     && pass "C2b: DIG_IPS still populated (guard still runs against override)" || fail "C2b: $C2_OUT"
 
 # C3: no DNS record → falls through to curl autodetect.
-C3_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="" CURL_STUB_RESULT="132.145.192.254" \
+C3_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="" CURL_STUB_RESULT="198.51.100.254" \
     _run_upgrade "turns" "example.com") && C3_RC=0 || C3_RC=$?
 [[ "$C3_RC" -eq 0 ]] || fail "C3: resolve_public_ip died unexpectedly: $C3_OUT"
-echo "$C3_OUT" | grep -F 'PUBLIC_IP=132.145.192.254' >/dev/null \
+echo "$C3_OUT" | grep -F 'PUBLIC_IP=198.51.100.254' >/dev/null \
     && pass "C3: no DNS record → falls through to curl autodetect" \
     || fail "C3: got: $C3_OUT"
 echo "$C3_OUT" | grep -F 'PUBLIC_IP_SOURCE=autodetect' >/dev/null \

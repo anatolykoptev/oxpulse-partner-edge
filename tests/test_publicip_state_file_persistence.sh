@@ -36,8 +36,8 @@ fail() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
-EGRESS="132.145.192.254"
-DNS_IP="129.159.103.86"
+EGRESS="198.51.100.254"
+DNS_IP="198.51.100.86"
 PRIVATE_IP="10.0.0.5"
 TURNS="turns"
 DOMAIN="example.com"

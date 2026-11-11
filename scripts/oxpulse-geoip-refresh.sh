@@ -20,7 +20,7 @@
 # not a transient error — the unit is Type=oneshot with no Restart=, and the
 # timer is MONTHLY. So one lost race froze the database until September:
 # oxpulse-geoip-refresh.service sat `failed` on ruoxp and cheburator for ten
-# days with nothing watching, ruoxp's mmdb was June data, and rvpn's was from
+# days with nothing watching, ruoxp's mmdb was June data, and node-a's was from
 # 20 May. By the time anyone looked the 2026-08 URL returned 200.
 #
 # Hence the fallback below: if the current month is not published yet, take the

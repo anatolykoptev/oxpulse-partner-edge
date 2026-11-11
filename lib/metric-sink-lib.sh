@@ -227,7 +227,7 @@ _emit_prom_gauge_file() {
 # gets its OWN file, truncated on each write. A caller emitting one series PER
 # SUBJECT — `partner_edge_container_unhealthy{container="..."}` across five
 # containers — therefore wrote the same file five times and only the LAST
-# subject survived. ruoxp and rvpn both carried exactly one sample,
+# subject survived. ruoxp and node-a both carried exactly one sample,
 # `container="oxpulse-partner-xray"` (alphabetically last), while the healer's
 # own `..._containers_seen` said 5. Four of five containers had no health
 # series at all, so a wedged coturn would have been invisible in a metric that

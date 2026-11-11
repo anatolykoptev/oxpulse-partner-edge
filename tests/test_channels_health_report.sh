@@ -931,7 +931,7 @@ STUB
     rm -rf "$T"
 }
 RETRY401=$(printf '%s\n' \
-  '2026-11-04T10:47:58.226+0000 INFO IPv4. Connected to: 11.77.0.2:3478' \
+  '2026-11-04T10:47:58.226+0000 INFO IPv4. Connected to: 198.51.100.2:3478' \
   '2026-11-04T10:47:58.229+0000 INFO allocate sent' \
   '2026-11-04T10:47:58.229+0000 INFO allocate response received: ' \
   '2026-11-04T10:47:58.230+0000 INFO allocate sent' \
@@ -941,18 +941,18 @@ RETRY401=$(printf '%s\n' \
   '2026-11-04T10:47:59.233+0000 INFO allocate sent' \
   '2026-11-04T10:47:59.234+0000 INFO allocate response received: ')
 run15b "4.18 401-retry loop killed at the bound" "$RETRY401" "auth-401"
-run15b "dead server (sent, never answered)" $'INFO Connected to: 11.77.0.77:3478\nINFO allocate sent' "timeout"
-run15b "healthy handshake killed mid-data" $'INFO allocate sent\nINFO allocate response received: \nINFO allocate sent\nINFO allocate response received: \nINFO IPv4. Received relay addr: 11.77.0.2:49702' "timeout"
+run15b "dead server (sent, never answered)" $'INFO Connected to: 198.51.100.77:3478\nINFO allocate sent' "timeout"
+run15b "healthy handshake killed mid-data" $'INFO allocate sent\nINFO allocate response received: \nINFO allocate sent\nINFO allocate response received: \nINFO IPv4. Received relay addr: 198.51.100.2:49702' "timeout"
 # Real healthy 4.18 -y output has 6 responses and 2 relay addrs (two allocations, each
 # a 401 challenge + success + more); killed at the bound it must STAY timeout. Pins the
 # `! grep -q "Received relay addr"` clause: without it this reads auth-401.
 HEALTHY6=$(printf '%s\n' \
   'INFO allocate sent' 'INFO allocate response received: ' \
   'INFO allocate sent' 'INFO allocate response received: ' \
-  'INFO IPv4. Received relay addr: 11.77.0.2:49912' \
+  'INFO IPv4. Received relay addr: 198.51.100.2:49912' \
   'INFO allocate sent' 'INFO allocate response received: ' \
   'INFO allocate sent' 'INFO allocate response received: ' \
-  'INFO IPv4. Received relay addr: 11.77.0.2:49913' \
+  'INFO IPv4. Received relay addr: 198.51.100.2:49913' \
   'INFO allocate sent' 'INFO allocate response received: ' \
   'INFO allocate sent' 'INFO allocate response received: ')
 run15b "healthy 4.18 handshake (6 responses + relay addrs) killed at the bound" "$HEALTHY6" "timeout"

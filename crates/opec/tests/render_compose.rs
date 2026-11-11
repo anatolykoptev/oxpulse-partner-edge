@@ -31,9 +31,9 @@ fn set_frozen_env() {
         "mlkem768x25519plus.native.0rtt.fXgOoxcW",
     );
     env::set_var("TURNS_SUBDOMAIN", "api-test01");
-    env::set_var("PUBLIC_IP", "157.22.204.190");
+    env::set_var("PUBLIC_IP", "198.51.100.100");
     env::set_var("PRIVATE_IP", "");
-    env::set_var("EXTERNAL_IP_LINE", "157.22.204.190");
+    env::set_var("EXTERNAL_IP_LINE", "198.51.100.100");
     env::set_var("IMAGE_VERSION", "stable");
     env::set_var("SFU_UDP_PORT", "7878");
     env::set_var("SFU_METRICS_PORT", "9317");

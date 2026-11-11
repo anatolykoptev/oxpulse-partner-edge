@@ -53,7 +53,7 @@ check-sh:
 # those developers with nothing.
 check-rust: build test-all lint deny
 
-# Full pre-PR gate: the cargo half plus the shell suite. Needs Linux — krolik
+# Full pre-PR gate: the cargo half plus the shell suite. Needs Linux — the build host
 # has the repo at ~/src/oxpulse-partner-edge. Before this, `check` was
 # documented as the full gate and ran none of the 190 shell tests, so the only
 # way to learn whether they passed was to push and wait 243s.

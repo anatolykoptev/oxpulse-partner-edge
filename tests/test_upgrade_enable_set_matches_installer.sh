@@ -6,8 +6,8 @@
 #
 # Why this test exists (fleet fingerprint, 2026-08-07 — 5 of 5 nodes, 86 axes):
 # a fresh install enables seven units; nothing on any upgrade path ever ran
-# `systemctl enable` at all. The two oldest nodes (rvpn-seed,
-# zvonilka-cc7cf842800b) therefore sat with oxpulse-partner-edge.service
+# `systemctl enable` at all. The two oldest nodes (node-a-seed,
+# node-c-seed) therefore sat with oxpulse-partner-edge.service
 # DISABLED — no container comes back after a reboot — plus the xray-update and
 # geoip-refresh timers off, and NO cert-watch units at all, so a renewed TURNS
 # certificate never signalled coturn. Every one of those was reachable only

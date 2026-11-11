@@ -2,7 +2,7 @@
 # tests/test_coturn_probe_container_leak.sh — _coturn_probe_run must not leak
 # containers in state `Created`.
 #
-# Live incident (relay node pillow, 2026-10-30): 130 never-started containers of
+# Live incident (relay node node-b, 2026-10-30): 130 never-started containers of
 # the coturn image, entrypoint `timeout`, cmd `<N> turnutils_stunclient ...`,
 # created 5-10/day. The outer `timeout` was the SAME value as the in-container
 # one, so it killed the docker CLI while create/start was still in flight; the

@@ -247,7 +247,7 @@ which runs the distro 4.6.1 until its first upgrade, is therefore safe. The CI s
 test proves it on a real `coturn/coturn:4.6.1`: with the legacy render nothing binds
 UDP on the TLS port; without the lines it does. (Firewall note: a node built by
 `install-relay.sh` opens `443/tcp` only. A node whose ufw has a bare `443 ALLOW`,
-such as msk1, also exposes udp/443, which is why the guarantee is made at render
+on some relay-only nodes, also exposes udp/443, which is why the guarantee is made at render
 time and not by the firewall.)
 
 `coturn-relay.conf.tpl` keeps `no-cli`: coturn 4.18 logs it as deprecated (the CLI is

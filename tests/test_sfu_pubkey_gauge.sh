@@ -2,7 +2,7 @@
 # tests/test_sfu_pubkey_gauge.sh — partner_edge_sfu_pubkey_applied must be able
 # to reach BOTH values (#550).
 #
-# Measured on rvpn, zvonilka and ruoxp on 2026-08-07 — identical on all three:
+# Measured on node-a, node-c and ruoxp on 2026-08-07 — identical on all three:
 #
 #   _written  1 line, 114 chars, sha 20004dd2a6ae   (file: PEM, newlines as \n)
 #   _live     3 lines, 112 chars, sha eb29fd8ee039  (printenv: real PEM)

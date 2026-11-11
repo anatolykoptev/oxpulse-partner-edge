@@ -448,7 +448,7 @@ _esc() { printf '%s' "$1" | sed -e 's/[\\&|"]/\\&/g'; }
 # CH3 was a control-plane-only fallback tunnel (QUIC to a hysteria2 server on
 # the central host). Its server was stopped on purpose on 2026-10-09 after a
 # secrets incident; the edges kept restarting a client that could not connect
-# (rvpn: 30,440 restarts). The edge now decides on its own that CH3 is gone, so
+# (node-a: 30,440 restarts). The edge now decides on its own that CH3 is gone, so
 # the presence or absence of `hysteria2_server` in node-config does not matter.
 #
 # retire_hysteria2_ch3 — idempotent teardown, called from upgrade.sh and from
@@ -565,7 +565,7 @@ retire_hysteria2_ch3() {
     fi
 
     # 1. Container. Compose first, through the node's own project dir: `cd` there
-    #    so .env's COMPOSE_FILE (rvpn's docker-compose.override.yml) is honoured.
+    #    so .env's COMPOSE_FILE (node-a's docker-compose.override.yml) is honoured.
     #    On a node whose compose no longer defines the service that fails, so a
     #    plain `docker rm -f` by name is the fallback — by name, never a pattern.
     if (( have_ctr )); then

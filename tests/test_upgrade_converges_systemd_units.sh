@@ -9,8 +9,8 @@
 # Measured cause (fleet fingerprint, 2026-08-07, 5 of 5 nodes, 86 axes):
 #   • oxpulse-partner-cert-watch.{path,service} carry {{TURNS_SUBDOMAIN}} and
 #     {{PARTNER_DOMAIN}} placeholders, so they were excluded from the verbatim
-#     checksum-copy loop and shipped ONLY by a fresh install. rvpn-seed and
-#     zvonilka-cc7cf842800b have never had them — a renewed TURNS certificate
+#     checksum-copy loop and shipped ONLY by a fresh install. node-a-seed and
+#     node-c-seed have never had them — a renewed TURNS certificate
 #     never signals coturn on either box.
 #   • Nothing on any apply path ever ran `systemctl enable`. The same two nodes
 #     have oxpulse-partner-edge.service DISABLED: their containers do not come
