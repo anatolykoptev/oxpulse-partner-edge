@@ -80,6 +80,11 @@ for a in "$@"; do
 	prev="$a"
 done
 [[ -z "$url" ]] && exit 22
+# Test knob: fail the FIRST upgrader fetch only. That is the early self-update
+# fetch, so it skips its re-exec (warn) and the later gate has to re-exec.
+if [[ -n "${CURL_FAIL_ONCE_FILE:-}" && "$url" == */partner-edge-upgrade.sh && ! -e "$CURL_FAIL_ONCE_FILE" ]]; then
+	: > "$CURL_FAIL_ONCE_FILE"; exit 22
+fi
 rel="${url#fixture://}"
 src="${FIXTURE_ROOT:?}/$rel"
 [[ -f "$src" ]] || exit 22
@@ -613,6 +618,22 @@ else
 	fail "J11a: descendant inherited the skip-lock credential ($(grep '^LOCKHELD=' "$N1/docker_calls.log" 2>/dev/null | sort -u | tr '\n' ' '))"
 fi
 
+
+echo "=== J12: gate re-exec keeps the pre-sync snapshot — rollback restores the OLD scripts ==="
+N12="$T/n12"; build_node "$N12" v9.9.8 old
+printf '#!/usr/bin/env bash\n# OLD-SCRIPT-MARKER-J12\nexit 0\n' > "$N12/sbin/oxpulse-partner-edge-selfheal"
+OUT12=$(run_upgrade "$N12" CURL_FAIL_ONCE_FILE="$N12/.fail_once" DOCKER_PULL_RC=1 2>&1); RC12=$?
+_marker=$(sed -n 's/^IMAGE_VERSION=//p' "$N12/lib/install.env")
+if grep -q 'still running the old upgrade.sh' <<<"$OUT12" && grep -q 'keeping the pre-sync snapshot' <<<"$OUT12"; then
+	pass "J12a: the convergence gate re-exec'd and the child reused the parent's snapshot"
+else
+	fail "J12a: gate re-exec / snapshot reuse not observed (rc=$RC12; $(tail -6 <<<"$OUT12"))"
+fi
+if [[ "$RC12" -ne 0 && "$_marker" == v9.9.8 ]] && grep -q 'OLD-SCRIPT-MARKER-J12' "$N12/sbin/oxpulse-partner-edge-selfheal"; then
+	pass "J12b: pull failed after the gate re-exec; rollback restored the OLD host-script bytes (marker intact)"
+else
+	fail "J12b: rollback restored the NEW scripts or lost the marker (rc=$RC12 marker=$_marker selfheal=$(head -c 120 "$N12/sbin/oxpulse-partner-edge-selfheal" | tr '\n' '|'))"
+fi
 echo ""
 printf '=== RESULT: %s tests, %s failures ===\n' "$TESTS" "$FAILURES"
 [[ "$FAILURES" -eq 0 ]]

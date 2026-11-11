@@ -1152,6 +1152,16 @@ if [[ "$DRY_RUN" -eq 0 && "$MODE" != check ]]; then
 	# flag right before it hands the same fd to the next image.
 	unset OXPULSE_UPGRADE_LOCK_HELD
 fi
+# Pre-sync snapshot handoff across the convergence-gate re-exec: the parent took
+# the Step-1 backup + snapshot_host_scripts BEFORE sync_host_scripts installed the
+# target scripts. The re-exec'd child restarts the apply path, and re-taking the
+# snapshot there would capture the ALREADY-SYNCED scripts (and a compose already
+# healed by the shims), so every rollback branch would restore the NEW scripts
+# beside the old images. Single-use: read once, then unset so no descendant or
+# later re-exec inherits it.
+_SNAPSHOT_REUSE=0
+[[ "${OXPULSE_UPGRADE_SNAPSHOT_TAKEN:-0}" == "1" ]] && _SNAPSHOT_REUSE=1
+unset OXPULSE_UPGRADE_SNAPSHOT_TAKEN
 
 # --templates-only: re-render channel client configs from upstream templates, skip image ops.
 if [[ "$MODE" == templates ]]; then
@@ -2979,6 +2989,14 @@ _self_update_converge_alert() {
 	tg_alert "[$_host] CRITICAL partner-edge self-upgrade to ${RELEASE_TAG:-unknown}: $1 — node stays on the old release until a successful re-run" || true
 }
 
+# _snapshot_reusable - true only for the child of a convergence-gate re-exec whose
+# parent's snapshot is intact and was taken at THIS run's installed version.
+_snapshot_reusable() {
+	[[ "$_SNAPSHOT_REUSE" == "1" ]] || return 1
+	[[ -f "$PREV_HOST_SCRIPTS_DIR/tag" \
+		&& "$(cat "$PREV_HOST_SCRIPTS_DIR/tag" 2>/dev/null)" == "$CURRENT" ]] || return 1
+	return 0
+}
 # _assert_self_update_converged - fail-closed convergence gate, called ONCE in each
 # apply path immediately AFTER that path's sync_host_scripts. Invariant (general, NOT
 # narrowly "before reconcile_all"): never proceed past sync_host_scripts running STALE
@@ -3061,12 +3079,15 @@ _assert_self_update_converged() {
 	# across exec; the child skips reacquire on OXPULSE_UPGRADE_LOCK_HELD +
 	# the fd-9-is-lock check.
 	export OXPULSE_UPGRADE_LOCK_HELD=1
+	# The snapshot taken before sync_host_scripts is the only copy of the OLD
+	# scripts: tell the child not to re-take it from the now-synced disk.
+	export OXPULSE_UPGRADE_SNAPSHOT_TAKEN=1
 	shopt -s execfail
 	# shellcheck disable=SC2093  # on success exec replaces the process; the
 	# lines below are the exec-FAILED recovery path, reachable via execfail.
 	exec "$_installed" "$@" || true
 	shopt -u execfail
-	unset OXPULSE_UPGRADE_LOCK_HELD
+	unset OXPULSE_UPGRADE_LOCK_HELD OXPULSE_UPGRADE_SNAPSHOT_TAKEN
 
 	# Even the verified on-disk copy could not be exec'd — now fail closed and
 	# make noise: a silent die is how node-a sat un-upgraded until a human
@@ -4129,11 +4150,15 @@ if [[ "$MODE" == with_templates ]]; then
 	resolve_edge_service_scope _wt_edge_svcs
 
 	# Step 1: backup current state before any mutation (images + templates + host-scripts).
-	[[ -f "$PREFIX_ETC/Caddyfile" ]]  && cp -a "$PREFIX_ETC/Caddyfile" "$PREV_CADDYFILE"
-	[[ -f "$HEALTHCHECK" ]]           && cp -a "$HEALTHCHECK" "$PREV_HEALTHCHECK"
-	cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
-	cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
-	snapshot_host_scripts "$CURRENT"
+	if _snapshot_reusable; then
+		log "backup: keeping the pre-sync snapshot taken before the convergence-gate re-exec"
+	else
+		[[ -f "$PREFIX_ETC/Caddyfile" ]]  && cp -a "$PREFIX_ETC/Caddyfile" "$PREV_CADDYFILE"
+		[[ -f "$HEALTHCHECK" ]]           && cp -a "$HEALTHCHECK" "$PREV_HEALTHCHECK"
+		cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
+		cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
+		snapshot_host_scripts "$CURRENT"
+	fi
 
 	# Phase 2 (Task 6): opec-presence + caddy-render-capable probe BEFORE reconcile.
 	# Unlike install.sh (which always runs _ensure_opec_binary at startup), upgrade.sh
@@ -4467,9 +4492,13 @@ declare -a _edge_svcs
 resolve_edge_service_scope _edge_svcs
 
 # ---- Backup current config + host-scripts before mutating ----
-cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
-cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
-snapshot_host_scripts "$CURRENT"
+if _snapshot_reusable; then
+	log "backup: keeping the pre-sync snapshot taken before the convergence-gate re-exec"
+else
+	cp -a "$COMPOSE_FILE" "$PREV_COMPOSE_FILE"
+	cp -a "$STATE_FILE"   "$PREV_STATE_FILE"
+	snapshot_host_scripts "$CURRENT"
+fi
 
 # Live-box migration shim (2026-07-08): heal any pre-v0.14.5 SFU healthcheck
 # that still probes the raw /CIDR mesh IP — see the function's docstring
