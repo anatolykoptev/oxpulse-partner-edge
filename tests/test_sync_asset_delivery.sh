@@ -53,7 +53,9 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$dest" && -n "$url" ]] || exit 22
 f="$FIXTURE/${url#*://}"
-if [[ -f "$f" ]]; then cp "$f" "$dest"; exit 0; fi
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+_chk() { case "$(realpath -m -- "$1")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*) ;; *) echo "stub $2 outside sandbox: $1" >&2; exit 99 ;; esac; }
+if [[ -f "$f" ]]; then _chk "$dest" curl; cp "$f" "$dest"; exit 0; fi
 exit 22
 STUB
 	chmod +x "$TMP/bin/curl"
@@ -98,6 +100,9 @@ STUB
 	# --- install: copy src→dst (same stub shape as test_awg_params_agent_install.sh)
 	cat > "$TMP/bin/install" <<'STUB'
 #!/usr/bin/env bash
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+_chk() { case "$(realpath -m -- "$1")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*) ;; *) echo "stub $2 outside sandbox: $1" >&2; exit 99 ;; esac; }
+if [[ "${1:-}" == "-d" ]]; then for _a in "$@"; do [[ "$_a" == /* ]] && _chk "$_a" install; done; else _chk "${!#}" install; fi
 echo "install $*" >> "$FAKE_LOG"
 args=("$@")
 n=${#args[@]}

@@ -22,7 +22,7 @@
 #      immediately AFTER sync_host_scripts: if this process is still executing the
 #      OLD upgrade.sh while the NEW release bytes are already installed to the sbin
 #      path, re-exec those installed (SHA256SUMS-verified) bytes with "$@" —
-#      sentinel-guarded, converging THIS run (pillow 0.16.40→0.16.41 fix). die()
+#      sentinel-guarded, converging THIS run (node-a 0.16.40→0.16.41 fix). die()
 #      only when even that exec fails, after firing _self_update_converge_alert.
 #      No-op when self-update was not applicable (dev/CI/manual/dry-run). Escape
 #      hatch OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 downgrades die->warn.
@@ -260,7 +260,7 @@ fi
 # C2 (INCIDENT REPRODUCTION + RECOVERY): applicable + DIVERGENT (old in-memory
 # bytes, new bytes installed) => the gate re-execs the installed copy with the
 # sentinel set — the exec'd child sees OXPULSE_UPGRADE_REEXECED=1, skips the gate,
-# and converges THIS run. This is the pillow 0.16.40→0.16.41 shape: asking a human
+# and converges THIS run. This is the node-a 0.16.40→0.16.41 shape: asking a human
 # to re-run is what left that node stuck. Non-vacuous: neutering
 # _assert_self_update_converged to `return 0` drops the REEXEC_CHILD marker (RED).
 C2_OUT=$(run_gate "$ZERO_SHA" "$GATE_WRAP")

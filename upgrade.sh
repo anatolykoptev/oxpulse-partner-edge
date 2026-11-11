@@ -2814,7 +2814,7 @@ _settle_serveability_alert() {
 # still executing the OLD upgrade.sh while the NEW release bytes are already
 # installed to disk — the exact v0.14.4 failure class (an old process walking
 # into a freshly-synced host-script set, dying deep in reconcile_firewall_surface).
-# Since the pillow 0.16.40→0.16.41 incident the gate RECOVERS: it re-execs the
+# Since the node-a 0.16.40→0.16.41 incident the gate RECOVERS: it re-execs the
 # installed (SHA256SUMS-verified) bytes with the original args and die()s only
 # when even that exec fails. It compares OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA
 # (the bytes THIS process is executing, fingerprinted below before any sync can
@@ -3010,7 +3010,7 @@ _self_update_converge_alert() {
 # installed sbin bytes; a difference means we are still running the old release while the
 # new one is already on disk. Recovery is in-band: re-exec the just-installed,
 # SHA256SUMS-verified bytes with the original args (sentinel-guarded) so the run
-# converges HERE — the pillow 0.16.40→0.16.41 lesson, where a die() that merely
+# converges HERE — the node-a 0.16.40→0.16.41 lesson, where a die() that merely
 # asked for a re-run left the node stuck (the version marker had already been
 # written, so refresh saw desired==installed and never retried). die() fires only
 # when even that exec cannot run, after _self_update_converge_alert. Escape hatch
@@ -3046,7 +3046,7 @@ _assert_self_update_converged() {
 		return 0
 	fi
 
-	# Recover in the SAME run (pillow 0.16.40→0.16.41): the bytes just installed
+	# Recover in the SAME run (node-a 0.16.40→0.16.41): the bytes just installed
 	# at $_installed passed SHA256SUMS verification inside sync_host_scripts, so
 	# re-exec them with this invocation's original args — the call sites pass
 	# "$@" through for exactly this. Sentinel-guarded: the child sees
@@ -3069,7 +3069,7 @@ _assert_self_update_converged() {
 	unset OXPULSE_UPGRADE_LOCK_HELD
 
 	# Even the verified on-disk copy could not be exec'd — now fail closed and
-	# make noise: a silent die is how pillow sat un-upgraded until a human
+	# make noise: a silent die is how node-a sat un-upgraded until a human
 	# noticed. The version markers were NOT written yet (they sit below this
 	# gate), so the next refresh tick retries this upgrade on its own.
 	_self_update_converge_alert "self-update did not converge (re-exec of $_installed failed too)" || true
@@ -4197,11 +4197,11 @@ if [[ "$MODE" == with_templates ]]; then
 	# to disk. If this process is still executing the OLD bytes (a self-update no-op
 	# that _maybe_self_update_reexec could not re-exec through), the gate re-execs
 	# those installed, SHA256SUMS-verified bytes with "$@" — and only dies if even
-	# that fails (the v0.14.4 / pillow 0.16.40→0.16.41 failure class). No-op when
+	# that fails (the v0.14.4 / node-a 0.16.40→0.16.41 failure class). No-op when
 	# self-update was not applicable to this run (dev/CI/manual/dry-run).
 	_assert_self_update_converged "$@"
 
-	# Version markers are written ONLY after the convergence gate (pillow
+	# Version markers are written ONLY after the convergence gate (node-a
 	# 0.16.40→0.16.41): a gate failure must leave install.env/compose claiming
 	# the OLD release so the next refresh tick retries on its own — and so a
 	# gate-level re-exec child does not read CURRENT==TARGET and exit
@@ -4398,7 +4398,7 @@ derive_release_tag
 log "current=$CURRENT target=$TARGET release_tag=$RELEASE_TAG"
 
 if [[ "$CURRENT" == "$TARGET" && "$MODE" != rollback ]]; then
-	# UPG-1/UPG-5: the marker alone is not proof of convergence (pillow:
+	# UPG-1/UPG-5: the marker alone is not proof of convergence (node-a:
 	# IMAGE_VERSION claimed 0.16.41 while containers still ran 0.16.40). If
 	# the running containers report a different tag, the apply was
 	# interrupted — fall through and re-apply instead of exiting.

@@ -571,7 +571,7 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	# RUNNING script's own baked tag (OXPULSE_UPGRADE_TAG) — i.e. the OLD
 	# release whenever the self-update re-exec did not fire — or to an
 	# unversioned mirror raw/ tree / per-object CDN cache, so its bytes can be
-	# stale per-file (pillow 0.16.40→0.16.41: channel-render-lib.sh and VERSION
+	# stale per-file (node-a 0.16.40→0.16.41: channel-render-lib.sh and VERSION
 	# fetched stale bytes, failed the new tag's sha guard and were skipped,
 	# leaving the node half-synced until the gate died).
 	local use_release_assets=0
@@ -586,7 +586,7 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	# failure appends the asset name to _req_fail and the run die()s BEFORE
 	# touching host scripts, units, compose, images or the version marker —
 	# the node stays entirely on the old set. This is what prevents the
-	# pillow-class mixed-script state (upgrade.sh synced, a required sibling
+	# node-a-class mixed-script state (upgrade.sh synced, a required sibling
 	# did not) from ever reaching the image pull.
 	#
 	# Requiredness is derived from the release's own manifest, not a

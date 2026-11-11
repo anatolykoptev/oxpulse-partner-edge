@@ -455,7 +455,7 @@ RAW_HTTP_PID=$!
 
 # Build SHA256SUMS with correct hashes for files that sync_host_scripts fetches.
 # Extract the remote_name for each managed file from the preamble. The verified
-# sync fetches every payload from RELEASES_BASE/$tag/<asset> (pillow fix), so
+# sync fetches every payload from RELEASES_BASE/$tag/<asset> (node-a fix), so
 # stage each file into the release dir under its release-asset name — the same
 # mapping lib/host-scripts-lib.sh applies (and test 9's sbin_to_asset asserts).
 declare -A EDGE_E_SHAS

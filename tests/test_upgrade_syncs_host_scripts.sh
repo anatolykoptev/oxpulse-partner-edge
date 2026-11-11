@@ -306,7 +306,7 @@ T5_RELEASE="$TMPDIR_ROOT/t5/release/v0.test"
 mkdir -p "$T5_SBIN" "$T5_BIN" "$T5_LIBDIR" "$T5_SYSTEMD" "$T5_RELEASE"
 
 # The verified-sync payload comes from the release bundle, not REPO_RAW
-# (pillow fix): stage real health-report bytes as the release asset so the
+# (node-a fix): stage real health-report bytes as the release asset so the
 # fetch reaches the sha guard, which must then reject them.
 curl -fsSL --max-time 10 \
     "http://127.0.0.1:$SERVE_PORT/oxpulse-channels-health-report.sh" \

@@ -41,6 +41,9 @@ setup() {
 	# Also creates parent directories as needed.
 	cat > "$TMP/shims/install" <<'STUB'
 #!/usr/bin/env bash
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+_chk() { case "$(realpath -m -- "$1")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*|/usr/local/share/oxpulse-partner-edge|/usr/local/share/oxpulse-partner-edge/*) ;; *) echo "stub $2 outside sandbox: $1" >&2; exit 99 ;; esac; }
+if [[ "${1:-}" == "-d" ]]; then for _a in "$@"; do [[ "$_a" == /* ]] && _chk "$_a" install; done; else _chk "${!#}" install; fi
 # Parse mode (-m 0644) and -d flags; then perform the actual copy or mkdir.
 mode=""
 is_dir=0

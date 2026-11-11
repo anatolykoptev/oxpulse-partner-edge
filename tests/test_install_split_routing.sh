@@ -24,6 +24,9 @@ setup() {
 	# install stub: log call + copy src→dst when src is real file
 	cat > "$TMP/bin/install" << 'STUB'
 #!/usr/bin/env bash
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+_chk() { case "$(realpath -m -- "$1")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*) ;; *) echo "stub $2 outside sandbox: $1" >&2; exit 99 ;; esac; }
+if [[ "${1:-}" == "-d" ]]; then for _a in "$@"; do [[ "$_a" == /* ]] && _chk "$_a" install; done; else _chk "${!#}" install; fi
 echo "install $*" >> "$FAKE_LOG"
 args=("$@")
 n=${#args[@]}

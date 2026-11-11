@@ -347,7 +347,7 @@ _self_upgrade_is_ge() {
 # apply converged — a crash between the compose rewrite and the post-gate
 # marker move (or the pre-fix marker placement, which sat BEFORE pull)
 # leaves containers on the old tag while the marker claims the new one.
-# That is exactly the stuck pillow state: refresh must read the divergence
+# That is exactly the stuck node-a state: refresh must read the divergence
 # as "not installed" and retry, not "desired == installed" and no-op.
 _self_upgrade_running_tag() {
     command -v docker >/dev/null 2>&1 || return 0
@@ -393,6 +393,8 @@ _write_attempt_marker() {
 }
 _maybe_self_upgrade() {
     local hb_code="$1" hb_body="$2"
+    # Sweep tmp files a crashed _write_attempt_marker left behind (same-dir, pid-suffixed).
+    rm -f "$PREFIX_LIB"/self-upgrade.attempted.tmp.* 2>/dev/null || true
     [[ "$hb_code" == "200" ]] || return 0
     local _desired _installed
     _desired=$(printf '%s' "$hb_body" | jq -r '.desired_release // empty' 2>/dev/null || true)
@@ -405,7 +407,7 @@ _maybe_self_upgrade() {
     # UPG-1/UPG-5: marker truth check. If the running containers' image tag
     # differs from the marker, the apply was interrupted — treat the node as
     # NOT installed at the marker version so the retry below fires (this is
-    # also what heals the already-stuck pillow state: marker 0.16.41,
+    # also what heals the already-stuck node-a state: marker 0.16.41,
     # containers 0.16.40, desired 0.16.41).
     local _running
     _running=$(_self_upgrade_running_tag)
@@ -462,7 +464,7 @@ _maybe_self_upgrade() {
             log "self-upgrade: $_unit.service already $_st — not starting another"
             return 0 ;;
     esac
-    # Attempt tracking (pillow 0.16.40→0.16.41): the self-upgrade runs as a
+    # Attempt tracking (node-a 0.16.40→0.16.41): the self-upgrade runs as a
     # detached transient unit, so its outcome is invisible to this tick — a
     # failed attempt previously left NO trace and the node could sit unapplied
     # until a human noticed.

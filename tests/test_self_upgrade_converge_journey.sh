@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/test_self_upgrade_converge_journey.sh — journey-level regression for the
-# self-update convergence incident (pillow 0.16.40→0.16.41):
+# self-update convergence incident (node-a 0.16.40→0.16.41):
 #
 # A node may report the target release while still running old containers and
 # old host scripts, then fail to retry automatically.
@@ -598,6 +598,12 @@ if grep -qE "mv -f $R7D/lib/self-upgrade\.attempted\.tmp\.[0-9]+ $R7D/lib/self-u
 else
 	fail "J10a: marker not written atomically (mv.log=$(cat "$T/mv.log" 2>/dev/null))"
 fi
+
+printf 'stale\n' > "$R7D/lib/self-upgrade.attempted.tmp.99999"
+SDRUN_CALL_LOG="$T/sdrun_marker" run_refresh "9.9.9"
+[[ ! -e "$R7D/lib/self-upgrade.attempted.tmp.99999" ]] \
+	&& pass "J10b: stale self-upgrade.attempted.tmp.* from a crashed write is swept" \
+	|| fail "J10b: stale tmp marker survived the refresh tick"
 
 echo "=== J11: lock-handoff credential does not leak to descendants ==="
 if grep -q '^LOCKHELD=' "$N1/docker_calls.log" 2>/dev/null \

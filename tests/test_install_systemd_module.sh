@@ -9,6 +9,9 @@ setup() {
 	mkdir -p "$TMPDIR_LOCAL/bin"
 	cat > "$TMPDIR_LOCAL/bin/install" <<'STUB'
 #!/usr/bin/env bash
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+_chk() { case "$(realpath -m -- "$1")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*) ;; *) echo "stub $2 outside sandbox: $1" >&2; exit 99 ;; esac; }
+if [[ "${1:-}" == "-d" ]]; then for _a in "$@"; do [[ "$_a" == /* ]] && _chk "$_a" install; done; else _chk "${!#}" install; fi
 echo "install $*" >> "$FAKE_LOG"
 # copy src→dest so downstream code can open the file if needed
 if [[ "$1" == "-m" ]]; then
@@ -31,7 +34,8 @@ dst=""
 while [[ $# -gt 0 ]]; do
 	if [[ "$1" == "-o" ]]; then dst="$2"; shift 2; else shift; fi
 done
-[[ -n "$dst" ]] && touch "$dst" || true
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+if [[ -n "$dst" ]]; then case "$(realpath -m -- "$dst")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*) touch "$dst" ;; *) echo "stub curl outside sandbox: $dst" >&2; exit 99 ;; esac; fi
 exit 0
 STUB
 	chmod +x "$TMPDIR_LOCAL/bin/curl"
