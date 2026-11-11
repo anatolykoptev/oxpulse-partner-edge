@@ -63,6 +63,7 @@ L2="$TMPD/l2.sh"
     echo 'emit_gauge() { printf "GAUGE %s\n" "$1" >> "$METRICS"; }'
     awk '/^_self_upgrade_is_ge\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
     awk '/^_self_upgrade_running_tag\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
+    awk '/^_write_attempt_marker\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
     awk '/^_self_upgrade_alert\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
     awk '/^_maybe_self_upgrade\(\)/{f=1} f{print} /^}$/ && f{exit}' "$REFRESH"
 } > "$L2"
