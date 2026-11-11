@@ -20,6 +20,9 @@ export PREFIX_SBIN PREFIX_LIBDIR src_dir REPO_RAW
 mkdir -p "$TMP/shims"
 cat > "$TMP/shims/install" <<'STUB'
 #!/usr/bin/env bash
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+_chk() { case "$(realpath -m -- "$1")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*|/usr/local/share/oxpulse-partner-edge|/usr/local/share/oxpulse-partner-edge/*) ;; *) echo "stub $2 outside sandbox: $1" >&2; exit 99 ;; esac; }
+[[ "${1:-}" == "-d" ]] || _chk "${!#}" install
 mode=""
 is_dir=0
 args=()
@@ -65,7 +68,8 @@ dst=""
 while [[ $# -gt 0 ]]; do
     [[ "$1" == "-o" ]] && { dst="$2"; shift 2; } || shift
 done
-[[ -n "$dst" ]] && touch "$dst" || true
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+if [[ -n "$dst" ]]; then case "$(realpath -m -- "$dst")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*|/usr/local/share/oxpulse-partner-edge|/usr/local/share/oxpulse-partner-edge/*) touch "$dst" ;; *) echo "stub curl outside sandbox: $dst" >&2; exit 99 ;; esac; fi
 exit 0
 STUB
 chmod +x "$TMP/shims/curl"

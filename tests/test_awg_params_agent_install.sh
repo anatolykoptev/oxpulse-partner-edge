@@ -20,6 +20,9 @@ setup() {
 
 	cat > "$TMP/bin/install" << 'STUB'
 #!/usr/bin/env bash
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+_chk() { case "$(realpath -m -- "$1")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*) ;; *) echo "stub $2 outside sandbox: $1" >&2; exit 99 ;; esac; }
+if [[ "${1:-}" == "-d" ]]; then for _a in "$@"; do [[ "$_a" == /* ]] && _chk "$_a" install; done; else _chk "${!#}" install; fi
 echo "install $*" >> "$FAKE_LOG"
 # copy src→dst so downstream reads succeed
 args=("$@")
@@ -142,6 +145,8 @@ ENVEOF
 	run env FAKE_LOG="$FAKE_LOG" PATH="$TMP/bin:$PATH" bash -c "
 		$(_common_env)
 		source '$REPO_ROOT/lib/install-awg-params-agent.sh'
+		# the lib assigns the constant at source time: re-assert the sandbox path AFTER it
+		_AWG_PARAMS_AGENT_BIN='$DEST_BIN/oxpulse-awg-params-agent'
 		_awg_params_agent_install_unit
 	"
 	[ "$status" -eq 0 ]
@@ -211,6 +216,8 @@ ENVEOF
 		$(_common_env)
 		_AWG_PARAMS_AGENT_BIN='$DEST_BIN/oxpulse-awg-params-agent'
 		source '$REPO_ROOT/lib/install-awg-params-agent.sh'
+		# the lib assigns the constant at source time: re-assert the sandbox path AFTER it
+		_AWG_PARAMS_AGENT_BIN='$DEST_BIN/oxpulse-awg-params-agent'
 		# smoke check uses sleep + systemctl; stub systemctl returns 0 = active
 		sleep() { :; }
 		awg_params_agent_run
@@ -281,6 +288,8 @@ ENVEOF
 		die()  { echo \"die: \$*\" >&2; exit 1; }
 		_AWG_PARAMS_AGENT_BIN='$DEST_BIN/oxpulse-awg-params-agent'
 		source \"$REPO_ROOT/lib/install-awg-params-agent.sh\"
+		# the lib assigns the constant at source time: re-assert the sandbox path AFTER it
+		_AWG_PARAMS_AGENT_BIN='$DEST_BIN/oxpulse-awg-params-agent'
 		_awg_params_agent_install_binary
 	"
 	[ "$status" -eq 0 ]
@@ -405,6 +414,8 @@ EOF
 		die()  { echo \"die: \$*\" >&2; exit 1; }
 		sleep() { :; }
 		source '$REPO_ROOT/lib/install-awg-params-agent.sh'
+		# the lib assigns the constant at source time: re-assert the sandbox path AFTER it
+		_AWG_PARAMS_AGENT_BIN='$DEST_BIN/oxpulse-awg-params-agent'
 		# Simulate a die-class top-up failure (binary/unit fetch).
 		awg_params_agent_run() { echo 'die: awg-params-agent: simulated install failure' >&2; exit 1; }
 		source '$TMP/guard.sh'

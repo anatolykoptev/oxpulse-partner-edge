@@ -53,7 +53,9 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$dest" && -n "$url" ]] || exit 22
 f="$FIXTURE/${url#*://}"
-if [[ -f "$f" ]]; then cp "$f" "$dest"; exit 0; fi
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+_chk() { case "$(realpath -m -- "$1")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*) ;; *) echo "stub $2 outside sandbox: $1" >&2; exit 99 ;; esac; }
+if [[ -f "$f" ]]; then _chk "$dest" curl; cp "$f" "$dest"; exit 0; fi
 exit 22
 STUB
 	chmod +x "$TMP/bin/curl"
@@ -98,6 +100,9 @@ STUB
 	# --- install: copy src→dst (same stub shape as test_awg_params_agent_install.sh)
 	cat > "$TMP/bin/install" <<'STUB'
 #!/usr/bin/env bash
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+_chk() { case "$(realpath -m -- "$1")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*) ;; *) echo "stub $2 outside sandbox: $1" >&2; exit 99 ;; esac; }
+if [[ "${1:-}" == "-d" ]]; then for _a in "$@"; do [[ "$_a" == /* ]] && _chk "$_a" install; done; else _chk "${!#}" install; fi
 echo "install $*" >> "$FAKE_LOG"
 args=("$@")
 n=${#args[@]}
@@ -346,9 +351,16 @@ _make_release() {
 	# tag=latest skips the SHA256SUMS fetch entirely (sha256sums_ok=0);
 	# ALLOW_UNVERIFIED=1 — which legitimately un-verifies the SCRIPT class —
 	# must NOT un-verify the root-daemon asset.
+	#
+	# UPG-3 contract: unarmed guard → every managed file is REQUIRED — so the
+	# fixture serves the two unconditionally-managed payloads (defaults.conf,
+	# VERSION) or the phase-1 die() fires before the asset step is reached.
 	printf '[Service]\nExecStart=/usr/local/bin/oxpulse-awg-params-agent\n' \
 		> "$FSYSTEMD/oxpulse-awg-params-agent.service"
 	printf 'SENTINEL' > "$FBIN/oxpulse-awg-params-agent"
+	mkdir -p "$FIXTURE/raw/config"
+	printf 'NAIVE_SOCKS_PORT=1080\n' > "$FIXTURE/raw/config/defaults.conf"
+	printf '9.9.9\n' > "$FIXTURE/raw/VERSION"
 
 	run env FAKE_SYSTEMCTL_ACTIVE=1 ALLOW_UNVERIFIED=1 PATH="$TMP/bin:$PATH" \
 		bash -c "$(_sync_env); bash '$TMP/run_sync.sh' latest"

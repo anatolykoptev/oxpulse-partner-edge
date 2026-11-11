@@ -282,8 +282,25 @@ trap "rm -f '$PREAMBLE_TAG' '$PREAMBLE_SYNC'" EXIT
 bash -n "$PREAMBLE_SYNC" || { fail "C-0: sync preamble has syntax errors"; exit 1; }
 pass "C-0: sync preamble syntax clean"
 
-# Fixture server: no assets at all → SHA256SUMS will 404 for any tag.
+# Fixture server: no SHA256SUMS (it 404s for any tag), but it DOES serve every
+# managed file. UPG-3: once the checksum guard is unarmed (--allow-unverified
+# or 'latest'), EVERY managed asset becomes required — a missing one die()s
+# the sync before anything installs. The old "404 → warn+skip" contract is
+# gone, so C-3/C-5 must serve the full set to exercise "proceed unverified".
 TMPDIR_FAIL=$(mktemp -d)
+eval "$(awk '/^_HOST_SCRIPT_[A-Z_]+=\(/{f=1} f{print} f && /^\)$/{f=0}' "$UPGRADE")"
+eval "$(awk '/^_host_script_remote_name\(\)/{f=1} f{print} f && /^}$/{exit}' "$UPGRADE")"
+for _f in "${_HOST_SCRIPT_SBIN_FILES[@]}"; do
+    _rn=$(_host_script_remote_name "$_f")
+    mkdir -p "$TMPDIR_FAIL/$(dirname "$_rn")"
+    printf '# fixture stub\n' > "$TMPDIR_FAIL/$_rn"
+done
+mkdir -p "$TMPDIR_FAIL/config" "$TMPDIR_FAIL/systemd"
+printf '# fixture stub\n' > "$TMPDIR_FAIL/config/defaults.conf"
+printf '0.0.0\n' > "$TMPDIR_FAIL/VERSION"
+for _u in "${_HOST_SCRIPT_SYSTEMD_FILES[@]}"; do
+    printf '[Unit]\n# fixture stub\n' > "$TMPDIR_FAIL/systemd/$_u"
+done
 FAIL_PORT=18771
 python3 -m http.server "$FAIL_PORT" --directory "$TMPDIR_FAIL" \
     >/tmp/test-tag-form-fail-httpd.log 2>&1 &
@@ -372,6 +389,35 @@ echo "$OUT_C5" | grep -i 'latest.*SHA256SUMS.*not available\|floating tag' >/dev
     && pass "C-6: 'latest' run emits 'not available' / 'floating tag' warning" \
     || fail "C-6: expected floating-tag warning for 'latest'; got: $OUT_C5"
 
+# C-7 (UPG-3): --allow-unverified waives INTEGRITY, not COMPLETENESS — a
+# missing REQUIRED asset must still die the sync before any install lands.
+# (Unarmed guard → every managed file is required; the empty dir serves none.)
+TC7_SBIN=$(mktemp -d)
+TC7_EMPTY=$(mktemp -d)
+TC7_PORT=18773
+python3 -m http.server "$TC7_PORT" --directory "$TC7_EMPTY" \
+    >/tmp/test-tag-form-c7-httpd.log 2>&1 &
+TC7_HTTP_PID=$!
+sleep 1
+OUT_C7=$(
+    PREFIX_SBIN="$TC7_SBIN" \
+    PREFIX_BIN="$TC7_SBIN" \
+    PREFIX_LIBDIR="$TC7_SBIN" \
+    SYSTEMD_DIR="$TC7_SBIN" \
+    SYSTEMCTL_BIN=true \
+    REPO_RAW="http://127.0.0.1:$TC7_PORT" \
+    RELEASES_BASE="http://127.0.0.1:$TC7_PORT" \
+    DRY_RUN=0 \
+    ALLOW_UNVERIFIED=1 \
+    STATE_FILE=/dev/null \
+    bash -c "source '$PREAMBLE_SYNC'; sync_host_scripts v0.12.59" 2>&1
+) && RC_C7=0 || RC_C7=$?
+kill "$TC7_HTTP_PID" 2>/dev/null || true
+[[ "$RC_C7" -ne 0 && "$OUT_C7" == *"required target asset"* ]] \
+    && pass "C-7: --allow-unverified + missing required assets → sync dies naming the set (UPG-3)" \
+    || fail "C-7: unarmed sync should die on missing required assets (rc=$RC_C7); got: $OUT_C7"
+rm -rf "$TC7_SBIN" "$TC7_EMPTY"
+
 # ---------------------------------------------------------------------------
 # Fix D: Edge-e repro — new release layout (vX.Y.Z, no partner-edge- prefix)
 # ---------------------------------------------------------------------------
@@ -408,15 +454,26 @@ python3 -m http.server "$RAW_PORT" --directory "$REPO_ROOT" \
 RAW_HTTP_PID=$!
 
 # Build SHA256SUMS with correct hashes for files that sync_host_scripts fetches.
-# Extract the remote_name for each managed file from the preamble.
+# Extract the remote_name for each managed file from the preamble. The verified
+# sync fetches every payload from RELEASES_BASE/$tag/<asset> (node-a fix), so
+# stage each file into the release dir under its release-asset name — the same
+# mapping lib/host-scripts-lib.sh applies (and test 9's sbin_to_asset asserts).
 declare -A EDGE_E_SHAS
 while IFS= read -r remote_name; do
-    [[ -z "$remote_name" ]] && continue
+    [[ -z "$remote_name" || "$remote_name" == "upgrade.sh" ]] && continue
     fpath="$REPO_ROOT/$remote_name"
     fname=$(basename "$remote_name")
+    asset="$fname"
+    case "$remote_name" in
+        lib/render-channel-lib.sh)        asset="render-channel-lib.sh" ;;
+        scripts/oxpulse-xray-update.sh)   asset="oxpulse-xray-update.sh" ;;
+        scripts/oxpulse-geoip-refresh.sh) asset="oxpulse-geoip-refresh.sh" ;;
+        healthcheck.sh)                   asset="partner-edge-healthcheck.sh" ;;
+    esac
     if [[ -f "$fpath" ]]; then
         sha=$(sha256sum "$fpath" | awk '{print $1}')
-        EDGE_E_SHAS["$fname"]="$sha"
+        EDGE_E_SHAS["$asset"]="$sha"
+        cp -f "$fpath" "$EDGE_E_RELEASE_DIR/$asset"
     fi
 done < <(
     bash -c "

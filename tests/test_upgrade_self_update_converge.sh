@@ -21,13 +21,16 @@
 #   C. _assert_self_update_converged() — fail-closed gate in each apply path, run
 #      immediately AFTER sync_host_scripts: if this process is still executing the
 #      OLD upgrade.sh while the NEW release bytes are already installed to the sbin
-#      path, die() with an actionable "just re-run" message. No-op when self-update
-#      was not applicable (dev/CI/manual/dry-run). Escape hatch
-#      OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 downgrades die->warn.
+#      path, re-exec those installed (SHA256SUMS-verified) bytes with "$@" —
+#      sentinel-guarded, converging THIS run (node-a 0.16.40→0.16.41 fix). die()
+#      only when even that exec fails, after firing _self_update_converge_alert.
+#      No-op when self-update was not applicable (dev/CI/manual/dry-run). Escape
+#      hatch OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 downgrades die->warn.
 #
-# Falsification (anti-vacuous): C-DIE requires the gate to die on divergent bytes;
-# neutering _assert_self_update_converged to `return 0` flips it RED (verified during
-# development). C-SILENT / C-NOTAPPLICABLE require it to NOT die. A-WARN requires the
+# Falsification (anti-vacuous): C2 requires the gate to re-exec the installed copy
+# on divergent bytes; neutering _assert_self_update_converged to `return 0` flips
+# it RED (no REEXEC_CHILD marker). C2b requires die()+alert when the exec cannot
+# run. C-SILENT / C-NOTAPPLICABLE require it to NOT die. A-WARN requires the
 # fetch-failure warn text to appear where it was silent before.
 #
 # REAL-CODE MANDATE: the predicate + gate are awk-extracted verbatim from upgrade.sh
@@ -223,10 +226,12 @@ log(){ :; }
 warn(){ echo "WARN: $*" >&2; }
 die(){ echo "DIE: $1" >&2; exit 1; }
 RETRY_OPTS=()
+_self_update_converge_alert(){ echo "ALERT: $*" >&2; }
+[[ "${OXPULSE_UPGRADE_REEXECED:-0}" == 1 ]] && echo "REEXEC_CHILD"
 PRE
     cat "$SHOULD_FN"
     cat "$GATE_FN"
-    printf '_assert_self_update_converged\n'
+    printf '_assert_self_update_converged "$@"\n'
     printf 'echo "GATE_SURVIVED"\n'
 } > "$GATE_WRAP"
 chmod +x "$GATE_WRAP"
@@ -252,16 +257,37 @@ else
     fail "C1: expected silent GATE_SURVIVED on converged bytes; got: $C1_OUT"
 fi
 
-# C2 (INCIDENT REPRODUCTION): applicable + DIVERGENT (old in-memory bytes, new bytes
-# installed) => DIE, gate does NOT survive. This is the exact v0.14.4 failure the gate
-# exists to catch. Non-vacuous: neutering _assert_self_update_converged to `return 0`
-# makes this go RED (verified in development).
+# C2 (INCIDENT REPRODUCTION + RECOVERY): applicable + DIVERGENT (old in-memory
+# bytes, new bytes installed) => the gate re-execs the installed copy with the
+# sentinel set — the exec'd child sees OXPULSE_UPGRADE_REEXECED=1, skips the gate,
+# and converges THIS run. This is the node-a 0.16.40→0.16.41 shape: asking a human
+# to re-run is what left that node stuck. Non-vacuous: neutering
+# _assert_self_update_converged to `return 0` drops the REEXEC_CHILD marker (RED).
 C2_OUT=$(run_gate "$ZERO_SHA" "$GATE_WRAP")
-if printf '%s\n' "$C2_OUT" | grep 'DIE: self-update did not converge' >/dev/null \
-    && ! printf '%s\n' "$C2_OUT" | grep 'GATE_SURVIVED' >/dev/null; then
-    pass "C2: applicable + divergent bytes => gate DIES with the actionable re-run message (incident caught)"
+if printf '%s\n' "$C2_OUT" | grep 'REEXEC_CHILD' >/dev/null \
+    && printf '%s\n' "$C2_OUT" | grep 'GATE_SURVIVED' >/dev/null \
+    && ! printf '%s\n' "$C2_OUT" | grep 'DIE:' >/dev/null; then
+    pass "C2: applicable + divergent bytes => gate re-execs the installed copy, converges same-run (incident caught + recovered)"
 else
-    fail "C2: expected a convergence DIE; got: $C2_OUT"
+    fail "C2: expected a gate-level re-exec into the installed bytes; got: $C2_OUT"
+fi
+
+# C2b: divergent + the installed copy cannot even exec (EACCES) => alert + die —
+# the fail-closed arm is still armed, just reached only when re-exec is impossible.
+# The non-exec copy must BE the running path for _should_self_update's realpath
+# match (same file, both roles — production shape).
+GATE_WRAP_NOEXEC="$TMP/gate_wrap_noexec"
+cp "$GATE_WRAP" "$GATE_WRAP_NOEXEC"; chmod 0644 "$GATE_WRAP_NOEXEC"
+C2B_OUT=$(env RELEASE_TAG=v9.9.9 MODE=apply DRY_RUN=0 PREFIX_SBIN="$TMP" \
+    OXPULSE_INSTALLED_UPGRADE_PATH="$GATE_WRAP_NOEXEC" \
+    OXPULSE_UPGRADE_PRESYNC_RUNNING_SHA="$ZERO_SHA" \
+    bash "$GATE_WRAP_NOEXEC" 2>&1 || true)
+if printf '%s\n' "$C2B_OUT" | grep 'DIE: self-update did not converge' >/dev/null \
+    && printf '%s\n' "$C2B_OUT" | grep 'ALERT:' >/dev/null \
+    && ! printf '%s\n' "$C2B_OUT" | grep 'GATE_SURVIVED' >/dev/null; then
+    pass "C2b: divergent + un-exec-able installed copy => alert fired + die (fail-closed arm intact)"
+else
+    fail "C2b: expected alert + die when the installed re-exec cannot run; got: $C2B_OUT"
 fi
 
 # C3: escape hatch OXPULSE_UPGRADE_NO_CONVERGE_GATE=1 on the SAME divergent case =>
@@ -307,12 +333,13 @@ echo "--- Part C: both apply paths wire the gate after sync_host_scripts ---"
 
 # The gate must be called exactly at the two real apply-path Step-4 sync sites (the
 # ones followed by baseline/pull), not the incidental opec-fallback syncs. We assert
-# there are exactly two _assert_self_update_converged call sites and each is preceded
-# (nearby, upward) by a `sync_host_scripts "$RELEASE_TAG"` line.
-GATE_CALLS=$(grep -cE '^[[:space:]]*_assert_self_update_converged$' "$UPGRADE")
+# there are exactly two _assert_self_update_converged call sites — each passing
+# "$@" so the gate-level re-exec preserves the invocation args — and each is
+# preceded (nearby, upward) by a `sync_host_scripts "$RELEASE_TAG"` line.
+GATE_CALLS=$(grep -cE '^[[:space:]]*_assert_self_update_converged "\$@"' "$UPGRADE")
 [[ "$GATE_CALLS" -eq 2 ]] \
-    && pass "C6: exactly two _assert_self_update_converged call sites (one per apply path), got $GATE_CALLS" \
-    || fail "C6: expected 2 gate call sites, got $GATE_CALLS"
+    && pass "C6: exactly two _assert_self_update_converged \"\$@\" call sites (one per apply path), got $GATE_CALLS" \
+    || fail "C6: expected 2 gate call sites passing \"\$@\", got $GATE_CALLS"
 
 # For each gate call line, the nearest preceding non-comment code line must be the real
 # sync (either `sync_host_scripts "$RELEASE_TAG"` exactly — no `|| true`, no MODE guard).
@@ -323,7 +350,7 @@ while IFS= read -r gate_ln; do
         STRUCT_OK=0
         echo "  gate at line $gate_ln is preceded by: [$prev] (expected the Step-4 sync)"
     fi
-done < <(grep -nE '^[[:space:]]*_assert_self_update_converged$' "$UPGRADE" | cut -d: -f1)
+done < <(grep -nE '^[[:space:]]*_assert_self_update_converged( |$)' "$UPGRADE" | cut -d: -f1)
 [[ "$STRUCT_OK" -eq 1 ]] \
     && pass "C7: each gate call sits immediately after its path's sync_host_scripts \"\$RELEASE_TAG\"" \
     || fail "C7: a gate call is not positioned right after the Step-4 sync"

@@ -341,8 +341,61 @@ _self_upgrade_is_ge() {
     [[ "$1" == "$2" ]] && return 0
     [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]
 }
+# _self_upgrade_running_tag — print the LOWEST vX.Y.Z image tag (v stripped)
+# among running oxpulse-partner-* containers; empty when none are up or
+# docker is unavailable. UPG-1/UPG-5: IMAGE_VERSION alone is not proof the
+# apply converged — a crash between the compose rewrite and the post-gate
+# marker move (or the pre-fix marker placement, which sat BEFORE pull)
+# leaves containers on the old tag while the marker claims the new one.
+# That is exactly the stuck node-a state: refresh must read the divergence
+# as "not installed" and retry, not "desired == installed" and no-op.
+_self_upgrade_running_tag() {
+    command -v docker >/dev/null 2>&1 || return 0
+    local _imgs
+    _imgs=$(docker ps --filter "name=oxpulse-partner-" --format '{{.Image}}' 2>/dev/null || true)
+    [[ -n "$_imgs" ]] || return 0
+    printf '%s\n' "$_imgs" \
+        | sed -nE 's|^ghcr\.io/anatolykoptev/partner-edge-[a-z]+:([vV]?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]*)?).*|\1|p' \
+        | sed 's|^[vV]||' | sort -V | head -n1
+}
+# _self_upgrade_alert MSG — operator-visible alert through the existing
+# selfheal/Telegram path (tg_alert from telegram-alert-lib.sh, the same lib
+# selfheal.sh uses). Lazy-sources so a missing lib degrades to a log line —
+# the ceiling metric below still carries the signal to dozor.
+_self_upgrade_alert() {
+    local _msg="$1"
+    if ! declare -F tg_alert >/dev/null 2>&1; then
+        local _tg
+        for _tg in "${PREFIX_SBIN:-/usr/local/sbin}/telegram-alert-lib.sh" \
+                   "${INSTALL_LIB_DIR:-/usr/local/lib/partner-edge}/telegram-alert-lib.sh"; do
+            # shellcheck source=/dev/null  # installed on the node, not in the repo layout
+            [[ -r "$_tg" ]] && { . "$_tg"; break; }
+        done
+    fi
+    if ! declare -F tg_alert >/dev/null 2>&1; then
+        log "self-upgrade ALERT (telegram lib unavailable): $_msg"
+        return 0
+    fi
+    tg_alert "$_msg" force || true
+}
+# _write_attempt_marker DESIRED ATTEMPTS EPOCH ALERTED — atomic: tmp file in
+# the SAME directory (rename(2) is atomic only within one filesystem) + mv, so
+# a crash mid-write can never leave a truncated marker that parses as
+# attempts=0 and silently resets the backoff/ceiling. Best-effort like before.
+_write_attempt_marker() {
+    local _m="$PREFIX_LIB/self-upgrade.attempted" _t
+    _t="$_m.tmp.$$"
+    if printf "%s:%s:%s:%s\n" "$1" "$2" "$3" "$4" > "$_t" 2>/dev/null; then
+        mv -f "$_t" "$_m" 2>/dev/null || rm -f "$_t" 2>/dev/null || true
+    else
+        rm -f "$_t" 2>/dev/null || true
+    fi
+    return 0
+}
 _maybe_self_upgrade() {
     local hb_code="$1" hb_body="$2"
+    # Sweep tmp files a crashed _write_attempt_marker left behind (same-dir, pid-suffixed).
+    rm -f "$PREFIX_LIB"/self-upgrade.attempted.tmp.* 2>/dev/null || true
     [[ "$hb_code" == "200" ]] || return 0
     local _desired _installed
     _desired=$(printf '%s' "$hb_body" | jq -r '.desired_release // empty' 2>/dev/null || true)
@@ -352,6 +405,27 @@ _maybe_self_upgrade() {
     # class) — `|| true` on the whole pipeline.
     _installed=$(grep -E '^IMAGE_VERSION=' "$PREFIX_LIB/install.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
     _installed="${_installed#v}"
+    # UPG-1/UPG-5: marker truth check. If the running containers' image tag
+    # differs from the marker, the apply was interrupted — treat the node as
+    # NOT installed at the marker version so the retry below fires (this is
+    # also what heals the already-stuck node-a state: marker 0.16.41,
+    # containers 0.16.40, desired 0.16.41).
+    local _running
+    _running=$(_self_upgrade_running_tag)
+    if [[ -n "$_running" && "$_running" != "$_installed" ]]; then
+        log "self-upgrade: marker claims ${_installed:-none} but running containers report ${_running} — treating node as not installed (interrupted apply)"
+        emit_metric "partner_edge_self_upgrade_marker_diverged_total" "marker=\"${_installed:-none}\"" "1"
+        _installed="$_running"
+        # Mirror case of the same crash window: the apply converged but died
+        # before the post-gate marker move, so containers already run the
+        # desired release while the marker lags. Repair the marker in place —
+        # it is meant to record what actually runs.
+        if [[ "$_installed" == "$_desired" ]] \
+            && grep -qE '^IMAGE_VERSION=' "$PREFIX_LIB/install.env" 2>/dev/null; then
+            sed -i -E "s|^IMAGE_VERSION=.*|IMAGE_VERSION=v${_running}|" "$PREFIX_LIB/install.env" 2>/dev/null \
+                && log "self-upgrade: repaired IMAGE_VERSION marker → v${_running} (matches running containers)"
+        fi
+    fi
     # desired must be a CONCRETE release semver — no pre-release/build suffix:
     # `sort -V` mis-orders pre-releases and rc-over-final is a downgrade in
     # disguise, so a fleet rollout only targets MAJOR.MINOR.PATCH.
@@ -369,7 +443,11 @@ _maybe_self_upgrade() {
         emit_metric "partner_edge_self_upgrade_unknown_installed_total" "" "1"
         return 0
     fi
+    local _attempt_marker="$PREFIX_LIB/self-upgrade.attempted"
     if [[ "$_desired" == "$_installed" ]]; then
+        # Converged — retire a previous attempt marker (if any) so the NEXT
+        # rollout starts counting from 1.
+        rm -f "$_attempt_marker" 2>/dev/null || true
         return 0  # already converged — idempotent no-op
     fi
     if ! _self_upgrade_is_ge "$_desired" "$_installed"; then
@@ -377,6 +455,74 @@ _maybe_self_upgrade() {
         emit_metric "partner_edge_self_upgrade_downgrade_refused_total" "" "1"
         return 0
     fi
+    # In-flight probe BEFORE attempt bookkeeping: an already-running
+    # self-upgrade unit must not consume retry budget or sit behind a backoff
+    # window — skip it without touching the marker.
+    local _unit="oxpulse-partner-edge-self-upgrade" _st
+    _st=$(systemctl show -p ActiveState --value "$_unit.service" 2>/dev/null || true)
+    case "$_st" in
+        active|activating|deactivating|reloading)
+            log "self-upgrade: $_unit.service already $_st — not starting another"
+            return 0 ;;
+    esac
+    # Attempt tracking (node-a 0.16.40→0.16.41): the self-upgrade runs as a
+    # detached transient unit, so its outcome is invisible to this tick — a
+    # failed attempt previously left NO trace and the node could sit unapplied
+    # until a human noticed.
+    #
+    # UPG-4: bounded retries with exponential backoff + ceiling. Marker
+    # format: <desired_tag>:<attempts>:<last_attempt_epoch>:<alerted>
+    # (old 2-field files parse the same — missing fields read as 0).
+    # Before attempt N+1 (N>=1), N*... the prior attempt must be at least
+    # BASE*2^(N-1) seconds old, capped at MAX (1h, 2h, 4h, … up to 24h by
+    # default). Once attempts reach the ceiling the node stops launching
+    # upgrades for this tag and raises ONE operator-visible alert through the
+    # selfheal/Telegram path plus a metric; a new desired tag resets the
+    # marker. Best-effort: a read-only $PREFIX_LIB must not abort the run.
+    local _now _m_tag="" _attempts=0 _last_epoch=0 _alerted=0
+    _now=$(date +%s)
+    if [[ -f "$_attempt_marker" ]]; then
+        _m_tag=$(cut -d: -f1 "$_attempt_marker" 2>/dev/null || true)
+        _attempts=$(cut -d: -f2 "$_attempt_marker" 2>/dev/null || true)
+        _last_epoch=$(cut -d: -f3 "$_attempt_marker" 2>/dev/null || true)
+        _alerted=$(cut -d: -f4 "$_attempt_marker" 2>/dev/null || true)
+    fi
+    [[ "$_m_tag" == "$_desired" ]] || { _attempts=0; _last_epoch=0; _alerted=0; }
+    [[ "$_attempts" =~ ^[0-9]+$ ]] || _attempts=0
+    [[ "$_last_epoch" =~ ^[0-9]+$ ]] || _last_epoch=0
+    [[ "$_alerted" =~ ^[0-9]+$ ]] || _alerted=0
+    local _max_attempts="${OXPULSE_SELF_UPGRADE_MAX_ATTEMPTS:-8}"
+    local _base_backoff="${OXPULSE_SELF_UPGRADE_BASE_BACKOFF:-3600}"
+    local _max_backoff="${OXPULSE_SELF_UPGRADE_MAX_BACKOFF:-86400}"
+    if [[ "$_attempts" -ge "$_max_attempts" ]]; then
+        if [[ "$_alerted" -eq 0 ]]; then
+            _self_upgrade_alert "self-upgrade to v${_desired} hit the retry ceiling (${_attempts} attempts, backoff ${_base_backoff}s→${_max_backoff}s exhausted) — node stays on v${_installed}; manual intervention required. journalctl -u oxpulse-partner-edge-self-upgrade"
+            emit_metric "partner_edge_self_upgrade_ceiling_total" "tag=\"$_desired\"" "1"
+            _alerted=1
+            _write_attempt_marker "$_desired" "$_attempts" "$_last_epoch" "$_alerted"
+        fi
+        log "self-upgrade: retry ceiling reached for v$_desired ($_attempts of $_max_attempts attempts) — not retrying this tag"
+        return 0
+    fi
+    if [[ "$_attempts" -gt 0 && "$_last_epoch" -gt 0 ]]; then
+        local _shift=$(( _attempts - 1 )) _delay _remaining
+        (( _shift > 5 )) && _shift=5   # 2^5 × 3600s already saturates the 24h cap
+        _delay=$(( _base_backoff << _shift ))
+        (( _delay > _max_backoff )) && _delay=$_max_backoff
+        _remaining=$(( _last_epoch + _delay - _now ))
+        if [[ "$_remaining" -gt 0 ]]; then
+            log "self-upgrade: backoff — attempt $(( _attempts + 1 )) for v$_desired deferred (${_remaining}s of ${_delay}s window remaining)"
+            emit_gauge "partner_edge_self_upgrade_backoff_seconds" "tag=\"$_desired\"" "$_remaining"
+            return 0
+        fi
+    fi
+    _attempts=$(( _attempts + 1 ))
+    if [[ "$_attempts" -gt 1 ]]; then
+        log "self-upgrade: retrying v$_desired (attempt $_attempts of $_max_attempts — previous attempt(s) did not converge; journalctl -u oxpulse-partner-edge-self-upgrade)"
+        emit_metric "partner_edge_self_upgrade_retry_total" "tag=\"$_desired\"" "1"
+    fi
+    emit_gauge "partner_edge_self_upgrade_attempts" "tag=\"$_desired\"" "$_attempts"
+    _write_attempt_marker "$_desired" "$_attempts" "$_now" "$_alerted"
     log "self-upgrade: desired_release=$_desired (installed=$_installed) — applying"
     emit_metric "partner_edge_self_upgrade_applied_total" "tag=\"$_desired\"" "1"
     local _upg_bin
@@ -388,16 +534,9 @@ _maybe_self_upgrade() {
     # upgrade mid-run (2026-10-31, node-b 0.16.31 -> 0.16.33), and mid-pull the
     # rollback path never runs. --no-block returns at once; the outcome lives in
     # `journalctl -u oxpulse-partner-edge-self-upgrade` and the upgrade log.
-    # upgrade.sh keeps its own flock; the ActiveState probe is a cheap pre-check so
-    # a second refresh tick during a long upgrade does not even try.
+    # upgrade.sh keeps its own flock; the ActiveState probe (above) is a cheap
+    # pre-check so a second refresh tick during a long upgrade does not even try.
     # timeout 900: a DPI-blocked docker pull must not run forever. Fail-soft.
-    local _unit="oxpulse-partner-edge-self-upgrade" _st
-    _st=$(systemctl show -p ActiveState --value "$_unit.service" 2>/dev/null || true)
-    case "$_st" in
-        active|activating|deactivating|reloading)
-            log "self-upgrade: $_unit.service already $_st — not starting another"
-            return 0 ;;
-    esac
     if systemd-run --quiet --no-block --collect --unit="$_unit" \
         --description="OxPulse partner-edge self-upgrade to v$_desired" \
         --property=Type=oneshot --property=TimeoutStartSec=1000 \

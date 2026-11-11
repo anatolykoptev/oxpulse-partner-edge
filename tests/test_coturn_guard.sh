@@ -717,7 +717,12 @@ sync_with_systemctl_log() { # sync_with_systemctl_log DRY_RUN -> prints the syst
 	local T="$TMP/sync$1"; rm -rf "$T"; mkdir -p "$T/bin" "$T/sd" "$T/sbin" "$T/share" "$T/etc" "$T/lib" "$T/bin2"
 	: > "$T/sd/oxpulse-coturn-self-relay-guard.service"
 	printf '#!/bin/bash\necho "$*" >> "%s/systemctl.log"\nexit 0\n' "$T" > "$T/bin/systemctl"
-	printf '#!/bin/bash\nexit 22\n' > "$T/bin/curl"
+	# UPG-3: with the checksum guard unarmed (tag=latest) EVERY managed asset is
+	# required — config-defaults.conf + VERSION fetch unconditionally — and a
+	# failed required fetch die()s the sync before the apply loop. Serve stub
+	# bytes so the run reaches it; what is exercised is the apply loop, not the
+	# fetch failure (that path has its own coverage in the journey test).
+	printf '#!/bin/bash\no=""; p=""; for a in "$@"; do [ "$p" = "-o" ] && o="$a"; p="$a"; done\n[ -n "$o" ] && printf "# fixture\\n" > "$o"; exit 0\n' > "$T/bin/curl"
 	chmod +x "$T/bin/systemctl" "$T/bin/curl"
 	(
 		export PATH="$T/bin:$PATH"

@@ -52,6 +52,9 @@ done
 ym=$(sed 's/.*dbip-country-lite-\([0-9-]*\)\.mmdb\.gz/\1/' <<<"$url")
 echo "$ym" >> "$CURL_LOG"
 grep -qw "$ym" <<<"$AVAILABLE" || exit 22        # 404, exactly as db-ip answers
+_sb="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+_chk() { case "$(realpath -m -- "$1")" in "$_sb"/*|/tmp/*|"${TMPDIR:-/tmp}"/*) ;; *) echo "stub $2 outside sandbox: $1" >&2; exit 99 ;; esac; }
+_chk "$out" curl
 printf 'MMDB-BYTES-FOR-%s' "$ym" > "$out"
 CURL
 	# gunzip: our "archive" is already plain, so just drop the suffix.

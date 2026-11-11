@@ -305,6 +305,14 @@ T5_SYSTEMD="$TMPDIR_ROOT/t5/systemd"
 T5_RELEASE="$TMPDIR_ROOT/t5/release/v0.test"
 mkdir -p "$T5_SBIN" "$T5_BIN" "$T5_LIBDIR" "$T5_SYSTEMD" "$T5_RELEASE"
 
+# The verified-sync payload comes from the release bundle, not REPO_RAW
+# (node-a fix): stage real health-report bytes as the release asset so the
+# fetch reaches the sha guard, which must then reject them.
+curl -fsSL --max-time 10 \
+    "http://127.0.0.1:$SERVE_PORT/oxpulse-channels-health-report.sh" \
+    -o "$T5_RELEASE/oxpulse-channels-health-report.sh" \
+    || { fail "5: could not stage health-report release asset"; }
+
 # Build a SHA256SUMS with a bogus hash for health-report.
 FAKE_HASH="0000000000000000000000000000000000000000000000000000000000000000"
 printf '%s  oxpulse-channels-health-report.sh\n' "$FAKE_HASH" > "$T5_RELEASE/SHA256SUMS"
@@ -677,10 +685,16 @@ curl -fsSL --max-time 10 \
 # Compute the correct sha256 of those actual bytes.
 T11_CORRECT_HASH=$(sha256sum "$T11_ACTUAL_FILE" | awk '{print $1}')
 
+# UPG-3: a manifest entry makes the asset REQUIRED — partner-edge-upgrade.sh
+# must therefore be served AND hash-correct, or the phase-1 verdict die()s the
+# sync before anything installs (the old zero-hash entry relied on warn+skip).
+printf '#!/bin/bash\n# fixture partner-edge-upgrade.sh for test 11\n' > "$T11_RELEASE/partner-edge-upgrade.sh"
+T11_UPG_HASH=$(sha256sum "$T11_RELEASE/partner-edge-upgrade.sh" | awk '{print $1}')
+
 # Build SHA256SUMS with the CORRECT hash so the guard should PASS.
 {
     printf '%s  oxpulse-channels-health-report.sh\n' "$T11_CORRECT_HASH"
-    printf '%s  partner-edge-upgrade.sh\n'            "0000000000000000000000000000000000000000000000000000000000000000"
+    printf '%s  partner-edge-upgrade.sh\n'            "$T11_UPG_HASH"
 } > "$T11_RELEASE/SHA256SUMS"
 
 # Serve from a dedicated fixture server.
@@ -796,8 +810,12 @@ curl -fsSL --max-time 10 \
 # If upgrade.sh were adding partner-edge- prefix, it would fetch from
 # $RELEASES_BASE/partner-edge-v0.12.60/SHA256SUMS (404) and die.
 T13_HASH=$(sha256sum "$T13_ACTUAL_FILE" | awk '{print $1}')
+# UPG-3: partner-edge-upgrade.sh is REQUIRED once manifest-listed — serve real
+# bytes and hash them, or the phase-1 verdict die()s before the installs run.
+printf '#!/bin/bash\n# fixture partner-edge-upgrade.sh for test 13\n' > "$T13_RELEASE_ASSET_DIR/partner-edge-upgrade.sh"
+T13_UPG_HASH=$(sha256sum "$T13_RELEASE_ASSET_DIR/partner-edge-upgrade.sh" | awk '{print $1}')
 printf '%s  oxpulse-channels-health-report.sh\n' "$T13_HASH" > "$T13_RELEASE_ASSET_DIR/SHA256SUMS"
-printf '%s  partner-edge-upgrade.sh\n' "0000000000000000000000000000000000000000000000000000000000000000" \
+printf '%s  partner-edge-upgrade.sh\n' "$T13_UPG_HASH" \
     >> "$T13_RELEASE_ASSET_DIR/SHA256SUMS"
 
 T13_PORT=18764

@@ -323,7 +323,10 @@ else
 fi
 # The plain-path call site must precede the compose/state backup (cp -a ... .prev).
 reexec_line=$(grep -n '^_maybe_self_update_reexec "\$@"' "$UPGRADE" | head -1 | cut -d: -f1 || true)
-backup_line=$(grep -n '^cp -a "\$COMPOSE_FILE" "\$PREV_COMPOSE_FILE"' "$UPGRADE" | head -1 | cut -d: -f1 || true)
+# The plain-path backup is the LAST such copy in the file; it sits inside the
+# snapshot-reuse if/else (the gate re-exec's child keeps the parent's snapshot),
+# hence indented - match any indentation and take the last.
+backup_line=$(grep -nE '^[[:space:]]*cp -a "\$COMPOSE_FILE" "\$PREV_COMPOSE_FILE"' "$UPGRADE" | tail -1 | cut -d: -f1 || true)
 if [[ -n "$reexec_line" && -n "$backup_line" && "$reexec_line" -lt "$backup_line" ]]; then
     pass "T5b: plain-path re-exec (line $reexec_line) runs BEFORE the compose backup (line $backup_line) - rollback preserved"
 else

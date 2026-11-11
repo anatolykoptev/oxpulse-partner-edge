@@ -562,48 +562,92 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	# ------------------------------------------------------------------
 	local _any_changed=0
 
+	# Payload origin polarity. When the tag's SHA256SUMS armed the checksum
+	# guard, fetch every synced file from the TARGET release's own asset set
+	# ($RELEASES_BASE/$tag/<asset>): release.yml stages every synced file flat
+	# under that name, and the published bytes satisfy the SHA256SUMS entry by
+	# construction — fetched bytes can never fail the verifier that armed them.
+	# REPO_RAW stays only for 'latest' and unverified runs: it is pinned to the
+	# RUNNING script's own baked tag (OXPULSE_UPGRADE_TAG) — i.e. the OLD
+	# release whenever the self-update re-exec did not fire — or to an
+	# unversioned mirror raw/ tree / per-object CDN cache, so its bytes can be
+	# stale per-file (node-a 0.16.40→0.16.41: channel-render-lib.sh and VERSION
+	# fetched stale bytes, failed the new tag's sha guard and were skipped,
+	# leaving the node half-synced until the gate died).
+	local use_release_assets=0
+	if [[ "$tag" != "latest" && "$sha256sums_ok" -eq 1 ]]; then
+		use_release_assets=1
+	fi
+
+	# ------------------------------------------------------------------
+	# Two-phase, all-or-nothing install (UPG-3). Phase 1 fetches + verifies
+	# every REQUIRED target asset into $tmpdir; only when the whole required
+	# set is staged does phase 2 install anything. A fetch or checksum
+	# failure appends the asset name to _req_fail and the run die()s BEFORE
+	# touching host scripts, units, compose, images or the version marker —
+	# the node stays entirely on the old set. This is what prevents the
+	# node-a-class mixed-script state (upgrade.sh synced, a required sibling
+	# did not) from ever reaching the image pull.
+	#
+	# Requiredness is derived from the release's own manifest, not a
+	# hand-written list: when the checksum guard is armed, a file absent
+	# from SHA256SUMS is a file that release does not ship (older releases
+	# predate parts of the managed set) — warn + skip, not a missing
+	# download. When unarmed ('latest' / --allow-unverified) every managed
+	# file is required.
+	# ------------------------------------------------------------------
+	local -a _req_fail=()
+	local -a _pend_src=() _pend_dst=() _pend_mode=()
+
+	_hs_required() {
+		local _asset="$1"
+		[[ "$use_release_assets" -eq 0 ]] && return 0
+		[[ -n "$(_lookup_sha256 "$_asset")" ]]
+	}
+
+	_hs_fetch() {
+		local _asset="$1" _url="$2" _tmp="$3" _es _as
+		if ! curl -fsSL --max-time 30 "$_url" -o "$_tmp" 2>/dev/null; then
+			warn "host-script sync: could not fetch $_url (required asset $_asset)"
+			_req_fail+=("$_asset")
+			return 1
+		fi
+		_es=$(_lookup_sha256 "$_asset")
+		if [[ -n "$_es" ]]; then
+			_as=$(sha256sum "$_tmp" | awk '{print $1}')
+			if [[ "$_as" != "$_es" ]]; then
+				warn "host-script sync: SHA256 MISMATCH for required asset $_asset (expected=$_es actual=$_as) — refusing (possible MITM or stale CDN)"
+				_req_fail+=("$_asset")
+				return 1
+			fi
+		fi
+		return 0
+	}
+
+	_hs_queue() {
+		local _src="$1" _dst="$2" _mode="$3" _s _d
+		if [[ -f "$_dst" ]]; then
+			_s=$(sha256sum "$_src" | awk '{print $1}')
+			_d=$(sha256sum "$_dst" | awk '{print $1}')
+			if [[ "$_s" == "$_d" ]]; then
+				log "  host-script: $(basename "$_dst") up-to-date (sha256 match)"
+				return 0
+			fi
+		fi
+		_pend_src+=("$_src") _pend_dst+=("$_dst") _pend_mode+=("$_mode")
+		return 0
+	}
+
 	local f remote_name fetch_url fetch_tmp mode expected_sha actual_sha installed_sha install_dir
 	for f in "${_HOST_SCRIPT_SBIN_FILES[@]}"; do
 		remote_name=$(_host_script_remote_name "$f")
 		install_dir=$(_host_script_install_dir "$f")
-		# Self-update special case (MINOR-1):
-		# release.yml stages a @RELEASE_TAG_PLACEHOLDER@-substituted copy of upgrade.sh as
-		# "partner-edge-upgrade.sh" in the release assets (not in REPO_RAW, which
-		# serves the raw committed tree with the literal placeholder).  Fetching from
-		# REPO_RAW would yield bytes that DON'T match the SHA256SUMS entry for
-		# "partner-edge-upgrade.sh" (substituted bytes), so the guard would reject
-		# every self-update attempt.  Instead we fetch the SUBSTITUTED asset from
-		# RELEASES_BASE when the tag is not a floating "latest".
-		local use_releases_asset=0
-		case "$f" in
-			oxpulse-partner-edge-upgrade)
-				if [[ "$tag" != "latest" ]]; then
-					use_releases_asset=1
-				fi
-				;;
-		esac
-
-		if [[ "$use_releases_asset" -eq 1 ]]; then
-			# Fetch substituted partner-edge-upgrade.sh from release assets.
-			# SHA256SUMS asset name is "partner-edge-upgrade.sh".
-			fetch_url="$RELEASES_BASE/$tag/partner-edge-upgrade.sh"
-			fetch_tmp="$tmpdir/partner-edge-upgrade.sh"
-		else
-			fetch_url="$REPO_RAW/$remote_name"
-			fetch_tmp="$tmpdir/$(basename "$remote_name")"
-		fi
 		mode=$(_host_script_mode "$f")
 
-		if ! curl -fsSL --max-time 30 "$fetch_url" -o "$fetch_tmp" 2>/dev/null; then
-			warn "host-script sync: could not fetch $fetch_url — skipping $f"
-			continue
-		fi
-
-		# Checksum guard: verify fetched file against SHA256SUMS if available.
-		# asset_name in SHA256SUMS is the release-staged name (the basename, no lib/ prefix).
+		# Release-asset name — SHA256SUMS column 2 and the flat staged name
+		# (see release.yml; installed names map where they differ).
 		local sha256_asset_name
 		sha256_asset_name=$(basename "$remote_name")
-		# Map installed names to SHA256SUMS asset names where they differ.
 		case "$f" in
 			oxpulse-partner-edge-upgrade)   sha256_asset_name="partner-edge-upgrade.sh" ;;
 			oxpulse-partner-edge-hydrate)   sha256_asset_name="hydrate.sh" ;;
@@ -616,71 +660,35 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 			oxpulse-partner-edge-healthcheck) sha256_asset_name="partner-edge-healthcheck.sh" ;;
 		esac
 
-		expected_sha=$(_lookup_sha256 "$sha256_asset_name")
-		if [[ -n "$expected_sha" ]]; then
-			actual_sha=$(sha256sum "$fetch_tmp" | awk '{print $1}')
-			if [[ "$actual_sha" != "$expected_sha" ]]; then
-				warn "host-script sync: SHA256 MISMATCH for $f (expected=$expected_sha actual=$actual_sha) — skipping (possible MITM or stale CDN)"
-				continue
-			fi
+		if [[ "$use_release_assets" -eq 1 ]]; then
+			fetch_url="$RELEASES_BASE/$tag/$sha256_asset_name"
+		else
+			fetch_url="$REPO_RAW/$remote_name"
 		fi
+		fetch_tmp="$tmpdir/$sha256_asset_name"
 
-		# Idempotency: skip if installed file already matches.
-		local installed_path="$install_dir/$f"
-		if [[ -f "$installed_path" ]]; then
-			installed_sha=$(sha256sum "$installed_path" | awk '{print $1}')
-			actual_sha=$(sha256sum "$fetch_tmp" | awk '{print $1}')
-			if [[ "$installed_sha" == "$actual_sha" ]]; then
-				log "  host-script: $f up-to-date (sha256 match)"
-				continue
-			fi
+		if ! _hs_required "$sha256_asset_name"; then
+			warn "host-script sync: $sha256_asset_name not in $tag SHA256SUMS — release does not ship it, skipping $f"
+			continue
 		fi
-
-		# Atomic install: sibling temp + rename(2).
-		install -d -m 0755 "$install_dir"
-		local tmp_inst="$install_dir/$f.new.$$"
-		install -m "$mode" "$fetch_tmp" "$tmp_inst"
-		mv -f "$tmp_inst" "$installed_path"
-		log "  host-script: installed $f (mode=$mode, dir=$install_dir)"
-		_any_changed=1
+		_hs_fetch "$sha256_asset_name" "$fetch_url" "$fetch_tmp" || continue
+		_hs_queue "$fetch_tmp" "$install_dir/$f" "$mode"
 	done
 
 	# ------------------------------------------------------------------
 	# Step 3: defaults.conf (sourced by channel-render-lib + health-report).
 	# ------------------------------------------------------------------
 	local defaults_url="$REPO_RAW/config/defaults.conf"
+	# Same payload-origin polarity as Step 2: verified bytes come from the
+	# target release bundle (staged as config-defaults.conf), not the
+	# running-tag-pinned REPO_RAW.
+	[[ "$use_release_assets" -eq 1 ]] && defaults_url="$RELEASES_BASE/$tag/config-defaults.conf"
 	local defaults_dst="$PREFIX_SHARE/oxpulse-partner-edge/config/defaults.conf"
 	local defaults_tmp="$tmpdir/defaults.conf"
-	if curl -fsSL --max-time 30 "$defaults_url" -o "$defaults_tmp" 2>/dev/null; then
-		# SHA256 guard (staged as config-defaults.conf in release assets).
-		expected_sha=$(_lookup_sha256 "config-defaults.conf")
-		if [[ -n "$expected_sha" ]]; then
-			actual_sha=$(sha256sum "$defaults_tmp" | awk '{print $1}')
-			if [[ "$actual_sha" != "$expected_sha" ]]; then
-				warn "host-script sync: SHA256 MISMATCH for defaults.conf — skipping"
-				defaults_tmp=""
-			fi
-		fi
-		if [[ -n "$defaults_tmp" && -f "$defaults_tmp" ]]; then
-			install -d -m 0755 "$(dirname "$defaults_dst")"
-			if [[ -f "$defaults_dst" ]]; then
-				installed_sha=$(sha256sum "$defaults_dst" | awk '{print $1}')
-				actual_sha=$(sha256sum "$defaults_tmp" | awk '{print $1}')
-				if [[ "$installed_sha" == "$actual_sha" ]]; then
-					log "  host-script: defaults.conf up-to-date"
-				else
-					install -m 0644 "$defaults_tmp" "$defaults_dst"
-					log "  host-script: installed defaults.conf"
-					_any_changed=1
-				fi
-			else
-				install -m 0644 "$defaults_tmp" "$defaults_dst"
-				log "  host-script: installed defaults.conf (new)"
-				_any_changed=1
-			fi
-		fi
-	else
-		warn "host-script sync: could not fetch defaults.conf from $defaults_url — skipping"
+	if ! _hs_required "config-defaults.conf"; then
+		warn "host-script sync: config-defaults.conf not in $tag SHA256SUMS — release does not ship it, skipping"
+	elif _hs_fetch "config-defaults.conf" "$defaults_url" "$defaults_tmp"; then
+		_hs_queue "$defaults_tmp" "$defaults_dst" 0644
 	fi
 
 	# ------------------------------------------------------------------
@@ -689,53 +697,13 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	# sync the field stays empty after upgrade (hydrate only runs on first boot).
 	# ------------------------------------------------------------------
 	local version_url="$REPO_RAW/VERSION"
+	[[ "$use_release_assets" -eq 1 ]] && version_url="$RELEASES_BASE/$tag/VERSION"
 	local version_dst="$PREFIX_SHARE/oxpulse-partner-edge/VERSION"
 	local version_tmp="$tmpdir/VERSION"
-	if curl -fsSL --max-time 30 "$version_url" -o "$version_tmp" 2>/dev/null; then
-		expected_sha=$(_lookup_sha256 "VERSION")
-		if [[ -n "$expected_sha" ]]; then
-			actual_sha=$(sha256sum "$version_tmp" | awk '{print $1}')
-			if [[ "$actual_sha" != "$expected_sha" ]]; then
-				warn "host-script sync: SHA256 MISMATCH for VERSION — skipping"
-				version_tmp=""
-			fi
-		fi
-		if [[ -n "$version_tmp" && -f "$version_tmp" ]]; then
-			install -d -m 0755 "$(dirname "$version_dst")"
-			if [[ -f "$version_dst" ]]; then
-				installed_sha=$(sha256sum "$version_dst" | awk '{print $1}')
-				actual_sha=$(sha256sum "$version_tmp" | awk '{print $1}')
-				if [[ "$installed_sha" == "$actual_sha" ]]; then
-					log "  host-script: VERSION up-to-date"
-				else
-					install -m 0644 "$version_tmp" "$version_dst"
-					log "  host-script: installed VERSION"
-					_any_changed=1
-				fi
-			else
-				install -m 0644 "$version_tmp" "$version_dst"
-				log "  host-script: installed VERSION (new)"
-				_any_changed=1
-			fi
-		fi
-	else
-		warn "host-script sync: could not fetch VERSION from $version_url — skipping"
-	fi
-
-	# ------------------------------------------------------------------
-	# Step 4: render-channel-lib.sh also goes into PREFIX_LIBDIR (Bug 17 fix
-	# mirroring install-systemd.sh — both PREFIX_SBIN and PREFIX_LIBDIR).
-	# ------------------------------------------------------------------
-	local rcl_sbin="$PREFIX_SBIN/render-channel-lib.sh"
-	local rcl_libdir="$PREFIX_LIBDIR/render-channel-lib.sh"
-	if [[ -f "$rcl_sbin" ]]; then
-		if [[ ! -f "$rcl_libdir" ]] || ! diff -q "$rcl_sbin" "$rcl_libdir" >/dev/null 2>&1; then
-			install -d -m 0755 "$PREFIX_LIBDIR"
-			if [[ ! "$rcl_sbin" -ef "$rcl_libdir" ]]; then
-				install -m 0644 "$rcl_sbin" "$rcl_libdir"
-				log "  host-script: synced render-channel-lib.sh to $PREFIX_LIBDIR"
-			fi
-		fi
+	if ! _hs_required "VERSION"; then
+		warn "host-script sync: VERSION not in $tag SHA256SUMS — release does not ship it, skipping"
+	elif _hs_fetch "VERSION" "$version_url" "$version_tmp"; then
+		_hs_queue "$version_tmp" "$version_dst" 0644
 	fi
 
 	# ------------------------------------------------------------------
@@ -745,32 +713,17 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	# ------------------------------------------------------------------
 	local unit unit_url unit_tmp unit_dst unit_expected_sha unit_actual_sha
 	for unit in "${_HOST_SCRIPT_SYSTEMD_FILES[@]}"; do
+		# Units are staged flat by basename in the release bundle.
 		unit_url="$REPO_RAW/systemd/$unit"
+		[[ "$use_release_assets" -eq 1 ]] && unit_url="$RELEASES_BASE/$tag/$unit"
 		unit_tmp="$tmpdir/$unit"
 		unit_dst="$SYSTEMD_DIR/$unit"
-		if ! curl -fsSL --max-time 30 "$unit_url" -o "$unit_tmp" 2>/dev/null; then
-			warn "host-script sync: could not fetch systemd/$unit — skipping"
+		if ! _hs_required "$unit"; then
+			warn "host-script sync: $unit not in $tag SHA256SUMS — release does not ship it, skipping"
 			continue
 		fi
-		# Checksum guard: unit is staged as <unit-name> in SHA256SUMS (basename only).
-		unit_expected_sha=$(_lookup_sha256 "$unit")
-		if [[ -n "$unit_expected_sha" ]]; then
-			unit_actual_sha=$(sha256sum "$unit_tmp" | awk '{print $1}')
-			if [[ "$unit_actual_sha" != "$unit_expected_sha" ]]; then
-				warn "host-script sync: SHA256 MISMATCH for systemd/$unit (expected=$unit_expected_sha actual=$unit_actual_sha) — skipping (possible MITM or stale CDN)"
-				continue
-			fi
-		fi
-		if [[ -f "$unit_dst" ]]; then
-			installed_sha=$(sha256sum "$unit_dst" | awk '{print $1}')
-			actual_sha=$(sha256sum "$unit_tmp" | awk '{print $1}')
-			if [[ "$installed_sha" == "$actual_sha" ]]; then
-				continue
-			fi
-		fi
-		install -m 0644 "$unit_tmp" "$unit_dst"
-		log "  host-script: installed systemd/$unit"
-		_any_changed=1
+		_hs_fetch "$unit" "$unit_url" "$unit_tmp" || continue
+		_hs_queue "$unit_tmp" "$unit_dst" 0644
 	done
 
 	# ------------------------------------------------------------------
@@ -801,24 +754,22 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 			warn "host-script sync: cannot render systemd/$_tu — TURNS_SUBDOMAIN and/or PARTNER_DOMAIN absent from $STATE_FILE. Leaving the unit ABSENT rather than installing one with unresolved {{placeholders}} (an inert watcher reads as converged; an absent one does not)."
 			continue
 		fi
+		# UPG-6: when the target checksum manifest armed the guard, the raw
+		# template comes from the TARGET release bundle ($RELEASES_BASE/$tag/$_tu,
+		# staged flat like the verbatim units) — NOT the running-tag-pinned
+		# REPO_RAW — and its template bytes verify against that same manifest
+		# BEFORE substitution. A release that does not stage the template (its
+		# SHA256SUMS has no entry) simply does not ship the unit → skip.
 		unit_url="$REPO_RAW/systemd/$_tu"
+		[[ "$use_release_assets" -eq 1 ]] && unit_url="$RELEASES_BASE/$tag/$_tu"
 		unit_tmp="$tmpdir/$_tu"
 		unit_dst="$SYSTEMD_DIR/$_tu"
 		_tu_rendered="$tmpdir/$_tu.rendered"
-		if ! curl -fsSL --max-time 30 "$unit_url" -o "$unit_tmp" 2>/dev/null; then
-			warn "host-script sync: could not fetch systemd/$_tu — skipping"
+		if ! _hs_required "$_tu"; then
+			warn "host-script sync: $_tu not in $tag SHA256SUMS — release does not ship it, skipping"
 			continue
 		fi
-		# Checksum guard runs on the TEMPLATE bytes as released — the rendered
-		# output is per-node and has no entry in SHA256SUMS by construction.
-		unit_expected_sha=$(_lookup_sha256 "$_tu")
-		if [[ -n "$unit_expected_sha" ]]; then
-			unit_actual_sha=$(sha256sum "$unit_tmp" | awk '{print $1}')
-			if [[ "$unit_actual_sha" != "$unit_expected_sha" ]]; then
-				warn "host-script sync: SHA256 MISMATCH for systemd/$_tu (expected=$unit_expected_sha actual=$unit_actual_sha) — skipping (possible MITM or stale CDN)"
-				continue
-			fi
-		fi
+		_hs_fetch "$_tu" "$unit_url" "$unit_tmp" || continue
 		# Same substitution install.sh performs (_systemd_install_cert_watch_units).
 		sed -e "s|{{TURNS_SUBDOMAIN}}|${_tpl_turns}|g" \
 		    -e "s|{{PARTNER_DOMAIN}}|${_tpl_domain}|g" \
@@ -827,17 +778,50 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 			warn "host-script sync: systemd/$_tu still contains an unresolved {{placeholder}} after substitution — NOT installing (the template gained a placeholder this renderer does not know about)"
 			continue
 		fi
-		if [[ -f "$unit_dst" ]]; then
-			installed_sha=$(sha256sum "$unit_dst" | awk '{print $1}')
-			actual_sha=$(sha256sum "$_tu_rendered" | awk '{print $1}')
-			if [[ "$installed_sha" == "$actual_sha" ]]; then
-				continue
-			fi
-		fi
-		install -m 0644 "$_tu_rendered" "$unit_dst"
-		log "  host-script: installed systemd/$_tu (rendered from STATE)"
+		_hs_queue "$_tu_rendered" "$unit_dst" 0644
+	done
+
+	# ------------------------------------------------------------------
+	# Phase-1 verdict (UPG-3): if ANY required target asset failed to fetch
+	# or verify, die here — BEFORE a single install lands. Nothing above has
+	# touched $PREFIX_SBIN/$SYSTEMD_DIR/$PREFIX_SHARE, the compose file, the
+	# images or the version marker, so the node stays entirely on the old set
+	# and the next refresh/upgrade retries cleanly.
+	# ------------------------------------------------------------------
+	if (( ${#_req_fail[@]} > 0 )); then
+		die "host-script sync: ${#_req_fail[@]} required target asset(s) failed to fetch or verify for $tag: ${_req_fail[*]} — aborting with no host-script, unit, image or marker change (fix the delivery problem or pass --allow-unverified only for dev/test runs)"
+	fi
+
+	# Phase 2: install everything staged. Sibling temp + rename(2) per file,
+	# same atomicity contract the per-file loop had before.
+	local _pi _pi_dst _pi_tmp
+	for ((_pi=0; _pi<${#_pend_dst[@]}; _pi++)); do
+		_pi_dst="${_pend_dst[$_pi]}"
+		install -d -m 0755 "$(dirname "$_pi_dst")"
+		_pi_tmp="$_pi_dst.new.$$"
+		install -m "${_pend_mode[$_pi]}" "${_pend_src[$_pi]}" "$_pi_tmp"
+		mv -f "$_pi_tmp" "$_pi_dst"
+		log "  host-script: installed $(basename "$_pi_dst")"
 		_any_changed=1
 	done
+
+	# ------------------------------------------------------------------
+	# Step 4: render-channel-lib.sh also goes into PREFIX_LIBDIR (Bug 17 fix
+	# mirroring install-systemd.sh — both PREFIX_SBIN and PREFIX_LIBDIR).
+	# Runs AFTER phase 2 so it mirrors the just-installed copy, not the
+	# pre-upgrade one.
+	# ------------------------------------------------------------------
+	local rcl_sbin="$PREFIX_SBIN/render-channel-lib.sh"
+	local rcl_libdir="$PREFIX_LIBDIR/render-channel-lib.sh"
+	if [[ -f "$rcl_sbin" ]]; then
+		if [[ ! -f "$rcl_libdir" ]] || ! diff -q "$rcl_sbin" "$rcl_libdir" >/dev/null 2>&1; then
+			install -d -m 0755 "$PREFIX_LIBDIR"
+			if [[ ! "$rcl_sbin" -ef "$rcl_libdir" ]]; then
+				install -m 0644 "$rcl_sbin" "$rcl_libdir"
+				log "  host-script: synced render-channel-lib.sh to $PREFIX_LIBDIR"
+			fi
+		fi
+	fi
 
 	# ------------------------------------------------------------------
 	# Step 5c: ENABLEMENT convergence.
@@ -962,7 +946,7 @@ Aborting: host-scripts NOT installed (no unverified installs on relay)."
 	# in the fetch→verify→install→restart chain this step needs already exists
 	# in this function — SHA256SUMS is fetched once per tag at Step 1 (this
 	# step never re-fetches it), entries resolve via _lookup_sha256, the
-	# fetch URL reuses the use_releases_asset polarity ($RELEASES_BASE/$tag,
+	# fetch URL reuses the use_release_assets polarity ($RELEASES_BASE/$tag,
 	# which already encodes OXPULSE_MIRROR_BASE), and _any_changed drives the
 	# Step 7 restart that already lists oxpulse-awg-params-agent.service. A
 	# separate converge would be the THIRD fetch+verify implementation in a

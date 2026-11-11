@@ -145,9 +145,11 @@ HELPERS
 } > "$PREAMBLE"
 bash -n "$PREAMBLE" || { fail "B0: extracted preamble has syntax errors"; exit 1; }
 
-# Minimal REPO_RAW fixture: only healthcheck.sh needs to exist — every other
-# file in _HOST_SCRIPT_SBIN_FILES 404s and is skipped gracefully (existing
-# sync_host_scripts contract: "could not fetch $fetch_url — skipping $f").
+# UPG-3: with the checksum guard unarmed (--allow-unverified) EVERY managed
+# asset is required — the old "404 → warn+skip" contract is gone and a missing
+# one die()s the sync before anything installs. The fixture therefore serves
+# the full managed set: REAL bytes for healthcheck.sh (the file under test),
+# stub bytes for everything else.
 B_REPO="$B_TMPDIR/repo_raw"
 mkdir -p "$B_REPO"
 NEW_HC_CONTENT='#!/usr/bin/env bash
@@ -159,6 +161,20 @@ fi
 exit 0
 '
 printf '%s' "$NEW_HC_CONTENT" > "$B_REPO/healthcheck.sh"
+eval "$(awk '/^_HOST_SCRIPT_[A-Z_]+=\(/{f=1} f{print} f && /^\)$/{f=0}' "$UPGRADE")"
+eval "$(awk '/^_host_script_remote_name\(\)/{f=1} f{print} f && /^}$/{exit}' "$UPGRADE")"
+for _f in "${_HOST_SCRIPT_SBIN_FILES[@]}"; do
+    _rn=$(_host_script_remote_name "$_f")
+    [[ "$_rn" == "healthcheck.sh" ]] && continue
+    mkdir -p "$B_REPO/$(dirname "$_rn")"
+    printf '# fixture stub\n' > "$B_REPO/$_rn"
+done
+mkdir -p "$B_REPO/config" "$B_REPO/systemd"
+printf '# fixture stub\n' > "$B_REPO/config/defaults.conf"
+printf '0.0.0\n' > "$B_REPO/VERSION"
+for _u in "${_HOST_SCRIPT_SYSTEMD_FILES[@]}"; do
+    printf '[Unit]\n# fixture stub\n' > "$B_REPO/systemd/$_u"
+done
 
 B_SBIN="$B_TMPDIR/sbin"
 mkdir -p "$B_SBIN"
@@ -262,6 +278,35 @@ C_REPO="$C_TMPDIR/repo_raw"
 mkdir -p "$C_REPO"
 printf '#!/usr/bin/env bash\nif [[ "$1" == "--snapshot" ]]; then echo "check_99_hc_sync_marker=GREEN"; exit 0; fi\nexit 0\n' \
     > "$C_REPO/healthcheck.sh"
+
+# UPG-3: --allow-unverified waives integrity, not completeness — with the
+# checksum guard unarmed EVERY managed asset is required, so the fixture must
+# serve the whole set. Libs the apply path actually invokes get FUNCTIONAL
+# stubs (same set the journey test uses); everything else gets inert bytes.
+eval "$(awk '/^_HOST_SCRIPT_[A-Z_]+=\(/{f=1} f{print} f && /^\)$/{f=0}' "$UPGRADE")"
+eval "$(awk '/^_host_script_remote_name\(\)/{f=1} f{print} f && /^}$/{exit}' "$UPGRADE")"
+for _f in "${_HOST_SCRIPT_SBIN_FILES[@]}"; do
+    _rn=$(_host_script_remote_name "$_f")
+    [[ "$_rn" == "healthcheck.sh" ]] && continue
+    mkdir -p "$C_REPO/$(dirname "$_rn")"
+    case "$_rn" in
+        channel-render-lib.sh)
+            printf 'refetch_node_config() { return 0; }\nre_render_xray() { return 0; }\nretire_hysteria2_ch3() { return 0; }\n' > "$C_REPO/$_rn" ;;
+        ghcr-auth-lib.sh)
+            printf 'ghcr_configure_token() { return 0; }\nghcr_login_from_file() { return 0; }\nghcr_pull_diagnose() { return 0; }\n' > "$C_REPO/$_rn" ;;
+        lib/install-awg.sh)
+            printf 'ensure_amneziawg() { return 0; }\n' > "$C_REPO/$_rn" ;;
+        lib/telegram-alert-lib.sh)
+            printf 'tg_alert() { return 0; }\n' > "$C_REPO/$_rn" ;;
+        *) printf '# fixture stub\n' > "$C_REPO/$_rn" ;;
+    esac
+done
+mkdir -p "$C_REPO/config" "$C_REPO/systemd"
+printf '# fixture stub\n' > "$C_REPO/config/defaults.conf"
+printf '0.0.0\n' > "$C_REPO/VERSION"
+for _u in "${_HOST_SCRIPT_SYSTEMD_FILES[@]}"; do
+    printf '[Unit]\n# fixture stub\n' > "$C_REPO/systemd/$_u"
+done
 
 C_FAKE_DOCKER="$C_TMPDIR/docker"
 cat > "$C_FAKE_DOCKER" << 'CFAKE'
