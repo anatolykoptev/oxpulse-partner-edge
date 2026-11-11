@@ -10,7 +10,77 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # docs-gate: canonical docs-only detector. Inserted by scripts/docs-gate.rb; the
+  # `check` mode compares this block byte for byte, so edit it HERE, never per repo.
+  # Spec and failure semantics: ~/.claude/skills/ci-setup/specs/docs-only-fastpath.md
+  docs-scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+    steps:
+      - id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          # docs_only=true only on a positive, complete answer; every doubt means full CI.
+          is_doc() {
+            case "$1" in
+              *.md | docs/* | doc/* | LICENSE | LICENSE.* | LICENSE-* | COPYING | NOTICE | AUTHORS) return 0 ;;
+              .github/ISSUE_TEMPLATE/* | .github/PULL_REQUEST_TEMPLATE* | .github/CODEOWNERS) return 0 ;;
+            esac
+            return 1
+          }
+          why=
+          touched() { # every touched path (rename sources included); non-zero on any doubt
+            local url page=1 resp n
+            case "$EVENT" in
+              pull_request) url="$API/repos/$REPO/pulls/$PR/files" ;;
+              push)
+                [ -n "${BEFORE//0/}" ] || { why="push without a usable before sha"; return 1; }
+                url="$API/repos/$REPO/compare/$BEFORE...$AFTER" ;;
+              *) why="event $EVENT"; return 1 ;;
+            esac
+            while :; do
+              resp=$(printf 'header = "Authorization: Bearer %s"\n' "$GH_TOKEN" | curl -fsS --retry 2 -K - -H "Accept: application/vnd.github+json" "$url?per_page=100&page=$page") || { why="API error on page $page"; return 1; }
+              if [ "$EVENT" = push ] && [ "$page" = 1 ]; then
+                [ "$(jq -r .status <<<"$resp")" = ahead ] || { why="push is not a fast-forward"; return 1; }
+              fi
+              n=$(jq -r '(if type == "array" then . else .files end) | length' <<<"$resp") || { why="unreadable page $page"; return 1; }
+              [[ $n =~ ^[0-9]+$ ]] || { why="unreadable page $page"; return 1; }
+              jq -r '(if type == "array" then . else .files end) | .[] | .filename, (.previous_filename // empty)' <<<"$resp" || { why="unreadable page $page"; return 1; }
+              # compare lists at most 300 files: 300 or more may be a truncated list
+              if [ "$EVENT" = push ] && [ "$n" -ge 100 ]; then why="push may exceed the compare file cap"; [ "$page" -lt 3 ] || return 1; fi
+              [ "$n" -ge 100 ] || { why=; return 0; }
+              page=$((page + 1))
+              [ "$page" -le 30 ] || { why="3000 files or more"; return 1; }
+            done
+          }
+          docs_only=false
+          # `if !` keeps errexit off for the whole listing: every doubt is an explicit return 1
+          if ! list=$(touched); then
+            why=${why:-listing failed}
+          elif [ -z "$list" ]; then
+            why="no changed paths"
+          else
+            docs_only=true
+            while IFS= read -r f; do is_doc "$f" || { docs_only=false; why="code path: $f"; break; }; done <<<"$list"
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs-only: $docs_only${why:+ ($why)}" >> "$GITHUB_STEP_SUMMARY"
+
   lint:
+    needs: [docs-scope]
+    if: ${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}
     name: Format + Clippy
     runs-on: ubuntu-latest
     steps:
@@ -33,6 +103,8 @@ jobs:
   # break at every interop boundary (SfuRid/Rid, MediaData). Fails if the
   # workspace resolves more than one str0m version.
   single-str0m:
+    needs: [docs-scope]
+    if: ${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}
     name: Single str0m version
     runs-on: ubuntu-latest
     steps:
@@ -77,6 +149,8 @@ jobs:
           echo "OK: no oxpulse-sfu-kit source override present."
 
   test:
+    needs: [docs-scope]
+    if: ${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}
     name: Tests
     runs-on: ubuntu-latest
     steps:
@@ -94,6 +168,8 @@ jobs:
         working-directory: crates/sfu
 
   fips-build:
+    needs: [docs-scope]
+    if: ${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}
     name: FIPS build check
     runs-on: ubuntu-22.04
     steps:
@@ -107,6 +183,8 @@ jobs:
         working-directory: crates/sfu
 
   installer-bash-tests:
+    needs: [docs-scope]
+    if: ${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}
     name: Installer bash tests
     runs-on: ubuntu-22.04
     timeout-minutes: 15
@@ -139,6 +217,8 @@ jobs:
   # tests/test_relay_coturn_smoke.sh SKIPs in the installer job (no binaries); this
   # job is where it actually runs on every PR.
   relay-coturn-static:
+    needs: [docs-scope]
+    if: ${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}
     name: Relay static coturn smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 25
