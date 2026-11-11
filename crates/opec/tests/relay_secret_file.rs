@@ -239,7 +239,7 @@ fn render_denies_only_explicit_peer_ip_ranges() {
     // becomes the range [addr, addr] — EXCEPT the all-zero 'any' address:
     // addr_any() then holds for both endpoints and ioa_addr_in_range()
     // matches EVERY peer, IPv4 included ('8.8.8.8 denied in the range: ::',
-    // observed live on msk1). The only bare single-address form proven safe
+    // observed live on a relay-only node). The only bare single-address form proven safe
     // is the IPv6 loopback '::1'.
     const SINGLE_ADDR_ALLOWLIST: &[&str] = &["::1"];
     let d = tempfile::tempdir().unwrap();

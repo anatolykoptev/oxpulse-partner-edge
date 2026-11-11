@@ -30,9 +30,9 @@ set_frozen_vars() {
   REALITY_SERVER_NAME=www.samsung.com
   REALITY_ENCRYPTION=mlkem768x25519plus.native.0rtt.fXgOoxcW
   TURNS_SUBDOMAIN=api-test01
-  PUBLIC_IP=157.22.204.190
+  PUBLIC_IP=198.51.100.100
   PRIVATE_IP=
-  EXTERNAL_IP_LINE=157.22.204.190
+  EXTERNAL_IP_LINE=198.51.100.100
   # No NAT in this fixture (PRIVATE_IP empty) → allowed-peer-ip line is empty.
   ALLOWED_PEER_IP_LINE=
   IMAGE_VERSION=stable

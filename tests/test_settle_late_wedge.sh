@@ -3,13 +3,13 @@
 # while a container it just recreated goes unhealthy afterwards (#522).
 #
 # Motivating case, measured converging the fleet onto v0.16.9 on 2026-07-30:
-# upgrade.sh printed `upgraded to latest successfully` on rvpn and ruoxp and
+# upgrade.sh printed `upgraded to latest successfully` on node-a and ruoxp and
 # settle_healthcheck saw no regression. MINUTES LATER both nodes'
 # oxpulse-partner-xray were unhealthy (FailingStreak 10 and 9) with
 # `Connection reset by peer` on :3080 — a stale outbound from the compose
 # recreate. While wedged, xray kept accepting and forwarding connections, so it
 # looked alive from every angle except the end-to-end probe, and the control
-# plane had already dropped rvpn-seed from the handout pool.
+# plane had already dropped node-a-seed from the handout pool.
 #
 # Two load-bearing cases:
 #   T5 — the FUNCTIONAL snapshot is clean and the gate must STILL fail because
@@ -175,7 +175,7 @@ rc=$(bash -c "source '$PRE2'
                    || bad "T6: guard changed behaviour when the helper is absent (rc=$rc)"
 
 # ── T7 — the detection budget must outlast TIME-TO-UNHEALTHY (arithmetic) ───
-# Measured on rvpn 2026-08-07: oxpulse-partner-xray declares
+# Measured on node-a 2026-08-07: oxpulse-partner-xray declares
 #   start_period=30s  interval=30s  retries=3  timeout=10s
 # Docker cannot write `unhealthy` before start_period + retries*interval = 120s.
 # A budget shorter than that closes before the signal can exist.
@@ -235,7 +235,7 @@ logged=$(sed -n '/late-wedge watch for/{s/.*late-wedge watch for \([0-9]*\)s.*/\
                        || bad "T9: explicit override ignored — logged ${logged:-?}s instead of 7s"
 
 # ── T10..T15 — pre-upgrade BASELINE: only a container that WAS healthy can wedge ─
-# 2026-10-12 rvpn v0.16.28 -> v0.16.31: oxpulse-partner-hysteria2 was crash-looping
+# 2026-10-12 node-a v0.16.28 -> v0.16.31: oxpulse-partner-hysteria2 was crash-looping
 # before the upgrade (never recreated by it); the watch flagged it and rolled back a
 # clean upgrade. _watchb runs the watch with a baseline file as the 2nd argument.
 _watchb() {
@@ -341,7 +341,7 @@ rc=$(_watchb "$TC/base")
 [[ "$rc" != "0" ]] && ok "T18: baseline 'starting' (RestartCount 0) is still watched (rc=$rc)" || bad "T18: a fresh starting container was ignored"
 
 # T19 - FLAPPER: a crash-looper sampled at `running starting` with a high RestartCount
-# (rvpn hysteria2: 2 of 20 samples, RestartCount 30439) is pre-broken, not "healthy before".
+# (node-a hysteria2: 2 of 20 samples, RestartCount 30439) is pre-broken, not "healthy before".
 # Mutation: drop the `$3 == "starting" && r < flap` RestartCount clause in
 # _settle_baseline_prebroken (upgrade.sh) -> this case goes RED.
 _reset

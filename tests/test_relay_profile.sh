@@ -156,7 +156,7 @@ done
 # coturn 4.6.1: a peer-ip value with no '-' is the single-address range
 # [addr,addr] — but the all-zero 'any' address makes both ends satisfy
 # addr_any(), so ioa_addr_in_range() matches EVERY peer, IPv4 included (live on
-# msk1: "A peer IP 8.8.8.8 denied in the range: ::"). '::1' is the only bare
+# a relay-only node: "A peer IP 8.8.8.8 denied in the range: ::"). '::1' is the only bare
 # single-address form proven safe; anything else must carry an explicit -end.
 bad="$(sed -nE 's/^(denied|allowed)-peer-ip=//p' "$R/coturn-relay.conf.tpl" | grep -vF -e '-' | grep -vxF '::1' || true)"
 if [[ -z "$bad" ]]; then pass "peer-ip directives carry an explicit - range end"; else fail "peer-ip directives carry an explicit - range end: $bad"; fi

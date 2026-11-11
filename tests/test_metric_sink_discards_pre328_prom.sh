@@ -35,15 +35,15 @@ TEXTFILE_DIR="$TMPD/unused"
 source "$LIB"
 
 # The exposition that is actually on the fleet — duplicate TYPE line and a
-# duplicate series, copied from rvpn 2026-08-08.
+# duplicate series, copied from node-a 2026-08-08.
 _fossil() {
     cat <<'EOF'
 # TYPE partner_edge_keys_fetch_failure_total counter
-partner_edge_keys_fetch_failure_total{partner_id="rvpn-seed"} 1
+partner_edge_keys_fetch_failure_total{partner_id="node-a-seed"} 1
 # TYPE partner_edge_heartbeat_failure_total counter
-partner_edge_heartbeat_failure_total{partner_id="rvpn-seed"} 1
+partner_edge_heartbeat_failure_total{partner_id="node-a-seed"} 1
 # TYPE partner_edge_keys_fetch_failure_total counter
-partner_edge_keys_fetch_failure_total{partner_id="rvpn-seed"} 1
+partner_edge_keys_fetch_failure_total{partner_id="node-a-seed"} 1
 EOF
 }
 
@@ -140,9 +140,9 @@ _fossil > "$d/partner_edge.prom"
 metric_sink_discard_pre328_prom "$d" >/dev/null
 (
     TEXTFILE_DIR="$d"
-    emit_metric "partner_edge_keys_fetch_failure_total" 'partner_id="rvpn"' 1
-    emit_metric "partner_edge_keys_fetch_failure_total" 'partner_id="rvpn"' 1
-    emit_metric "partner_edge_heartbeat_failure_total"  'partner_id="rvpn"' 1
+    emit_metric "partner_edge_keys_fetch_failure_total" 'partner_id="node-a"' 1
+    emit_metric "partner_edge_keys_fetch_failure_total" 'partner_id="node-a"' 1
+    emit_metric "partner_edge_heartbeat_failure_total"  'partner_id="node-a"' 1
 )
 new="$d/partner_edge.prom"
 if [[ ! -f "$new" ]]; then
@@ -156,7 +156,7 @@ else
         _ok "S5: regenerated file is valid exposition"
     fi
     # Two increments of the same series must accumulate to 2, not appear twice.
-    if grep -qE '^partner_edge_keys_fetch_failure_total\{partner_id="rvpn"\} 2$' "$new"; then
+    if grep -qE '^partner_edge_keys_fetch_failure_total\{partner_id="node-a"\} 2$' "$new"; then
         _ok "S5b: repeated emits accumulate (counter reads 2)"
     else
         _fail "S5b: counter did not accumulate — file says: $(grep keys_fetch "$new" | tr '\n' ' ')"

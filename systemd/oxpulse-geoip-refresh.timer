@@ -8,7 +8,7 @@ After=network-online.target
 #  1. This timer is in upgrade.sh's _HOST_SCRIPT_RESTART_UNITS, and restarting a
 #     Persistent= timer REWRITES its stamp in /var/lib/systemd/timers. systemd
 #     then believes the job just ran, and every missed occurrence is silently
-#     cancelled. On rvpn — the node upgraded most often — the stamp read
+#     cancelled. On node-a — the node upgraded most often — the stamp read
 #     "Aug 7 20:05", the same second as oxpulse-xray-update.timer's, while the
 #     mmdb was still the one installed on 20 May. The job had not run in 82
 #     DAYS, the unit was not failed, and nothing anywhere reported it.

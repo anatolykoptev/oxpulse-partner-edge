@@ -90,7 +90,7 @@ echo "sysctl $*" >> "$STUB_LOG"
 EOF
 chmod +x "$TMP/bin/nft" "$TMP/bin/sysctl"
 export STUB_LOG="$TMP/calls.log" STUB_RULES="$TMP/rules.nft"
-# `ip -o addr show` seam: this fake host owns pillow-like addresses; anything else
+# `ip -o addr show` seam: this fake host owns node-b-like addresses; anything else
 # (e.g. 10.9.9.9) is NOT local. The guard's locality checks run against it.
 cat > "$TMP/bin/ip" <<'EOF'
 #!/bin/bash
@@ -508,8 +508,8 @@ mkstatus loc1; printf 'min-port=%s\nmax-port=%s\nrelay-ip=10.9.9.9\nallowed-peer
 status_rc && fail "status passed with a NON-local relay address whose allowed-peer-ip matches the conf (conf compared with itself)" || pass "status FAILS when the relay address is not configured on a local interface"
 mkstatus loc2; printf 'min-port=%s\nmax-port=%s\nexternal-ip=203.0.113.5/10.9.9.9\nallowed-peer-ip=10.9.9.9\n' "$g_min" "$g_max" > "$SD/coturn.conf"
 status_rc && fail "status passed with a non-local private half of external-ip" || pass "status FAILS when the private half of external-ip is not local"
-mkstatus loc3; printf 'min-port=%s\nmax-port=%s\nrelay-ip=10.0.1.44\nexternal-ip=132.145.192.254\nallowed-peer-ip=10.0.1.44\n' "$g_min" "$g_max" > "$SD/coturn.conf"
-status_rc && pass "status: pillow's real shape (relay-ip local + own allowed-peer-ip) is in force" || fail "status rejected pillow's conf: $(cat "$SD/out")"
+mkstatus loc3; printf 'min-port=%s\nmax-port=%s\nrelay-ip=10.0.1.44\nexternal-ip=198.51.100.254\nallowed-peer-ip=10.0.1.44\n' "$g_min" "$g_max" > "$SD/coturn.conf"
+status_rc && pass "status: node-b's real shape (relay-ip local + own allowed-peer-ip) is in force" || fail "status rejected node-b's conf: $(cat "$SD/out")"
 
 # --- (3) firewalld/ufw legacy 49152-65535 range -------------------------------------
 fwtest() { # fwtest FILE -> runs _firewall_apply_firewalld with a recording firewall-cmd
@@ -553,13 +553,13 @@ fwset() { printf '%s\n' "$@" > "$FW/perm"; printf '%s\n' "$@" > "$FW/run"; } # s
 fwstate() { echo "perm=[$(tr '\n' ' ' < "$FW/perm")] run=[$(tr '\n' ' ' < "$FW/run")]"; }
 fwgrd() { FIREWALL_CMD="$FW/firewall-cmd" UFW_BIN="${UFW:-/nonexistent}" COTURN_CONF="${CONF:-/nonexistent}" run_guard "$REPO_ROOT/$GUARD" "$@" >/dev/null 2>"$FW/err"; }
 
-# F1: THE rvpn incident. Legacy range present, narrow range covered by it -> after apply the
+# F1: THE node-a incident. Legacy range present, narrow range covered by it -> after apply the
 # zone must hold exactly the narrow range in BOTH scopes (it used to hold nothing).
 fwreset; fwset 49152-65535/udp 3478/udp
 fwgrd apply
 want="perm=[3478/udp ${g_min}-${g_max}/udp ] run=[3478/udp ${g_min}-${g_max}/udp ]"
 [[ $(fwstate) == "$want" ]] && pass "apply: legacy 49152-65535 retired and ${g_min}-${g_max}/udp in force (permanent + runtime)" \
-	|| fail "apply left the wrong zone state (the rvpn no-relay-range bug): $(fwstate)"
+	|| fail "apply left the wrong zone state (the node-a no-relay-range bug): $(fwstate)"
 
 # F2: the narrow add silently fails -> the legacy range must be RESTORED, never left with no range.
 fwreset; fwset 49152-65535/udp
@@ -637,7 +637,7 @@ for l in "A:1/udp DENY Anywhere" "A:1/udp ALLOW OUT Anywhere" "A:1/udp LIMIT Any
 done
 [[ $ufw_ok == 1 ]] && pass "ufw_allows_in: ALLOW / ALLOW IN / (v6) accepted; DENY / ALLOW OUT / LIMIT / source-restricted rejected" || fail "ufw_allows_in form handling wrong"
 
-# F8: ufw installed but INACTIVE (pillow): nothing to manage - rc 0, no rule writes, no false alarm.
+# F8: ufw installed but INACTIVE (node-b): nothing to manage - rc 0, no rule writes, no false alarm.
 fwreset; printf '49152:65535/udp ALLOW Anywhere\n' > "$FW/ufw.state"
 UFW_STATUS=inactive UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent COTURN_CONF="$TMP/fwconf" run_guard "$REPO_ROOT/$GUARD" firewall-sync >/dev/null 2>"$FW/err8"; rc8=$?
 { [[ $rc8 -eq 0 ]] && ! grep -qE 'ufw (allow|--force)' "$FW/calls" && ! grep -q 'blocked' "$FW/err8"; } \
@@ -672,7 +672,7 @@ FIREWALL_CMD="$FW/firewall-cmd" status_rc && fail "status passed with the runtim
 mkstatus fw3; fwreset; fwset "${g_min}-${g_max}/udp"
 FIREWALL_CMD="$FW/firewall-cmd" status_rc && pass "status: relay range in force in both firewalld scopes" || fail "status rejected a correct firewalld: $(cat "$SD/out")"
 mkstatus fw4; fwreset
-UFW_STATUS=inactive UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent status_rc && pass "status: inactive ufw + no firewalld -> skipped (pillow)" || fail "status failed on inactive ufw: $(cat "$SD/out")"
+UFW_STATUS=inactive UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent status_rc && pass "status: inactive ufw + no firewalld -> skipped (node-b)" || fail "status failed on inactive ufw: $(cat "$SD/out")"
 mkstatus fw5; fwreset; : > "$FW/ufw.state"
 UFW_BIN="$FW/ufw" FIREWALL_CMD=/nonexistent status_rc && fail "status passed with active ufw lacking the range" || pass "status FAILS when active ufw lacks the relay range"
 

@@ -3,14 +3,14 @@
 # on its own decision (channel-render-lib.sh: retire_hysteria2_ch3).
 #
 # What is silent if it breaks:
-#   1. a node keeps a crash-looping hysteria2 container (rvpn: 30,440 restarts)
+#   1. a node keeps a crash-looping hysteria2 container (node-a: 30,440 restarts)
 #   2. the `ch3` profile survives in .env, so the next `compose up` brings the
 #      container back
 #   3. the teardown touches a neighbouring container or the .env COMPOSE_FILE
-#      line (rvpn's docker-compose.override.yml)
+#      line (node-a's docker-compose.override.yml)
 #   4. the yaml is deleted while the container survives: docker restarts it and
 #      creates a DIRECTORY where the bind-mount source used to be
-#   5. a second run, or a run on a node that never had CH3 (pillow), changes
+#   5. a second run, or a run on a node that never had CH3 (node-b), changes
 #      something
 #
 # `docker` is a PATH shim over a fixture file; no daemon is needed.
@@ -58,7 +58,7 @@ DOCKER
 }
 teardown() { rm -rf "$TMP"; }
 
-# A node with CH3 as rvpn had it: container, yaml + backup, sha, ch3 in the
+# A node with CH3 as node-a had it: container, yaml + backup, sha, ch3 in the
 # profiles next to COMPOSE_FILE, status active, the two helper scripts.
 fixture_ch3_node() {
 	printf '%s\n' oxpulse-partner-xray oxpulse-partner-hysteria2 oxpulse-partner-caddy oxpulse-partner-sfu > "$TMP/containers"
@@ -75,9 +75,9 @@ fixture_clean_node() {
 	printf 'COMPOSE_FILE=docker-compose.yml\nCOMPOSE_PROFILES=metrics\n' > "$ETC/.env"
 	printf '# Generated\nxray=active\nhysteria2=skipped\nnaive=active\nawg=active\n' > "$VAR/channels-status.env"
 }
-# pillow as it really is: never had CH3, but it ran older releases that installed
+# Node-b as it really is: never had CH3, but it ran older releases that installed
 # the two CH3 helper scripts, and its status file says hysteria2=skipped.
-fixture_pillow_node() {
+fixture_node_b() {
 	fixture_clean_node
 	: > "$SBIN/oxpulse-partner-edge-enable-hy2"; : > "$SBIN/hydrate-hy2.sh"
 }
@@ -93,7 +93,7 @@ run_lib() {   # [lib-path]
 echo ""
 echo "=== retire_hysteria2_ch3 (channel-render-lib.sh) ==="
 
-# 1 — full teardown on an rvpn-shaped node
+# 1 — full teardown on a node-a-shaped node
 setup; fixture_ch3_node; run_lib; rc=$?
 [[ $rc -eq 0 ]] && pass "teardown exits 0" || fail "teardown exit $rc: $(cat "$TMP/out")"
 ! grep -qx oxpulse-partner-hysteria2 "$TMP/containers" && pass "hysteria2 container removed" || fail "hysteria2 container still present"
@@ -138,21 +138,21 @@ run_lib; rc=$?
 	|| fail "touched a node without CH3 (rc=$rc calls=$(mutations) out=$(cat "$TMP/out"))"
 teardown
 
-# 3b — pillow for real: first run has an effect (helper scripts go, skipped -> retired),
+# 3b — node-b for real: first run has an effect (helper scripts go, skipped -> retired),
 #      containers and profiles untouched; the second run is then a true no-op.
-setup; fixture_pillow_node
+setup; fixture_node_b
 run_lib; rc=$?
 [[ $rc -eq 0 && ! -e "$SBIN/oxpulse-partner-edge-enable-hy2" && ! -e "$SBIN/hydrate-hy2.sh" ]] \
-	&& pass "pillow first run: the two leftover CH3 helper scripts are removed" || fail "pillow helpers left (rc=$rc): $(ls "$SBIN")"
+	&& pass "node-b first run: the two leftover CH3 helper scripts are removed" || fail "node-b helpers left (rc=$rc): $(ls "$SBIN")"
 grep -qx 'hysteria2=retired' "$VAR/channels-status.env" \
-	&& pass "pillow first run: hysteria2=skipped flipped to retired" || fail "pillow status: $(cat "$VAR/channels-status.env")"
+	&& pass "node-b first run: hysteria2=skipped flipped to retired" || fail "node-b status: $(cat "$VAR/channels-status.env")"
 [[ "$(tr '\n' ' ' < "$TMP/containers")" == "oxpulse-partner-xray oxpulse-partner-caddy " && "$(mutations)" == 0 ]] \
 	&& grep -qx 'COMPOSE_PROFILES=metrics' "$ETC/.env" \
-	&& pass "pillow first run: containers, docker calls and .env profiles untouched" || fail "pillow collateral change"
+	&& pass "node-b first run: containers, docker calls and .env profiles untouched" || fail "node-b collateral change"
 before="$(snapshot)"; : > "$TMP/calls"
 run_lib; rc=$?
 [[ $rc -eq 0 && "$(snapshot)" == "$before" && "$(mutations)" == 0 && ! -s "$TMP/out" ]] \
-	&& pass "pillow second run: no-op" || fail "pillow second run changed something (rc=$rc out=$(cat "$TMP/out"))"
+	&& pass "node-b second run: no-op" || fail "node-b second run changed something (rc=$rc out=$(cat "$TMP/out"))"
 teardown
 
 # 4 — .env holding only the ch3 profile: the line goes, nothing else is invented
@@ -241,7 +241,7 @@ ufw_rules_fixture() {
 }
 
 # 10 — ufw: 18443 v4+v6 closed, every other rule intact, second run no-op. The node
-#      is pillow AFTER its teardown ran: no container, no yaml, no helper scripts.
+#      is node-b AFTER its teardown ran: no container, no yaml, no helper scripts.
 setup; fixture_clean_node; firewall_stubs; ufw_rules_fixture
 run_lib; rc=$?
 ! grep -q '18443' "$TMP/ufw.rules" && [[ $rc -eq 0 ]] \
@@ -274,7 +274,7 @@ setup; fixture_clean_node; before="$(snapshot)"; run_lib
 teardown
 
 # --- mutation: gate the port closure on CH3 leftovers (have_files) -------------
-# The pillow-after-teardown case (test 10) has no leftovers, so it must go RED.
+# The node-b-after-teardown case (test 10) has no leftovers, so it must go RED.
 setup; fixture_clean_node; firewall_stubs; ufw_rules_fixture
 MUT2="$TMP/mutant2-channel-render-lib.sh"
 sed 's/^    retire_ch3_close_port || true$/    [[ -e "$PREFIX_ETC\/hysteria2-client.yaml" ]] \&\& retire_ch3_close_port || true/' "$LIB" > "$MUT2"

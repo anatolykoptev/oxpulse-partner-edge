@@ -5,7 +5,7 @@
 #
 # Measured 2026-08-07: a visitor in Russia loads 69 assets, each tunnelled
 # Moscow → San Jose over AWG → xray → HY2 → naive. Proven by firing 8 requests
-# at one chunk on zvonilka.net and watching the origin counter move by exactly 8.
+# at one chunk on a production edge and watching the origin counter move by exactly 8.
 #
 # The load-bearing assertion here is NOT that caching works — it is C4/C5, the
 # boundary. The document is branded per-partner at serve time by the Rust SPA

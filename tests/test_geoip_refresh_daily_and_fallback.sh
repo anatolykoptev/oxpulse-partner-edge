@@ -1,14 +1,14 @@
 #!/bin/bash
 # tests/test_geoip_refresh_daily_and_fallback.sh
 #
-# The geo database stopped updating for 82 days on rvpn and nobody noticed,
+# The geo database stopped updating for 82 days on node-a and nobody noticed,
 # because every failure in this path is SILENT: the file simply stays as it was.
 # Both mechanisms are covered here.
 #
 #   1. THE SCHEDULE. oxpulse-geoip-refresh.timer is in upgrade.sh's
 #      _HOST_SCRIPT_RESTART_UNITS, and restarting a Persistent= timer rewrites
 #      its stamp in /var/lib/systemd/timers — systemd then believes the job just
-#      ran and cancels every missed occurrence. Measured 2026-08-11: rvpn's
+#      ran and cancels every missed occurrence. Measured 2026-08-11: node-a's
 #      stamp read "Aug 7 20:05", the same second as another restarted timer's,
 #      while its mmdb was the one installed on 20 May. Any period LONGER than
 #      the upgrade interval is a job that never runs, so the timer must be
@@ -127,7 +127,7 @@ teardown
 if grep -qE '^OnCalendar=daily$' "$TIMER"; then
 	pass "the timer is daily"
 else
-	fail "the timer is not daily — an upgrade restart rewrites a Persistent stamp and cancels every missed run, so any period longer than the upgrade interval never fires (rvpn: 82 days)"
+	fail "the timer is not daily — an upgrade restart rewrites a Persistent stamp and cancels every missed run, so any period longer than the upgrade interval never fires (node-a: 82 days)"
 fi
 
 echo ""

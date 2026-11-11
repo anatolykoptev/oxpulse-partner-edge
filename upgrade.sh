@@ -1011,7 +1011,7 @@ V01_TO_V02=0
 #   1. $TARGET already set (explicit CLI arg) — wins, unchanged.
 #   2. $OXPULSE_UPGRADE_TAG when it is a real vX.Y.Z tag and not the
 #      unsubstituted @RELEASE_TAG_PLACEHOLDER@ sentinel — the value baked into every
-#      released installer.  On every probed edge (ruoxp, rvpn, zvonilka) there
+#      released installer.  On every probed edge (ruoxp, node-a, node-c) there
 #      is no VERSION file, so the previous fall-through to 'latest' made
 #      CURRENT and TARGET compare equal and the run exited "already on latest
 #      — nothing to do" having transferred nothing (issue #612).
@@ -1088,7 +1088,7 @@ derive_release_tag() { normalize_target; }
 # refresh predates the detached self-upgrade runner). That unit has
 # TimeoutStartSec=120 and KillMode=control-group, but a full upgrade — pull,
 # recreate, healthcheck, the >=130s settle late-wedge watch — takes far longer, so
-# systemd SIGTERMed every central-driven upgrade mid-run (2026-10-31, pillow
+# systemd SIGTERMed every central-driven upgrade mid-run (2026-10-31, node-b
 # 0.16.31 -> 0.16.33; mid-pull the rollback path never runs). A new
 # process cannot be saved from a SIGTERM, so it is moved out of the unit instead:
 # re-run this script as its own transient unit and let the refresh return.
@@ -1413,7 +1413,7 @@ _HOST_SCRIPT_SYSTEMD_FILES=(
 # checksum-verified copy, and it would install the raw template.
 #
 # Consequence of having neither path deliver them, measured on the fleet
-# 2026-08-07: the two oldest nodes (rvpn-seed, zvonilka-cc7cf842800b) carry no
+# 2026-08-07: the two oldest nodes (node-a-seed, node-c-seed) carry no
 # cert-watch units at all, so a renewed TURNS certificate never signals coturn
 # on either box — and no upgrade could ever have fixed it, because delivery was
 # reachable only from a fresh install.
@@ -2149,14 +2149,14 @@ settle_healthcheck_with_retry() {
 # not in WHEN. That is the gap this closes.
 #
 # Measured, converging the fleet onto v0.16.9 on 2026-07-30: upgrade.sh printed
-# `upgraded to latest successfully` on rvpn and ruoxp and settle_healthcheck saw
+# `upgraded to latest successfully` on node-a and ruoxp and settle_healthcheck saw
 # no regression. MINUTES LATER both nodes' oxpulse-partner-xray were unhealthy
 # (FailingStreak 10 and 9), `wget http://127.0.0.1:3080/api/health/live`
 # returning `Connection reset by peer` every 30s without recovering — a stale
 # outbound left over from the compose recreate, fixed instantly by
 # `docker restart`. While wedged, xray kept ACCEPTING and forwarding client
 # connections, so it looked alive from every angle except the one end-to-end
-# probe. The control plane had already dropped rvpn-seed from the handout pool.
+# probe. The control plane had already dropped node-a-seed from the handout pool.
 #
 # An upgrade gate that closes before the thing it upgraded can fail will keep
 # reporting success over exactly that class, whatever the cause.
@@ -2183,7 +2183,7 @@ settle_healthcheck_with_retry() {
 #
 #     start_period + retries * interval
 #
-# Measured on rvpn 2026-08-07, oxpulse-partner-xray declares
+# Measured on node-a 2026-08-07, oxpulse-partner-xray declares
 # start_period=30s interval=30s retries=3 timeout=10s => 130s. The first cut of
 # this watch used a fixed 60s default, which closes roughly a minute BEFORE the
 # 2026-07-30 wedge could have become visible: it would have passed that upgrade
@@ -2209,7 +2209,7 @@ _settle_derive_recheck_window() {
 		[[ -z "$_n" ]] && continue
 		# Guarded template: a container with no HEALTHCHECK yields an empty line.
 		# The unguarded form is a template ERROR on such a container, not an empty
-		# field (measured on docker 27, rvpn).
+		# field (measured on docker 27, node-a).
 		_cfg=$("$_docker" inspect -f '{{if .Config.Healthcheck}}{{.Config.Healthcheck.StartPeriod.Seconds}} {{.Config.Healthcheck.Interval.Seconds}} {{.Config.Healthcheck.Timeout.Seconds}} {{.Config.Healthcheck.Retries}}{{end}}' "$_n" 2>/dev/null || true)
 		[[ -z "$_cfg" ]] && continue
 		read -r _sp _iv _to _rt <<< "$_cfg"
@@ -2239,12 +2239,12 @@ _settle_derive_recheck_window() {
 # AGE (seconds since State.StartedAt; absent = unknown). Includes
 # stopped containers (ps -a). v1 (no RESTARTS column) is still read; RESTARTS = 0 there.
 # RESTARTS exists because a crash-looper flaps through `running starting` between
-# `restarting unhealthy` samples (rvpn 2026-11-03: 2 of 20 samples), so status+health
+# `restarting unhealthy` samples (node-a 2026-11-03: 2 of 20 samples), so status+health
 # alone mis-record it as healthy-before about 1 upgrade in 10.
 # Best effort: returns 1 and leaves OUTFILE without the header when docker is
 # unreachable - the watch then runs strict, as before.
 #
-# Why (2026-10-12, rvpn v0.16.28 -> v0.16.31): oxpulse-partner-hysteria2 was
+# Why (2026-10-12, node-a v0.16.28 -> v0.16.31): oxpulse-partner-hysteria2 was
 # crash-looping BEFORE the upgrade (hy2 checks red in the baseline, never recreated by
 # it), the watch saw it `unhealthy`, and a clean upgrade was rolled back on a
 # false positive.
@@ -2604,7 +2604,7 @@ _render_gate() {
 # WHY HERE, when the disk healer already collects: the healer opens at 85%, so
 # between upgrades a node grows one tag per service per release with nothing
 # reporting it — 286 across the five edges when anyone first looked, 12.2 GB
-# recoverable on rvpn alone. Worse than the space, that dead weight is SLACK:
+# recoverable on node-a alone. Worse than the space, that dead weight is SLACK:
 # when something else fills the disk, the healer reclaims OUR images, drops back
 # under the threshold and clears its budget, so the alert that should have said
 # "the growth is not ours" never fires at all.
@@ -3077,7 +3077,7 @@ FIX: re-run this upgrade (the on-disk bytes are already correct, so the next inv
 # pre-change health/docker baselines, so a crash-looping or healthy hysteria2
 # container is gone before anything is measured: the settle gates and the
 # late-wedge watch never see it, and the upgrade no longer depends on the
-# baseline "already broken" carve-out to survive a node that has one (rvpn
+# baseline "already broken" carve-out to survive a node that has one (node-a
 # rolled 0.16.28 -> 0.16.34 back for exactly that).
 #
 # retire_hysteria2_ch3 lives in channel-render-lib.sh, which sync_host_scripts
@@ -3193,7 +3193,7 @@ do_rollback_templates() {
 # Motherly/central IP guard (T2): an edge must NEVER advertise the central
 # backend's IP as its own public IP. Live bug: the RU edge's egress route
 # traversed the AWG mesh tunnel to motherly, so curl ifconfig.me returned the
-# central IP (192.9.243.148). The motherly IP is derived from OXPULSE_MOTHERLY_IP
+# central IP (198.51.100.148). The motherly IP is derived from OXPULSE_MOTHERLY_IP
 # env (operator escape hatch) or by resolving the BACKEND_API / OXPULSE_BACKEND_URL
 # host A-record (best-effort; empty when unresolvable → guard is a no-op). Any
 # tier that would yield the motherly IP is REJECTED and the resolver falls

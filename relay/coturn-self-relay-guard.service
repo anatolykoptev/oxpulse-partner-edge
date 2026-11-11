@@ -1,6 +1,6 @@
 [Unit]
 Description=Stop coturn relaying UDP to this host's own services (nft inet output hook)
-# Origin: krolik-server deploy/host-config/coturn-self-relay-guard/coturn-self-relay-guard.service.
+# Origin: deploy/host-config/coturn-self-relay-guard/coturn-self-relay-guard.service in the private fleet repo.
 # Ordered Before the relay coturn unit, deliberately NOT Requires=/BindsTo=: a
 # coupling either way breaks coturn restarts and rollback.
 Before=oxpulse-relay-coturn.service

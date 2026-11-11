@@ -514,7 +514,7 @@ _maybe_self_upgrade() {
     # unit has TimeoutStartSec=120 + KillMode=control-group, and a real upgrade
     # (pull, recreate, healthcheck, >=130s settle late-wedge watch) takes far
     # longer: when it ran synchronously here systemd SIGTERMed every central-driven
-    # upgrade mid-run (2026-10-31, pillow 0.16.31 -> 0.16.33), and mid-pull the
+    # upgrade mid-run (2026-10-31, node-b 0.16.31 -> 0.16.33), and mid-pull the
     # rollback path never runs. --no-block returns at once; the outcome lives in
     # `journalctl -u oxpulse-partner-edge-self-upgrade` and the upgrade log.
     # upgrade.sh keeps its own flock; the ActiveState probe (above) is a cheap
@@ -601,7 +601,7 @@ _channel_restart_if_changed() {
 # channel marked "skipped" (because its server was empty at install) stayed
 # skipped forever, even after the inputs appeared and the container was running.
 # _channel_restart_if_changed then skipped every restart for that channel, so
-# config re-renders never reached the container (rvpn-seed ran May's config for
+# config re-renders never reached the container (node-a-seed ran May's config for
 # two months, reporting healthy the entire time).
 #
 # This function re-derives each channel's status from currently-available inputs
@@ -615,7 +615,7 @@ _channel_restart_if_changed() {
 #   skipped → skipped  when inputs are still absent (nothing to try with).
 #   failed_at_*  → unchanged. "We tried and it broke" is a different state from
 #                  "we had nothing to try with" — collapsing them repeats the
-#                  liveness≠authorization mistake that took rvpn-seed down.
+#                  liveness≠authorization mistake that took node-a-seed down.
 #   active → active    (no downward transition; a running channel stays active).
 #
 # Inputs per channel:
@@ -809,7 +809,7 @@ _emit_sfu_applied_gauge() {
     # #550: make the comparison representation-independent on NEWLINES too, not
     # just on quotes. The env file stores the PEM on ONE line with the newlines
     # escaped as the two characters \n; `printenv` hands back the real
-    # multi-line PEM. Measured on rvpn/zvonilka/ruoxp: written 114 chars / 1
+    # multi-line PEM. Measured on node-a/node-c/ruoxp: written 114 chars / 1
     # line vs live 112 chars / 3 lines — 114 = 112 + 2 across exactly two
     # newlines, i.e. the same key in two representations. Without this decode
     # the equality below can never hold, so the gauge sits at 0 on every node

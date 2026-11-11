@@ -342,7 +342,7 @@ _probe_peer_udp_stun() {
     #
     # The outer (docker-CLI) timeout is secs + 15, NOT the same value: with equal
     # bounds the CLI was killed while create/start was still in flight, leaving a
-    # container in state `Created` that `--rm` never removes (130 leaked on pillow,
+    # container in state `Created` that `--rm` never removes (130 leaked on node-b,
     # 2026-10-30). See _coturn_probe_run. The in-container timeout still bounds the
     # tool, so the per-probe budget above holds whenever docker itself is healthy.
     #

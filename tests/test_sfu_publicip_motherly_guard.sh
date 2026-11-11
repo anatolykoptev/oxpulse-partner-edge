@@ -10,8 +10,8 @@
 # PUBLIC_IP global that hydrate.sh's resolve_external_ip() resolves with
 # precedence: OXPULSE_PUBLIC_IP override → TURNS DNS A-record → egress
 # autodetect. On a multi-homed OCI edge (live incident 2026-07-17) the egress
-# IP (132.145.192.254) has no inbound path; the TURNS DNS A-record
-# (129.159.103.86) is the reachable one. If SFU_PUBLIC_IP were derived from a
+# IP (198.51.100.254) has no inbound path; the TURNS DNS A-record
+# (198.51.100.86) is the reachable one. If SFU_PUBLIC_IP were derived from a
 # DIFFERENT source than coturn's external-ip, the SFU would advertise the dead
 # egress IP in WebRTC host candidates and group-call media would stall. This
 # test asserts (structurally) that docker-compose.yml.tpl renders SFU_PUBLIC_IP
@@ -22,7 +22,7 @@
 # T2 — motherly/central IP guard. An edge must NEVER advertise the central
 # backend's IP as its own public IP. Live bug: the RU edge's egress route
 # traversed the AWG mesh tunnel to motherly, so curl ifconfig.me returned the
-# central IP (192.9.243.148) — rendering that as coturn external-ip /
+# central IP (198.51.100.148) — rendering that as coturn external-ip /
 # SFU_PUBLIC_IP points clients at the hub, not the edge. The guard derives the
 # motherly IP from OXPULSE_MOTHERLY_IP env (operator escape hatch) or by
 # resolving BACKEND_URL's host A-record, and rejects any tier that would yield
@@ -144,9 +144,9 @@ _run_hydrate() {
         echo \"EXTERNAL_IP_LINE=\$EXTERNAL_IP_LINE\"; echo \"ALLOWED_PEER_IP_LINE=\$ALLOWED_PEER_IP_LINE\"" 2>&1
 }
 
-MOTHERLY="192.9.243.148"
-EDGE_DNS="129.159.103.86"
-EGRESS="132.145.192.254"
+MOTHERLY="198.51.100.148"
+EDGE_DNS="198.51.100.86"
+EGRESS="198.51.100.254"
 
 # ===========================================================================
 # Section B — T1 functional: SFU_PUBLIC_IP follows the resolver
@@ -158,7 +158,7 @@ echo "=== Section B: T1 — SFU_PUBLIC_IP follows resolve_external_ip ==="
 # docker-compose.yml.tpl renders SFU_PUBLIC_IP from {{PUBLIC_IP}} (A3) and
 # coturn's EXTERNAL_IP_LINE is derived from the same PUBLIC_IP, BOTH equal the
 # DNS A-record on a multi-homed edge. Revert resolve_external_ip to
-# "PUBLIC_IP=$egress_ip" and PUBLIC_IP becomes 132.145.192.254 → this assert
+# "PUBLIC_IP=$egress_ip" and PUBLIC_IP becomes 198.51.100.254 → this assert
 # REDS (the value that flows to both coturn external-ip and SFU_PUBLIC_IP
 # would be the dead egress IP).
 B1_OUT=$(PATH="$STUBPATH" DIG_STUB_RESULT="$EDGE_DNS" \

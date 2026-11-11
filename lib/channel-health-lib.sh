@@ -307,7 +307,7 @@ _coturn_probe_image() {
 # create/start was still in flight on a loaded box; the daemon then aborts the
 # start and the container stays in state `Created` — `--rm` (AutoRemove) fires on
 # the exit of a STARTED container only, so nothing ever removes it. Measured on
-# relay node pillow 2026-10-30: 130 such containers (5-10/day since 2026-10-12).
+# relay node-b, 2026-10-30: 130 such containers (5-10/day since 2026-10-12).
 #
 # WALL-TIME BUDGET. Every docker call below has its own bound, so the worst case
 # a probe can add on top of its in-container `secs` (docker wedged, every call
@@ -500,7 +500,7 @@ probe_ch4() {
         # Derive RFC 7635 short-lived ephemeral credential in-script so that
         # only a time-limited username+password (valid 600s) appears on argv —
         # NOT the long-term base secret.  This prevents any co-resident process
-        # scraping /proc/<pid>/cmdline from obtaining unlimited TURN creds.
+        # reading /proc/<pid>/cmdline from obtaining unlimited TURN creds.
         #
         # SECURITY (SEC-CR-001): the base static-auth-secret MUST NEVER appear
         # on any process argv.  /proc/<pid>/cmdline is world-readable (the edge

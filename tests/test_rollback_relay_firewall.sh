@@ -2,7 +2,7 @@
 # tests/test_rollback_relay_firewall.sh - after ANY rollback the firewall's relay range
 # must equal the live coturn.conf's min-port/max-port.
 #
-# Incident (rvpn v0.16.28 -> v0.16.31, 2026-10-12): the guard's `apply` (run during the
+# Incident (node-a v0.16.28 -> v0.16.31, 2026-10-12): the guard's `apply` (run during the
 # host-script sync, before the settle gate) migrated coturn.conf to 49152-49999 and
 # retired the firewalld 49152-65535 entry; a rollback then restored images, compose and
 # an OLDER guard but left the migrated conf, and the zone had no relay range at all
@@ -56,7 +56,7 @@ cmp -s "$TC/snap/sbin/oxpulse-partner-edge-coturn-guard" "$TC/sbin/oxpulse-partn
     && ok "R1b: the host scripts were still restored (old guard back on disk)" \
     || bad "R1b: rollback no longer restores the host scripts"
 
-# R2: the exact rvpn state - legacy entry already retired, nothing replaced it.
+# R2: the exact node-a state - legacy entry already retired, nothing replaced it.
 reset
 run_restore "$TC/snap"
 [[ "$(fwstate)" == "perm=[49152-49999/udp ] run=[49152-49999/udp ]" ]] \

@@ -1,4 +1,4 @@
-# Origin: krolik-server deploy/host-config/coturn-self-relay-guard/coturn-self-relay-guard.nft
+# Origin: deploy/host-config/coturn-self-relay-guard/coturn-self-relay-guard.nft
 # (private fleet repo), relay range widened from 49152-49999 to 49152-65535.
 # Installed to /etc/oxpulse-partner-edge/coturn-self-relay-guard.nft by install-relay.sh.
 #
