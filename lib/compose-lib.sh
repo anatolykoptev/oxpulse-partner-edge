@@ -164,7 +164,7 @@ compose_diff_recreate_resolve_pulled_digests() {
 #    exactly zero of the five production edges, and green everywhere.
 #
 # 2. install.sh wrote it with `printf 'COMPOSE_PROFILES=%s\n' > .env`, which
-#    TRUNCATES. rvpn's .env holds
+#    TRUNCATES. node-a's .env holds
 #    `COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml` — the line
 #    that decides which compose files load at all. A profile write there would
 #    have silently dropped the override file.

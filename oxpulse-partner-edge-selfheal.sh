@@ -47,7 +47,7 @@
 #                                404. curl --retry does not retry a 404, the
 #                                unit is Type=oneshot with no Restart=, and the
 #                                timer is monthly — so ONE lost race froze the
-#                                geo database for a month. rvpn's mmdb was from
+#                                geo database for a month. node-a's mmdb was from
 #                                20 May. Nothing alerted for ten days. A plain
 #                                `systemctl restart` fixes it, because by the
 #                                time anyone looks the file is published.
@@ -58,7 +58,7 @@
 #                                oxpulse-partner-edge.service DISABLED). The
 #                                upgrade path now enables them, but only when an
 #                                upgrade runs; nothing checks in between.
-#   5. DISK pressure           — measured: rvpn / at 80% with 9.5 GB of docker
+#   5. DISK pressure           — measured: node-a / at 80% with 9.5 GB of docker
 #                                build cache and 8.9 GB of images reclaimable.
 #                                A full disk wedges every one of the above at
 #                                once and turns each of their healers into a
@@ -88,7 +88,7 @@
 #   touch /var/lib/oxpulse-partner-edge/selfheal.hold.<subject>  → stop one subject
 # <subject> is the natural name: a container name, a unit name, or `disk`.
 # Nothing else pauses this script, and `systemctl stop`ping a container to debug
-# it does NOT — that is precisely the case the hold file exists for. rvpn shares
+# it does NOT — that is precisely the case the hold file exists for. node-a shares
 # its docker daemon with a neighbouring project, which makes this load-bearing.
 #
 # Env overrides (tests set these; operators normally should not):
@@ -192,7 +192,7 @@ _alert() {   # message
 
 # --- gauge series -------------------------------------------------------------
 # A gauge textfile is truncated on every write, so one write per subject leaves
-# only the LAST subject. Measured on ruoxp and rvpn 2026-08-11: the healer
+# only the LAST subject. Measured on ruoxp and node-a 2026-08-11: the healer
 # reported `containers_seen 5` beside a single surviving
 # `partner_edge_container_unhealthy{container="oxpulse-partner-xray"}` sample —
 # four containers unobserved behind a metric that looked healthy. So samples
@@ -302,7 +302,7 @@ _budget_clear() {   # subject
 # has been bitten by exactly that.
 #
 # The NAME_PREFIX is a second, narrowing gate, and it is not redundant: measured
-# 2026-08-11, rvpn's `all-rvpn-gate` — a container belonging to the neighbouring
+# 2026-08-11, node-a's `all-node-a-gate` — a container belonging to the neighbouring
 # rvpnm project that shares that box's docker daemon — carries
 # com.docker.compose.project=oxpulse-partner-edge. The project label alone puts
 # a foreign container inside our blast radius. A prefix is not a hand-written
@@ -466,7 +466,7 @@ _evaluate_container() {   # container now
 	# --- crash-loop signal ------------------------------------------------------
 	# State.StartedAt resets on every restart, so a container that dies and is
 	# restarted by docker every ~65 s is never older than START_GRACE at a tick and
-	# the grace below would hide it forever (rvpn: 30,440 restarts over 3 weeks, no
+	# the grace below would hide it forever (node-a: 30,440 restarts over 3 weeks, no
 	# budget spent, no alert). A rise in RestartCount since the last tick is the
 	# evidence the grace cannot erase: it switches the grace off for this tick.
 	# The first sight of a container (no stored count) is a baseline, not a rise.
@@ -737,8 +737,8 @@ _disk_pct() { df -P "$DOCKER_ROOT" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); pri
 # number removed.
 #
 # WHY: an upgrade pulls the new images and never removes the ones it replaced.
-# Measured across the fleet 2026-08-11 — 90 stale tags on rvpn reaching back to
-# v0.8.0, 286 across five nodes — and nothing had ever removed one. rvpn was at
+# Measured across the fleet 2026-08-11 — 90 stale tags on node-a reaching back to
+# v0.8.0, 286 across five nodes — and nothing had ever removed one. node-a was at
 # 80% with 12.2 GB of recoverable junk.
 #
 # Three rules, each load-bearing:
@@ -746,7 +746,7 @@ _disk_pct() { df -P "$DOCKER_ROOT" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); pri
 #   • The repository set is DERIVED from what is actually running, never a
 #     hand-written prefix. A service added in a later release is covered the day
 #     it ships; a hand-written list could not see it. It also cannot reach a
-#     neighbouring project's images — on rvpn a foreign container shares our
+#     neighbouring project's images — on node-a a foreign container shares our
 #     compose label, and _managed_containers' name-prefix gate is what keeps this
 #     pointed at ours only.
 #   • Anything a CONTAINER references is kept, compared by image ID rather than
@@ -763,7 +763,7 @@ _disk_pct() { df -P "$DOCKER_ROOT" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); pri
 #     both slots to those two tags, so our own releases all fell outside it and
 #     only the in-use-by-ID rule above saved the four that happened to be running
 #     — the previous release, which is by definition not running, did not survive.
-#     Measured on zvonilka 2026-08-11 against the real daemon. The test fixtures
+#     Measured on node-c 2026-08-11 against the real daemon. The test fixtures
 #     could not show it: they gave the third-party images repos we do NOT run, so
 #     the repo filter dropped them before they reached the version pool.
 _prune_stale_edge_images() {
@@ -838,7 +838,7 @@ heal_disk() {   # now
 	fi
 
 	# The three reclaim steps are ordered by WHOSE data they touch: our own
-	# garbage first, anything shared with a neighbouring project last. rvpn shares
+	# garbage first, anything shared with a neighbouring project last. node-a shares
 	# this docker daemon with the rvpnm project, so that ordering is not cosmetic.
 
 	# 1. Dangling images: untagged and referenced by nothing, so garbage by
@@ -848,8 +848,8 @@ heal_disk() {   # now
 
 	# 2. OUR OWN accumulated release tags. Measured 2026-08-11: an upgrade pulls
 	#    new images and never removes the ones it replaced, so every edge grows a
-	#    tag per release forever — 90 stale tags on rvpn going back to v0.8.0,
-	#    286 across the five nodes, 12.2 GB on rvpn alone. Nothing had ever
+	#    tag per release forever — 90 stale tags on node-a going back to v0.8.0,
+	#    286 across the five nodes, 12.2 GB on node-a alone. Nothing had ever
 	#    removed one.
 	if (( pct >= DISK_PCT )); then
 		local n; n="$(_prune_stale_edge_images)"

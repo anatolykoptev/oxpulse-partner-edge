@@ -166,7 +166,7 @@ _firewall_apply_ufw() {
 	# Caddy reverse_proxies /sfu/ws/* to host.docker.internal:8920; browsers reach
 	# it exclusively through Caddy's :443 TLS front, never :8920 directly. Without
 	# this rule `default deny incoming` drops Caddy→host:8920 ("no route to host")
-	# → 502 on every group call (live incident us_zvonilka 2026-07-09).
+	# → 502 on every group call (live incident on a US edge, 2026-07-09).
 	#
 	# SCOPING (correct-by-construction): the rule is bound to the docker bridge
 	# INTERFACE (`in on br-<id>`) AND the bridge source subnet, so it can only

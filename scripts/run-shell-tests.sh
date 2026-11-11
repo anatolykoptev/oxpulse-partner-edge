@@ -96,7 +96,7 @@ ERROR: this suite needs a Linux userland, and this is $(uname -s).
   So this refuses rather than emitting a verdict it cannot stand behind.
 
   Your options:
-    - run it on Linux (krolik has the repo at ~/src/oxpulse-partner-edge)
+    - run it on Linux (the build host has the repo at ~/src/oxpulse-partner-edge)
     - '$0 --native' to see the local result, knowing it is
       informational and NOT a gate
     - push and read CI

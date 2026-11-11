@@ -4,7 +4,7 @@
 # Placeholders (all substituted at install time):
 #   edge-b edge-b.example 203.0.113.10:5349
 #   test-turn-secret-deadbeef d529dee6-3cdd-4079-95d1-f8801722147c U6ea044JJjgiCjQAnYEBqBBlkeSqrQaLq3lcjnN2EFk abcd1234
-#   www.samsung.com 157.22.204.190  stable
+#   www.samsung.com 198.51.100.100  stable
 #   7878 9317 -----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAZiwaWp+FJ1sGprGGS69mq+sB6nhwOMi24xGSGfgdXNo=\n-----END PUBLIC KEY-----\n
 #   test-signaling-sfu-secret
 
@@ -84,7 +84,7 @@ services:
     environment:
       TURN_SECRET: "test-turn-secret-deadbeef"
       REALM: "edge-b.example"
-      PUBLIC_IPV4: "157.22.204.190"
+      PUBLIC_IPV4: "198.51.100.100"
       PRIVATE_IPV4: ""
       PARTNER_ID: "edge-b"
     volumes:
@@ -162,7 +162,7 @@ services:
       # comes from install.sh `$PUBLIC_IP` autodetect (cloud metadata →
       # ipify → ifconfig.me). Operators may override at compose render
       # time via OXPULSE_PUBLIC_IP. Falls back to bind address when empty.
-      SFU_PUBLIC_IP: "157.22.204.190"
+      SFU_PUBLIC_IP: "198.51.100.100"
     # 2026-05-06 post-mortem: probe all three planes (metrics, client_ws,
     # relay API). Previously only /metrics on 9317 was
     # checked; that listener starts independently of feature gates so

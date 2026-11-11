@@ -44,7 +44,7 @@
 # needs; before the nat OUTPUT chain at dstnat (-100), because Docker's nat OUTPUT
 # rewrites local-destined published ports to container addresses, and a later hook
 # would see the rewritten address (not "local") and miss exactly the docker-
-# published UDP services. Rule 1 deliberately differs from the krolik canon
+# published UDP services. Rule 1 deliberately differs from the central-host canon
 # (priority raw, no state): partner edges run a TURN client on the host itself
 # (lib/channel-health-lib.sh ch4, lib/cross-probe-lib.sh) and, on public-NIC edges,
 # coturn's replies to it go to a LOCAL address on an ephemeral port that rule 3
@@ -347,7 +347,7 @@ tmo() { # tmo SECONDS CMD... — timeout(1) where it exists (absent on macOS tes
 # EXACT entry. So "add the narrow range first, then remove 49152-65535" - the order
 # this function used to have - adds nothing and then deletes the only entry: the box
 # is left with NO relay range, exit 0, and a log line that claims the opposite
-# (rvpn, 2026-10-12 09:30:48 UTC). Therefore: remove the legacy entry FIRST, add the
+# (node-a, 2026-10-12 09:30:48 UTC). Therefore: remove the legacy entry FIRST, add the
 # narrow one, VERIFY it is in force in BOTH scopes, and put the legacy entry back if
 # it is not. A relay range that is too wide beats one that is absent.
 
@@ -594,7 +594,7 @@ cmd_status() {
 	fi
 
 	# (d) the ACTIVE host firewall must let the conf's relay range in, or inbound relay
-	# media is dropped while everything else reads green (rvpn 2026-10-12). Skipped when
+	# media is dropped while everything else reads green (node-a 2026-10-12). Skipped when
 	# neither firewalld nor ufw is active.
 	relay_firewall_in_force || return 1
 

@@ -19,7 +19,7 @@
 #     6. pending attempt now healthy   → counts `healed`, clears pending
 #     7. MIN_GAP not elapsed           → does NOT restart
 #     8. a FOREIGN container carrying our compose project label is never touched
-#        (measured: rvpn's `all-rvpn-gate` belongs to a neighbouring project and
+#        (measured: node-a's `all-node-a-gate` belongs to a neighbouring project and
 #        has com.docker.compose.project=oxpulse-partner-edge)
 #     9. stopped                       → started
 #    10. stopped `compose run` one-off → never started
@@ -46,7 +46,7 @@
 #    20. below threshold               → never prunes
 #    21. at threshold                  → prunes, verifies, records healed
 #
-#   crash loop (the guard rvpn lacked: StartedAt resets on every restart, so a
+#   crash loop (the guard node-a lacked: StartedAt resets on every restart, so a
 #   container restarting every ~65 s was always inside the 180 s grace)
 #    49. RestartCount rose, container young → budget gate runs (restart)
 #    50. same, budget spent               → alerts once, no restart (given_up)
@@ -306,7 +306,7 @@ run_it
 teardown
 
 # 8 — a foreign container carrying our project label
-setup; fixture all-rvpn-gate unhealthy "$OLD"; run_it
+setup; fixture all-node-a-gate unhealthy "$OLD"; run_it
 [[ "$(restarts)" == 0 ]] && pass "foreign container sharing our project label is never touched" \
                          || fail "restarted a container belonging to another project"
 teardown
@@ -487,8 +487,8 @@ teardown
 # --- image garbage collection -------------------------------------------------
 # An upgrade pulls the new images and never removes the ones it replaced, so every
 # edge grows one tag per release forever. Measured 2026-08-11 before this existed:
-# 90 stale tags on rvpn reaching back to v0.8.0, 286 across the five nodes, 12.2 GB
-# recoverable on rvpn alone — and nothing had ever removed one.
+# 90 stale tags on node-a reaching back to v0.8.0, 286 across the five nodes, 12.2 GB
+# recoverable on node-a alone — and nothing had ever removed one.
 img_setup() {   # a fleet-shaped image store: ours across 4 releases + a neighbour's
 	setup
 	echo 92 > "$TMPDIR_DISK"; export FAKE_DISK_AFTER_RMI=40
@@ -517,7 +517,7 @@ grep -qE 'v0\.16\.(20|19)' "$RMI_LOG" \
 	|| pass "the current and previous releases are kept"
 teardown
 
-# 27 — a NEIGHBOUR's image is never touched. rvpn shares this docker daemon with
+# 27 — a NEIGHBOUR's image is never touched. node-a shares this docker daemon with
 # the rvpnm project; a prune that reached their images would be an outage we
 # caused on somebody else's service.
 img_setup; run_it
@@ -579,7 +579,7 @@ hy_setup() {
 	image ccc2 tobyxdd/hysteria:v2
 }
 
-# 32 — THE ONE ONLY THE LIVE NODE SHOWED. Measured on zvonilka 2026-08-11 against
+# 32 — THE ONE ONLY THE LIVE NODE SHOWED. Measured on node-c 2026-08-11 against
 # the real daemon, before this had ever run under real disk pressure: a keep-set
 # computed across all repos at once handed BOTH slots to v2.8.2 and v2, so every
 # release we had fell outside it and only the in-use-by-ID guard saved the four

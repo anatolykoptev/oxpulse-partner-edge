@@ -7,13 +7,13 @@
 #
 # Measured 2026-08-08 while trying to roll the metrics collector (#570):
 #
-#   rvpn        .env = COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml
+#   node-a        .env = COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml
 #   ruoxp       .env ABSENT
-#   zvonilka    .env ABSENT
+#   node-c    .env ABSENT
 #   cheburator  .env ABSENT
-#   pillow      .env ABSENT
+#   node-b      .env ABSENT
 #
-# Not one node had COMPOSE_PROFILES at all. rvpn's line is the second hazard:
+# Not one node had COMPOSE_PROFILES at all. node-a's line is the second hazard:
 # install.sh wrote the profile file with `>`, which would have truncated the
 # COMPOSE_FILE entry that decides which compose files load.
 #
@@ -56,7 +56,7 @@ fi
 # ---------------------------------------------------------------------------
 # S2. THE ONE THAT MATTERS — a neighbouring key must survive.
 #
-# This is rvpn's real .env. Truncating it drops the line that decides which
+# This is node-a's real .env. Truncating it drops the line that decides which
 # compose files load at all, which no test would notice and the node would
 # only reveal on its next restart.
 # ---------------------------------------------------------------------------

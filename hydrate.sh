@@ -337,8 +337,8 @@ _persist_state_ip() {
 # value is outbound-only and has no inbound path — using it verbatim as
 # coturn's external-ip / the SFU's SFU_PUBLIC_IP makes every WebRTC relay
 # candidate unreachable, so ICE connectivity checks stall (~6s) and calls
-# never connect. Live incident 2026-07-17: egress=132.145.192.254 (no
-# inbound path) vs. the real reachable IP 129.159.103.86 (the TURNS DNS
+# never connect. Live incident 2026-07-17: egress=198.51.100.254 (no
+# inbound path) vs. the real reachable IP 198.51.100.86 (the TURNS DNS
 # A-record); relay RTT dropped 6000ms→67ms once external-ip was corrected.
 #
 # Precedence, most-authoritative first:
@@ -363,7 +363,7 @@ _persist_state_ip() {
 # Motherly/central IP guard (T2): an edge must NEVER advertise the central
 # backend's IP as its own public IP. Live bug: the RU edge's egress route
 # traversed the AWG mesh tunnel to motherly, so curl ifconfig.me returned the
-# central IP (192.9.243.148) — rendering that as coturn external-ip /
+# central IP (198.51.100.148) — rendering that as coturn external-ip /
 # SFU_PUBLIC_IP points clients at the hub, not the edge. The motherly IP is
 # derived from OXPULSE_MOTHERLY_IP env (operator escape hatch) or by resolving
 # BACKEND_URL's host A-record (best-effort; empty when unresolvable → guard

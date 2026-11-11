@@ -4,7 +4,7 @@
 # Defect: resolve_default_target (upgrade.sh:973-984) is wrong on both branches:
 #   • VERSION missing → TARGET=latest.  CURRENT also reads latest, they compare
 #     equal, and the run exits "already on latest — nothing to do" having
-#     transferred nothing.  Every probed edge (ruoxp, rvpn, zvonilka) has no
+#     transferred nothing.  Every probed edge (ruoxp, node-a, node-c) has no
 #     VERSION file, so this is the normal path, not an edge case.
 #   • VERSION present → awk yields bare 0.16.24; normalize_target never adds a
 #     v prefix, so the release URL 404s against the real v0.16.24 tag.
