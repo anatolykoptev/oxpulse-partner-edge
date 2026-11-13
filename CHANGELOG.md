@@ -1195,7 +1195,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Caddyfile.tpl` `(tunnel_upstream)` + `(tunnel_upstream_default)` snippets — now emit pool + health directives (backward-incompatible with single-upstream golden — bumped fixture).
 
 ### Notes
-- Phase 1 uses fleet-shared hy2 credentials. Per-edge identity = Phase 7 (`partner_nodes.hy2_auth_hash` schema migration TBD).
+- Phase 1 uses fleet-shared hy2 credentials. Per-edge identity = Phase 7 (`partner_nodes.hy2_auth_hash` schema migration not yet written).
 - CH5 NaiveProxy deferred — caddy-forwardproxy `forbidden_zones` blocks RFC1918+loopback at hub server-side; needs external relay (Phase 2).
 - CH1 Reality reinstall blocked on oxpulse-chat PR #971 (XRAY_XHTTP_MODE env extraction).
 
