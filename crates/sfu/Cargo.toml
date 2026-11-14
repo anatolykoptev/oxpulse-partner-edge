@@ -35,8 +35,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }
-hmac = "0.12"
-sha2 = "0.10"
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["rustls-tls-native-roots", "connect"] }
 futures-util = { version = "0.3", features = ["sink"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
@@ -52,6 +50,10 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace"] }
 opentelemetry-semantic-conventions = "0.31"
 tracing-opentelemetry = "0.32"
+
+[package.metadata.cargo-machete]
+# aws-lc-rs is only enabled through the `fips` feature (`dep:aws-lc-rs`); no source line names it, but CI's FIPS build check selects it.
+ignored = ["aws-lc-rs"]
 
 [features]
 test-utils = []
