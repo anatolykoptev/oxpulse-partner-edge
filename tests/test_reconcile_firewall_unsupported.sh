@@ -75,6 +75,11 @@ die()  { printf '[die] %s\n' "$*" >>"$TMP/calls.log"; exit 1; }
 # lookup at call time (bash resolves function calls dynamically).
 _firewall_detect_tool() { printf 'none'; }
 
+# Hermetic: never read the sandbox host's real iptables rules / packages (the
+# takeover guard looks at them on the ufw path exercised by T4).
+export PE_FW_RULES_V4="$TMP/none.v4" PE_FW_RULES_V6="$TMP/none.v6"
+_firewall_persistent_pkg_installed() { return 1; }
+
 # Avoid the (unrelated) AWG-port-unresolvable skip branch so the test
 # actually reaches the unsupported-tool branch under test.
 export AWG_LISTEN_PORT=44399
@@ -145,6 +150,22 @@ if [[ ! -s "$TMP/tg_alert.log" ]]; then
 else
 	fail "T4b: tg_alert called on success path: $(cat "$TMP/tg_alert.log")"
 fi
+
+# ── T5: the escalation text names the actual refusal (rc 3 ssh / rc 4 takeover) ─
+# A generic "no supported firewall tool" text sends the operator hunting for the
+# wrong cause; each refusal must say what to set.
+for _case in "3:PE_SSH_PORTS" "4:PE_FIREWALL_TAKEOVER"; do
+	_rc_c=${_case%%:*}; _key=${_case#*:}
+	: >"$TMP/tg_alert.log"
+	firewall_apply() { return "$_rc_c"; }
+	_RECONCILE_FIREWALL_APPLIED=0
+	reconcile_firewall_surface
+	if grep -q "$_key" "$TMP/tg_alert.log" && ! grep -q "no supported firewall tool" "$TMP/tg_alert.log"; then
+		pass "T5: rc=$_rc_c alert names $_key and not the generic 'no supported firewall tool'"
+	else
+		fail "T5: rc=$_rc_c alert text wrong: $(cat "$TMP/tg_alert.log")"
+	fi
+done
 
 echo ""
 echo "=== t14 firewall-unsupported tests: $PASS passed, $FAIL failed ==="

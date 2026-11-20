@@ -1687,8 +1687,13 @@ _reconcile_firewall_escalate() {
 
     local _host
     _host=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "unknown-host")
-    tg_alert "[oxpulse-partner-edge] CRITICAL firewall_apply failed (rc=${_rc}) on ${_host} — no supported firewall tool (ufw/firewalld) or apply error; SFU mesh-only ports (9317,8912/tcp) and the public whitelist are NOT enforced. Apply the whitelist manually or install ufw/firewalld." \
-        "force"
+    local _msg
+    case "$_rc" in
+        3) _msg="[oxpulse-partner-edge] CRITICAL firewall_apply REFUSED (rc=3) on ${_host} — the sshd port(s) are not covered by the ruleset (or the port list was invalid); enabling would lock out SSH. ufw may be left DISABLED. Set PE_SSH_PORTS=<port[,port]> (install.env) or fix the rules, then re-run; the mesh-only ports (9317,8912/tcp) are NOT enforced until then." ;;
+        4) _msg="[oxpulse-partner-edge] CRITICAL firewall_apply REFUSED (rc=4) on ${_host} — an existing iptables-based firewall (iptables-persistent / rules.v4) would be discarded by the ufw takeover. Review the rules listed in the converge log, then set PE_FIREWALL_TAKEOVER=1 (install.env) to proceed. Until then the partner-edge whitelist is NOT applied." ;;
+        *) _msg="[oxpulse-partner-edge] CRITICAL firewall_apply failed (rc=${_rc}) on ${_host} — no supported firewall tool (ufw/firewalld) or apply error; SFU mesh-only ports (9317,8912/tcp) and the public whitelist are NOT enforced. Apply the whitelist manually or install ufw/firewalld." ;;
+    esac
+    tg_alert "$_msg" "force"
 }
 
 # ---------------------------------------------------------------------------
