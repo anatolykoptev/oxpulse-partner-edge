@@ -26,14 +26,26 @@ mkdir -p "$TMP/mocks"
 # ufw mock: logs every call AND keeps a tiny ruleset so `ufw show added` (the
 # independent read-back the SSH-coverage hard stop uses) reflects what was really
 # added. UFW_DROP_RULE="1987/tcp" simulates an `allow` that silently did not land.
+# `show added` prints rules in ufw's CANONICAL form (the table below holds REAL
+# ufw 0.36.2 outputs; unlisted rules print as typed) and ufw rejects some inputs.
+: >"$TMP/canon.table"
 cat >"$TMP/mocks/ufw" <<EOF
 #!/usr/bin/env bash
+canon_record() {
+	local verb="\$1"; shift; local -a w=(); local c=""
+	while [[ \$# -gt 0 ]]; do if [[ "\$1" == comment ]]; then c="\$2"; break; fi; w+=("\$1"); shift; done
+	local typed="\$verb \${w[*]}" canon
+	canon=\$(awk -F'\t' -v t="\$typed" '\$1==t{print \$2; exit}' "$TMP/canon.table" 2>/dev/null)
+	if [[ "\$canon" == ERROR:* ]]; then echo "\$canon" >&2; exit 1; fi
+	[[ -n "\$canon" ]] || canon="\$typed"
+	if [[ -n "\$c" ]]; then echo "ufw \$canon comment '\$c'" >>"$TMP/ufw.rules"; else echo "ufw \$canon" >>"$TMP/ufw.rules"; fi
+}
 echo "ufw \$*" >>"$TMP/calls.log"
 case "\$1" in
 	reset) : >"$TMP/ufw.rules" ;;
 	allow|deny) if [[ "\${UFW_FAIL_RULE:-}" == "\$2" ]]; then echo "ufw \$*" >>"$TMP/ufw.rules"; exit 1; fi   # fails AFTER recording: only the rc check can catch it
 	       [[ -n "\${UFW_DROP_MATCH:-}" && "\$*" == *"\$UFW_DROP_MATCH"* ]] && exit 0   # any rule whose text contains the match silently does not land
-	       [[ "\${UFW_DROP_RULE:-}" == "\$2" ]] || echo "ufw \$*" >>"$TMP/ufw.rules" ;;
+	       [[ "\${UFW_DROP_RULE:-}" == "\$2" ]] || canon_record "\$@" ;;
 	# ufw translates its status: under any locale but C the word is not "active".
 	status) if [[ -n "\${UFW_STATUS_ACTIVE:-}" ]]; then [[ "\${LC_ALL:-}" == C ]] && echo "Status: active" || echo "Statut : actif"; else echo "Status: inactive"; fi ;;
 	show) [[ "\$2" == added ]] && { echo "Added user rules (see 'ufw status' for running firewall):"; cat "$TMP/ufw.rules" 2>/dev/null || true; } ;;
@@ -53,6 +65,38 @@ cat >"$TMP/mocks/ss" <<EOF
 [[ -s "$TMP/ss_fail" ]] && exit 1
 cat "$TMP/ss_out"
 EOF
+# ufw python-module stub (the helper imports ufw.frontend/ufw.parser like the real
+# ufw does). It canonicalises through the same table the ufw mock uses; unlisted
+# rules print as typed. Real-module behaviour was NOT run here (see PR).
+mkdir -p "$TMP/pypath/ufw"
+: >"$TMP/pypath/ufw/__init__.py"
+cat >"$TMP/pypath/ufw/frontend.py" <<'PYSTUB'
+import os, sys
+class _Rule:
+    def __init__(self, t): self.t = t
+    def normalize(self): pass
+class _PR:
+    def __init__(self, t): self.data = {"rule": _Rule(t)}
+def parse_command(argv):
+    a = argv[1:]
+    c = ""
+    if "comment" in a:
+        i = a.index("comment"); c = a[i + 1]; a = a[:i]
+    typed = " ".join(a)
+    canon = typed
+    for line in open(os.environ["PE_CANON_TABLE"]).read().split("\n"):
+        if "\t" in line and line.split("\t")[0] == typed:
+            canon = line.split("\t")[1]
+    if canon.startswith("ERROR:"):
+        sys.stderr.write(canon + "\n"); sys.exit(1)
+    return _PR(canon + ((" comment '" + c + "'") if c else ""))
+PYSTUB
+cat >"$TMP/pypath/ufw/parser.py" <<'PYSTUB'
+class UFWCommandRule:
+    @staticmethod
+    def get_command(r): return r.t
+PYSTUB
+export PE_UFW_PYPATH="$TMP/pypath" PE_CANON_TABLE="$TMP/canon.table"
 # systemctl mock: socket unit active iff $TMP/sock_<unit>.active is non-empty;
 # `show -p Listen <unit>` prints $TMP/sock_<unit>.listen.
 cat >"$TMP/mocks/systemctl" <<EOF
@@ -298,8 +342,9 @@ t_reset() {
 	: >"$TMP/sshd_fail"; : >"$TMP/ss_fail"; : >"$TMP/pkg_installed"; : >"$TMP/rules.v4"; : >"$TMP/rules.v6"
 	local _u; for _u in ssh.socket sshd.socket; do : >"$TMP/sock_$_u.active"; : >"$TMP/sock_$_u.listen"; done
 	printf 'port 22\n' >"$TMP/sshd_T"
+	_PE_FW_CANON_MODE=""; : >"$TMP/canon.table"
 	_xn=$((_xn+1)); export PE_FW_EXTRA_FILE="$TMP/extra.$_xn"   # fresh (absent) extra-rules file per test
-	unset PE_SSH_PORTS PE_FIREWALL_TAKEOVER UFW_DROP_RULE UFW_DROP_MATCH UFW_FAIL_RULE UFW_STATUS_ACTIVE DOCKER_BRIDGE_OPT SSH_CONNECTION
+	unset PE_FW_CANON_MODE PE_SSH_PORTS PE_FIREWALL_TAKEOVER UFW_DROP_RULE UFW_DROP_MATCH UFW_FAIL_RULE UFW_STATUS_ACTIVE DOCKER_BRIDGE_OPT SSH_CONNECTION
 	_firewall_detect_tool() { printf 'ufw'; }
 	t_dock
 }
@@ -576,6 +621,9 @@ bad_lines=(
 	"allow 22/tcp comment 'back\\slash'"
 	"allow from 10.9.0.0/24 to 10.0.0.1 port 80 proto tcp"
 	"allow 80,443/tcp"
+	"allow 22/tcp comment '--rootdir=/tmp/x'"
+	"allow in on -x to any port 80 proto tcp"
+	"allow 8000:8100"
 )
 for bl in "${bad_lines[@]}"; do
 	t_reset; t_extra "$EXTRA_OK" "$bl"; t_apply
@@ -644,5 +692,99 @@ t_reset; printf 'ufw allow from 172.21.0.0/16 to any port 8083 proto tcp\n' >"$T
 cp "$PE_FW_EXTRA_FILE" "$TMP/extra.first"; printf 'ufw allow from 10.1.1.1 to any port 9999 proto tcp\n' >"$TMP/ufw.rules"; t_apply
 cmp -s "$PE_FW_EXTRA_FILE" "$TMP/extra.first" || { echo "FAIL test29: second apply re-seeded the file"; exit 1; }
 echo "[ok] test29: seeding never overwrites and is idempotent"
+
+# ── #723 review: canonical read-back, strict fallback, seeding rules ──────────
+# REAL ufw 0.36.2 canonicalisations (UFWCommandRule.get_command): typed -> printed
+# by `ufw show added`. The ufw mock and the python-module stub both read this table.
+t_canon_table() {
+	printf '%s\t%s\n' \
+		"allow from any to any port 80 proto tcp" "allow 80/tcp" \
+		"allow to any port 80 proto tcp" "allow 80/tcp" \
+		"allow to any port 80" "allow 80" \
+		"deny from any to any port 23 proto tcp" "deny 23/tcp" \
+		"deny from any" "deny to any" \
+		"allow in on awg0 from any to any port 53 proto udp" "allow in on awg0 to any port 53 proto udp" \
+		"allow from 2001:DB8::1 to any port 443 proto tcp" "allow from 2001:db8::1 to any port 443 proto tcp" \
+		"allow from 010.0.0.1 to any port 80 proto tcp" "ERROR: Bad source address" \
+		>"$TMP/canon.table"
+}
+
+# Test 30: the read-back compares ufw's CANONICAL form, not the typed text
+t_reset; t_canon_table
+t_extra "allow from any to any port 80 proto tcp comment 'web'" "allow to any port 80" "deny from any to any port 23 proto tcp" "deny from any" \
+	"allow in on awg0 from any to any port 53 proto udp comment 'dns'" "allow from 2001:DB8::1 to any port 443 proto tcp"
+t_apply
+[ "$_rc" -eq 0 ] || { echo "FAIL test30: rules ufw canonicalises differently must still pass the read-back (rc=$_rc)"; cat "$TMP/calls.log"; exit 1; }
+grep -q "^ufw --force enable" "$TMP/calls.log" || { echo "FAIL test30: enable"; exit 1; }
+grep -qx "ufw allow 80/tcp comment 'web'" "$TMP/ufw.rules" || { echo "FAIL test30: mock did not canonicalise (fixture broken)"; cat "$TMP/ufw.rules"; exit 1; }
+echo "[ok] test30: typed non-canonical rules (from any, to any port, IPv6 case, ...) pass the read-back via ufw's canonical form"
+
+# Test 31: lines ufw's parser rejects are refused BEFORE the reset (py mode)
+for bl in "allow from 010.0.0.1 to any port 80 proto tcp" "allow from 2001:::db8 to any port 9100 proto tcp" "allow from 1:2:3 to any port 80 proto tcp"; do
+	t_reset; t_canon_table; t_extra "$EXTRA_OK" "$bl"; t_apply
+	[ "$_rc" -eq 6 ] || { echo "FAIL test31: '$bl' must be refused with rc 6, got $_rc"; cat "$TMP/calls.log"; exit 1; }
+	grep -qE "^ufw (reset|--force|default|allow|deny)" "$TMP/calls.log" && { echo "FAIL test31: ufw mutated before validation: $bl"; exit 1; }
+done
+echo "[ok] test31: ufw-rejected / malformed sources refused before the reset"
+
+# Test 32: no ufw python module → strict canonical-only grammar, warned once
+t_reset; export PE_FW_CANON_MODE=off
+for gl in "allow 80" "allow 80/tcp" "allow 49152:49999/udp" "allow in on awg0 to any port 53 proto udp" "allow from 10.9.0.0/24 to any port 9100 proto tcp" "deny from 203.0.113.0/24"; do
+	_PE_FW_CANON_MODE=""; _firewall_extra_parse_line "$gl" || { echo "FAIL test32: canonical line rejected in strict mode ($_X_ERR): $gl"; exit 1; }
+done
+for bl in "allow from any to any port 80 proto tcp" "allow to any port 80 proto tcp" "allow to any port 80" "deny from any" "allow from 2001:db8::1 to any port 443 proto tcp" \
+	"allow from 2001:DB8::1 to any port 443 proto tcp" "allow from 010.0.0.1 to any port 80 proto tcp" "allow from 10.9.0.5/24 to any port 80 proto tcp" \
+	"allow from 10.9.0.1/32 to any port 80 proto tcp" "allow 8000:8100" "allow from 10.9.0.0/24 to any port 8000:8100" "allow in on -x to any port 80 proto tcp"; do
+	_PE_FW_CANON_MODE=""; _firewall_extra_parse_line "$bl" && { echo "FAIL test32: non-canonical line accepted in strict mode: $bl"; exit 1; }
+done
+# the fallback is announced exactly once per apply, and it applies end to end
+t_reset; export PE_FW_CANON_MODE=off; t_extra "allow 8443" "allow from 10.9.0.0/24 to any port 9100 proto tcp"; t_apply
+[ "$_rc" -eq 0 ] || { echo "FAIL test32: strict-mode apply rc=$_rc"; cat "$TMP/calls.log"; exit 1; }
+[ "$(grep -c "strict canonical-only grammar" "$TMP/calls.log")" -eq 1 ] || { echo "FAIL test32: fallback warning must be logged exactly once"; cat "$TMP/calls.log"; exit 1; }
+echo "[ok] test32: strict fallback accepts only ufw-canonical lines (incl. bare 'allow N'), rejects the rest"
+
+# Test 33: seeding ownership = exact plan comments / identical specs / any :8920 opener
+t_reset; printf 'port 1987\n' >"$TMP/sshd_T"
+cat >"$TMP/ufw.rules" <<'EOF'
+ufw allow 22/tcp comment 'partner-edge ssh'
+ufw allow 80/tcp comment 'partner-edge pub'
+ufw allow 3000/tcp comment 'partner-edge pub'
+ufw allow 8920/tcp
+ufw allow 8920
+ufw allow 8900:8950/tcp
+ufw allow from 10.0.0.0/8 to any port 8920 proto tcp comment 'mine'
+ufw allow 8443
+ufw allow 9100/tcp comment 'partner-edge custom thing'
+ufw limit 22/tcp
+ufw allow 5000,5001/tcp
+EOF
+t_apply
+[ "$_rc" -eq 0 ] || { echo "FAIL test33: rc=$_rc"; cat "$TMP/calls.log"; exit 1; }
+seeded=$(grep -vE '^[[:space:]]*(#|$)' "$PE_FW_EXTRA_FILE")
+want=$(printf '%s\n' "allow 8443" "allow 9100/tcp comment 'partner-edge custom thing'")
+[ "$seeded" = "$want" ] || { echo "FAIL test33: seeded set wrong. got:"; echo "$seeded"; echo "want:"; echo "$want"; exit 1; }
+for must in "8920/tcp" "allow 8920'" "8900:8950/tcp" "port 8920 proto tcp comment 'mine'" "partner-edge pub" ; do
+	grep -q "seed: skip.*${must}" "$TMP/calls.log" || { echo "FAIL test33: skip of '${must}' not logged with a reason"; cat "$TMP/calls.log"; exit 1; }
+done
+grep -q "seed: skip 'ufw allow 8920/tcp' — opens :8920" "$TMP/calls.log" || { echo "FAIL test33: comment-less 8920 rule must be skipped as an :8920 opener"; cat "$TMP/calls.log"; exit 1; }
+grep -q "^# NOT SEEDED.*limit 22/tcp" "$PE_FW_EXTRA_FILE" && grep -q "^# NOT SEEDED.*5000,5001/tcp" "$PE_FW_EXTRA_FILE" || { echo "FAIL test33: unsupported rules must be kept as '# NOT SEEDED' comments"; cat "$PE_FW_EXTRA_FILE"; exit 1; }
+grep -q "2 live rule(s) were NOT seedable.*dropped by this run's reset" "$TMP/calls.log" || { echo "FAIL test33: missing summary warning with the count"; cat "$TMP/calls.log"; exit 1; }
+echo "[ok] test33: seeding skips exact partner-edge comments + any :8920 opener (logged), seeds bare 'allow N' and look-alike comments, counts NOT SEEDED"
+
+# Test 34: a seeding failure aborts BEFORE the reset; no temp file left behind
+t_reset; : >"$TMP/afile"; export PE_FW_EXTRA_FILE="$TMP/afile/firewall-extra.ufw"
+printf 'ufw allow 8443\n' >"$TMP/ufw.rules"; t_apply
+[ "$_rc" -eq 6 ] || { echo "FAIL test34: unwritable seed target must abort with rc 6, got $_rc"; cat "$TMP/calls.log"; exit 1; }
+grep -qE "^ufw (reset|--force|default|allow|deny)" "$TMP/calls.log" && { echo "FAIL test34: ufw mutated although seeding failed (rules would be lost)"; cat "$TMP/calls.log"; exit 1; }
+t_reset; printf 'ufw allow 8443\n' >"$TMP/ufw.rules"; t_apply
+for _t in "$TMP"/.firewall-extra.*; do [ -e "$_t" ] && { echo "FAIL test34: temp file left behind: $_t"; exit 1; }; done
+echo "[ok] test34: seeding failure → rc 6 before any ufw mutation; no temp leftovers"
+
+# Test 35: extras come AFTER the partner-edge allows (a deny never precedes allow 80/443)
+t_reset; t_extra "deny from 203.0.113.0/24 to any port 80 proto tcp"; t_apply
+ln_a=$(grep -n -m1 "^ufw allow 80/tcp" "$TMP/calls.log" || true); ln_a=${ln_a%%:*}
+ln_d=$(grep -n -m1 "^ufw deny from 203.0.113.0/24" "$TMP/calls.log" || true); ln_d=${ln_d%%:*}
+{ [ -n "$ln_a" ] && [ -n "$ln_d" ] && [ "$ln_a" -lt "$ln_d" ]; } || { echo "FAIL test35: deny ($ln_d) must follow allow 80/tcp ($ln_a)"; exit 1; }
+echo "[ok] test35: operator rules (incl. deny) are applied after the partner-edge allows"
 
 echo "[ok] all firewall-module tests passed"
