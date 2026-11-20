@@ -424,14 +424,423 @@ _firewall_resolve_edge_bridges() {
 	return 0
 }
 
+# --- Operator extra rules ----------------------------------------------------
+# `ufw --force reset` wipes every operator rule on each apply, so rules the node
+# needs beyond the partner-edge set live in a file that is re-applied after it:
+#   /etc/oxpulse-partner-edge/firewall-extra.ufw   (override: PE_FW_EXTRA_FILE)
+# One ufw rule per line in the exact `ufw show added` form minus the leading
+# "ufw ", e.g.
+#   allow from 10.9.0.0/24 to any port 9100 proto tcp comment 'node-exporter mesh-only'
+# `#` comments and blank lines are ignored. The grammar is a strict allowlist (see
+# _firewall_extra_parse_line); nothing is ever eval'd or word-split into a command.
+# ufw only: firewalld has no equivalent here (warned, not failed).
+
+_firewall_extra_file() { printf '%s' "${PE_FW_EXTRA_FILE:-/etc/oxpulse-partner-edge/firewall-extra.ufw}"; }
+
+_firewall_valid_port_spec() { # N or N:M, 1-65535, N<M, no leading zeros
+	local v="$1" a b
+	[[ "$v" =~ ^([1-9][0-9]{0,4})(:([1-9][0-9]{0,4}))?$ ]] || return 1
+	a="${BASH_REMATCH[1]}"; b="${BASH_REMATCH[3]:-}"
+	(( a <= 65535 )) || return 1
+	[[ -z "$b" ]] || { (( b <= 65535 && a < b )) || return 1; }
+	return 0
+}
+
+# IPv6 pre-filter (ufw's own parser is the authority; this only keeps obvious
+# garbage like `2001:::db8` or `1:2:3` from reaching it): at most one `::`, groups
+# of 1-4 hex digits, 8 groups without `::`, at most 7 with it.
+_firewall_valid_ipv6() {
+	local ip="$1" head tail g n=0
+	[[ "$ip" =~ ^[0-9A-Fa-f:]+$ && "$ip" != *:::* ]] || return 1
+	local IFS=:
+	if [[ "$ip" == *::* ]]; then
+		[[ "${ip#*::}" != *::* ]] || return 1
+		head="${ip%%::*}"; tail="${ip#*::}"
+		# shellcheck disable=SC2086  # split on ':'
+		for g in $head $tail; do [[ "$g" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1; n=$((n+1)); done
+		(( n <= 7 ))
+	else
+		# shellcheck disable=SC2086
+		for g in $ip; do [[ "$g" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1; n=$((n+1)); done
+		(( n == 8 ))
+	fi
+}
+
+# IPv4 pre-filter. $2 = "strict" additionally demands ufw's canonical form: no
+# leading zeros, no /0 or /32, and a prefix that is network-aligned (ufw rewrites
+# host bits / drops /32).
+_firewall_valid_ipv4_cidr() {
+	local v="$1" mode="${2:-}" ip pfx="" o val=0
+	local -a oct=()
+	ip="${v%%/*}"; [[ "$v" == */* ]] && pfx="${v#*/}"
+	[[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+	local IFS=.
+	# shellcheck disable=SC2086
+	for o in $ip; do
+		(( 10#$o <= 255 )) || return 1
+		if [[ "$mode" == strict ]]; then [[ "$o" == 0 || "$o" != 0* ]] || return 1; fi
+		oct+=("$((10#$o))")
+	done
+	if [[ -n "$pfx" ]]; then
+		[[ "$pfx" =~ ^[0-9]{1,2}$ ]] && (( 10#$pfx <= 32 )) || return 1
+		if [[ "$mode" == strict ]]; then
+			[[ "$pfx" =~ ^([1-9]|[12][0-9]|3[01])$ ]] || return 1
+			val=$(( (oct[0]<<24) | (oct[1]<<16) | (oct[2]<<8) | oct[3] ))
+			(( (val & ((1 << (32 - pfx)) - 1)) == 0 )) || return 1
+		fi
+	fi
+	return 0
+}
+
+# any | IPv4[/n] | IPv6[/n]. $2 = "strict" (no ufw python module): canonical-only,
+# so `any` and every IPv6 form are refused (ufw rewrites/drops them; compressing an
+# IPv6 address here would be guesswork).
+_firewall_valid_src() {
+	local v="$1" mode="${2:-}" ip pfx=""
+	if [[ "$v" == any ]]; then [[ "$mode" != strict ]]; return; fi
+	ip="${v%%/*}"; [[ "$v" == */* ]] && pfx="${v#*/}"
+	if [[ "$ip" == *:* ]]; then
+		[[ "$mode" != strict ]] || return 1
+		_firewall_valid_ipv6 "$ip" || return 1
+		[[ -z "$pfx" ]] || { [[ "$pfx" =~ ^[0-9]{1,3}$ ]] && (( 10#$pfx <= 128 )); } || return 1
+		return 0
+	fi
+	_firewall_valid_ipv4_cidr "$v" "$mode"
+}
+
+# --- ufw's own parser as the canonicalisation oracle --------------------------
+# `ufw show added` prints rules in ufw's CANONICAL form (`allow from any to any
+# port 80 proto tcp` -> `allow 80/tcp`, IPv6 lower-cased, `from any` dropped, ...)
+# and ufw rejects some lines our grammar accepts (`010.0.0.1`, `1:2:3`). A
+# read-back compared against typed text would refuse a valid rule AFTER the reset
+# (ufw left disabled). So each rule is run through ufw's own parser BEFORE the reset:
+# ufw.frontend.parse_command + UFWCommandRule.get_command, exactly what
+# `ufw show added` uses (ufw 0.36). Read-only: no UFWFrontend/backend is created, no
+# rootdir is touched. Module path: the interpreter's default (Debian/Ubuntu keep it
+# in /usr/lib/python3/dist-packages), then python3*/{dist,site}-packages, with
+# PE_UFW_PYPATH (colon list, tried first; test seam / non-standard installs).
+_PE_UFW_CANON_PY=''
+read -r -d '' _PE_UFW_CANON_PY <<'PYCANON_EOF' || true
+import sys, os, io, glob, shlex, contextlib, gettext
+for d in reversed([x for x in os.environ.get("PE_UFW_PYPATH", "").split(":") if x]):
+    sys.path.insert(0, d)
+def load():
+    import ufw.frontend, ufw.parser
+try:
+    load()
+except Exception:
+    for d in ["/usr/lib/python3/dist-packages"] + glob.glob("/usr/lib/python3*/dist-packages") + glob.glob("/usr/lib/python3*/site-packages"):
+        if d not in sys.path:
+            sys.path.append(d)
+    try:
+        load()
+    except Exception:
+        sys.exit(3)
+gettext.install("ufw")
+import ufw.frontend, ufw.parser
+for line in sys.stdin.read().split("\n"):
+    if not line.strip():
+        continue
+    err = io.StringIO()
+    try:
+        argv = ["ufw"] + shlex.split(line)
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            pr = ufw.frontend.parse_command(argv)
+        r = pr.data["rule"]
+        r.normalize()
+        print("OK\t" + ufw.parser.UFWCommandRule.get_command(r))
+    except SystemExit:
+        print("ERR\t" + (err.getvalue().strip().replace("\n", " ") or "rejected by ufw"))
+    except Exception as e:
+        print("ERR\t" + type(e).__name__ + ": " + str(e).replace("\n", " "))
+PYCANON_EOF
+
+# Sets _PE_FW_CANON_MODE: "py" (ufw module usable) or "strict" (fallback grammar).
+# Cached; never call it in $( ) or the cache is lost.
+# PE_FW_CANON_MODE=off forces strict (tests; hosts with a broken module).
+_PE_FW_CANON_MODE=""
+_firewall_canon_mode() {
+	if [[ -z "$_PE_FW_CANON_MODE" ]]; then
+		if [[ "${PE_FW_CANON_MODE:-}" != off ]] && command -v python3 >/dev/null 2>&1 \
+			&& python3 -I -c "$_PE_UFW_CANON_PY" </dev/null >/dev/null 2>&1; then
+			_PE_FW_CANON_MODE=py
+		else
+			_PE_FW_CANON_MODE=strict
+			warn "[firewall] ufw's python parser is unavailable — extra rules fall back to a strict canonical-only grammar (no 'from any', no IPv6 sources, no bare 'to any port' form)."
+		fi
+	fi
+}
+
+# Canonical `ufw show added` form (without the "ufw " prefix, comment stripped) of
+# ONE rule line, from ufw's parser. Sets _X_CANON; on rejection sets _X_ERR, rc 1.
+_firewall_ufw_canonical() {
+	local out kind rest re_c="^(.*[^[:space:]])[[:space:]]+comment[[:space:]]+'.*'$"
+	out=$(printf '%s\n' "$1" | python3 -I -c "$_PE_UFW_CANON_PY" 2>/dev/null) || {
+		_X_ERR="ufw's parser could not be run"; return 1; }
+	kind="${out%%$'\t'*}"; rest="${out#*$'\t'}"
+	if [[ "$kind" != OK ]]; then _X_ERR="ufw rejects it: ${rest}"; return 1; fi
+	if [[ "$rest" =~ $re_c ]]; then rest="${BASH_REMATCH[1]}"; fi
+	_X_CANON="$rest"
+}
+
+# Parse ONE rule line. On success sets _X_VERB, _X_COMMENT, _X_CANON (the form
+# `ufw show added` will print, comment stripped) and the array _X_WORDS (rule words
+# after the verb) and returns 0; on failure sets _X_ERR, returns 1.
+# Grammar (ufw's printed form; fixed token order):
+#   (allow|deny) <N[/tcp|udp]|N:M/tcp|udp>
+#   (allow|deny) [in on IFACE] [from SRC] [to any port PORT [proto tcp|udp]]
+# each optionally followed by:  comment '<text without quotes>'
+# An allow must be scoped: a port, or a source other than `any`. Unsupported on
+# purpose: limit, reject, route, out, multiport lists, app profiles, `to <addr>`.
+_firewall_extra_parse_line() {
+	local line="$1" body comment="" re_c n i verb has_port=0 has_to=0 src="" has_if=0 mode proto="" port=""
+	_X_VERB=""; _X_COMMENT=""; _X_WORDS=(); _X_ERR=""; _X_CANON=""
+	_firewall_canon_mode   # sets _PE_FW_CANON_MODE (not in a subshell: the cache must persist)
+	mode="$_PE_FW_CANON_MODE"
+	re_c="^(.*[^[:space:]])[[:space:]]+comment[[:space:]]+'([^']*)'$"
+	if [[ "$line" =~ $re_c ]]; then
+		body="${BASH_REMATCH[1]}"; comment="${BASH_REMATCH[2]}"
+		if [[ ! "$comment" =~ ^[[:print:]]{1,200}$ || "$comment" == *\\* ]]; then
+			_X_ERR="comment must be 1-200 printable characters without quotes or backslashes"; return 1
+		fi
+		# ufw strips --rootdir=/--datadir= from argv wherever they appear.
+		if [[ "$comment" == -* ]]; then _X_ERR="comment must not start with '-'"; return 1; fi
+	else
+		body="$line"
+	fi
+	if [[ ! "$body" =~ ^[A-Za-z0-9_.:/\ -]+$ ]]; then
+		_X_ERR="unsupported character (allowed: letters digits _ . : / - and spaces; comment only as trailing comment '<text>')"; return 1
+	fi
+	local -a t=()
+	read -ra t <<<"$body"
+	n=${#t[@]}
+	verb="${t[0]:-}"
+	[[ "$verb" == allow || "$verb" == deny ]] || { _X_ERR="rule must start with allow or deny"; return 1; }
+	_X_VERB="$verb"; _X_COMMENT="$comment"
+	if (( n == 2 )) && [[ "${t[1]}" =~ ^([0-9:]+)(/(tcp|udp))?$ ]]; then
+		port="${BASH_REMATCH[1]}"; proto="${BASH_REMATCH[3]:-}"
+		_firewall_valid_port_spec "$port" || { _X_ERR="invalid port '${t[1]}'"; return 1; }
+		[[ "$port" != *:* || -n "$proto" ]] || { _X_ERR="a port range needs /tcp or /udp"; return 1; }
+		_X_WORDS=("${t[1]}")
+		_X_CANON="$verb ${t[1]}"
+		if [[ "$mode" != strict ]]; then _firewall_ufw_canonical "$line" || return 1; fi
+		return 0
+	fi
+	i=1
+	if [[ "${t[i]:-}" == in ]]; then
+		[[ "${t[i+1]:-}" == on && "${t[i+2]:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,14}$ ]] || { _X_ERR="expected 'in on <iface>' (iface <=15 chars, not starting with '-')"; return 1; }
+		_X_WORDS+=(in on "${t[i+2]}"); has_if=1; i=$((i+3))
+	fi
+	if [[ "${t[i]:-}" == from ]]; then
+		src="${t[i+1]:-}"
+		_firewall_valid_src "$src" "$mode" || { _X_ERR="invalid source '${src}' (IPv4[/n], IPv6[/n], any; ufw's canonical form only in strict mode: IPv4, aligned prefix, no /32)"; return 1; }
+		_X_WORDS+=(from "$src"); i=$((i+2))
+	fi
+	if [[ "${t[i]:-}" == to ]]; then
+		[[ "${t[i+1]:-}" == any ]] || { _X_ERR="only 'to any' is supported"; return 1; }
+		_X_WORDS+=(to any); has_to=1; i=$((i+2))
+	fi
+	if [[ "${t[i]:-}" == port ]]; then
+		port="${t[i+1]:-}"
+		_firewall_valid_port_spec "$port" || { _X_ERR="invalid port '${port}'"; return 1; }
+		_X_WORDS+=(port "$port"); has_port=1; i=$((i+2))
+		if [[ "${t[i]:-}" == proto ]]; then
+			[[ "${t[i+1]:-}" == tcp || "${t[i+1]:-}" == udp ]] || { _X_ERR="proto must be tcp or udp"; return 1; }
+			proto="${t[i+1]}"; _X_WORDS+=(proto "$proto"); i=$((i+2))
+		fi
+		[[ "$port" != *:* || -n "$proto" ]] || { _X_ERR="a port range needs 'proto tcp|udp'"; return 1; }
+	fi
+	(( i == n )) || { _X_ERR="unexpected token '${t[i]:-}' (expected: [in on IF] [from SRC] [to any port N [proto tcp|udp]])"; return 1; }
+	(( has_port == has_to )) || { _X_ERR="'to any' and 'port' must appear together"; return 1; }
+	(( ${#_X_WORDS[@]} > 0 )) || { _X_ERR="empty rule"; return 1; }
+	if [[ "$verb" == allow && $has_port -eq 0 && ( -z "$src" || "$src" == any ) ]]; then
+		_X_ERR="unscoped allow (needs a port, or a source other than 'any')"; return 1
+	fi
+	if [[ "$mode" == strict ]]; then
+		# canonical-only: ufw prints a bare `to any port N` as `N[/proto]`
+		if (( has_port && ! has_if )) && [[ -z "$src" ]]; then
+			_X_ERR="not canonical: write '${verb} ${port}${proto:+/$proto}' (ufw prints this form)"; return 1
+		fi
+		_X_CANON="$verb ${_X_WORDS[*]}"
+	else
+		_firewall_ufw_canonical "$line" || return 1
+	fi
+	return 0
+}
+
+# Validate the whole extra file; load the rules into _PE_FW_EXTRA (entries
+# "<verb> <words...>\x1f<comment>\x1f<canonical>"). Every bad line is reported; rc 6 if
+# any. Called BEFORE `ufw --force reset`.
+_firewall_extra_load() {
+	_PE_FW_EXTRA=()
+	local f; f=$(_firewall_extra_file)
+	[[ -e "$f" ]] || return 0
+	[[ -r "$f" ]] || { warn "[firewall] extra rules file $f is not readable — refusing to touch the firewall."; return 6; }
+	local line n=0 bad=0
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		n=$((n+1))
+		line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+		[[ -z "$line" || "$line" == \#* ]] && continue
+		if _firewall_extra_parse_line "$line"; then
+			_PE_FW_EXTRA+=("${_X_VERB} ${_X_WORDS[*]}"$'\x1f'"${_X_COMMENT}"$'\x1f'"${_X_CANON}")
+		else
+			warn "[firewall] $f:$n: ${_X_ERR}: $line"
+			bad=1
+		fi
+	done <"$f"
+	if (( bad )); then
+		warn "[firewall] REFUSING to touch the firewall: fix $f (nothing was changed)."
+		return 6
+	fi
+	return 0
+}
+
+
+
+
+_firewall_extra_has_rules() {
+	local f; f=$(_firewall_extra_file)
+	[[ -r "$f" ]] && grep -qvE '^[[:space:]]*(#|$)' "$f"
+}
+
+# The partner-edge rule set as "<comment>\t<spec>" lines (spec = "allow <words>"),
+# the single source for BOTH the apply loop and the seeding comparison, so the two
+# cannot drift. $1 = awg port, $2 = ssh ports.
+_firewall_ufw_plan() {
+	local awg_port="$1" ssh_ports="$2" p r
+	for p in $ssh_ports; do printf '%s\t%s\n' 'partner-edge ssh' "allow ${p}/tcp"; done
+	for p in "${_PE_FW_PUB_TCP[@]}"; do printf '%s\t%s\n' 'partner-edge pub' "allow ${p}/tcp"; done
+	for p in "${_PE_FW_PUB_UDP[@]}"; do printf '%s\t%s\n' 'partner-edge pub' "allow ${p}/udp"; done
+	for r in "${_PE_FW_PUB_UDP_RANGES[@]}"; do printf '%s\t%s\n' 'partner-edge ephemeral relay' "allow ${r}/udp"; done
+	printf '%s\t%s\n' "amneziawg ${awg_port}" "allow ${awg_port}/udp"
+	for p in "${_PE_FW_MESH_TCP[@]}"; do
+		printf '%s\t%s\n' 'partner-edge mesh-only' "allow from 10.9.0.0/24 to any port ${p} proto tcp"
+	done
+	# SFU client WS (:8920) — see the scoping rationale in _firewall_apply_ufw.
+	local edge_iface edge_subnet fixed_done=0 c='partner-edge sfu-ws local-bridge'
+	while read -r edge_iface edge_subnet; do
+		[[ -n "$edge_subnet" ]] || continue
+		if [[ "$edge_iface" == "-" || -z "$edge_iface" ]]; then
+			printf '%s\t%s\n' "$c" "allow from ${edge_subnet} to any port 8920 proto tcp"
+		elif [[ "$edge_iface" == "$_PE_FW_EDGE_BRIDGE" ]]; then
+			(( fixed_done )) && continue
+			fixed_done=1
+			printf '%s\t%s\n' "$c" "allow in on ${edge_iface} to any port 8920 proto tcp"
+		else
+			printf '%s\t%s\n' "$c" "allow in on ${edge_iface} from ${edge_subnet} to any port 8920 proto tcp"
+		fi
+	done < <(_firewall_resolve_edge_bridges)
+}
+
+# One-time seeding for nodes that predate the extra-rules file: write it from the
+# live `ufw show added`, MINUS what the partner-edge set owns. Runs before the
+# first reset with this code; never overwrites (noclobber = O_EXCL), so it is
+# idempotent and an operator's file is never touched. A live rule is
+# partner-edge-owned when (a) its comment starts with "partner-edge" (covers stale
+# pins such as the old in-on-br-<id> rule and the iface-agnostic 8920 rule),
+# (b) its spec equals one the plan would add now (ssh ports from detection, awg,
+# pub/relay/mesh), or (c) it opens :8920. Anything else that parses is seeded; a
+# live rule outside the grammar is kept as a "# NOT SEEDED" comment and warned.
+# $1 = awg port, $2 = ssh ports.
+# Does this ALLOW spec open `port`? Handles `allow N[/proto]`, `allow N:M/proto`
+# and `... port N[:M] ...`. Used to keep any rule that exposes :8920 out of the seed.
+_firewall_spec_opens_port() {
+	local spec="$1" port="$2" lo hi
+	[[ "$spec" == allow\ * ]] || return 1
+	if [[ "$spec" =~ ^allow\ ([0-9]+)(:([0-9]+))?(/(tcp|udp))?$ ]] \
+		|| [[ "$spec" =~ (^|[[:space:]])port\ ([0-9]+)(:([0-9]+))? ]]; then
+		if [[ "${BASH_REMATCH[0]}" == allow\ * ]]; then lo="${BASH_REMATCH[1]}"; hi="${BASH_REMATCH[3]:-$lo}"
+		else lo="${BASH_REMATCH[2]}"; hi="${BASH_REMATCH[4]:-$lo}"; fi
+		(( lo <= port && port <= hi )) && return 0
+	fi
+	return 1
+}
+
+# One-time seeding for nodes that predate the extra-rules file: write it from the
+# live `ufw show added`, MINUS what the partner-edge set owns. Runs before the
+# first reset with this code and never overwrites an existing file (idempotent).
+# A live rule is partner-edge-owned (not seeded) when (a) its comment is EXACTLY one
+# the plan emits (or `amneziawg <n>` for a stale awg port), (b) its spec equals one
+# the plan would add now (detected ssh ports, awg, pub/relay/mesh), or (c) it opens
+# :8920 in any form (a comment-less stale one must not reopen the SFU WS). Every
+# skip is logged with its reason. A live rule outside the grammar is kept as a
+# "# NOT SEEDED" comment and counted in one summary warning: THIS run's reset drops it.
+# Writes a temp file then publishes it with `ln` (atomic, EEXIST = someone else
+# seeded, never clobbers). rc 6 when the file cannot be written (the caller aborts
+# BEFORE the reset). $1 = awg port, $2 = ssh ports.
+_firewall_seed_extra_rules() {
+	local f; f=$(_firewall_extra_file)
+	[[ -e "$f" ]] && return 0
+	local added plan planned comments line rule spec comment out="" n_seed=0 n_skip=0 reason
+	local re_c="^(.*[^[:space:]])[[:space:]]+comment[[:space:]]+'(.*)'$"
+	added=$(ufw show added 2>/dev/null || true)
+	plan=$(_firewall_ufw_plan "$1" "$2")
+	planned=$'\n'"$(cut -f2 <<<"$plan")"$'\n'
+	comments=$'\n'"$(cut -f1 <<<"$plan")"$'\n'
+	while IFS= read -r line; do
+		[[ "$line" == "ufw "* ]] || continue
+		rule="${line#ufw }"; spec="$rule"; comment=""
+		if [[ "$rule" =~ $re_c ]]; then spec="${BASH_REMATCH[1]}"; comment="${BASH_REMATCH[2]}"; fi
+		reason=""
+		if [[ -n "$comment" && "$comments" == *$'\n'"$comment"$'\n'* ]]; then reason="comment '$comment' is a partner-edge rule comment"
+		elif [[ "$comment" =~ ^amneziawg\ [0-9]+$ ]]; then reason="amneziawg rule (re-added from the current awg port)"
+		elif [[ "$planned" == *$'\n'"$spec"$'\n'* ]]; then reason="identical to a partner-edge rule applied now"
+		elif _firewall_spec_opens_port "$spec" 8920; then reason="opens :8920 (managed by the partner-edge set)"
+		fi
+		if [[ -n "$reason" ]]; then
+			log "[firewall] seed: skip 'ufw ${rule}' — ${reason}"
+			continue
+		fi
+		if _firewall_extra_parse_line "$rule"; then
+			out+="$rule"$'\n'; n_seed=$((n_seed+1))
+		else
+			out+="# NOT SEEDED (${_X_ERR}): $rule"$'\n'; n_skip=$((n_skip+1))
+			warn "[firewall] seed: live rule NOT seeded (${_X_ERR}): ufw $rule"
+		fi
+	done <<<"$added"
+	local dir tmp; dir=$(dirname "$f")
+	mkdir -p "$dir" 2>/dev/null && tmp=$(mktemp "$dir/.firewall-extra.XXXXXX" 2>/dev/null) || {
+		warn "[firewall] REFUSING to touch the firewall: cannot create $f (directory/temp file) — operator rules would be lost by the reset."
+		return 6
+	}
+	if ! printf '%s\n%s\n%s' \
+		"# Operator firewall rules, re-applied after the partner-edge set on every apply (ufw only)." \
+		"# seeded from live ufw on $(date -u +%F)" \
+		"$out" >"$tmp"; then
+		unlink "$tmp" 2>/dev/null || true
+		warn "[firewall] REFUSING to touch the firewall: cannot write the seed file for $f."
+		return 6
+	fi
+	chmod 0644 "$tmp" 2>/dev/null || true
+	if ln "$tmp" "$f" 2>/dev/null; then
+		log "[firewall] seeded $f from live ufw: ${n_seed} rule(s) kept, ${n_skip} not seedable"
+		(( n_skip == 0 )) || warn "[firewall] seed: ${n_skip} live rule(s) were NOT seedable (unsupported shape) and are dropped by this run's reset — see the '# NOT SEEDED' lines in $f and re-add them by hand."
+	elif [[ ! -e "$f" ]]; then
+		unlink "$tmp" 2>/dev/null || true
+		warn "[firewall] REFUSING to touch the firewall: cannot publish $f."
+		return 6
+	fi
+	unlink "$tmp" 2>/dev/null || true
+	return 0
+}
+
 # `ufw allow <words...> comment <c>`; records the rule words in the caller's
 # `_fw_want` array (dynamic scope) so the pre-enable read-back can verify them.
 _firewall_ufw_add() {
 	local comment="$1"; shift
-	_firewall_ufw_do allow "$@" comment "$comment" || return $?
-	_fw_want+=("allow $*")
+	_firewall_ufw_add_rule "$comment" allow "$@"
 }
 
+# Generic form: $1 comment ("" = none), $2 verb (allow|deny), rest = rule words.
+_firewall_ufw_add_rule() {
+	local comment="$1" verb="$2"; shift 2
+	if [[ -n "$comment" ]]; then
+		_firewall_ufw_do "$verb" "$@" comment "$comment" || return $?
+	else
+		_firewall_ufw_do "$verb" "$@" || return $?
+	fi
+	_fw_want+=("$verb $*")
+}
 # NOTE every required mutation below propagates its failure explicitly
 # (`|| return`): callers invoke this as `_firewall_apply_ufw ... || return $?`,
 # which suspends errexit inside the whole function, so a bare failing command
@@ -439,32 +848,19 @@ _firewall_ufw_add() {
 _firewall_apply_ufw() {
 	local awg_port="$1" ssh_ports="${2:-}"
 	[[ -n "$ssh_ports" ]] || ssh_ports=$(_firewall_resolve_ssh_ports)
-	# Validate BEFORE the destructive reset: a bad detection result must never
-	# leave a previously-active ufw disabled.
+	# Validate EVERYTHING that can be validated BEFORE the destructive reset: a bad
+	# detection result or a malformed operator rule must never leave a
+	# previously-active ufw disabled.
 	_firewall_validate_ports "$ssh_ports" "$awg_port" || return $?
+	local -a _PE_FW_EXTRA=()
+	_firewall_extra_load || return $?
 	local -a _fw_want=()
 	_firewall_ufw_do --force reset || return $?
 	_firewall_ufw_do default deny incoming || return $?
 	_firewall_ufw_do default allow outgoing || return $?
 	_firewall_ufw_do default allow routed || return $?   # let Docker FORWARD work (docker manages its own DOCKER chain)
-	local p
-	for p in $ssh_ports; do
-		_firewall_ufw_add 'partner-edge ssh' "${p}/tcp" || return $?
-	done
-	for p in "${_PE_FW_PUB_TCP[@]}"; do
-		_firewall_ufw_add 'partner-edge pub' "${p}/tcp" || return $?
-	done
-	for p in "${_PE_FW_PUB_UDP[@]}"; do
-		_firewall_ufw_add 'partner-edge pub' "${p}/udp" || return $?
-	done
-	local r
-	for r in "${_PE_FW_PUB_UDP_RANGES[@]}"; do
-		_firewall_ufw_add 'partner-edge ephemeral relay' "${r}/udp" || return $?
-	done
-	_firewall_ufw_add "amneziawg ${awg_port}" "${awg_port}/udp" || return $?
-	for p in "${_PE_FW_MESH_TCP[@]}"; do
-		_firewall_ufw_add 'partner-edge mesh-only' from 10.9.0.0/24 to any port "$p" proto tcp || return $?
-	done
+	# The partner-edge set comes from _firewall_ufw_plan (also used by the seeding
+	# comparison). :8920 scoping rationale, implemented in the plan:
 	# SFU client WS (:8920) — reachable ONLY from the local docker `edge` bridge.
 	# Caddy reverse_proxies /sfu/ws/* to host.docker.internal:8920; browsers reach
 	# it exclusively through Caddy's :443 TLS front, never :8920 directly. Without
@@ -484,21 +880,31 @@ _firewall_apply_ufw() {
 	#     which would stale the rule exactly like the bridge name did.
 	#   - legacy br-<id> network: interface + source subnet (as before).
 	#   - iface unknown (override seam, iface "-"): source-only, RFC1918-gated.
-	local edge_iface edge_subnet had_bridge=0 fixed_done=0
-	while read -r edge_iface edge_subnet; do
-		[[ -n "$edge_subnet" ]] || continue
-		had_bridge=1
-		if [[ "$edge_iface" == "-" || -z "$edge_iface" ]]; then
-			_firewall_ufw_add 'partner-edge sfu-ws local-bridge' from "$edge_subnet" to any port 8920 proto tcp || return $?
-		elif [[ "$edge_iface" == "$_PE_FW_EDGE_BRIDGE" ]]; then
-			(( fixed_done )) && continue
-			fixed_done=1
-			_firewall_ufw_add 'partner-edge sfu-ws local-bridge' in on "$edge_iface" to any port 8920 proto tcp || return $?
+	local plan c spec
+	local -a w
+	plan=$(_firewall_ufw_plan "$awg_port" "$ssh_ports")
+	while IFS=$'\t' read -r c spec; do
+		[[ -n "$spec" ]] || continue
+		read -ra w <<<"${spec#allow }"
+		_firewall_ufw_add "$c" "${w[@]}" || return $?
+	done <<<"$plan"
+	if [[ "$plan" == *"port 8920 "* ]]; then _firewall_warn_if_no_bridge 1; else _firewall_warn_if_no_bridge 0; fi
+	# Operator extra rules (validated above), applied AFTER the partner-edge allows
+	# (so a seeded `deny` can never precede `allow 80/443`). The read-back wants the
+	# rule in ufw's CANONICAL form (field 3, from ufw's own parser before the reset),
+	# not the typed text.
+	local entry verb rest canon
+	for entry in "${_PE_FW_EXTRA[@]}"; do
+		IFS=$'\x1f' read -r spec c canon <<<"$entry"   # \x1f: a non-whitespace IFS keeps an empty comment field
+		verb="${spec%% *}"; rest="${spec#* }"
+		read -ra w <<<"$rest"
+		if [[ -n "$c" ]]; then
+			_firewall_ufw_do "$verb" "${w[@]}" comment "$c" || return $?
 		else
-			_firewall_ufw_add 'partner-edge sfu-ws local-bridge' in on "$edge_iface" from "$edge_subnet" to any port 8920 proto tcp || return $?
+			_firewall_ufw_do "$verb" "${w[@]}" || return $?
 		fi
-	done < <(_firewall_resolve_edge_bridges)
-	_firewall_warn_if_no_bridge "$had_bridge"
+		_fw_want+=("$canon")
+	done
 	# Hard stops BEFORE enable, each against ufw's own read-back: never turn the
 	# firewall on over an sshd port, or any other required rule, that is not there.
 	_firewall_ufw_require_ssh_covered "$ssh_ports" || return $?
@@ -527,6 +933,9 @@ _firewall_apply_firewalld() {
 	_firewall_validate_ports "$ssh_ports" "$awg_port" || return $?
 	# Every required mutation propagates explicitly (`|| return 5`): the caller's
 	# `|| return $?` suspends errexit inside this function.
+	if _firewall_extra_has_rules; then
+		warn "[firewall] $(_firewall_extra_file) has operator rules but firewalld does not apply them (ufw only) — add them with firewall-cmd (permanent rich rules) or they stay closed."
+	fi
 	local zone=public
 	local p
 	local -a _fw_want_ports=()
@@ -626,6 +1035,7 @@ firewall_apply() {
 		ufw)
 			_firewall_takeover_guard "$awg_port" "$ssh_ports" || return $?
 			log "[firewall] applying ufw rules (awg=${awg_port}/udp ssh=${ssh_ports// /,}/tcp)"
+			_firewall_seed_extra_rules "$awg_port" "$ssh_ports" || return $?
 			_firewall_apply_ufw "$awg_port" "$ssh_ports" || return $?
 			;;
 		ufw-install)
@@ -634,6 +1044,7 @@ firewall_apply() {
 			log "[firewall] installing ufw, then applying rules (ssh=${ssh_ports// /,}/tcp)"
 			DEBIAN_FRONTEND=noninteractive apt-get update -qq
 			DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw
+			_firewall_seed_extra_rules "$awg_port" "$ssh_ports" || return $?
 			_firewall_apply_ufw "$awg_port" "$ssh_ports" || return $?
 			;;
 		firewalld)

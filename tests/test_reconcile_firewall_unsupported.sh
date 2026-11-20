@@ -77,7 +77,7 @@ _firewall_detect_tool() { printf 'none'; }
 
 # Hermetic: never read the sandbox host's real iptables rules / packages (the
 # takeover guard looks at them on the ufw path exercised by T4).
-export PE_FW_RULES_V4="$TMP/none.v4" PE_FW_RULES_V6="$TMP/none.v6"
+export PE_FW_RULES_V4="$TMP/none.v4" PE_FW_RULES_V6="$TMP/none.v6" PE_FW_EXTRA_FILE="$TMP/none.extra"
 _firewall_persistent_pkg_installed() { return 1; }
 
 # Avoid the (unrelated) AWG-port-unresolvable skip branch so the test
@@ -154,7 +154,7 @@ fi
 # ── T5: the escalation text names the actual refusal (rc 3 ssh / rc 4 takeover) ─
 # A generic "no supported firewall tool" text sends the operator hunting for the
 # wrong cause; each refusal must say what to set.
-for _case in "3:PE_SSH_PORTS" "4:PE_FIREWALL_TAKEOVER"; do
+for _case in "3:PE_SSH_PORTS" "4:PE_FIREWALL_TAKEOVER" "6:firewall-extra.ufw"; do
 	_rc_c=${_case%%:*}; _key=${_case#*:}
 	: >"$TMP/tg_alert.log"
 	firewall_apply() { return "$_rc_c"; }
