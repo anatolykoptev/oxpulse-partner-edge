@@ -384,3 +384,9 @@ volumes:
 networks:
   edge:
     driver: bridge
+    driver_opts:
+      # Fixed host bridge name. Docker otherwise names it br-<network-id>, and the
+      # id changes whenever the network is recreated (every `compose down`), which
+      # stales the host firewall's `in on <iface>` rule for Caddy -> host:8920.
+      # MUST equal _PE_FW_EDGE_BRIDGE in lib/firewall-lib.sh (<=15 chars).
+      com.docker.network.bridge.name: pe-edge0
