@@ -77,7 +77,7 @@ _firewall_detect_tool() { printf 'none'; }
 
 # Hermetic: never read the sandbox host's real iptables rules / packages (the
 # takeover guard looks at them on the ufw path exercised by T4).
-export PE_FW_RULES_V4="$TMP/none.v4" PE_FW_RULES_V6="$TMP/none.v6"
+export PE_FW_RULES_V4="$TMP/none.v4" PE_FW_RULES_V6="$TMP/none.v6" PE_FW_EXTRA_FILE="$TMP/none.extra"
 _firewall_persistent_pkg_installed() { return 1; }
 
 # Avoid the (unrelated) AWG-port-unresolvable skip branch so the test
