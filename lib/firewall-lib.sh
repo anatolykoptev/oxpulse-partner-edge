@@ -100,9 +100,12 @@ _firewall_resolve_awg_port() {
 # Every TCP port the host's sshd listens on, space-separated on one line, sorted
 # and de-duplicated. UNION of: operator override PE_SSH_PORTS (space/comma list),
 # `sshd -T` (configured Port lines, includes sshd_config.d; needs root) and the
-# live listeners of the sshd process from `ss -ltnp` (catches socket-activated
-# ssh.socket / ListenStream overrides that `sshd -T` does not report). Union, not
-# first-hit: allowing one port too many is harmless, missing one is a lockout.
+# live listeners of the sshd process from `ss -ltnp`, the ListenStream ports of an
+# ACTIVE ssh.socket/sshd.socket (systemd socket activation, Ubuntu 22.10+/24.04:
+# the socket's port overrides sshd_config Port, and until the first connection
+# `ss -p` shows the owner as "systemd", not sshd), and the local port of the
+# session running this installer (${SSH_CONNECTION##* }). Union, not first-hit:
+# allowing one port too many is harmless, missing one is a lockout.
 # Prints nothing and returns 1 when no source yielded a port.
 _firewall_detect_ssh_ports() {
 	local raw="" sshd_bin
@@ -118,6 +121,18 @@ _firewall_detect_ssh_ports() {
 		# (handles 0.0.0.0:22, [::]:22, *:22).
 		raw+=" $(ss -H -ltnp 2>/dev/null | awk '/"sshd/{n=split($4,a,":"); print a[n]}' || true)"
 	fi
+	if command -v systemctl >/dev/null 2>&1; then
+		local unit
+		for unit in ssh.socket sshd.socket; do
+			systemctl is-active --quiet "$unit" 2>/dev/null || continue
+			# `Listen=[::]:22 (Stream)` / `Listen=0.0.0.0:1987 (Stream)` / `Listen=22 (Stream)`
+			raw+=" $(systemctl show -p Listen "$unit" 2>/dev/null \
+				| sed -n 's/^Listen=//p' | sed 's/ (.*$//' | awk '{n=split($1,a,":"); print a[n]}' || true)"
+		done
+	fi
+	# The live session's own destination port (empty when not run over ssh).
+	local conn="${SSH_CONNECTION:-}"
+	[[ -z "$conn" ]] || raw+=" ${conn##* }"
 	local p out=""
 	for p in $raw; do
 		[[ "$p" =~ ^[0-9]+$ ]] || continue
@@ -158,6 +173,56 @@ _firewall_ufw_require_ssh_covered() {
 	return 3
 }
 
+# Hard stop #2: EVERY rule this run meant to add (pub tcp/udp, relay range, awg,
+# mesh, :8920) must be in `ufw show added`. A `ufw allow` that exited 0 without
+# landing, or one whose failure was swallowed, would otherwise ship a firewall
+# that default-denies a required port. $@ = rule specs ("allow 443/tcp", ...).
+# rc 0 all present, rc 5 otherwise.
+_firewall_ufw_require_rules_present() {
+	local added spec line found missing=""
+	added=$(ufw show added 2>/dev/null || true)
+	for spec in "$@"; do
+		found=0
+		while IFS= read -r line; do
+			if [[ "$line" == "ufw $spec" || "$line" == "ufw $spec "* ]]; then found=1; break; fi
+		done <<<"$added"
+		(( found )) || missing+=$'\n'"             ufw $spec"
+	done
+	[[ -z "$missing" ]] && return 0
+	warn "[firewall] REFUSING to enable ufw: required rules missing from the ruleset about to be enabled:${missing}"
+	warn "           ufw is left DISABLED (reset already ran). Re-run once the cause is fixed."
+	return 5
+}
+
+# $1 = space-separated ssh ports (non-empty), $2 = awg port; each a plain integer
+# 1-65535. Checked BEFORE
+# `ufw --force reset` so a detection problem never leaves an active ufw disabled.
+_firewall_validate_ports() {
+	local ssh_list="$1" awg="$2" p n=0
+	for p in $ssh_list "$awg"; do
+		[[ "$p" =~ ^[0-9]+$ ]] && (( 10#$p >= 1 && 10#$p <= 65535 )) || {
+			warn "[firewall] REFUSING to touch the firewall: invalid port '${p}' (ssh='${ssh_list}' awg='${awg}')."
+			return 3
+		}
+	done
+	for p in $ssh_list; do n=$((n+1)); done
+	if (( n == 0 )); then
+		warn "[firewall] REFUSING to touch the firewall: empty ssh port list."
+		return 3
+	fi
+	return 0
+}
+
+# Run one ufw mutation; a failure is reported and returned (callers `|| return`),
+# never swallowed: `fn || return $?` at the call site disables errexit inside fn,
+# so each required step must propagate explicitly.
+_firewall_ufw_do() {
+	ufw "$@" >/dev/null || {
+		warn "[firewall] 'ufw $*' FAILED — not enabling a partial ruleset."
+		return 5
+	}
+}
+
 _firewall_firewalld_require_ssh_covered() {
 	local zone="$1" ports="$2" lp ls p missing=""
 	lp=$(firewall-cmd --permanent --zone="$zone" --list-ports 2>/dev/null | tr '\n' ' ' || true)
@@ -170,6 +235,21 @@ _firewall_firewalld_require_ssh_covered() {
 	[[ -z "$missing" ]] && return 0
 	warn "[firewall] REFUSING to reload firewalld: sshd listens on${missing} but the permanent ${zone} zone does not allow it — reloading would lock out SSH."
 	return 3
+}
+
+# Same for every required plain port (pub tcp/udp, relay range, awg): "80/tcp" ...
+# Rich rules (mesh, :8920) have no stable listing format and rely on their
+# explicit rc check at the call site.
+_firewall_firewalld_require_ports_present() {
+	local zone="$1"; shift
+	local lp spec missing=""
+	lp=$(firewall-cmd --permanent --zone="$zone" --list-ports 2>/dev/null | tr '\n' ' ' || true)
+	for spec in "$@"; do
+		[[ " $lp " == *" ${spec} "* ]] || missing+=" ${spec}"
+	done
+	[[ -z "$missing" ]] && return 0
+	warn "[firewall] REFUSING to reload firewalld: required ports missing from the permanent ${zone} zone:${missing}"
+	return 5
 }
 
 # --- Takeover guard ----------------------------------------------------------
@@ -192,13 +272,14 @@ _firewall_persistent_pkg_installed() {
 	return 1
 }
 
-# `-A INPUT ... -j ACCEPT` lines of rules.v4 (empty when absent/none).
+# `-A INPUT ... -j ACCEPT` lines of rules.v4 and rules.v6 (empty when absent/none).
 _firewall_rules_v4_input_accepts() {
-	local f; f=$(_firewall_rules_v4_path)
-	[[ -r "$f" ]] || return 0
-	grep -E '^-A INPUT .*-j ACCEPT' "$f" || true
+	local f
+	for f in "$(_firewall_rules_v4_path)" "${PE_FW_RULES_V6:-/etc/iptables/rules.v6}"; do
+		[[ -r "$f" ]] || continue
+		grep -E '^-A INPUT .*-j ACCEPT' "$f" || true
+	done
 }
-
 # Subset of the rules.v4 INPUT ACCEPT lines that the ufw set we are about to apply
 # does NOT reproduce. Deliberately conservative: only conntrack/loopback/icmp
 # (ufw's built-in before.rules) and a plain `-p tcp|udp --dport N` whose port is in
@@ -206,21 +287,22 @@ _firewall_rules_v4_input_accepts() {
 # covered. Anything else is reported. $1 = awg port, $2 = ssh ports.
 _firewall_uncovered_v4_rules() {
 	local awg="$1" ssh="$2" line proto ports port ok src
-	local re_proto='-p (tcp|udp)( |$)' re_ports='--dports? ([0-9:,]+)' re_src='-s ([0-9./]+)'
+	local re_proto='-p (tcp|udp)( |$)' re_ports='--dports? ([0-9:,]+)' re_src='-s ([^ ]+)' re_if='-i ([^ ]+)' iif
 	while IFS= read -r line; do
 		[[ -n "$line" ]] || continue
 		case "$line" in
-			*"RELATED,ESTABLISHED"*|*"ESTABLISHED,RELATED"*|*" -i lo "*|*" -i lo"|*"-p icmp"*) continue ;;
+			*"RELATED,ESTABLISHED"*|*"ESTABLISHED,RELATED"*|*" -i lo "*|*" -i lo"|*"-p icmp"*|*"-p ipv6-icmp"*) continue ;;
 		esac
-		proto="" ports="" src=""
+		proto="" ports="" src="" iif=""
 		[[ "$line" =~ $re_proto ]] && proto="${BASH_REMATCH[1]}"
 		[[ "$line" =~ $re_ports ]] && ports="${BASH_REMATCH[1]}"
 		[[ "$line" =~ $re_src ]] && src="${BASH_REMATCH[1]}"
+		[[ "$line" =~ $re_if ]] && iif="${BASH_REMATCH[1]}"
 		ok=0
 		if [[ -n "$proto" && -n "$ports" ]]; then
 			ok=1
 			for port in ${ports//,/ }; do
-				_firewall_port_covered "$proto" "$port" "$src" "$awg" "$ssh" || ok=0
+				_firewall_port_covered "$proto" "$port" "$src" "$awg" "$ssh" "$iif" || ok=0
 			done
 		fi
 		(( ok )) || printf '%s\n' "$line"
@@ -228,19 +310,25 @@ _firewall_uncovered_v4_rules() {
 }
 
 _firewall_port_covered() {
-	local proto="$1" port="$2" src="$3" awg="$4" ssh="$5" p r
+	local proto="$1" port="$2" src="$3" awg="$4" ssh="$5" iif="${6:-}" p r
+	# ufw opens our public ports to EVERYONE on EVERY interface: a v4/v6 rule that
+	# was source- or interface-restricted is therefore NOT reproduced (it would
+	# widen), except the mesh-only ports from exactly the mesh CIDR.
+	[[ -z "$iif" ]] || return 1
 	if [[ "$proto" == tcp ]]; then
-		for p in "${_PE_FW_PUB_TCP[@]}" $ssh; do [[ "$p" == "$port" ]] && return 0; done
+		if [[ -z "$src" ]]; then
+			for p in "${_PE_FW_PUB_TCP[@]}" $ssh; do [[ "$p" == "$port" ]] && return 0; done
+		fi
 		for p in "${_PE_FW_MESH_TCP[@]}"; do
 			[[ "$p" == "$port" && "$src" == "10.9.0.0/24" ]] && return 0
 		done
 	else
+		[[ -z "$src" ]] || return 1
 		for p in "${_PE_FW_PUB_UDP[@]}" "$awg"; do [[ "$p" == "$port" ]] && return 0; done
 		for r in "${_PE_FW_PUB_UDP_RANGES[@]}"; do [[ "$r" == "$port" ]] && return 0; done
 	fi
 	return 1
 }
-
 # rc 0 proceed, rc 4 refuse. Only guards the FIRST transition to ufw: once ufw is
 # active the takeover already happened (and a leftover rules.v4 is stale), so the
 # every-converge re-apply must not refuse forever.
@@ -249,15 +337,21 @@ _firewall_takeover_guard() {
 	_firewall_persistent_pkg_installed && pkg=1
 	rules=$(_firewall_rules_v4_input_accepts)
 	[[ "$pkg" == 1 || -n "$rules" ]] || return 0
-	if [[ "$pkg" == 0 ]] && command -v ufw >/dev/null 2>&1 \
-		&& ufw status 2>/dev/null | head -1 | grep -qi 'Status: active'; then
-		return 0
+	if [[ "$pkg" == 0 ]] && command -v ufw >/dev/null 2>&1; then
+		# Capture first (no `| head`/`grep -q` pipe: SIGPIPE + pipefail can turn an
+		# active ufw into a false "not active"); C locale because ufw translates the
+		# word "active" and a localized status would miss the match.
+		local ufw_st
+		ufw_st=$(LC_ALL=C ufw status 2>/dev/null || true)
+		if grep -qi 'Status: active' <<<"$ufw_st"; then
+			return 0
+		fi
 	fi
 	uncovered=$(_firewall_uncovered_v4_rules "$awg" "$ssh")
 	warn "[firewall] this host has an existing iptables-based firewall that the ufw takeover would discard:"
 	[[ "$pkg" == 1 ]] && warn "           iptables-persistent/netfilter-persistent is installed — installing ufw REMOVES it."
 	if [[ -n "$uncovered" ]]; then
-		warn "           INPUT ACCEPT rules in $(_firewall_rules_v4_path) that the partner-edge ufw set will NOT cover (lost on takeover):"
+		warn "           INPUT ACCEPT rules in $(_firewall_rules_v4_path) / ${PE_FW_RULES_V6:-/etc/iptables/rules.v6} that the partner-edge ufw set will NOT cover (lost on takeover):"
 		while IFS= read -r rules; do warn "             $rules"; done <<<"$uncovered"
 	fi
 	if [[ "${PE_FIREWALL_TAKEOVER:-}" == "1" ]]; then
@@ -330,31 +424,46 @@ _firewall_resolve_edge_bridges() {
 	return 0
 }
 
+# `ufw allow <words...> comment <c>`; records the rule words in the caller's
+# `_fw_want` array (dynamic scope) so the pre-enable read-back can verify them.
+_firewall_ufw_add() {
+	local comment="$1"; shift
+	_firewall_ufw_do allow "$@" comment "$comment" || return $?
+	_fw_want+=("allow $*")
+}
+
+# NOTE every required mutation below propagates its failure explicitly
+# (`|| return`): callers invoke this as `_firewall_apply_ufw ... || return $?`,
+# which suspends errexit inside the whole function, so a bare failing command
+# would be silently ignored and `ufw --force enable` would still go live.
 _firewall_apply_ufw() {
 	local awg_port="$1" ssh_ports="${2:-}"
 	[[ -n "$ssh_ports" ]] || ssh_ports=$(_firewall_resolve_ssh_ports)
-	ufw --force reset >/dev/null
-	ufw default deny incoming
-	ufw default allow outgoing
-	ufw default allow routed   # let Docker FORWARD work (docker manages its own DOCKER chain)
+	# Validate BEFORE the destructive reset: a bad detection result must never
+	# leave a previously-active ufw disabled.
+	_firewall_validate_ports "$ssh_ports" "$awg_port" || return $?
+	local -a _fw_want=()
+	_firewall_ufw_do --force reset || return $?
+	_firewall_ufw_do default deny incoming || return $?
+	_firewall_ufw_do default allow outgoing || return $?
+	_firewall_ufw_do default allow routed || return $?   # let Docker FORWARD work (docker manages its own DOCKER chain)
 	local p
 	for p in $ssh_ports; do
-		ufw allow "${p}/tcp" comment 'partner-edge ssh' >/dev/null
+		_firewall_ufw_add 'partner-edge ssh' "${p}/tcp" || return $?
 	done
 	for p in "${_PE_FW_PUB_TCP[@]}"; do
-		ufw allow "${p}/tcp" comment "partner-edge pub" >/dev/null
+		_firewall_ufw_add 'partner-edge pub' "${p}/tcp" || return $?
 	done
 	for p in "${_PE_FW_PUB_UDP[@]}"; do
-		ufw allow "${p}/udp" comment 'partner-edge pub' >/dev/null
+		_firewall_ufw_add 'partner-edge pub' "${p}/udp" || return $?
 	done
 	local r
 	for r in "${_PE_FW_PUB_UDP_RANGES[@]}"; do
-		ufw allow "${r}/udp" comment 'partner-edge ephemeral relay' >/dev/null
+		_firewall_ufw_add 'partner-edge ephemeral relay' "${r}/udp" || return $?
 	done
-	ufw allow "${awg_port}/udp" comment "amneziawg ${awg_port}" >/dev/null
+	_firewall_ufw_add "amneziawg ${awg_port}" "${awg_port}/udp" || return $?
 	for p in "${_PE_FW_MESH_TCP[@]}"; do
-		ufw allow from 10.9.0.0/24 to any port "$p" proto tcp \
-			comment 'partner-edge mesh-only' >/dev/null
+		_firewall_ufw_add 'partner-edge mesh-only' from 10.9.0.0/24 to any port "$p" proto tcp || return $?
 	done
 	# SFU client WS (:8920) — reachable ONLY from the local docker `edge` bridge.
 	# Caddy reverse_proxies /sfu/ws/* to host.docker.internal:8920; browsers reach
@@ -363,32 +472,38 @@ _firewall_apply_ufw() {
 	# → 502 on every group call (live incident on a US edge, 2026-07-09).
 	#
 	# SCOPING (correct-by-construction): the rule is bound to the docker bridge
-	# INTERFACE (`in on br-<id>`) AND the bridge source subnet, so it can only
-	# match traffic that actually arrived on that bridge — never the public NIC.
-	# Source-IP alone is NOT sufficient: RFC1918 is not martian (RFC1812) and
-	# rp_filter defaults to loose (=2) on these distros, so a spoofed 172.x source
-	# on the public interface would pass a source-only check; the interface match
-	# is the real guard. (This TCP port's return path also can't reach a spoofer,
-	# but we do not rely on that.) 8920 stays off the public whitelist — not
-	# public exposure. If the bridge iface is unknown (override seam, iface "-"),
-	# we fall back to source-only, still RFC1918-gated.
-	local edge_iface edge_subnet had_bridge=0
+	# INTERFACE (`in on <iface>`), so it can only match traffic that actually
+	# arrived on that bridge — never the public NIC. Source-IP alone is NOT
+	# sufficient: RFC1918 is not martian (RFC1812) and rp_filter defaults to loose
+	# (=2) on these distros, so a spoofed 172.x source on the public interface would
+	# pass a source-only check; the interface match is the real guard. (This TCP
+	# port's return path also can't reach a spoofer, but we do not rely on that.)
+	# 8920 stays off the public whitelist — not public exposure.
+	#   - fixed bridge (_PE_FW_EDGE_BRIDGE): interface-only rule, NO source subnet —
+	#     the subnet is docker-assigned and can change when the network is recreated,
+	#     which would stale the rule exactly like the bridge name did.
+	#   - legacy br-<id> network: interface + source subnet (as before).
+	#   - iface unknown (override seam, iface "-"): source-only, RFC1918-gated.
+	local edge_iface edge_subnet had_bridge=0 fixed_done=0
 	while read -r edge_iface edge_subnet; do
 		[[ -n "$edge_subnet" ]] || continue
 		had_bridge=1
 		if [[ "$edge_iface" == "-" || -z "$edge_iface" ]]; then
-			ufw allow from "$edge_subnet" to any port 8920 proto tcp \
-				comment 'partner-edge sfu-ws local-bridge' >/dev/null
+			_firewall_ufw_add 'partner-edge sfu-ws local-bridge' from "$edge_subnet" to any port 8920 proto tcp || return $?
+		elif [[ "$edge_iface" == "$_PE_FW_EDGE_BRIDGE" ]]; then
+			(( fixed_done )) && continue
+			fixed_done=1
+			_firewall_ufw_add 'partner-edge sfu-ws local-bridge' in on "$edge_iface" to any port 8920 proto tcp || return $?
 		else
-			ufw allow in on "$edge_iface" from "$edge_subnet" to any port 8920 proto tcp \
-				comment 'partner-edge sfu-ws local-bridge' >/dev/null
+			_firewall_ufw_add 'partner-edge sfu-ws local-bridge' in on "$edge_iface" from "$edge_subnet" to any port 8920 proto tcp || return $?
 		fi
 	done < <(_firewall_resolve_edge_bridges)
 	_firewall_warn_if_no_bridge "$had_bridge"
-	# Hard stop BEFORE enable: never turn the firewall on over an sshd port the
-	# ruleset does not allow.
+	# Hard stops BEFORE enable, each against ufw's own read-back: never turn the
+	# firewall on over an sshd port, or any other required rule, that is not there.
 	_firewall_ufw_require_ssh_covered "$ssh_ports" || return $?
-	ufw --force enable >/dev/null
+	_firewall_ufw_require_rules_present "${_fw_want[@]}" || return $?
+	_firewall_ufw_do --force enable || return $?
 }
 
 # Shared breadcrumb: if docker is present and no override is set but the resolver
@@ -409,20 +524,28 @@ _firewall_warn_if_no_bridge() {
 _firewall_apply_firewalld() {
 	local awg_port="$1" ssh_ports="${2:-}"
 	[[ -n "$ssh_ports" ]] || ssh_ports=$(_firewall_resolve_ssh_ports)
+	_firewall_validate_ports "$ssh_ports" "$awg_port" || return $?
+	# Every required mutation propagates explicitly (`|| return 5`): the caller's
+	# `|| return $?` suspends errexit inside this function.
 	local zone=public
 	local p
+	local -a _fw_want_ports=()
+	# NOTE: on an existing node the `ssh` service (22) added by older releases is NOT
+	# removed here — a non-22 sshd leaves 22/tcp open until an operator removes it.
 	for p in $ssh_ports; do
 		if [[ "$p" == "22" ]]; then
-			firewall-cmd --permanent --zone=$zone --add-service=ssh >/dev/null
+			firewall-cmd --permanent --zone=$zone --add-service=ssh >/dev/null || return 5
 		else
-			firewall-cmd --permanent --zone=$zone --add-port="${p}/tcp" >/dev/null
+			firewall-cmd --permanent --zone=$zone --add-port="${p}/tcp" >/dev/null || return 5
 		fi
 	done
 	for p in "${_PE_FW_PUB_TCP[@]}"; do
-		firewall-cmd --permanent --zone=$zone --add-port="${p}/tcp" >/dev/null
+		firewall-cmd --permanent --zone=$zone --add-port="${p}/tcp" >/dev/null || return 5
+		_fw_want_ports+=("${p}/tcp")
 	done
 	for p in "${_PE_FW_PUB_UDP[@]}"; do
-		firewall-cmd --permanent --zone=$zone --add-port="${p}/udp" >/dev/null
+		firewall-cmd --permanent --zone=$zone --add-port="${p}/udp" >/dev/null || return 5
+		_fw_want_ports+=("${p}/udp")
 	done
 	local r fr
 	# Retire the pre-fix relay range before adding the narrower one: every edge installed before the
@@ -433,9 +556,11 @@ _firewall_apply_firewalld() {
 	for r in "${_PE_FW_PUB_UDP_RANGES[@]}"; do
 		# firewalld wants dashes; our array uses ufw-style colons.
 		fr="${r/:/-}"
-		firewall-cmd --permanent --zone=$zone --add-port="${fr}/udp" >/dev/null
+		firewall-cmd --permanent --zone=$zone --add-port="${fr}/udp" >/dev/null || return 5
+		_fw_want_ports+=("${fr}/udp")
 	done
-	firewall-cmd --permanent --zone=$zone --add-port="${awg_port}/udp" >/dev/null
+	firewall-cmd --permanent --zone=$zone --add-port="${awg_port}/udp" >/dev/null || return 5
+	_fw_want_ports+=("${awg_port}/udp")
 
 	# Retire :18443, the retired hysteria2 (CH3) forwarder. Older releases opened it
 	# to the world (tcp+udp) and add-port alone never removes it. Permanent AND
@@ -455,7 +580,7 @@ _firewall_apply_firewalld() {
 		firewall-cmd --permanent --zone=$zone --remove-rich-rule \
 			"rule family=ipv4 source address=10.9.0.0/24 port port=$p protocol=tcp accept" 2>/dev/null || true
 		firewall-cmd --permanent --zone=$zone --add-rich-rule \
-			"rule family=ipv4 source address=10.9.0.0/24 port port=$p protocol=tcp accept" >/dev/null
+			"rule family=ipv4 source address=10.9.0.0/24 port port=$p protocol=tcp accept" >/dev/null || return 5
 	done
 
 	# SFU client WS (:8920) — local docker `edge` bridge only (8920 was already
@@ -475,13 +600,14 @@ _firewall_apply_firewalld() {
 		firewall-cmd --permanent --zone=$zone --remove-rich-rule \
 			"rule family=ipv4 source address=$edge_subnet port port=8920 protocol=tcp accept" 2>/dev/null || true
 		firewall-cmd --permanent --zone=$zone --add-rich-rule \
-			"rule family=ipv4 source address=$edge_subnet port port=8920 protocol=tcp accept" >/dev/null
+			"rule family=ipv4 source address=$edge_subnet port port=8920 protocol=tcp accept" >/dev/null || return 5
 	done < <(_firewall_resolve_edge_bridges)
 	_firewall_warn_if_no_bridge "$had_bridge"
 
 	# Hard stop BEFORE reload (permanent config is inert until then).
 	_firewall_firewalld_require_ssh_covered "$zone" "$ssh_ports" || return $?
-	firewall-cmd --reload >/dev/null
+	_firewall_firewalld_require_ports_present "$zone" "${_fw_want_ports[@]}" || return $?
+	firewall-cmd --reload >/dev/null || return 5
 }
 
 # Public entry point. Caller passes nothing; we discover everything.

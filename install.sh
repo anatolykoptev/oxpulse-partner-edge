@@ -1460,7 +1460,16 @@ if [[ -n "${AWG_ALLOCATED_IP:-}" && -n "${AWG_MOTHERLY_PUBKEY:-}" && $DRY_RUN -e
 		# :9317 (SFU /metrics) + :8912 (relay API) publicly reachable; see
 		# the 2026-05-21 edge-b/edge-c/edge-d audit. firewall_apply is
 		# idempotent and supports ufw (Debian/Ubuntu) + firewalld (RHEL).
-		firewall_apply
+		_fw_rc=0
+		firewall_apply || _fw_rc=$?
+		case "$_fw_rc" in
+			0) ;;
+			3) die "firewall: refused to enable — an sshd port is not covered by the ruleset (or the port list was invalid); enabling would lock out SSH. ufw may be left DISABLED.
+Set PE_SSH_PORTS=<port[,port]> (e.g. PE_SSH_PORTS=1987) and re-run install.sh; firewall_apply is idempotent." ;;
+			4) die "firewall: refused takeover — this host has an iptables-based firewall (iptables-persistent / /etc/iptables/rules.v4|v6) that the ufw rules would discard.
+Review the rules listed above, then re-run install.sh with PE_FIREWALL_TAKEOVER=1; firewall_apply is idempotent." ;;
+			*) die "firewall: firewall_apply failed (rc=$_fw_rc) — see the messages above; re-running install.sh is safe (firewall_apply is idempotent)." ;;
+		esac
 	else
 		warn "[awg] install_amneziawg failed — edge will run without VPN mesh"
 		warn "      Run 'install_amneziawg' manually after fixing the build environment."
@@ -1688,6 +1697,11 @@ EOF
 	# Values authoritative at install time (network_run: env override > autodetect).
 	printf 'PUBLIC_IP=%s\n' "${PUBLIC_IP:-}" >> "$PREFIX_LIB/install.env"
 	printf 'PRIVATE_IP=%s\n' "${PRIVATE_IP:-}" >> "$PREFIX_LIB/install.env"
+	# Persist the firewall operator overrides so the converge (refresh.service /
+	# upgrade.sh read install.env via EnvironmentFile) behaves like this install:
+	# install.env is rewritten from scratch above, so a hand-added key would be lost.
+	[[ -z "${PE_SSH_PORTS:-}" ]] || printf 'PE_SSH_PORTS=%s\n' "${PE_SSH_PORTS// /,}" >> "$PREFIX_LIB/install.env"
+	[[ "${PE_FIREWALL_TAKEOVER:-}" != "1" ]] || printf 'PE_FIREWALL_TAKEOVER=1\n' >> "$PREFIX_LIB/install.env"
 	chmod 0600 "$PREFIX_LIB/install.env"
 	# Phase 1: record sha256 of rendered Caddyfile for drift detection.
 	# healthcheck.sh check 15 compares this against /canary/config-hash.
