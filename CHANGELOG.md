@@ -5,6 +5,18 @@ All notable changes to oxpulse-partner-edge will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.43](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.42...v0.16.43) (2026-11-21)
+
+
+### Features
+
+* **firewall:** operator extra-rules file survives the ufw reset ([#723](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/723)) ([81abe73](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/81abe73ccd3fda646461d258554ae70b18e5039e))
+
+
+### Bug Fixes
+
+* **firewall:** detect sshd ports, refuse silent takeover, stable edge bridge ([#719](https://github.com/anatolykoptev/oxpulse-partner-edge/issues/719)) ([c31f548](https://github.com/anatolykoptev/oxpulse-partner-edge/commit/c31f54896cd993d71a5028a2364c524b50e85146))
+
 ## [0.16.42](https://github.com/anatolykoptev/oxpulse-partner-edge/compare/v0.16.41...v0.16.42) (2026-11-11)
 
 
